@@ -48,12 +48,13 @@ export interface CompartmentOutput {
 }
 
 export const DEFAULT_COMPARTMENT_NODES = [
-  "enclave-snp-fra-01",
-  "enclave-snp-iad-02",
-  "enclave-snp-nrt-03",
-  "enclave-snp-sjc-04",
-  "enclave-snp-zur-05",
-  "enclave-snp-ams-06",
+  // Chat models listed in Tinfoil's live model table (inference.tinfoil.sh/.well-known/tinfoil-proxy).
+  "tinfoil-kimi-k3",
+  "tinfoil-gemma4-31b",
+  "tinfoil-llama3-3-70b",
+  "tinfoil-deepseek-v4-1-flash",
+  "tinfoil-glm-5-3",
+  "tinfoil-gpt-oss-120b",
 ];
 
 /**

@@ -1,9 +1,13 @@
 /**
  * Google DeepMind Gemini 4 Argon (`gemini-4-argon`) Interactions API Contract,
- * Privacy Invariant Guard, and Companion Toolkit Registry (`src/lib/gemini/interactions.ts`).
+ * Tinfoil Enclave OpenAI-Compatible Planner Loop, Privacy Invariant Guard, and
+ * Companion Toolkit Registry (`src/lib/gemini/interactions.ts`).
  *
- * Uses the official `@google/genai` (v2.31.0) SDK (`new GoogleGenAI({ apiKey })`
- * and `client.interactions.create(...)`), never raw fetch with `?key=`.
+ * Uses the official `@google/genai` SDK (`new GoogleGenAI({ apiKey })` and
+ * `client.interactions.create(...)`) when `GEMINI_API_KEY` is present, and
+ * falls back to an attested Tinfoil enclave model (`kimi-k3` or `gemma4-31b`)
+ * via the `tinfoil` SDK (`tinfoilClient.chat.completions.create(...)` with
+ * OpenAI-compatible tool calls) when no Gemini key is configured.
  */
 
 import { GoogleGenAI } from "@google/genai";
@@ -58,6 +62,11 @@ export const ARGON_LONG_DECODE_THRESHOLD_TOKENS = 65_536;
 export const ARGON_MAX_UNIFIED_CONTEXT_TOKENS = 1_000_000;
 export const TINFOIL_KIMI_K3_MAX_CONTEXT_TOKENS = 262_144;
 
+export interface ArgonPlannerDescriptor {
+  provider: "gemini" | "tinfoil";
+  model: string;
+}
+
 export interface ArgonModelCallRecord {
   model: string;
   purpose: string;
@@ -86,35 +95,35 @@ export const ARGON_TOOLKIT_MANIFEST: readonly ArgonToolkitModelSpec[] = [
     statusInDemo: "used-when-key-set",
     trustBoundary: "gemini-interactions-cloud",
     description:
-      "Invoked via @google/genai client.interactions.create with generation_config.thinking_level and background execution over scrubbed and symmetry-masked text.",
+      "Invoked via @google/genai client.interactions.create with generation_config.thinking_level and background execution over scrubbed and symmetry-masked text. When GEMINI_API_KEY is absent, planning falls back to an attested Tinfoil model.",
   },
   {
     id: ARGON_COMPANION_MODELS.parallelSubagentFast,
     role: "Parallel Subagent for Attestation and Atlas Hybrid Search Summarization",
-    stageUsed: "Stage 2 (Parallel Subagent Summary when GEMINI_API_KEY is provided)",
+    stageUsed: "Stage 2 (Parallel Subagent Summary when GEMINI_API_KEY is provided; skipped without key)",
     statusInDemo: "used-when-key-set",
     trustBoundary: "gemini-interactions-cloud",
     description:
-      "Called in parallel via client.interactions.create to summarize MongoDB Atlas Hybrid Search ($rankFusion) and Tinfoil 2-hop attestation results.",
+      "Called in parallel via client.interactions.create when GEMINI_API_KEY is present to summarize MongoDB Atlas Hybrid Search ($rankFusion) and Tinfoil 2-hop attestation results.",
   },
   {
     id: ARGON_COMPANION_MODELS.parallelSubagentLite,
     role: "Parallel Subagent for Quorum and Policy Verification Summarization",
-    stageUsed: "Stage 2 (Parallel Subagent Summary when GEMINI_API_KEY is provided)",
+    stageUsed: "Stage 2 (Parallel Subagent Summary when GEMINI_API_KEY is provided; skipped without key)",
     statusInDemo: "used-when-key-set",
     trustBoundary: "gemini-interactions-cloud",
     description:
-      "Called in parallel via client.interactions.create to summarize 5-of-7 Ed25519 hardware verifier quorum and Circle Arc registry readiness.",
+      "Called in parallel via client.interactions.create when GEMINI_API_KEY is present to summarize 5-of-7 Ed25519 hardware verifier quorum and Circle Arc registry readiness.",
   },
   {
     id: ARGON_COMPANION_MODELS.confidentialOpenCloud,
-    role: "Open-Weight Confidential Enclave Model (Tinfoil Live Attested)",
-    stageUsed: "Stage 4 (Attested Tinfoil Enclave Inference via gemma4-31b / kimi-k3)",
+    role: "Open-Weight Confidential Enclave Planner and Inference Model (Tinfoil Live Attested)",
+    stageUsed: "Stage 4 (Attested Tinfoil Enclave Planner and Inference via gemma4-31b or kimi-k3)",
     statusInDemo: "live-enclave",
     trustBoundary: "attested-tee-enclave",
     tinfoilEnclaveAlias: ARGON_COMPANION_MODELS.tinfoilEnclaveGemma,
     description:
-      "Maps to Tinfoil's live attested gemma4-31b (gemma4-31b-inf10-0.tinfoil.containers.tinfoil.dev) and kimi-k3 (kimi-k3-inf14.tinfoil.containers.tinfoil.dev, Intel TDX + NVIDIA CC GPUs, max-model-len 262,144 tokens) routed via router-0.tinfoil.sh (AMD SEV-SNP).",
+      "Maps to Tinfoil's live attested gemma4-31b and kimi-k3 enclaves (Intel TDX + NVIDIA CC GPUs, max-model-len 262,144 tokens on kimi-k3) routed via router-0.tinfoil.sh (AMD SEV-SNP).",
   },
   {
     id: ARGON_COMPANION_MODELS.sandboxAgent,
@@ -155,11 +164,11 @@ export const ARGON_TOOLKIT_MANIFEST: readonly ArgonToolkitModelSpec[] = [
   {
     id: ARGON_COMPANION_MODELS.confidentialOnDevice,
     role: "Not used in this demo (Stage 1 PII scrubbing and symmetry masking run in deterministic local TypeScript)",
-    stageUsed: "not used (Stage 1 uses local regex scrubber and symmetry transform)",
+    stageUsed: "not used (Stage 1 uses local prompt pipeline and symmetry transform)",
     statusInDemo: "not-used",
     trustBoundary: "on-device-local",
     description:
-      "Not used in this demo. Stage 1 runs deterministic local regex scrubbing (src/lib/privacy) and homomorphic symmetry masking (src/lib/symmetry).",
+      "Not used in this demo. Stage 1 runs deterministic local regex scrubbing (src/lib/pipeline and src/lib/privacy) and homomorphic symmetry masking (src/lib/symmetry).",
   },
 ] as const;
 
@@ -168,7 +177,7 @@ export class PrivacyInvariantViolationError extends Error {
 
   constructor(leakedToken: string) {
     super(
-      `PRIVACY_INVARIANT_VIOLATION: Outbound Google payload contained unredacted sensitive value (${leakedToken.slice(0, 4)}***). Call aborted before network transmission.`,
+      `PRIVACY_INVARIANT_VIOLATION: Outbound planner payload contained unredacted sensitive value (${leakedToken.slice(0, 4)}***). Call aborted before network transmission.`,
     );
     this.name = "PrivacyInvariantViolationError";
     this.leakedToken = leakedToken;
@@ -176,9 +185,10 @@ export class PrivacyInvariantViolationError extends Error {
 }
 
 /**
- * Enforces the dRouter Privacy Invariant: Google must only ever receive scrubbed text.
- * Inspects the serialized outbound payload and throws `PrivacyInvariantViolationError`
- * if any original placeholder value or unmasked sensitive token (>= 4 chars) is present.
+ * Enforces the dRouter Privacy Invariant: neither Google nor Tinfoil planner calls
+ * may receive raw PII or unredacted secrets. Inspects the serialized outbound payload
+ * and throws `PrivacyInvariantViolationError` if any original placeholder value or
+ * unmasked sensitive token (>= 4 chars) is present.
  */
 export function assertOutboundPrivacyInvariant(
   outboundPayload: unknown,
@@ -550,6 +560,48 @@ export const ARGON_CONFIDENTIAL_TOOLS: readonly ArgonInteractionToolDeclaration[
   },
 ] as const;
 
+export interface OpenAICompatibleToolDefinition {
+  type: "function";
+  function: {
+    name: string;
+    description: string;
+    parameters: {
+      type: "object";
+      properties: Record<string, { type: string; description: string }>;
+      required: string[];
+    };
+  };
+}
+
+/**
+ * Converts `ARGON_CONFIDENTIAL_TOOLS` into OpenAI-compatible function tool declarations
+ * for Tinfoil's attested enclave models (`kimi-k3` and `gemma4-31b`).
+ */
+export function buildTinfoilOpenAITools(
+  tools: readonly ArgonInteractionToolDeclaration[] = ARGON_CONFIDENTIAL_TOOLS,
+): OpenAICompatibleToolDefinition[] {
+  return tools.map((t) => ({
+    type: "function",
+    function: {
+      name: t.name,
+      description: t.description,
+      parameters: {
+        type: "object",
+        properties: Object.fromEntries(
+          Object.entries(t.parameters.properties).map(([key, prop]) => [
+            key,
+            {
+              type: prop.type.toLowerCase(),
+              description: prop.description,
+            },
+          ]),
+        ),
+        required: [...t.parameters.required],
+      },
+    },
+  }));
+}
+
 export interface InteractionsCreatePayload {
   model: typeof GEMINI_4_ARGON_MODEL_ID;
   thinking_level: ArgonThinkingLevel;
@@ -741,6 +793,57 @@ export interface GenAIInteractionsClientLike {
   };
 }
 
+export interface TinfoilToolCall {
+  id: string;
+  type?: string;
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+export interface TinfoilChatCompletionResponse {
+  id?: string;
+  choices?: Array<{
+    message?: {
+      role?: string;
+      content?: string | null;
+      tool_calls?: TinfoilToolCall[];
+    };
+    finish_reason?: string | null;
+  }>;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+  };
+}
+
+export interface TinfoilPlannerClientLike {
+  ready?(): Promise<void>;
+  getVerificationDocument?(): Promise<unknown>;
+  chat: {
+    completions: {
+      create(
+        params: Record<string, unknown>,
+        options?: Record<string, unknown>,
+      ): Promise<TinfoilChatCompletionResponse>;
+    };
+  };
+}
+
+export interface TinfoilPlannerCallResult {
+  attemptedLiveCall: boolean;
+  liveEndpointReached: boolean;
+  sdkMethod: "tinfoil.chat.completions.create";
+  model: "gemma4-31b" | "kimi-k3";
+  completionId?: string;
+  toolCallsExecuted: string[];
+  finalText?: string;
+  fallbackReason?: string;
+  modelCallRecord?: ArgonModelCallRecord;
+}
+
 export type ArgonToolExecutor = (
   toolName: string,
   args: Record<string, unknown>,
@@ -766,7 +869,7 @@ export async function callGeminiInteractionsEndpoint(params: {
 
   const resolvedKey =
     params.apiKey?.trim() ||
-    process.env.GEMINI_API_KEY?.trim() ||
+    (typeof process !== "undefined" ? process.env?.GEMINI_API_KEY?.trim() : "") ||
     "";
 
   if (!resolvedKey && !params.genaiClient) {
@@ -775,7 +878,7 @@ export async function callGeminiInteractionsEndpoint(params: {
       liveEndpointReached: false,
       sdkMethod: "client.interactions.create",
       fallbackReason:
-        "Simulated mode: no GEMINI_API_KEY configured in environment or request; local cryptographic, Tinfoil attestation, and MongoDB Atlas verifiers ran for real.",
+        "No GEMINI_API_KEY configured; planner routed to attested Tinfoil enclave model.",
     };
   }
 
@@ -906,7 +1009,6 @@ export async function callGeminiInteractionsEndpoint(params: {
     }
     const latencyMs = Math.max(1, Date.now() - startedAt);
     const rawMsg = err instanceof Error ? err.message : "SDK error";
-    // Never echo back an API key in error messages
     const safeMsg = resolvedKey ? rawMsg.split(resolvedKey).join("[REDACTED_KEY]") : rawMsg;
 
     return {
@@ -914,10 +1016,227 @@ export async function callGeminiInteractionsEndpoint(params: {
       liveEndpointReached: false,
       sdkMethod: "client.interactions.create",
       toolCallsExecuted,
-      fallbackReason: `Gemini Interactions SDK call failed (${safeMsg.slice(0, 180)}); local cryptographic and enclave verifiers completed.`,
+      fallbackReason: `Gemini Interactions SDK call failed (${safeMsg.slice(0, 180)}); falling back to Tinfoil planner.`,
       modelCallRecord: {
         model: params.payload.model,
         purpose: "Primary autonomous routing & tool-calling orchestrator (Stage 4)",
+        ok: false,
+        latencyMs,
+        error: safeMsg.slice(0, 180),
+      },
+    };
+  }
+}
+
+/**
+ * Executes the autonomous tool-calling planner loop using an attested Tinfoil enclave
+ * model (`kimi-k3` or `gemma4-31b`) via OpenAI-compatible tool calls on the `tinfoil` SDK.
+ * Strictly enforces `assertOutboundPrivacyInvariant` on every outbound prompt and tool result.
+ */
+export async function callTinfoilPlannerToolLoop(params: {
+  model: "gemma4-31b" | "kimi-k3";
+  scrubbedPrompt: string;
+  systemInstruction?: string;
+  apiKey?: string;
+  sensitiveOriginals?: readonly string[];
+  toolExecutor?: ArgonToolExecutor;
+  tinfoilClient?: TinfoilPlannerClientLike;
+  enableNetworkCall?: boolean;
+  maxTurns?: number;
+}): Promise<TinfoilPlannerCallResult> {
+  const sensitiveOriginals = params.sensitiveOriginals ?? [];
+  const systemInstruction =
+    params.systemInstruction ??
+    "You are the autonomous confidential security and routing planner for dRouter running inside an attested Tinfoil enclave. " +
+      "Never output unredacted PII or secrets, and never use em dashes. " +
+      "Use the provided verification tools to audit the scrubbed request and provide a concise verification summary repeating the masked identifiers.";
+
+  // Enforce Privacy Invariant before checking credentials or making any SDK call
+  assertOutboundPrivacyInvariant(params.scrubbedPrompt, sensitiveOriginals);
+  assertOutboundPrivacyInvariant(systemInstruction, sensitiveOriginals);
+
+  const resolvedKey =
+    params.apiKey?.trim() ||
+    (typeof process !== "undefined" ? process.env?.TINFOIL_API_KEY?.trim() : "") ||
+    "";
+
+  const canCallLive =
+    Boolean(params.tinfoilClient) ||
+    (Boolean(params.enableNetworkCall) &&
+      typeof window === "undefined" &&
+      Boolean(resolvedKey));
+
+  if (!canCallLive) {
+    return {
+      attemptedLiveCall: false,
+      liveEndpointReached: false,
+      sdkMethod: "tinfoil.chat.completions.create",
+      model: params.model,
+      toolCallsExecuted: [],
+      fallbackReason:
+        "Tinfoil enclave network inference skipped (cached GET or no TINFOIL_API_KEY enabled).",
+    };
+  }
+
+  const startedAt = Date.now();
+  const toolCallsExecuted: string[] = [];
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+
+  try {
+    let client: TinfoilPlannerClientLike;
+    if (params.tinfoilClient) {
+      client = params.tinfoilClient;
+    } else {
+      const { TinfoilAI } = await import("tinfoil");
+      client = new TinfoilAI({
+        apiKey: resolvedKey,
+      }) as unknown as TinfoilPlannerClientLike;
+    }
+
+    if (typeof client.ready === "function") {
+      await client.ready();
+    }
+
+    const openAiTools = buildTinfoilOpenAITools(ARGON_CONFIDENTIAL_TOOLS);
+    const messages: Array<Record<string, unknown>> = [
+      { role: "system", content: systemInstruction },
+      { role: "user", content: params.scrubbedPrompt },
+    ];
+
+    const maxTurns = params.maxTurns ?? (params.tinfoilClient ? 4 : 2);
+    let completionId: string | undefined;
+    let finalText = "";
+
+    for (let turn = 0; turn < maxTurns; turn++) {
+      const reqPayload: Record<string, unknown> = {
+        model: params.model,
+        messages: [...messages],
+        tools: openAiTools,
+        tool_choice: "auto",
+        max_tokens: 280,
+      };
+      assertOutboundPrivacyInvariant(reqPayload, sensitiveOriginals);
+
+      let response: TinfoilChatCompletionResponse;
+      try {
+        response = await client.chat.completions.create(reqPayload, {
+          headers: { "X-Tinfoil-Model": params.model },
+        });
+      } catch (toolCallErr) {
+        if (toolCallErr instanceof PrivacyInvariantViolationError) {
+          throw toolCallErr;
+        }
+        // If the target enclave container does not accept tool definitions on turn 0,
+        // fall back to a standard completion call on the same attested enclave.
+        if (turn === 0) {
+          const plainReq: Record<string, unknown> = {
+            model: params.model,
+            messages: [...messages],
+            max_tokens: 240,
+          };
+          assertOutboundPrivacyInvariant(plainReq, sensitiveOriginals);
+          response = await client.chat.completions.create(plainReq, {
+            headers: { "X-Tinfoil-Model": params.model },
+          });
+        } else {
+          throw toolCallErr;
+        }
+      }
+
+      if (response.id) {
+        completionId = response.id;
+      }
+      if (typeof response.usage?.prompt_tokens === "number") {
+        totalInputTokens += response.usage.prompt_tokens;
+      }
+      if (typeof response.usage?.completion_tokens === "number") {
+        totalOutputTokens += response.usage.completion_tokens;
+      }
+
+      const msg = response.choices?.[0]?.message;
+      const toolCalls = Array.isArray(msg?.tool_calls) ? msg.tool_calls : [];
+
+      if (typeof msg?.content === "string" && msg.content.trim().length > 0) {
+        finalText = msg.content.trim();
+      }
+
+      if (toolCalls.length === 0 || !params.toolExecutor) {
+        break;
+      }
+
+      messages.push({
+        role: "assistant",
+        content: msg?.content ?? null,
+        tool_calls: toolCalls,
+      });
+
+      for (const tc of toolCalls) {
+        const fnName = tc.function?.name;
+        if (!fnName) continue;
+        let parsedArgs: Record<string, unknown> = {};
+        if (typeof tc.function?.arguments === "string" && tc.function.arguments.trim()) {
+          try {
+            const parsed = JSON.parse(tc.function.arguments) as unknown;
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              parsedArgs = parsed as Record<string, unknown>;
+            }
+          } catch {
+            parsedArgs = {};
+          }
+        }
+        assertOutboundPrivacyInvariant(parsedArgs, sensitiveOriginals);
+        toolCallsExecuted.push(fnName);
+        const toolResult = await params.toolExecutor(fnName, parsedArgs);
+        const toolMsg: Record<string, unknown> = {
+          role: "tool",
+          tool_call_id: tc.id || `call-${turn}-${fnName}`,
+          name: fnName,
+          content: JSON.stringify(toolResult),
+        };
+        assertOutboundPrivacyInvariant(toolMsg, sensitiveOriginals);
+        messages.push(toolMsg);
+      }
+    }
+
+    const latencyMs = Math.max(1, Date.now() - startedAt);
+    return {
+      attemptedLiveCall: true,
+      liveEndpointReached: true,
+      sdkMethod: "tinfoil.chat.completions.create",
+      model: params.model,
+      completionId,
+      toolCallsExecuted,
+      finalText:
+        finalText ||
+        `Tinfoil enclave planner (${params.model}) executed ${toolCallsExecuted.length} tool call(s) over RFC 9180 HPKE.`,
+      modelCallRecord: {
+        model: params.model,
+        purpose: `Autonomous Tinfoil enclave planner & tool loop (${params.model} over RFC 9180 HPKE)`,
+        ok: true,
+        latencyMs,
+        ...(totalInputTokens > 0 ? { inputTokens: totalInputTokens } : {}),
+        ...(totalOutputTokens > 0 ? { outputTokens: totalOutputTokens } : {}),
+      },
+    };
+  } catch (err) {
+    if (err instanceof PrivacyInvariantViolationError) {
+      throw err;
+    }
+    const latencyMs = Math.max(1, Date.now() - startedAt);
+    const rawMsg = err instanceof Error ? err.message : "Tinfoil planner error";
+    const safeMsg = resolvedKey ? rawMsg.split(resolvedKey).join("[REDACTED_KEY]") : rawMsg;
+
+    return {
+      attemptedLiveCall: true,
+      liveEndpointReached: false,
+      sdkMethod: "tinfoil.chat.completions.create",
+      model: params.model,
+      toolCallsExecuted,
+      fallbackReason: `Tinfoil planner SDK call failed (${safeMsg.slice(0, 180)}).`,
+      modelCallRecord: {
+        model: params.model,
+        purpose: `Autonomous Tinfoil enclave planner & tool loop (${params.model})`,
         ok: false,
         latencyMs,
         error: safeMsg.slice(0, 180),
@@ -950,7 +1269,7 @@ export async function callCompanionSubagentInteraction(params: {
 
   const resolvedKey =
     params.apiKey?.trim() ||
-    process.env.GEMINI_API_KEY?.trim() ||
+    (typeof process !== "undefined" ? process.env?.GEMINI_API_KEY?.trim() : "") ||
     "";
 
   if (!resolvedKey && !params.genaiClient) {

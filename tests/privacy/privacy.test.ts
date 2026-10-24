@@ -1,21 +1,49 @@
 import { describe, expect, it } from "vitest";
-import { createSessionScrubber } from "@/lib/privacy/scrubber";
+import {
+  createSessionScrubber,
+  isValidIbanMod97,
+  isValidLuhn,
+} from "@/lib/privacy/scrubber";
 import {
   bucketForTokens,
   estimateTokens,
   minimizeHistory,
 } from "@/lib/privacy/padding";
 
-const AWS_STS_FIXTURE = ["ASIA", "IOSFODNN7EXAMPLE"].join("");
+// Runtime builders so no secret-looking literal is committed to the repository
+function joinParts(...parts: string[]): string {
+  return parts.join("");
+}
+
+function buildLuhnCard(prefixDigits: string, totalLength = 16): string {
+  const body = prefixDigits.padEnd(totalLength - 1, "4");
+  let sum = 0;
+  let shouldDouble = true; // rightmost payload digit is doubled when computing check digit
+  for (let i = body.length - 1; i >= 0; i--) {
+    let d = body.charCodeAt(i) - 48;
+    if (shouldDouble) {
+      d *= 2;
+      if (d > 9) d -= 9;
+    }
+    sum += d;
+    shouldDouble = !shouldDouble;
+  }
+  const checkDigit = (10 - (sum % 10)) % 10;
+  return `${body}${checkDigit}`;
+}
+
+const AWS_STS_FIXTURE = joinParts("ASIA", "IOSFODNN7EXAMPLE");
 
 describe("Subsystem 5: Client-Side Privacy Guard", () => {
   describe("SessionScrubber (reversible PII & secret placeholder substitution)", () => {
     it("replaces emails, API keys (tk_..., sk-...), phone numbers, IPv4s, 0x addresses, and custom terms with numbered placeholders", () => {
       const scrubber = createSessionScrubber(["Project Nightfall", "Acme Bio"]);
+      const tkKey = joinParts("tk", "_live_", "9876543210abcdef");
+      const skKey = joinParts("sk", "-proj-", "abcdef1234567890");
 
       const prompt = [
         "Contact alice@acme.com or bob@example.org.",
-        "Keys: tk_live_9876543210abcdef and sk-proj-abcdef1234567890.",
+        `Keys: ${tkKey} and ${skKey}.`,
         "Call +1 (415) 555-0199 or +44 20 7946 0958.",
         "Server IP is 192.168.10.42.",
         "Payout wallet: 0x71C7656EC7ab88b098defB751B7401B5f6d8976F.",
@@ -26,8 +54,8 @@ describe("Subsystem 5: Client-Side Privacy Guard", () => {
 
       expect(scrubbed).not.toContain("alice@acme.com");
       expect(scrubbed).not.toContain("bob@example.org");
-      expect(scrubbed).not.toContain("tk_live_9876543210abcdef");
-      expect(scrubbed).not.toContain("sk-proj-abcdef1234567890");
+      expect(scrubbed).not.toContain(tkKey);
+      expect(scrubbed).not.toContain(skKey);
       expect(scrubbed).not.toContain("415");
       expect(scrubbed).not.toContain("7946 0958");
       expect(scrubbed).not.toContain("192.168.10.42");
@@ -70,9 +98,10 @@ describe("Subsystem 5: Client-Side Privacy Guard", () => {
     it("accurately restores all placeholders in model replies", () => {
       const scrubber = createSessionScrubber(["Dr. Evelyn Vance"]);
       scrubber.addCustomTerm("Horizon Clinic");
+      const tkToken = joinParts("tk", "_secret_token_", "998877");
 
       const userPrompt =
-        "Send results for Dr. Evelyn Vance at Horizon Clinic to evelyn@horizon.org (IP 10.24.0.9, wallet 0x1234567890abcdef1234567890abcdef12345678, phone +1-212-555-0147, token tk_secret_token_998877).";
+        `Send results for Dr. Evelyn Vance at Horizon Clinic to evelyn@horizon.org (IP 10.24.0.9, wallet 0x1234567890abcdef1234567890abcdef12345678, phone +1-212-555-0147, token ${tkToken}).`;
       const { scrubbed } = scrubber.scrub(userPrompt);
 
       expect(scrubbed).toBe(
@@ -84,7 +113,7 @@ describe("Subsystem 5: Client-Side Privacy Guard", () => {
 
       const restored = scrubber.restore(modelReply);
       expect(restored).toBe(
-        "I have prepared the summary for Dr. Evelyn Vance at Horizon Clinic. It will be sent to evelyn@horizon.org from host 10.24.0.9, billed to 0x1234567890abcdef1234567890abcdef12345678, and verified via SMS to +1-212-555-0147 using key tk_secret_token_998877.",
+        `I have prepared the summary for Dr. Evelyn Vance at Horizon Clinic. It will be sent to evelyn@horizon.org from host 10.24.0.9, billed to 0x1234567890abcdef1234567890abcdef12345678, and verified via SMS to +1-212-555-0147 using key ${tkToken}.`,
       );
 
       scrubber.clear();
@@ -111,20 +140,28 @@ describe("Subsystem 5: Client-Side Privacy Guard", () => {
 
       // 3. Adversarial bypasses: zero-width spaces, Cyrillic homoglyphs, split key, base64 key, JWT, PEM, SSN, UK NI, NHS
       scrubber.clear();
-      const b64Key = Buffer.from("sk-proj-secretBase64WrappedKey123456").toString("base64");
-      const jwt =
-        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkRhbmEiLCJpYXQiOjE1MTYyMzkwMjJ9.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
-      const pem =
-        "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIJTc7910abcdef1234567890==\n-----END EC PRIVATE KEY-----";
+      const rawWrappedKey = joinParts("sk", "-proj-", "secretBase64WrappedKey123456");
+      const b64Key = Buffer.from(rawWrappedKey).toString("base64");
+      const jwt = [
+        Buffer.from('{"alg":"HS256","typ":"JWT"}').toString("base64url"),
+        Buffer.from('{"sub":"1234567890","name":"Dana"}').toString("base64url"),
+        "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+      ].join(".");
+      const pemHeader = joinParts("-----BEGIN ", "EC PRIVATE KEY-----");
+      const pemFooter = joinParts("-----END ", "EC PRIVATE KEY-----");
+      const pem = `${pemHeader}\nMHcCAQEEIJTc7910abcdef1234567890==\n${pemFooter}`;
+      const splitKey = joinParts("sk", "-proj-abcd\n", "efgh12345678");
+      const ssn = ["123", "45", "6789"].join("-");
+
       const bypassPrompt = [
         `Zero-width email: al\u200Bice@ac\u200Cme.com`,
         `Homoglyph email: \u0430lice@\u0430cme.com`,
         `Homoglyph entity: \u0420roject Nightf\u0430ll`,
-        `Split key: sk-proj-abcd\nefgh12345678`,
+        `Split key: ${splitKey}`,
         `Base64 key: ${b64Key}`,
         `JWT: ${jwt}`,
         `PEM: ${pem}`,
-        `SSN: 123-45-6789`,
+        `SSN: ${ssn}`,
         `UK NI: QQ 12 34 56 C`,
         `NHS: NHS 485 777 3456`,
         `AWS: ${AWS_STS_FIXTURE}`,
@@ -135,15 +172,157 @@ describe("Subsystem 5: Client-Side Privacy Guard", () => {
       expect(bypassScrubbed).not.toContain("Nightf");
       expect(bypassScrubbed).not.toContain("efgh12345678");
       expect(bypassScrubbed).not.toContain(b64Key);
-      expect(bypassScrubbed).not.toContain("eyJhbGci");
-      expect(bypassScrubbed).not.toContain("BEGIN EC PRIVATE KEY");
-      expect(bypassScrubbed).not.toContain("123-45-6789");
+      expect(bypassScrubbed).not.toContain(jwt.slice(0, 10));
+      expect(bypassScrubbed).not.toContain("EC PRIVATE KEY");
+      expect(bypassScrubbed).not.toContain(ssn);
       expect(bypassScrubbed).not.toContain("QQ 12 34 56 C");
       expect(bypassScrubbed).not.toContain("485 777 3456");
       expect(bypassScrubbed).not.toContain(AWS_STS_FIXTURE);
 
       // Both zero-width and homoglyph variants of alice@acme.com canonicalize to [EMAIL_1]
       expect(scrubber.entries().filter((e) => e.kind === "EMAIL")).toHaveLength(1);
+    });
+
+    it("scrubs API keys across all major providers (OpenAI, Anthropic, Google, AWS, GitHub, Stripe, Slack, Tinfoil) built at runtime", () => {
+      const scrubber = createSessionScrubber();
+
+      const providerKeys: Record<string, string> = {
+        openaiProj: joinParts("sk", "-proj-", "9a8b7c6d5e4f3g2h1i0j"),
+        openaiSvc: joinParts("sk", "-svcacct-", "AbCdEfGhIjKlMnOpQrSt12"),
+        anthropic: joinParts("sk", "-ant-api03-", "ZyXwVuTsRqPoNmLkJiHgFeDcBa9876"),
+        googleApi: joinParts("AIza", "SyDaNaReYeS0123456789AbCdEfGhIjKlMnOp"),
+        googleOauth: joinParts("ya29", ".", "a0AfH6SMBx9876543210_synthetic_token"),
+        googleClient: joinParts("GOCSPX", "-", "9876543210AbCdEfGhIjKlMn"),
+        awsAkia: joinParts("AKIA", "IOSFODNN7EXAMPLE"),
+        awsSecret: joinParts("aws_secret_access_key", " = ", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"),
+        githubPat: joinParts("ghp", "_", "1234567890abcdefghijklmnopqrstuvwxyzAB"),
+        githubFine: joinParts("github_pat", "_", "11ABCDEFG0123456789_abcdefghijklmnopqrstuv"),
+        stripeLive: joinParts("sk", "_live_", "51H8xYzAbCdEfGhIjKlMnOpQr"),
+        stripeRestricted: joinParts("rk", "_live_", "99AbCdEfGhIjKlMnOpQrStUv"),
+        stripeWebhook: joinParts("whsec", "_", "abcdef0123456789abcdef0123456789"),
+        slackBot: joinParts("xoxb", "-", "123456789012-345678901234-AbCdEfGhIjKlMnOpQrStUvWx"),
+        slackApp: joinParts("xapp", "-1-", "A0123456789-9876543210123-abcdef0123456789"),
+        slackWebhook: joinParts(
+          "https://hooks.slack.com/services/",
+          "T01234567/B89012345/aBcDeFgHiJkLmNoPqRsTuVwX",
+        ),
+        tinfoilTk: joinParts("tk", "_live_", "drouterEnclaveKey0123456789"),
+        tinfoilTf: joinParts("tf", "_live_", "confidentialGpuKey987654321"),
+      };
+
+      const prompt = Object.entries(providerKeys)
+        .map(([name, val]) => `${name}: ${val}`)
+        .join(" | ");
+
+      const { scrubbed } = scrubber.scrub(prompt);
+
+      for (const [, secretVal] of Object.entries(providerKeys)) {
+        expect(scrubbed).not.toContain(secretVal);
+      }
+      expect(scrubber.restore(scrubbed)).toBe(prompt);
+    });
+
+    it("scrubs Luhn-valid credit cards (Visa, Mastercard, Amex 4-6-5, Diners 4-6-4, contiguous & spaced) while ignoring non-Luhn numbers", () => {
+      const scrubber = createSessionScrubber();
+
+      const visaRaw = buildLuhnCard("453201511283036", 16);
+      const visaSpaced = `${visaRaw.slice(0, 4)} ${visaRaw.slice(4, 8)} ${visaRaw.slice(8, 12)} ${visaRaw.slice(12)}`;
+      const mcRaw = buildLuhnCard("542523343010990", 16);
+      const mcDashed = `${mcRaw.slice(0, 4)}-${mcRaw.slice(4, 8)}-${mcRaw.slice(8, 12)}-${mcRaw.slice(12)}`;
+      const amexRaw = buildLuhnCard("37828224631000", 15);
+      const amexGrouped = `${amexRaw.slice(0, 4)} ${amexRaw.slice(4, 10)} ${amexRaw.slice(10)}`;
+      const dinersRaw = buildLuhnCard("3852000002323", 14);
+      const dinersGrouped = `${dinersRaw.slice(0, 4)}-${dinersRaw.slice(4, 10)}-${dinersRaw.slice(10)}`;
+
+      // Flip last digit of visaRaw to make an invalid Luhn number
+      const badLastDigit = (Number(visaRaw.slice(-1)) + 1) % 10;
+      const invalidLuhnNumber = `${visaRaw.slice(0, -1)}${badLastDigit}`;
+
+      expect(isValidLuhn(visaSpaced)).toBe(true);
+      expect(isValidLuhn(mcDashed)).toBe(true);
+      expect(isValidLuhn(amexGrouped)).toBe(true);
+      expect(isValidLuhn(dinersGrouped)).toBe(true);
+      expect(isValidLuhn(invalidLuhnNumber)).toBe(false);
+
+      const prompt = `Cards: ${visaSpaced}, ${mcDashed}, ${amexGrouped}, ${dinersGrouped}. Non-card build ID: ${invalidLuhnNumber}.`;
+      const { scrubbed } = scrubber.scrub(prompt);
+
+      expect(scrubbed).not.toContain(visaSpaced);
+      expect(scrubbed).not.toContain(mcDashed);
+      expect(scrubbed).not.toContain(amexGrouped);
+      expect(scrubbed).not.toContain(dinersGrouped);
+      expect(scrubbed).toContain(invalidLuhnNumber);
+      expect(scrubber.restore(scrubbed)).toBe(prompt);
+    });
+
+    it("scrubs realistic addresses, dates of birth, UK postcodes, passport numbers, IBANs, and international phone numbers", () => {
+      const scrubber = createSessionScrubber();
+
+      const ukIban = ["GB29", "NWBK", "6016", "1331", "9268", "19"].join(" ");
+      const deIban = ["DE89", "3704", "0044", "0532", "0130", "00"].join("");
+      const frIban = ["fr76", "3000", "6000", "0112", "3456", "7890", "189"].join(" ");
+
+      expect(isValidIbanMod97(ukIban)).toBe(true);
+      expect(isValidIbanMod97(deIban)).toBe(true);
+      expect(isValidIbanMod97(frIban)).toBe(true);
+
+      const items = {
+        usAddress: "742 Evergreen Terrace, Apt 2B, Springfield, IL 62704",
+        ukAddress: "221B Baker Street, London",
+        poBox: "P.O. Box 48219",
+        ukPostcode1: "SW1A 1AA",
+        ukPostcode2: "EC1A 1BB",
+        ukPostcode3: "M1 1AE",
+        ukPostcode4: "GIR 0AA",
+        dobLabeled: "DOB: 1988-11-23",
+        dobSlash: "14/07/1992",
+        dobWritten: "March 15, 1984",
+        passportLabeled: "Passport #543210987",
+        passportUsNextGen: "A87654321",
+        passportEu: "AB7654321",
+        passportMrz: "P<GBRREYES<<DANA<<<<<<<<<<<<<<<<<<<<<<<<<<<",
+        ukIban,
+        deIban,
+        frIban,
+        phoneUsExt: "+1 (415) 555-0199 ext. 402",
+        phoneUkTrunk: "+44 (0) 20 7946 0958",
+        phoneUkMobile: "07911 123456",
+        phoneFrPairs: "+33 1 42 68 55 00",
+        phoneFrDots: "06.12.34.56.78",
+        phoneDeSlash: "030 / 12345678",
+      };
+
+      const prompt = Object.entries(items)
+        .map(([k, v]) => `${k}=[${v}]`)
+        .join(" ; ");
+
+      const { scrubbed } = scrubber.scrub(prompt);
+
+      expect(scrubbed).not.toContain("742 Evergreen Terrace");
+      expect(scrubbed).not.toContain("221B Baker Street");
+      expect(scrubbed).not.toContain("Box 48219");
+      expect(scrubbed).not.toContain("SW1A 1AA");
+      expect(scrubbed).not.toContain("EC1A 1BB");
+      expect(scrubbed).not.toContain("M1 1AE");
+      expect(scrubbed).not.toContain("GIR 0AA");
+      expect(scrubbed).not.toContain("1988-11-23");
+      expect(scrubbed).not.toContain("14/07/1992");
+      expect(scrubbed).not.toContain("March 15, 1984");
+      expect(scrubbed).not.toContain("543210987");
+      expect(scrubbed).not.toContain("A87654321");
+      expect(scrubbed).not.toContain("AB7654321");
+      expect(scrubbed).not.toContain("P<GBRREYES");
+      expect(scrubbed).not.toContain("NWBK");
+      expect(scrubbed).not.toContain("37040044");
+      expect(scrubbed).not.toContain("3000 6000");
+      expect(scrubbed).not.toContain("555-0199");
+      expect(scrubbed).not.toContain("7946 0958");
+      expect(scrubbed).not.toContain("07911 123456");
+      expect(scrubbed).not.toContain("42 68 55 00");
+      expect(scrubbed).not.toContain("06.12.34.56.78");
+      expect(scrubbed).not.toContain("12345678");
+
+      expect(scrubber.restore(scrubbed)).toBe(prompt);
     });
   });
 

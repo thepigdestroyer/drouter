@@ -52,8 +52,23 @@ export function vcek(simId: string) {
   return p384Key(`sim/vcek/${simId}`);
 }
 
+/**
+ * Synthetic 16-byte ASCII prefix ("sim-chip-0000000" -> 73696d2d636869702d30303030303030 in hex)
+ * placed at the start of every 64-byte simulated chipId so it can never be mistaken for a real AMD silicon chip ID.
+ */
+export const SYNTHETIC_CHIP_ID_PREFIX_TEXT = "sim-chip-0000000";
+export const SYNTHETIC_CHIP_ID_PREFIX_BYTES: Uint8Array = utf8(SYNTHETIC_CHIP_ID_PREFIX_TEXT); // 16 bytes
+export const SYNTHETIC_CHIP_ID_HEX_PREFIX = toHex(SYNTHETIC_CHIP_ID_PREFIX_BYTES); // "73696d2d636869702d30303030303030"
+
 export function chipId(simId: string): Uint8Array {
-  return derive(`sim/chip/${simId}`, 64);
+  const out = new Uint8Array(64);
+  out.set(SYNTHETIC_CHIP_ID_PREFIX_BYTES, 0);
+  out.set(derive(`sim/chip/${simId}`, 48), SYNTHETIC_CHIP_ID_PREFIX_BYTES.length);
+  return out;
+}
+
+export function chipIdDisplayLabel(simId: string): string {
+  return `sim-chip:${simId}:${toHex(chipId(simId)).slice(SYNTHETIC_CHIP_ID_HEX_PREFIX.length, SYNTHETIC_CHIP_ID_HEX_PREFIX.length + 16)}`;
 }
 
 export function ticketKey(simId: string): Uint8Array {

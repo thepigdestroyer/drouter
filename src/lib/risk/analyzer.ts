@@ -52,7 +52,7 @@ const DETECTION_RULES: DetectionRule[] = [
     category: "credentials",
     severity: 40,
     pattern:
-      /\b(?:sk-[A-Za-z0-9_-]{8,}|tk_[A-Za-z0-9_-]{8,}|ghp_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{10,}|(?:AKIA|ASIA)[0-9A-Z]{12,20}|xox[baprs]-[A-Za-z0-9-]{10,}|eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\b/g,
+      /\b(?:sk-[A-Za-z0-9_-]{8,}|(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{8,}|whsec_[A-Za-z0-9_]{8,}|(?:tk|tf|tinfoil)_[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{10,}|(?:AKIA|ASIA|ABIA|ACCA|AIDA|AROA)[0-9A-Z]{12,20}|xox[baprs]-[A-Za-z0-9-]{8,}|xapp-\d-[A-Za-z0-9-]{8,}|AIza[0-9A-Za-z_-]{20,}|GOCSPX-[0-9A-Za-z_-]{12,}|ya29\.[0-9A-Za-z._-]{12,}|eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\b/g,
     recommendation:
       "Replace live API tokens and cloud access keys with <CREDENTIAL_REDACTED> before sending off-device.",
     maskPreview: true,
@@ -264,7 +264,7 @@ export function generalizePromptPapillon(
   );
 
   working = working.replace(
-    /\b(?:sk-[A-Za-z0-9_-]{8,}|tk_[A-Za-z0-9_-]{8,}|ghp_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{10,}|(?:AKIA|ASIA)[0-9A-Z]{12,20}|xox[baprs]-[A-Za-z0-9-]{10,}|eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\b/g,
+    /\b(?:sk-[A-Za-z0-9_-]{8,}|(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{8,}|whsec_[A-Za-z0-9_]{8,}|(?:tk|tf|tinfoil)_[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{10,}|(?:AKIA|ASIA|ABIA|ACCA|AIDA|AROA)[0-9A-Z]{12,20}|xox[baprs]-[A-Za-z0-9-]{8,}|xapp-\d-[A-Za-z0-9-]{8,}|AIza[0-9A-Za-z_-]{20,}|GOCSPX-[0-9A-Za-z_-]{12,}|ya29\.[0-9A-Za-z._-]{12,}|eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\b/g,
     (match) =>
       assignVaultToken(
         localContextVault,

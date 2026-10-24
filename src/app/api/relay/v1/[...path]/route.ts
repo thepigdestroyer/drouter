@@ -1,4 +1,5 @@
 import { after } from "next/server";
+import { verifyAndSpendCreditHeader } from "@/lib/credits/ledger";
 import { logRelay } from "@/lib/db";
 import {
   BodyTooLargeError,
@@ -7,8 +8,11 @@ import {
   readBoundedBytes,
 } from "@/lib/ratelimit";
 import {
+  CREDIT_RATE_BONUS_PER_DENOM,
   FORWARD_REQUEST_HEADERS,
   FORWARD_RESPONSE_HEADERS,
+  MAX_CREDIT_RELAY_BODY_BYTES,
+  MAX_RELAY_BODY_BYTES,
   countingStream,
   isAllowedEnclave,
   isAllowedRelayModel,
@@ -18,8 +22,6 @@ import {
 } from "@/lib/relay";
 
 export const maxDuration = 300;
-
-const MAX_RELAY_BODY_BYTES = 262_144; // 256 KB max HPKE ciphertext
 
 const ipLimiter = createTokenBucketLimiter({
   name: "relay-v1",
@@ -37,19 +39,16 @@ const globalLimiter = createGlobalBucketLimiter({
  * dRouter relay. Forwards HPKE-encrypted request bodies to the enclave the browser verified, adds
  * the operator's API key, and streams the encrypted response back. It never decrypts anything and
  * logs only byte counts.
+ *
+ * Credit-backed limit policy:
+ * - Without `x-drouter-credit`, requests use the per-IP free tier (20 burst, 0.5/s, 256 KB body cap).
+ * - With `x-drouter-credit`, the RSA blind signature is verified against the per-denomination exponent
+ *   and the nullifier is recorded atomically in `credit_nullifiers` (HTTP 409 on double-spend).
+ *   Spending a credit bypasses the per-IP free-tier gate, refills `denomination * 4` tokens into the
+ *   caller's per-IP bucket (up to 4x capacity), credits `denomination` to the global bucket, and raises
+ *   the request body cap to 512 KB.
  */
 export async function POST(request: Request, ctx: { params: Promise<{ path: string[] }> }) {
-  const limited = ipLimiter.check(request);
-  if (limited) return limited;
-
-  const globalCheck = globalLimiter.consume(1);
-  if (!globalCheck.allowed) {
-    return Response.json(
-      { error: "Global relay capacity reached. Please retry shortly." },
-      { status: 429, headers: { "Retry-After": String(globalCheck.retryAfterSec) } },
-    );
-  }
-
   const { path } = await ctx.params;
   const validatedPath = validateRelayPath(path);
   if (!validatedPath) {
@@ -74,9 +73,38 @@ export async function POST(request: Request, ctx: { params: Promise<{ path: stri
     );
   }
 
+  const rawCreditHeader =
+    request.headers.get("x-drouter-credit") ?? request.headers.get("x-drouter-credit-token");
+  let spentCredit: { nullifier: string; denomination: number } | null = null;
+
+  if (rawCreditHeader !== null && rawCreditHeader.trim().length > 0) {
+    const spendResult = await verifyAndSpendCreditHeader(rawCreditHeader, "relay-v1");
+    if (!spendResult.ok) {
+      return Response.json({ error: spendResult.error }, { status: spendResult.status });
+    }
+    spentCredit = {
+      nullifier: spendResult.nullifier,
+      denomination: spendResult.denomination,
+    };
+    ipLimiter.credit(request, spendResult.denomination * CREDIT_RATE_BONUS_PER_DENOM, 4);
+    globalLimiter.credit(spendResult.denomination, 4);
+  } else {
+    const limited = ipLimiter.check(request);
+    if (limited) return limited;
+
+    const globalCheck = globalLimiter.consume(1);
+    if (!globalCheck.allowed) {
+      return Response.json(
+        { error: "Global relay capacity reached. Please retry shortly." },
+        { status: 429, headers: { "Retry-After": String(globalCheck.retryAfterSec) } },
+      );
+    }
+  }
+
+  const maxBodyBytes = spentCredit ? MAX_CREDIT_RELAY_BODY_BYTES : MAX_RELAY_BODY_BYTES;
   let requestBody: Uint8Array;
   try {
-    requestBody = await readBoundedBytes(request, MAX_RELAY_BODY_BYTES);
+    requestBody = await readBoundedBytes(request, maxBodyBytes);
   } catch (err) {
     if (err instanceof BodyTooLargeError) {
       return Response.json({ error: err.message }, { status: 413 });
@@ -88,10 +116,30 @@ export async function POST(request: Request, ctx: { params: Promise<{ path: stri
     return Response.json({ error: "Empty encrypted request body" }, { status: 400 });
   }
 
+  const creditHeaders: Record<string, string> = spentCredit
+    ? {
+        "X-DRouter-Credit-Nullifier": spentCredit.nullifier,
+        "X-DRouter-Credit-Denomination": String(spentCredit.denomination),
+      }
+    : {};
+
   if (process.env.DROUTER_STUB_UPSTREAM === "1") {
     return Response.json(
-      { stubbed: true, path: validatedPath, bytesUp: requestBody.byteLength },
-      { status: 200, headers: { "content-type": "application/json" } },
+      {
+        stubbed: true,
+        path: validatedPath,
+        bytesUp: requestBody.byteLength,
+        ...(spentCredit
+          ? {
+              creditNullifier: spentCredit.nullifier,
+              creditDenomination: spentCredit.denomination,
+            }
+          : {}),
+      },
+      {
+        status: 200,
+        headers: { "content-type": "application/json", ...creditHeaders },
+      },
     );
   }
 
@@ -99,7 +147,7 @@ export async function POST(request: Request, ctx: { params: Promise<{ path: stri
   if (!apiKey) {
     return Response.json(
       { error: "This relay has no Tinfoil API key configured. Simulated nodes still work." },
-      { status: 503 },
+      { status: 503, headers: creditHeaders },
     );
   }
 
@@ -117,10 +165,17 @@ export async function POST(request: Request, ctx: { params: Promise<{ path: stri
       cache: "no-store",
     });
   } catch {
-    return Response.json({ error: "Upstream enclave connection failed" }, { status: 502 });
+    return Response.json(
+      { error: "Upstream enclave connection failed" },
+      { status: 502, headers: creditHeaders },
+    );
   }
 
   const responseHeaders = pickHeaders(upstream.headers, FORWARD_RESPONSE_HEADERS);
+  for (const [k, v] of Object.entries(creditHeaders)) {
+    responseHeaders.set(k, v);
+  }
+
   const enclaveHost = parsedEnclave.host;
   let reportBytes: (bytes: number) => void = () => {};
   const bytesDown = new Promise<number>((resolve) => (reportBytes = resolve));
@@ -139,7 +194,7 @@ export async function POST(request: Request, ctx: { params: Promise<{ path: stri
     reportBytes(0);
     return Response.json(
       { error: `Upstream enclave returned HTTP ${upstream.status}` },
-      { status: upstream.status >= 500 ? 502 : upstream.status },
+      { status: upstream.status >= 500 ? 502 : upstream.status, headers: creditHeaders },
     );
   }
 

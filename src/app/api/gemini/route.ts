@@ -10,6 +10,7 @@ import {
   FORBIDDEN_ARGON_PARAMETERS,
   GEMINI_4_ARGON_MODEL_ID,
   DEMO_PERSONA,
+  PrivacyInvariantViolationError,
   runArgonAutonomousWorkflow,
   validateArgonRequestConfig,
   type ArgonThinkingLevel,
@@ -38,8 +39,8 @@ const arcAnchorGlobalLimiter = createGlobalBucketLimiter({
 
 const MAX_TASK_PROMPT_CHARS = 32_768;
 
-// GET is hit on every /argon page load, so it serves a cached simulated run
-// and never records receipts.
+// GET is hit on every /argon page load, so it serves a cached run
+// without triggering paid inference calls and never records receipts.
 const GET_CACHE_MS = 10 * 60_000;
 let cachedGet: { atMs: number; body: unknown } | null = null;
 
@@ -76,6 +77,7 @@ export async function GET() {
     injectFaultToTestSelfHealing: true,
     humanApprovedExternalAction: false,
     preferredEnclaveModel: "gemma4-31b",
+    enableLiveEnclaveInference: false,
     atlasRunner: serverAtlasRunner,
   });
 
@@ -91,6 +93,7 @@ export async function GET() {
   const body = {
     ok: true,
     mode: preVerifiedRun.mode,
+    planner: preVerifiedRun.planner,
     modelCalls: preVerifiedRun.modelCalls,
     track: "Google DeepMind Encode London Hackathon - Gemini 4 Argon Autonomous Agent",
     primaryModel: GEMINI_4_ARGON_MODEL_ID,
@@ -183,21 +186,36 @@ export async function POST(request: NextRequest) {
       ? body.geminiApiKey.trim()
       : undefined;
 
-  const autonomousRun = await runArgonAutonomousWorkflow({
-    taskPrompt:
-      typeof body.taskPrompt === "string"
-        ? body.taskPrompt
-        : DEFAULT_TASK_PROMPT,
-    thinkingLevel,
-    background: validation.normalizedConfig?.background ?? true,
-    injectFaultToTestSelfHealing: Boolean(body.injectFaultToTestSelfHealing),
-    humanApprovedExternalAction: Boolean(body.humanApprovedExternalAction),
-    preferredEnclaveModel,
-    geminiApiKey: ephemeralGeminiKey,
-    enableLiveEnclaveInference: true,
-    atlasRunner: serverAtlasRunner,
-    receiptRecorder: serverReceiptRecorder,
-  });
+  let autonomousRun;
+  try {
+    autonomousRun = await runArgonAutonomousWorkflow({
+      taskPrompt:
+        typeof body.taskPrompt === "string"
+          ? body.taskPrompt
+          : DEFAULT_TASK_PROMPT,
+      thinkingLevel,
+      background: validation.normalizedConfig?.background ?? true,
+      injectFaultToTestSelfHealing: Boolean(body.injectFaultToTestSelfHealing),
+      humanApprovedExternalAction: Boolean(body.humanApprovedExternalAction),
+      preferredEnclaveModel,
+      geminiApiKey: ephemeralGeminiKey,
+      enableLiveEnclaveInference: true,
+      atlasRunner: serverAtlasRunner,
+      receiptRecorder: serverReceiptRecorder,
+    });
+  } catch (err) {
+    if (err instanceof PrivacyInvariantViolationError) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "PRIVACY_INVARIANT_VIOLATION",
+          message: "Outbound planner payload contained unredacted sensitive data; request aborted.",
+        },
+        { status: 422 },
+      );
+    }
+    throw err;
+  }
 
   // The human approved the external action, so anchor the signed run digest on
   // Arc for real. Everything else in Stage 5 stays simulated and is labelled so.
@@ -222,6 +240,7 @@ export async function POST(request: NextRequest) {
   return NextResponse.json({
     ok: true,
     mode: autonomousRun.mode,
+    planner: autonomousRun.planner,
     arcAnchor,
     modelCalls: autonomousRun.modelCalls,
     primaryModel: GEMINI_4_ARGON_MODEL_ID,

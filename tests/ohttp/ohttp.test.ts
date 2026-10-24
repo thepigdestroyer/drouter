@@ -359,4 +359,106 @@ describe("RFC 9458 Oblivious HTTP (OHTTP) Binary KeyConfig & Framing", () => {
       expect(decapsulateOhttpResponse(resp, clientContext)).toBe(`ack:${msg}`);
     }
   });
+
+  it("derives gateway keys from server secrets (never hardcoded demo string), serves raw application/ohttp-keys on GET, and enforces the internal target allowlist on POST", async () => {
+    const { GET, POST } = await import("@/app/api/ohttp/route");
+    const { NextRequest } = await import("next/server");
+    const { resolveAllowlistedOhttpTarget } = await import("@/lib/ohttp/rfc9458");
+
+    // 1. Key derivation changes when server secret changes
+    const kpA = getDefaultOhttpGatewayKeypair(1, "aa".repeat(32));
+    const kpB = getDefaultOhttpGatewayKeypair(1, "bb".repeat(32));
+    expect(bytesToHex(kpA.publicKey)).not.toEqual(bytesToHex(kpB.publicKey));
+
+    // 2. Allowlist helper blocks external URLs, path traversal, and non-allowlisted internal routes
+    expect(resolveAllowlistedOhttpTarget("/api/v1/chat/completions").allowed).toBe(true);
+    expect(resolveAllowlistedOhttpTarget("/v1/chat/completions").canonicalPath).toBe(
+      "/api/v1/chat/completions",
+    );
+    expect(resolveAllowlistedOhttpTarget("/api/v1/models").allowed).toBe(true);
+    expect(resolveAllowlistedOhttpTarget("/api/v1/verify").allowed).toBe(true);
+    expect(resolveAllowlistedOhttpTarget("https://evil.example.com/v1/chat/completions").allowed).toBe(
+      false,
+    );
+    expect(resolveAllowlistedOhttpTarget("/api/admin/secrets").allowed).toBe(false);
+    expect(resolveAllowlistedOhttpTarget("/api/v1/../admin").allowed).toBe(false);
+
+    // 3. GET /api/ohttp with Accept: application/ohttp-keys returns raw binary KeyConfig
+    const getBinaryReq = new NextRequest("http://localhost:3000/api/ohttp", {
+      method: "GET",
+      headers: { accept: "application/ohttp-keys" },
+    });
+    const getBinaryRes = await GET(getBinaryReq);
+    expect(getBinaryRes.status).toBe(200);
+    expect(getBinaryRes.headers.get("content-type")).toBe("application/ohttp-keys");
+    const rawKeyBytes = new Uint8Array(await getBinaryRes.arrayBuffer());
+    const decodedFromGet = decodeOhttpKeyConfig(rawKeyBytes);
+    expect(decodedFromGet.keyId).toBe(1);
+
+    // 4. POST /api/ohttp forwards inner /api/v1/chat/completions (sim-echo-1) and encapsulates the real completion
+    const chatInnerReq = JSON.stringify({
+      method: "POST",
+      path: "/api/v1/chat/completions",
+      headers: { "content-type": "application/json" },
+      body: {
+        model: "sim-echo-1",
+        messages: [{ role: "user", content: "Ping enclave via RFC 9458 OHTTP gateway" }],
+      },
+    });
+    const { encapsulatedRequest: encChatReq, clientContext: chatClientCtx } =
+      encapsulateOhttpRequest(chatInnerReq, decodedFromGet.publicKey, decodedFromGet.keyId);
+
+    // Send as binary message/ohttp-req
+    const postBinaryReq = new NextRequest("http://localhost:3000/api/ohttp", {
+      method: "POST",
+      headers: {
+        "content-type": "message/ohttp-req",
+        accept: "message/ohttp-res",
+      },
+      body: Buffer.from(encChatReq),
+    });
+    const postBinaryRes = await POST(postBinaryReq);
+    expect(postBinaryRes.status).toBe(200);
+    expect(postBinaryRes.headers.get("content-type")).toBe("message/ohttp-res");
+    const encChatResBytes = new Uint8Array(await postBinaryRes.arrayBuffer());
+    const decChatResJson = decapsulateOhttpResponse(encChatResBytes, chatClientCtx);
+    const parsedChatRes = JSON.parse(decChatResJson) as {
+      status: number;
+      forwardedTo: string;
+      body: { choices: Array<{ message: { content: string } }> };
+    };
+    expect(parsedChatRes.status).toBe(200);
+    expect(parsedChatRes.forwardedTo).toBe("/api/v1/chat/completions");
+    expect(parsedChatRes.body.choices[0].message.content).toContain("Simulated enclave sim-1");
+
+    // 5. POST /api/ohttp rejects non-allowlisted inner path with encapsulated 403
+    // Re-fetch current gateway key after SIM_HARDWARE_SEED may have been initialized by chatCompletionsPost
+    const currentGateway = getDefaultOhttpGatewayKeypair(1);
+    const forbiddenInnerReq = JSON.stringify({
+      method: "GET",
+      path: "/api/internal/secret",
+    });
+    const { encapsulatedRequest: encForbiddenReq, clientContext: forbiddenCtx } =
+      encapsulateOhttpRequest(forbiddenInnerReq, currentGateway.publicKey, currentGateway.keyId);
+
+    const postForbiddenReq = new NextRequest("http://localhost:3000/api/ohttp", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ encapsulatedRequestHex: bytesToHex(encForbiddenReq) }),
+    });
+    const postForbiddenRes = await POST(postForbiddenReq);
+    expect(postForbiddenRes.status).toBe(200);
+    const forbiddenJson = (await postForbiddenRes.json()) as {
+      encapsulatedResponseHex: string;
+      innerStatus: number;
+    };
+    expect(forbiddenJson.innerStatus).toBe(403);
+    const decForbidden = JSON.parse(
+      decapsulateOhttpResponse(
+        new Uint8Array(Buffer.from(forbiddenJson.encapsulatedResponseHex, "hex")),
+        forbiddenCtx,
+      ),
+    ) as { status: number };
+    expect(decForbidden.status).toBe(403);
+  });
 });

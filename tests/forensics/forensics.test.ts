@@ -59,7 +59,7 @@ function makePassingChecks(): CheckResult[] {
 
 function makeEvidenceRegisters(): Record<string, string> {
   return {
-    "Enclave host": "kimi-k2-5-1.model.tinfoil.sh",
+    "Enclave host": "kimi-k3-inf14.tinfoil.containers.tinfoil.dev",
     "Measurement type": "sev-snp-1184b",
     "Enclave fingerprint": "4cf9a81e7b204d91a6c30e882b17f53c90e1d4a782b6c3019f8e7d6c5b4a3921",
     "Chip ID":
@@ -259,5 +259,92 @@ describe("Verifiable Forensic Proof Bundle Exporter & Standalone Offline Verifie
     expect(pinnedForged.valid).toBe(false);
     expect(pinnedForged.originVerified).toBe(false);
     expect(pinnedForged.reasons.some((r) => /expectedClientPublicKeyHex/i.test(r))).toBe(true);
+  });
+
+  it("builds a forensic proof bundle from real Console session data via buildProofBundle(), binds to the unlocked Vault Ed25519 identity, and verifies via /api/forensics with pinned keys", async () => {
+    const { buildProofBundle, downloadForensicProofBundle } = await import(
+      "@/lib/forensics/bundle"
+    );
+    const { unlockVaultWithPassphrase, wipeLocalVault } = await import(
+      "@/lib/auth/vault"
+    );
+    const { POST: forensicsPost } = await import("@/app/api/forensics/route");
+    const { NextRequest } = await import("next/server");
+
+    wipeLocalVault();
+    const vault = unlockVaultWithPassphrase(
+      "abandon ability able about above absent",
+      false,
+    );
+
+    const popReceipt = makeSignedPopReceipt();
+    const mockNode = {
+      id: "0x01" as const,
+      kind: "tinfoil" as const,
+      name: "Tinfoil Confidential Router #1",
+      endpoint: "router-0.tinfoil.sh",
+      measurement: "0x4cf9a81e7b204d91a6c30e882b17f53c90e1d4a782b6c3019f8e7d6c5b4a3921" as const,
+      operator: "0x1111111111111111111111111111111111111111" as const,
+      stake: "10000",
+      status: "active" as const,
+      region: "us-east",
+      registeredAt: 1760000000,
+      lastVerifiedAt: 1760000100,
+      lastVerifiedOk: true,
+    };
+
+    const bundle = buildProofBundle({
+      session: {
+        node: mockNode,
+        checks: makePassingChecks(),
+        evidence: makeEvidenceRegisters(),
+        evidenceHash: "0xdeadbeef",
+      },
+      model: "kimi-k3",
+      receipt: popReceipt,
+      verifyAnchorUrl:
+        "https://testnet.arcscan.app/tx/0x9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b",
+    });
+
+    expect(bundle.clientPublicKeyHex).toBe(vault.ed25519PublicKeyHex);
+    expect(bundle.evidence["Client vault ID"]).toBe(vault.vaultId);
+    expect(bundle.arcAnchorTx).toBe(
+      "0x9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b",
+    );
+
+    const dl = downloadForensicProofBundle({
+      node: mockNode,
+      checks: makePassingChecks(),
+      evidence: makeEvidenceRegisters(),
+      receipt: popReceipt,
+    });
+    expect(dl.verification.valid).toBe(true);
+    expect(dl.verification.originVerified).toBe(true);
+    expect(dl.verification.popOriginVerified).toBe(true);
+    expect(dl.filename).toMatch(/\.drouter-proof\.json$/);
+
+    // Verify via POST /api/forensics with pinned keys
+    const req = new NextRequest("http://localhost:3000/api/forensics", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        bundle,
+        expectedClientPublicKeyHex: vault.ed25519PublicKeyHex,
+        expectedPopSignerPublicKeyHex: popReceipt.signerPublicKey,
+        requirePinnedOrigin: true,
+      }),
+    });
+    const res = await forensicsPost(req);
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as {
+      valid: boolean;
+      originVerified: boolean;
+      popOriginVerified: boolean;
+    };
+    expect(data.valid).toBe(true);
+    expect(data.originVerified).toBe(true);
+    expect(data.popOriginVerified).toBe(true);
+
+    wipeLocalVault();
   });
 });

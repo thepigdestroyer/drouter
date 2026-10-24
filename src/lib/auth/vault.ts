@@ -361,6 +361,17 @@ export function getCurrentVaultSession(): VaultSession | null {
 }
 
 /**
+ * Returns the active custom scrub terms from the unlocked Client Vault session,
+ * or an empty array when the vault is locked (Cross-agent Interface I3).
+ */
+export function getActiveCustomScrubTerms(): string[] {
+  if (!activeSession || !Array.isArray(activeSession.payload?.customScrubTerms)) {
+    return [];
+  }
+  return [...activeSession.payload.customScrubTerms];
+}
+
+/**
  * Checks whether an encrypted vault bundle is stored in local device storage.
  */
 export function getPersistedVaultMetadata(): {

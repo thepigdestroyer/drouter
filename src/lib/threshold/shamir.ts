@@ -1,6 +1,8 @@
 import { ed25519 } from "@noble/curves/ed25519.js";
+import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
+import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
+import type { FreezeReceipt } from "@/lib/types";
 
 /**
  * secp256k1 field prime: P = 2^256 - 2^32 - 977
@@ -49,6 +51,60 @@ export interface AuthorizeThresholdKeyReleaseResult {
   approvals: ThresholdCheckerApproval[];
   reconstructedKeyHex?: string;
   reason: string;
+  simulatedQuorum: true;
+  quorumDisclosure: string;
+}
+
+/**
+ * Portable Shamir share string format: `drouter-share-v1:<purpose>:<k>-of-<n>:<index>:<yHex>:<commitmentHex>`
+ * Suitable for distributing a 3-of-5 recovery quorum for a client's `freezeSecretHex` or `vaultKeyHex`.
+ */
+export interface DistributedCustodyShare extends ShamirShare {
+  format: "drouter-custody-share-v1";
+  purpose: "freeze-secret" | "vault-export-key";
+  k: number;
+  n: number;
+  handleId: string;
+  portableToken: string;
+}
+
+export interface SplitFreezeReceiptSharesResult {
+  blobId: string;
+  sessionIdHex: string;
+  createdAt: number;
+  k: number;
+  n: number;
+  shares: DistributedCustodyShare[];
+}
+
+export interface SplitVaultKeySharesResult {
+  vaultId: string;
+  k: number;
+  n: number;
+  shares: DistributedCustodyShare[];
+}
+
+export const THRESHOLD_CHECKER_DISCLOSURE =
+  "Simulated regional checker quorum: all 5 regional checker Ed25519 keys are derived from the server's SIM_HARDWARE_SEED in this single-operator deployment. For genuine client-side custody without trusting a single server, use splitFreezeSecretIntoShares() or splitVaultKeyIntoShares() to distribute 3-of-5 Shamir shares to independent custodians.";
+
+let ephemeralThresholdFallbackSeed: Uint8Array | null = null;
+
+function getServerThresholdSeedBytes(): Uint8Array {
+  const raw =
+    (typeof process !== "undefined" && process.env?.THRESHOLD_CHECKER_SEED) ||
+    (typeof process !== "undefined" && process.env?.SIM_HARDWARE_SEED);
+  if (typeof raw === "string" && raw.trim().length > 0) {
+    const clean = raw.trim().replace(/^0x/i, "");
+    if (/^[0-9a-fA-F]+$/.test(clean) && clean.length >= 32 && clean.length % 2 === 0) {
+      return hexToBytes(clean);
+    }
+    return utf8ToBytes(raw.trim());
+  }
+  if (!ephemeralThresholdFallbackSeed) {
+    ephemeralThresholdFallbackSeed = new Uint8Array(32);
+    globalThis.crypto.getRandomValues(ephemeralThresholdFallbackSeed);
+  }
+  return ephemeralThresholdFallbackSeed;
 }
 
 function mod(a: bigint, p: bigint = SHAMIR_PRIME): bigint {
@@ -284,12 +340,225 @@ export function combineShares(
   return formatFieldElementHex(secret);
 }
 
+/**
+ * Clamps a 32-byte key into the secp256k1 field GF(P) if needed, or validates that it fits losslessly.
+ * Note: P = 2^256 - 2^32 - 977, so > 99.9999999% of random 256-bit keys are already < P.
+ */
+function ensureFieldCompatibleSecretHex(secretHex: string): string {
+  const clean = normalizeHex(secretHex);
+  if (clean.length !== 64) {
+    throw new Error("Expected a 32-byte (64 hex character) secret key");
+  }
+  const value = BigInt("0x" + clean);
+  if (value >= SHAMIR_PRIME) {
+    throw new Error("Secret key value exceeds GF(P) field prime; regenerate or re-derive key");
+  }
+  return clean;
+}
+
+function encodePortableShareToken(params: {
+  purpose: "freeze-secret" | "vault-export-key";
+  handleId: string;
+  k: number;
+  n: number;
+  share: ShamirShare;
+}): string {
+  return [
+    "drouter-share-v1",
+    params.purpose,
+    params.handleId,
+    `${params.k}-of-${params.n}`,
+    String(params.share.index),
+    params.share.yHex,
+    params.share.commitmentHex,
+  ].join(":");
+}
+
+export function parsePortableShareToken(token: string): DistributedCustodyShare {
+  if (typeof token !== "string") {
+    throw new Error("Share token must be a string");
+  }
+  const parts = token.trim().split(":");
+  if (parts.length !== 7 || parts[0] !== "drouter-share-v1") {
+    throw new Error("Invalid drouter-share-v1 portable share token format");
+  }
+  const [, purposeRaw, handleId, quorumSpec, indexStr, yHexRaw, commitmentRaw] = parts;
+  if (purposeRaw !== "freeze-secret" && purposeRaw !== "vault-export-key") {
+    throw new Error(`Unsupported share token purpose: ${purposeRaw}`);
+  }
+  const match = /^(\d+)-of-(\d+)$/.exec(quorumSpec);
+  if (!match) {
+    throw new Error(`Invalid quorum specification in share token: ${quorumSpec}`);
+  }
+  const k = Number(match[1]);
+  const n = Number(match[2]);
+  const index = Number(indexStr);
+  const yHex = normalizeHex(yHexRaw).padStart(64, "0");
+  const commitmentHex = normalizeHex(commitmentRaw).padStart(64, "0");
+
+  const share: DistributedCustodyShare = {
+    format: "drouter-custody-share-v1",
+    purpose: purposeRaw,
+    handleId,
+    k,
+    n,
+    index,
+    yHex,
+    commitmentHex,
+    portableToken: token.trim(),
+  };
+
+  if (!verifyShareCommitment(share)) {
+    throw new Error(`Share commitment verification failed for share index ${index}`);
+  }
+
+  return share;
+}
+
+/**
+ * Real product custody helper #1: Splits a Frozen Session's `freezeSecretHex` (from `FreezeReceipt`)
+ * into `k`-of-`n` (default 3-of-5) Shamir shares so a user can distribute session recovery across
+ * independent devices or team members and shred the single local secret.
+ */
+export function splitFreezeSecretIntoShares(
+  receipt: Pick<FreezeReceipt, "blobId" | "freezeSecretHex" | "sessionIdHex" | "createdAt">,
+  options?: { k?: number; n?: number }
+): SplitFreezeReceiptSharesResult {
+  const k = options?.k ?? 3;
+  const n = options?.n ?? 5;
+  const secretHex = ensureFieldCompatibleSecretHex(receipt.freezeSecretHex);
+  const rawShares = splitSecret(secretHex, k, n);
+
+  const shares: DistributedCustodyShare[] = rawShares.map((s) => ({
+    ...s,
+    format: "drouter-custody-share-v1",
+    purpose: "freeze-secret",
+    k,
+    n,
+    handleId: receipt.blobId,
+    portableToken: encodePortableShareToken({
+      purpose: "freeze-secret",
+      handleId: receipt.blobId,
+      k,
+      n,
+      share: s,
+    }),
+  }));
+
+  return {
+    blobId: receipt.blobId,
+    sessionIdHex: receipt.sessionIdHex,
+    createdAt: receipt.createdAt,
+    k,
+    n,
+    shares,
+  };
+}
+
+/**
+ * Reconstructs a `freezeSecretHex` from at least `k` (default 3) distributed Shamir shares or portable tokens.
+ */
+export function recoverFreezeSecretFromShares(
+  sharesOrTokens: Array<ShamirShare | DistributedCustodyShare | string>,
+  k = 3
+): { blobId?: string; freezeSecretHex: string } {
+  const parsedShares: Array<ShamirShare & { handleId?: string; k?: number }> = sharesOrTokens.map(
+    (item) => {
+      if (typeof item === "string") {
+        return parsePortableShareToken(item);
+      }
+      return item;
+    }
+  );
+  const effectiveK = parsedShares[0]?.k ?? k;
+  const handleIds = new Set(
+    parsedShares.map((s) => s.handleId).filter((id): id is string => typeof id === "string" && id.length > 0)
+  );
+  if (handleIds.size > 1) {
+    throw new Error("Cannot combine Shamir shares belonging to different frozen blobIds");
+  }
+  const freezeSecretHex = combineShares(parsedShares, effectiveK);
+  const blobId = handleIds.size === 1 ? [...handleIds][0] : undefined;
+  return { blobId, freezeSecretHex };
+}
+
+/**
+ * Real product custody helper #2: Splits a Client Vault's 256-bit `vaultKeyHex` into `k`-of-`n`
+ * (default 3-of-5) Shamir shares so an exported `.drouter-vault.json` bundle can be recovered
+ * by a threshold quorum without storing the passphrase in a single place.
+ */
+export function splitVaultKeyIntoShares(
+  vault: { vaultId: string; vaultKeyHex: string },
+  options?: { k?: number; n?: number }
+): SplitVaultKeySharesResult {
+  const k = options?.k ?? 3;
+  const n = options?.n ?? 5;
+  const secretHex = ensureFieldCompatibleSecretHex(vault.vaultKeyHex);
+  const rawShares = splitSecret(secretHex, k, n);
+
+  const shares: DistributedCustodyShare[] = rawShares.map((s) => ({
+    ...s,
+    format: "drouter-custody-share-v1",
+    purpose: "vault-export-key",
+    k,
+    n,
+    handleId: vault.vaultId,
+    portableToken: encodePortableShareToken({
+      purpose: "vault-export-key",
+      handleId: vault.vaultId,
+      k,
+      n,
+      share: s,
+    }),
+  }));
+
+  return {
+    vaultId: vault.vaultId,
+    k,
+    n,
+    shares,
+  };
+}
+
+/**
+ * Reconstructs a 256-bit `vaultKeyHex` from at least `k` (default 3) Shamir shares or portable tokens.
+ */
+export function recoverVaultKeyFromShares(
+  sharesOrTokens: Array<ShamirShare | DistributedCustodyShare | string>,
+  k = 3
+): { vaultId?: string; vaultKeyHex: string } {
+  const parsedShares: Array<ShamirShare & { handleId?: string; k?: number }> = sharesOrTokens.map(
+    (item) => {
+      if (typeof item === "string") {
+        return parsePortableShareToken(item);
+      }
+      return item;
+    }
+  );
+  const effectiveK = parsedShares[0]?.k ?? k;
+  const handleIds = new Set(
+    parsedShares.map((s) => s.handleId).filter((id): id is string => typeof id === "string" && id.length > 0)
+  );
+  if (handleIds.size > 1) {
+    throw new Error("Cannot combine Shamir shares belonging to different vaultIds");
+  }
+  const vaultKeyHex = combineShares(parsedShares, effectiveK);
+  const vaultId = handleIds.size === 1 ? [...handleIds][0] : undefined;
+  return { vaultId, vaultKeyHex };
+}
+
 function deriveCheckerKeypair(checkerId: string): {
   secretKey: Uint8Array;
   publicKey: Uint8Array;
   publicKeyHex: string;
 } {
-  const seed = sha256(utf8ToBytes(`drouter:threshold-checker-ed25519:v1:${checkerId}`));
+  const seed = hkdf(
+    sha256,
+    getServerThresholdSeedBytes(),
+    utf8ToBytes("drouter/threshold-checker-salt/v1"),
+    utf8ToBytes(`drouter/threshold-checker-ed25519/v1/${checkerId}`),
+    32
+  );
   const { secretKey, publicKey } = ed25519.keygen(seed);
   return {
     secretKey,
@@ -321,8 +590,10 @@ function buildCheckerStatement(params: {
 }
 
 /**
- * Runs `n` independent regional checkers to verify TEE measurement, on-chain registry
- * status, and non-flagged status before releasing Ed25519-signed Shamir shares.
+ * Simulated regional checker quorum: evaluates TEE measurement, on-chain registry status,
+ * and non-flagged status before releasing Ed25519-signed Shamir shares.
+ * Explicitly labelled `simulatedQuorum: true` because all regional checker keys are derived
+ * on this server from `SIM_HARDWARE_SEED`.
  */
 export function authorizeThresholdKeyRelease(
   params: AuthorizeThresholdKeyReleaseParams
@@ -349,23 +620,30 @@ export function authorizeThresholdKeyRelease(
     };
   });
 
-  // Derive target 32-byte key in GF(P)
-  const rawKeyDigest = bytesToHex(
-    sha256(
-      utf8ToBytes(
-        `drouter:threshold-master-key:v1:${params.sessionId}:${params.chipId}`
-      )
-    )
-  );
-  const expectedKeyHex = formatFieldElementHex(BigInt("0x" + rawKeyDigest));
+  const serverSeed = getServerThresholdSeedBytes();
 
-  const polySeedHex = bytesToHex(
-    sha256(
-      utf8ToBytes(
-        `drouter:threshold-poly-seed:v1:${params.sessionId}:${params.chipId}`
-      )
-    )
+  // Derive target 32-byte key in GF(P) using HKDF over server secret + session parameters
+  const rawKeyBytes = hkdf(
+    sha256,
+    serverSeed,
+    utf8ToBytes("drouter/threshold-master-key-salt/v1"),
+    utf8ToBytes(`drouter:threshold-master-key:v1:${params.sessionId}:${params.chipId}`),
+    32
   );
+  let keyScalar = BigInt("0x" + bytesToHex(rawKeyBytes));
+  if (keyScalar >= SHAMIR_PRIME || keyScalar === BigInt(0)) {
+    keyScalar = (keyScalar % (SHAMIR_PRIME - BigInt(1))) + BigInt(1);
+  }
+  const expectedKeyHex = formatFieldElementHex(keyScalar);
+
+  const polySeedBytes = hkdf(
+    sha256,
+    serverSeed,
+    utf8ToBytes("drouter/threshold-poly-seed-salt/v1"),
+    utf8ToBytes(`drouter:threshold-poly-seed:v1:${params.sessionId}:${params.chipId}`),
+    32
+  );
+  const polySeedHex = bytesToHex(polySeedBytes);
 
   const allShares = splitSecret(expectedKeyHex, k, n, polySeedHex);
   const checksPass =
@@ -431,6 +709,8 @@ export function authorizeThresholdKeyRelease(
         failedChecks.length > 0
           ? `Threshold key release refused by regional checkers (${failedChecks.join(", ")}); released ${releasedShares.length}/${k} required shares.`
           : `Insufficient checker approvals (${releasedShares.length}/${k}).`,
+      simulatedQuorum: true,
+      quorumDisclosure: THRESHOLD_CHECKER_DISCLOSURE,
     };
   }
 
@@ -442,6 +722,8 @@ export function authorizeThresholdKeyRelease(
       n,
       approvals,
       reason: "Reconstructed key did not match expected session key commitment.",
+      simulatedQuorum: true,
+      quorumDisclosure: THRESHOLD_CHECKER_DISCLOSURE,
     };
   }
 
@@ -451,6 +733,8 @@ export function authorizeThresholdKeyRelease(
     n,
     approvals,
     reconstructedKeyHex,
-    reason: `Threshold quorum satisfied (${releasedShares.length}/${n} regional checkers >= ${k}); 32-byte key reconstructed via Lagrange interpolation over GF(P).`,
+    reason: `Simulated regional quorum satisfied (${releasedShares.length}/${n} regional checkers >= ${k}); 32-byte key reconstructed via Lagrange interpolation over GF(P).`,
+    simulatedQuorum: true,
+    quorumDisclosure: THRESHOLD_CHECKER_DISCLOSURE,
   };
 }

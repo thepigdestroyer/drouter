@@ -7,6 +7,7 @@ import type { SimRoots } from "./types";
 /** The pinned simulated roots and registered node list the browser client trusts. */
 export function simRoots(): SimRoots {
   return {
+    simulated: true,
     amdRoot: toHex(amdRoot().publicKey),
     nvidiaRoot: toHex(nvidiaRoot().publicKey),
     approvedMeasurement: toHex(APPROVED_MEASUREMENT),
@@ -16,6 +17,7 @@ export function simRoots(): SimRoots {
       const manifest = buildManifest(spec.id);
       return {
         simId: spec.id,
+        simulated: true,
         region: spec.region,
         chipId: manifest.chipId,
         manifestHash: toHex(manifestHash(manifest)),

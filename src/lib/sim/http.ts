@@ -24,19 +24,24 @@ export async function respond<T>(fn: () => T | Promise<T>, request?: Request): P
     if (limited) return limited;
   }
   try {
-    return Response.json(await fn(), { headers: NO_STORE });
+    const payload = await fn();
+    const withSimFlag =
+      payload && typeof payload === "object" && !Array.isArray(payload)
+        ? { simulated: true as const, ...payload }
+        : payload;
+    return Response.json(withSimFlag, { headers: NO_STORE });
   } catch (err) {
     if (err instanceof SimError) {
-      return Response.json({ error: err.message }, { status: err.status, headers: NO_STORE });
+      return Response.json({ simulated: true, error: err.message }, { status: err.status, headers: NO_STORE });
     }
     if (err instanceof BodyTooLargeError) {
-      return Response.json({ error: err.message }, { status: 413, headers: NO_STORE });
+      return Response.json({ simulated: true, error: err.message }, { status: 413, headers: NO_STORE });
     }
     const message = err instanceof Error ? err.message : "";
     if (message.includes("SIM_HARDWARE_SEED")) {
-      return Response.json({ error: "simulated hardware is not configured" }, { status: 503, headers: NO_STORE });
+      return Response.json({ simulated: true, error: "simulated hardware is not configured" }, { status: 503, headers: NO_STORE });
     }
-    return Response.json({ error: "internal error" }, { status: 500, headers: NO_STORE });
+    return Response.json({ simulated: true, error: "internal error" }, { status: 500, headers: NO_STORE });
   }
 }
 

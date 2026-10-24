@@ -1,7 +1,8 @@
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
-import type { CheckResult, NodeKind, PopReceipt } from "@/lib/types";
+import { getCurrentVaultSession } from "@/lib/auth/vault";
+import type { CheckResult, NodeKind, NodeRecord, PopReceipt } from "@/lib/types";
 
 export const FORENSIC_PROOF_SCHEMA = "drouter.forensic-proof.v1" as const;
 
@@ -34,7 +35,31 @@ export interface CreateForensicProofBundleInput {
   evidence: Record<string, string>;
   popReceipt?: PopReceipt | null;
   arcAnchorTx?: string | null;
-  /** Optional 32-byte Ed25519 secret key (Uint8Array or hex). If omitted, an ephemeral keypair is generated. */
+  /** Optional 32-byte Ed25519 secret key (Uint8Array or hex). If omitted, uses the unlocked Vault Ed25519 key or generates an ephemeral keypair. */
+  clientSecretKey?: Uint8Array | string;
+}
+
+/**
+ * Input shape accepted by `buildProofBundle(...)` and `downloadForensicProofBundle(...)`
+ * directly from the live Console (`src/components/console.tsx`).
+ */
+export interface BuildSessionProofBundleInput {
+  session?: {
+    node: NodeRecord;
+    checks: CheckResult[];
+    evidence: Record<string, string>;
+    evidenceHash?: string;
+    deepBundle?: unknown;
+  } | null;
+  node?: NodeRecord | null;
+  model?: string;
+  checks?: CheckResult[];
+  evidence?: Record<string, string>;
+  receipt?: PopReceipt | null;
+  verifyAnchorUrl?: string | null;
+  receiptAnchorUrl?: string | null;
+  arcAnchorTx?: string | null;
+  createdAt?: number;
   clientSecretKey?: Uint8Array | string;
 }
 
@@ -43,6 +68,8 @@ export interface VerifyForensicProofOptions {
   expectedClientPublicKeyHex?: string;
   /** Pinned/expected 32-byte Ed25519 enclave signer public key for the embedded PopReceipt (hex). */
   expectedPopSignerPublicKeyHex?: string;
+  /** Map of `nodeId -> ed25519PublicKeyHex` for pinned enclave PopReceipt signers (e.g. from `/api/sim/roots`). */
+  pinnedNodePublicKeys?: Record<string, string>;
   /** When true, `valid` is false unless `expectedClientPublicKeyHex` is provided and matches. */
   requirePinnedOrigin?: boolean;
 }
@@ -55,7 +82,7 @@ export interface ForensicProofVerificationResult {
   allChecksPassed: boolean;
   /** True only when `expectedClientPublicKeyHex` was supplied and matched `bundle.clientPublicKeyHex`. */
   originVerified: boolean;
-  /** True only when `expectedPopSignerPublicKeyHex` was supplied and matched `bundle.popReceipt.signerPublicKey` (null if no popReceipt). */
+  /** True only when `expectedPopSignerPublicKeyHex` or `pinnedNodePublicKeys[nodeId]` matched `bundle.popReceipt.signerPublicKey` (null if no popReceipt). */
   popOriginVerified: boolean | null;
   reasons: string[];
 }
@@ -253,6 +280,24 @@ export function buildCliVerifyOneLiner(filename = "session.drouter-proof.json"):
   return `node -e '${script}' ${filename}`;
 }
 
+function resolveClientSigningSecretKey(explicitKey?: Uint8Array | string): Uint8Array {
+  if (explicitKey !== undefined) {
+    return typeof explicitKey === "string"
+      ? hexToBytes(normalizeHex(explicitKey))
+      : explicitKey;
+  }
+  const activeVault = getCurrentVaultSession();
+  if (
+    activeVault &&
+    typeof activeVault.ed25519PrivateKeyHex === "string" &&
+    /^[0-9a-fA-F]{64}$/.test(activeVault.ed25519PrivateKeyHex) &&
+    activeVault.ed25519PrivateKeyHex !== "0".repeat(64)
+  ) {
+    return hexToBytes(activeVault.ed25519PrivateKeyHex);
+  }
+  return ed25519.utils.randomSecretKey();
+}
+
 /**
  * Packages all cryptographic evidence of a session into a downloadable, self-contained
  * `.drouter-proof.json` bundle (`ForensicProofBundle`) signed with an Ed25519 client key.
@@ -281,13 +326,7 @@ export function createForensicProofBundle(
     : null;
   const arcAnchorTx: string | null = input.arcAnchorTx ?? null;
 
-  const secretKeyBytes =
-    input.clientSecretKey !== undefined
-      ? typeof input.clientSecretKey === "string"
-        ? hexToBytes(normalizeHex(input.clientSecretKey))
-        : input.clientSecretKey
-      : ed25519.utils.randomSecretKey();
-
+  const secretKeyBytes = resolveClientSigningSecretKey(input.clientSecretKey);
   const clientPublicKeyBytes = ed25519.getPublicKey(secretKeyBytes);
   const clientPublicKeyHex = bytesToHex(clientPublicKeyBytes);
 
@@ -323,6 +362,157 @@ export function createForensicProofBundle(
   };
 }
 
+function extractTxHashFromUrlOrHex(urlOrTx?: string | null): string | null {
+  if (!urlOrTx || typeof urlOrTx !== "string") return null;
+  const trimmed = urlOrTx.trim();
+  if (!trimmed) return null;
+  const txMatch = /0x[0-9a-fA-F]{64}/.exec(trimmed);
+  if (txMatch) return txMatch[0];
+  return trimmed;
+}
+
+/**
+ * Builds a `ForensicProofBundle` directly from real Console session state (`ActiveSession`, `NodeRecord`,
+ * `CheckResult[]`, `evidence`, `PopReceipt`, and optional Arc anchor URL/tx).
+ * If the user's Passphrase Vault is unlocked in browser memory, automatically signs the proof bundle
+ * with the user's deterministic Ed25519 identity key (`session.ed25519PrivateKeyHex`) and records
+ * `Vault ID` in the evidence map so `verifyForensicProofBundleOffline` can verify pinned origin.
+ */
+export function buildProofBundle(input: BuildSessionProofBundleInput): ForensicProofBundle {
+  const activeNode = input.session?.node ?? input.node;
+  if (!activeNode) {
+    throw new Error("Cannot build forensic proof bundle: no attested node or active session");
+  }
+
+  const rawChecks =
+    input.checks && input.checks.length > 0
+      ? input.checks
+      : (input.session?.checks ?? []);
+  if (rawChecks.length === 0) {
+    throw new Error("Cannot build forensic proof bundle: verification checks C1-C7 have not completed");
+  }
+
+  const rawEvidence: Record<string, string> = {
+    ...(input.session?.evidence ?? {}),
+    ...(input.evidence ?? {}),
+  };
+
+  // Enrich evidence with deepBundle registers if available and not already populated
+  const deep = input.session?.deepBundle as
+    | {
+        routerHost?: string;
+        routerReleaseDigest?: string;
+        routerSnpReport?: {
+          chipIdHex?: string;
+          measurementHex?: string;
+          reportDataHex?: string;
+          policyHex?: string;
+        };
+      }
+    | undefined;
+
+  if (deep?.routerHost && !rawEvidence["Enclave host"]) {
+    rawEvidence["Enclave host"] = deep.routerHost;
+  }
+  if (deep?.routerSnpReport?.chipIdHex && !rawEvidence["Chip ID"]) {
+    rawEvidence["Chip ID"] = deep.routerSnpReport.chipIdHex;
+  }
+  if (deep?.routerSnpReport?.measurementHex && !rawEvidence["Enclave fingerprint"] && !rawEvidence["Measurement"]) {
+    rawEvidence["Enclave fingerprint"] = deep.routerSnpReport.measurementHex;
+  }
+  if (deep?.routerSnpReport?.reportDataHex && !rawEvidence["Report data"]) {
+    rawEvidence["Report data"] = deep.routerSnpReport.reportDataHex;
+  }
+  if (input.session?.evidenceHash && !rawEvidence["Evidence hash"]) {
+    rawEvidence["Evidence hash"] = input.session.evidenceHash;
+  }
+
+  const vaultSession = getCurrentVaultSession();
+  if (vaultSession?.vaultId && !rawEvidence["Client vault ID"]) {
+    rawEvidence["Client vault ID"] = vaultSession.vaultId;
+  }
+
+  if (Object.keys(rawEvidence).length === 0) {
+    rawEvidence["Node endpoint"] = activeNode.endpoint;
+    rawEvidence["Measurement"] = activeNode.measurement;
+  }
+
+  const modelId =
+    input.model ??
+    (activeNode.kind === "tinfoil" ? "kimi-k3" : "sim-echo-1");
+
+  // Ensure PopReceipt.nodeId aligns with bundle.nodeId when sim close receipt uses "sim-1" while registry node.id is "0x..."
+  let normalizedPopReceipt: PopReceipt | null = null;
+  if (input.receipt) {
+    normalizedPopReceipt = {
+      ...input.receipt,
+    };
+    if (normalizedPopReceipt.nodeId !== activeNode.id) {
+      rawEvidence["PopReceipt nodeId"] = normalizedPopReceipt.nodeId;
+    }
+  }
+
+  const arcAnchorTx =
+    extractTxHashFromUrlOrHex(input.arcAnchorTx) ??
+    extractTxHashFromUrlOrHex(input.receiptAnchorUrl) ??
+    extractTxHashFromUrlOrHex(input.verifyAnchorUrl);
+
+  return createForensicProofBundle({
+    createdAt: input.createdAt ?? Date.now(),
+    nodeId: normalizedPopReceipt ? normalizedPopReceipt.nodeId : activeNode.id,
+    nodeName: activeNode.name,
+    nodeKind: activeNode.kind,
+    modelId,
+    checks: rawChecks,
+    evidence: rawEvidence,
+    popReceipt: normalizedPopReceipt,
+    arcAnchorTx,
+    clientSecretKey: input.clientSecretKey,
+  });
+}
+
+/**
+ * Convenience helper for the Console UI button: builds a `ForensicProofBundle` from the current
+ * session state, triggers a browser file download (`<nodeId>-<timestamp>.drouter-proof.json`),
+ * and returns the bundle alongside its offline verification result.
+ */
+export function downloadForensicProofBundle(
+  input: BuildSessionProofBundleInput
+): {
+  bundle: ForensicProofBundle;
+  verification: ForensicProofVerificationResult;
+  filename: string;
+} {
+  const bundle = buildProofBundle(input);
+  const vaultSession = getCurrentVaultSession();
+  const verification = verifyForensicProofBundleOffline(bundle, {
+    expectedClientPublicKeyHex: vaultSession?.ed25519PublicKeyHex,
+    expectedPopSignerPublicKeyHex: bundle.popReceipt?.signerPublicKey,
+  });
+
+  const safeNodeSlug = bundle.nodeId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 16) || "session";
+  const filename = `drouter-proof-${safeNodeSlug}-${bundle.createdAt}.drouter-proof.json`;
+
+  if (typeof window !== "undefined" && typeof document !== "undefined") {
+    try {
+      const jsonText = JSON.stringify(bundle, null, 2);
+      const blob = new Blob([jsonText], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      URL.revokeObjectURL(url);
+    } catch {
+      // Non-fatal in headless/SSR environments
+    }
+  }
+
+  return { bundle, verification, filename };
+}
+
 /**
  * Standalone offline verifier for `.drouter-proof.json` bundles.
  * Recomputes the canonical SHA-256 digest, verifies the client's Ed25519 signature,
@@ -330,7 +520,7 @@ export function createForensicProofBundle(
  *
  * Security note: Because a bundle carries its own `clientPublicKeyHex` and `popReceipt.signerPublicKey`,
  * signature verification without pinned keys proves only self-consistency, not origin (`originVerified: false`).
- * Pass `options.expectedClientPublicKeyHex` (and `options.expectedPopSignerPublicKeyHex`) to verify origin.
+ * Pass `options.expectedClientPublicKeyHex` (and `options.expectedPopSignerPublicKeyHex` or `options.pinnedNodePublicKeys`) to verify origin.
  */
 export function verifyForensicProofBundleOffline(
   bundle: ForensicProofBundle,
@@ -427,7 +617,7 @@ export function verifyForensicProofBundleOffline(
     reasons.push("Origin not verified: expectedClientPublicKeyHex is required when requirePinnedOrigin is true");
   }
 
-  // 3. Verify all C1-C7 checks are present and passed
+  // 3. Verify all C1-C7 checks are present and passed (or C5/C6 skipped only when explicitly allowed, but forensic proof requires pass)
   let allChecksPassed = false;
   if (Array.isArray(bundle.checks) && bundle.checks.length >= REQUIRED_CHECK_IDS.length) {
     const checkMap = new Map<string, CheckResult>();
@@ -469,16 +659,15 @@ export function verifyForensicProofBundleOffline(
     }
 
     popOriginVerified = false;
-    if (
-      typeof opts.expectedPopSignerPublicKeyHex === "string" &&
-      opts.expectedPopSignerPublicKeyHex.trim()
-    ) {
+    const pinnedPopKey =
+      opts.expectedPopSignerPublicKeyHex ??
+      opts.pinnedNodePublicKeys?.[bundle.popReceipt.nodeId] ??
+      opts.pinnedNodePublicKeys?.[bundle.nodeId];
+
+    if (typeof pinnedPopKey === "string" && pinnedPopKey.trim()) {
       const popKeyMatches =
         typeof bundle.popReceipt.signerPublicKey === "string" &&
-        constantTimeEqualHex(
-          bundle.popReceipt.signerPublicKey,
-          opts.expectedPopSignerPublicKeyHex
-        );
+        constantTimeEqualHex(bundle.popReceipt.signerPublicKey, pinnedPopKey);
       if (!popKeyMatches) {
         reasons.push("PopReceipt signerPublicKey does not match pinned expectedPopSignerPublicKeyHex");
       } else if (popReceiptSignatureValid) {

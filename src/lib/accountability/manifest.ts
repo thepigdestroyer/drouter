@@ -2,6 +2,7 @@ import { ed25519 } from "@noble/curves/ed25519.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
+import { SYNTHETIC_CHIP_ID_HEX_PREFIX } from "@/lib/sim/hardware";
 import type { HardwareManifest } from "@/lib/types";
 
 export const DEFAULT_SPDM_DEVICES = [
@@ -55,8 +56,10 @@ export function deriveNodeIdentityKey(nodeId: string): {
   };
 }
 
+// Synthetic chip IDs carry the same "sim-chip" prefix as src/lib/sim/hardware.ts so they
+// can never be mistaken for real AMD chip IDs.
 export function deriveNodeChipId(nodeId: string): string {
-  return bytesToHex(deriveBytes(`sim/chip/${nodeId}`, 64));
+  return SYNTHETIC_CHIP_ID_HEX_PREFIX + bytesToHex(deriveBytes(`sim/chip/${nodeId}`, 48));
 }
 
 export function deriveNodeGpuIds(nodeId: string, count = 8): string[] {

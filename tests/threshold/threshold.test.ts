@@ -172,4 +172,72 @@ describe("Shamir k-of-n Threshold Key Release", () => {
     );
     expect(flaggedNode.reason).toContain("notFlagged=false");
   });
+
+  it("splits and recovers real FreezeReceipt secrets and Client Vault export keys via 3-of-5 portable Shamir tokens", async () => {
+    const {
+      parsePortableShareToken,
+      recoverFreezeSecretFromShares,
+      recoverVaultKeyFromShares,
+      splitFreezeSecretIntoShares,
+      splitVaultKeyIntoShares,
+    } = await import("@/lib/threshold/shamir");
+
+    // 1. FreezeReceipt secret splitting & recovery
+    const freezeReceipt = {
+      blobId: "freeze-blob-7741",
+      freezeSecretHex: bytesToHex(sha256(utf8ToBytes("client-freeze-secret-dana-reyes"))),
+      sessionIdHex: "aa".repeat(32),
+      createdAt: 1760000500000,
+    };
+
+    const freezeSplit = splitFreezeSecretIntoShares(freezeReceipt, { k: 3, n: 5 });
+    expect(freezeSplit.k).toBe(3);
+    expect(freezeSplit.n).toBe(5);
+    expect(freezeSplit.shares).toHaveLength(5);
+
+    for (const share of freezeSplit.shares) {
+      expect(share.portableToken).toMatch(/^drouter-share-v1:freeze-secret:freeze-blob-7741:3-of-5:/);
+      const parsed = parsePortableShareToken(share.portableToken);
+      expect(parsed.yHex).toBe(share.yHex);
+      expect(parsed.handleId).toBe("freeze-blob-7741");
+    }
+
+    // Reconstruct from portable strings [0, 2, 4]
+    const recoveredFreeze = recoverFreezeSecretFromShares([
+      freezeSplit.shares[0].portableToken,
+      freezeSplit.shares[2].portableToken,
+      freezeSplit.shares[4].portableToken,
+    ]);
+    expect(recoveredFreeze.blobId).toBe("freeze-blob-7741");
+    expect(recoveredFreeze.freezeSecretHex).toBe(freezeReceipt.freezeSecretHex);
+
+    // 2. Vault export key splitting & recovery
+    const vaultKeyHex = bytesToHex(sha256(utf8ToBytes("client-vault-256-bit-aes-key")));
+    const vaultSplit = splitVaultKeyIntoShares({
+      vaultId: "vault-0192837465",
+      vaultKeyHex,
+    });
+    expect(vaultSplit.shares).toHaveLength(5);
+
+    const recoveredVault = recoverVaultKeyFromShares([
+      vaultSplit.shares[1].portableToken,
+      vaultSplit.shares[3].portableToken,
+      vaultSplit.shares[4].portableToken,
+    ]);
+    expect(recoveredVault.vaultId).toBe("vault-0192837465");
+    expect(recoveredVault.vaultKeyHex).toBe(vaultKeyHex);
+
+    // Mixing shares from two different vaults must throw
+    const otherVaultSplit = splitVaultKeyIntoShares({
+      vaultId: "vault-ffffffff00",
+      vaultKeyHex,
+    });
+    expect(() =>
+      recoverVaultKeyFromShares([
+        vaultSplit.shares[0].portableToken,
+        vaultSplit.shares[1].portableToken,
+        otherVaultSplit.shares[2].portableToken,
+      ])
+    ).toThrow(/different vaultIds/i);
+  });
 });

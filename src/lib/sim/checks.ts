@@ -21,6 +21,7 @@ export const CHECK_LABELS = {
 } as const;
 
 export interface SimEvidenceSummary {
+  simulated: true;
   measurement: string;
   chipId: string;
   tcb: Tcb;
@@ -54,11 +55,11 @@ function parseEvidenceReport(evidence: EvidenceBundle) {
 function checkC1({ roots, evidence }: CheckInput): { detail: string; policy: SimEvidenceSummary["policy"]; tcb: Tcb } {
   const { statement, signature } = evidence.vcekCertificate;
   if (!p384Verify(fromHex(signature), canonicalBytes(statement), fromHex(roots.amdRoot))) {
-    throw new Error("VCEK statement is not signed by the pinned AMD root");
+    throw new Error("VCEK statement is not signed by the pinned simulated AMD root");
   }
   const reportBytes = fromHex(evidence.report, REPORT_SIZE);
   if (!verifyReportSignature(reportBytes, fromHex(statement.vcekPublicKey))) {
-    throw new Error("attestation report signature does not verify under the VCEK");
+    throw new Error("attestation report signature does not verify under the simulated VCEK");
   }
   const report = parseReport(reportBytes);
   if (report.version !== 3) throw new Error(`unexpected report version ${report.version}`);
@@ -75,7 +76,7 @@ function checkC1({ roots, evidence }: CheckInput): { detail: string; policy: Sim
   if (policy.migrationAgent) throw new Error("guest policy allows a migration agent");
   if (policy.smt) throw new Error("guest policy allows SMT");
   return {
-    detail: `Report signed by VCEK, VCEK signed by simulated AMD root. TCB ${tcbText(tcb)}. Debug, migration and SMT off.`,
+    detail: `Simulated report signed by simulated VCEK under simulated AMD root. TCB ${tcbText(tcb)}. Debug, migration and SMT off.`,
     policy: {
       value: `0x${report.policy.toString(16)}`,
       smt: policy.smt,
@@ -92,7 +93,7 @@ function checkC2({ roots, evidence }: CheckInput): string {
   if (!hexEq(toHex(report.measurement), roots.approvedMeasurement)) {
     throw new Error("launch measurement is not the approved image");
   }
-  return `Measurement ${toHex(report.measurement).slice(0, 16)}… matches the approved image.`;
+  return `Simulated measurement ${toHex(report.measurement).slice(0, 16)}… matches the approved practice image.`;
 }
 
 function checkC3({ clientNonce, evidence }: CheckInput): string {
@@ -108,7 +109,7 @@ function checkC3({ clientNonce, evidence }: CheckInput): string {
   if (!bytesEqual(expected, report.reportData)) {
     throw new Error("REPORT_DATA does not match this session's nonce and the presented keys");
   }
-  return "REPORT_DATA recomputed from my nonce, the node identity, custody keys, manifest and model root.";
+  return "REPORT_DATA recomputed from my nonce, the simulated node identity, custody keys, manifest and model root.";
 }
 
 function checkC4({ roots, simId, evidence }: CheckInput): string {
@@ -127,7 +128,7 @@ function checkC4({ roots, simId, evidence }: CheckInput): string {
   if (!hexEq(evidence.identityPublicKey, node.identityPublicKey)) {
     throw new Error("node identity key is not the registered one");
   }
-  return `Chip ${node.chipId.slice(0, 16)}… and manifest ${node.manifestHash.slice(0, 16)}… match the registered node.`;
+  return `Simulated synthetic chip ${node.chipId.slice(0, 16)}… and manifest ${node.manifestHash.slice(0, 16)}… match the registered practice node.`;
 }
 
 function checkC5({ roots, clientNonce, evidence }: CheckInput): string {
@@ -135,7 +136,7 @@ function checkC5({ roots, clientNonce, evidence }: CheckInput): string {
   evidence.gpus.forEach((gpu, i) => {
     const { statement, signature } = gpu.certificate;
     if (!ed25519.verify(fromHex(signature, 64), canonicalBytes(statement), fromHex(roots.nvidiaRoot, 32))) {
-      throw new Error(`GPU ${i} certificate is not signed by the pinned NVIDIA root`);
+      throw new Error(`GPU ${i} certificate is not signed by the pinned simulated NVIDIA root`);
     }
     if (statement.gpuIndex !== i || gpu.report.gpuIndex !== i) throw new Error(`GPU ${i} index mismatch`);
     if (!ed25519.verify(fromHex(gpu.signature, 64), canonicalBytes(gpu.report), fromHex(statement.devicePublicKey, 32))) {
@@ -148,13 +149,13 @@ function checkC5({ roots, clientNonce, evidence }: CheckInput): string {
       throw new Error(`GPU ${i} id does not match the manifest`);
     }
   });
-  return `All ${GPUS_PER_NODE} GPUs: certificate chain valid, CC mode on, nonce fresh, ids match the manifest.`;
+  return `All ${GPUS_PER_NODE} simulated GPUs: certificate chain valid, CC mode on, nonce fresh, ids match the manifest.`;
 }
 
 function checkC7({ roots, modelId, evidence }: CheckInput): string {
   if (evidence.modelId !== modelId || roots.model.id !== modelId) throw new Error("model id differs from the allowlist");
   if (!hexEq(evidence.modelRoot, roots.model.modelRoot)) throw new Error("model root is not the allowlisted weights");
-  return `Model ${modelId} root ${evidence.modelRoot.slice(0, 16)}… matches the allowlist.`;
+  return `Simulated model ${modelId} root ${evidence.modelRoot.slice(0, 16)}… matches the allowlist.`;
 }
 
 export const REGISTRY_SKIP_DETAIL = "Registry ticket checked against Arc by the app";
@@ -196,6 +197,7 @@ export function runChecks(
   return {
     checks,
     summary: {
+      simulated: true,
       measurement: toHex(report.measurement),
       chipId: toHex(report.chipId),
       tcb: c1.tcb,

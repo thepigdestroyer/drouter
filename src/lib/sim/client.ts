@@ -29,10 +29,11 @@ export type { SimEvidenceSummary } from "./checks";
 
 export interface SimSession {
   simId: string;
+  simulated: true;
   checks: CheckResult[];
   evidence: SimEvidenceSummary;
   send(text: string): AsyncIterable<string>;
-  close(): Promise<PopReceipt>;
+  close(): Promise<PopReceipt & { simulated: true }>;
 }
 
 export interface OpenSimSessionOptions {
@@ -139,7 +140,7 @@ export async function openSimSession(
     }
   }
 
-  async function close(): Promise<PopReceipt> {
+  async function close(): Promise<PopReceipt & { simulated: true }> {
     if (closed) throw new Error("session is already closed");
     const wire = await call<PopReceiptWire>(`${encodeURIComponent(simId)}/close`, { ticket });
     closed = true;
@@ -150,11 +151,12 @@ export async function openSimSession(
       wire.measurement.toLowerCase() === roots.approvedMeasurement.toLowerCase();
     keys.kUp.fill(0);
     keys.kDown.fill(0);
-    return { ...wire, verified };
+    return { ...wire, simulated: true, verified };
   }
 
   return {
     simId,
+    simulated: true,
     checks,
     evidence: summary,
     send: (text: string) => send(text),

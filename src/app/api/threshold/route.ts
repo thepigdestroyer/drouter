@@ -5,6 +5,7 @@ import {
   readBoundedBytes,
 } from "@/lib/ratelimit";
 import {
+  THRESHOLD_CHECKER_DISCLOSURE,
   authorizeThresholdKeyRelease,
   combineShares,
   splitSecret,
@@ -19,7 +20,11 @@ const thresholdLimiter = createTokenBucketLimiter({
 });
 
 export async function GET(request?: Request) {
-  await connection();
+  try {
+    await connection();
+  } catch {
+    // Allow direct invocation in unit tests outside Next request storage
+  }
   if (request) {
     const limited = thresholdLimiter.check(request);
     if (limited) return limited;
@@ -40,8 +45,9 @@ export async function GET(request?: Request) {
     n,
   });
 
+  // Use CSPRNG (no hardcoded seed) to split the reconstructed key into a fresh 3-of-5 set
   const sampleShares = release.reconstructedKeyHex
-    ? splitSecret(release.reconstructedKeyHex, k, n, "0102030405060708")
+    ? splitSecret(release.reconstructedKeyHex, k, n)
     : [];
 
   const subsetVerifications =
@@ -79,6 +85,8 @@ export async function GET(request?: Request) {
     sessionId,
     chipId,
     subsetVerifications,
+    simulatedQuorum: true,
+    quorumDisclosure: THRESHOLD_CHECKER_DISCLOSURE,
   });
 }
 

@@ -180,6 +180,26 @@ export function createTokenBucketLimiter(config: TokenBucketConfig) {
         },
       );
     },
+    /** Credits tokens back into the caller's bucket (up to capacity * maxCapMultiplier). */
+    credit(reqOrIp: Request | string, bonusTokens: number, maxCapMultiplier = 4): void {
+      if (!Number.isFinite(bonusTokens) || bonusTokens <= 0) return;
+      const nowMs = nowFn();
+      const keyHash = hashClientIp(reqOrIp, name, nowMs);
+      const buckets = getBucketMap(name);
+      const maxCap = capacity * Math.max(1, maxCapMultiplier);
+      let state = buckets.get(keyHash);
+      if (!state) {
+        state = { tokens: Math.min(maxCap, capacity + bonusTokens), lastRefillMs: nowMs };
+        buckets.set(keyHash, state);
+      } else {
+        const elapsedSec = Math.max(0, (nowMs - state.lastRefillMs) / 1000);
+        if (elapsedSec > 0) {
+          state.tokens = Math.min(capacity, state.tokens + elapsedSec * refillPerSec);
+          state.lastRefillMs = nowMs;
+        }
+        state.tokens = Math.min(maxCap, state.tokens + bonusTokens);
+      }
+    },
   };
 }
 
@@ -215,6 +235,21 @@ export function createGlobalBucketLimiter(opts: {
       const deficit = cost - state.tokens;
       const retryAfterSec = Math.max(1, Math.ceil(deficit / Math.max(opts.refillPerSec, 0.0001)));
       return { allowed: false, remaining: 0, retryAfterSec };
+    },
+    credit(bonusTokens: number, maxCapMultiplier = 4): void {
+      if (!Number.isFinite(bonusTokens) || bonusTokens <= 0) return;
+      const nowMs = nowFn();
+      const maxCap = opts.capacity * Math.max(1, maxCapMultiplier);
+      if (!state) {
+        state = { tokens: Math.min(maxCap, opts.capacity + bonusTokens), lastRefillMs: nowMs };
+      } else {
+        const elapsedSec = Math.max(0, (nowMs - state.lastRefillMs) / 1000);
+        if (elapsedSec > 0) {
+          state.tokens = Math.min(opts.capacity, state.tokens + elapsedSec * opts.refillPerSec);
+          state.lastRefillMs = nowMs;
+        }
+        state.tokens = Math.min(maxCap, state.tokens + bonusTokens);
+      }
     },
     reset() {
       state = null;

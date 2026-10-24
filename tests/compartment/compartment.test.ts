@@ -112,4 +112,32 @@ describe("Compartmentalized Sub-Agent Task Splitter", () => {
       expect(new Set(plan.fragments.map((f) => f.assignedNodeId)).size).toBe(3);
     }
   });
+
+  it("scrubs PII and secrets via preparePrompt in POST /api/compartment before fragmenting", async () => {
+    const { POST } = await import("@/app/api/compartment/route");
+    const { NextRequest } = await import("next/server");
+    const synthSecret = ["sk", "live", "compartmentSecret987654321"].join("_");
+    const req = new NextRequest("http://localhost:3000/api/compartment", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        prompt: `## 1. Key Rotation\nRotate ${synthSecret} for dana@example.org\n\n## 2. Verification\nCheck 221B Baker Street, SW1A 1AA`,
+        compromisedNodeFraction: 0.02,
+      }),
+    });
+
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.bucketBytes).toBe(4096);
+    expect(body.pipelineReport.redactions.length).toBeGreaterThanOrEqual(3);
+    expect(body.pipelineReport.riskBefore).toBeGreaterThan(body.pipelineReport.riskAfter);
+
+    const combinedFragments = body.plan.fragments
+      .map((f: { subPrompt: string }) => f.subPrompt)
+      .join(" ");
+    expect(combinedFragments).not.toContain(synthSecret);
+    expect(combinedFragments).not.toContain("dana@example.org");
+    expect(combinedFragments).not.toContain("SW1A 1AA");
+  });
 });

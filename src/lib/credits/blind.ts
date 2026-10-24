@@ -191,10 +191,20 @@ function deriveDeterministicPrime(seedHex: string, label: string): bigint {
  * primes, giving a 2048-bit modulus). Without it, a 1024-bit key is derived
  * from the seed, which is only suitable for tests and local development.
  */
+function modulusBitLength(nHex: string): number {
+  const n = hexToBigInt(nHex);
+  return n <= ZERO ? 0 : n.toString(2).length;
+}
+
 function readEnvIssuerPrimes(): { p: bigint; q: bigint } | null {
   const raw =
     typeof process !== "undefined" ? process.env?.CREDITS_ISSUER_RSA_PQ?.trim() : undefined;
-  if (!raw) return null;
+  if (!raw) {
+    if (typeof process !== "undefined" && process.env?.NODE_ENV === "production") {
+      throw new Error("CREDITS_ISSUER_RSA_PQ must be set in production for 2048-bit credit issuance");
+    }
+    return null;
+  }
   const [pHex, qHex] = raw.split(":");
   if (!pHex || !qHex) throw new Error("CREDITS_ISSUER_RSA_PQ must be <p hex>:<q hex>");
   const p = BigInt("0x" + cleanHex(pHex));
@@ -255,21 +265,24 @@ export function deriveIssuerKey(seedHex: string): {
   n: string;
   e: string;
   d: string;
+  keyBits: number;
 } {
   const { n, e, d } = deriveFullIssuerKey(seedHex);
-  return { n, e, d };
+  return { n, e, d, keyBits: modulusBitLength(n) };
 }
 
 export function getPublicKey(seedHex: string): {
   n: string;
   e: string;
   denominations: number[];
+  keyBits: number;
 } {
   const { n, e } = deriveFullIssuerKey(seedHex);
   return {
     n,
     e,
     denominations: [...CREDIT_DENOMINATIONS],
+    keyBits: modulusBitLength(n),
   };
 }
 
@@ -415,6 +428,58 @@ export function verifyTokenSignature(
   } catch {
     return false;
   }
+}
+
+export function parseCreditHeader(raw: string | null | undefined): BlindCreditToken | null {
+  if (!raw || typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.length > 4096) return null;
+
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed) as Partial<BlindCreditToken>;
+      if (
+        parsed &&
+        typeof parsed.token === "string" &&
+        typeof parsed.signature === "string" &&
+        typeof parsed.denomination === "number" &&
+        CREDIT_DENOMINATIONS.includes(parsed.denomination)
+      ) {
+        return {
+          token: cleanHex(parsed.token),
+          signature: cleanHex(parsed.signature),
+          denomination: parsed.denomination,
+        };
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  const parts = trimmed.split(":");
+  if (parts.length === 3) {
+    try {
+      const denomination = Number(parts[0]);
+      if (!CREDIT_DENOMINATIONS.includes(denomination)) return null;
+      return {
+        denomination,
+        token: cleanHex(parts[1]),
+        signature: cleanHex(parts[2]),
+      };
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+export function formatCreditHeader(token: BlindCreditToken): string {
+  return JSON.stringify({
+    token: cleanHex(token.token),
+    signature: cleanHex(token.signature),
+    denomination: token.denomination,
+  });
 }
 
 export function nullifierFor(tokenHex: string): string {

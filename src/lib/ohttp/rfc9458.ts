@@ -639,16 +639,106 @@ export function decapsulateOhttpResponse(
   return textDecoder.decode(plaintextBytes);
 }
 
+let ephemeralFallbackSeed: Uint8Array | null = null;
+
+function resolveServerOhttpSeed(explicitSeed?: Uint8Array | string): Uint8Array {
+  if (explicitSeed instanceof Uint8Array && explicitSeed.byteLength >= 16) {
+    return explicitSeed;
+  }
+  if (typeof explicitSeed === "string" && explicitSeed.trim().length > 0) {
+    const clean = explicitSeed.trim().replace(/^0x/i, "");
+    if (/^[0-9a-fA-F]+$/.test(clean) && clean.length >= 32 && clean.length % 2 === 0) {
+      return hexToBytes(clean);
+    }
+    return utf8ToBytes(explicitSeed.trim());
+  }
+
+  const envSecret =
+    (typeof process !== "undefined" && process.env?.OHTTP_GATEWAY_SECRET) ||
+    (typeof process !== "undefined" && process.env?.SIM_HARDWARE_SEED);
+
+  if (typeof envSecret === "string" && envSecret.trim().length > 0) {
+    const clean = envSecret.trim().replace(/^0x/i, "");
+    if (/^[0-9a-fA-F]+$/.test(clean) && clean.length >= 32 && clean.length % 2 === 0) {
+      return hexToBytes(clean);
+    }
+    return utf8ToBytes(envSecret.trim());
+  }
+
+  if (!ephemeralFallbackSeed) {
+    ephemeralFallbackSeed = new Uint8Array(32);
+    globalThis.crypto.getRandomValues(ephemeralFallbackSeed);
+  }
+  return ephemeralFallbackSeed;
+}
+
+export const OHTTP_ALLOWED_INTERNAL_TARGETS = [
+  "/api/v1/chat/completions",
+  "/v1/chat/completions",
+  "/api/v1/models",
+  "/v1/models",
+  "/api/v1/verify",
+  "/v1/verify",
+] as const;
+
+export const OHTTP_SAME_OPERATOR_DISCLOSURE =
+  "OHTTP RFC 9458 requires non-colluding Relay and Target Gateway operators so the Gateway never sees the client IP and the Relay never sees the plaintext HTTP payload. In this single-deployment app, the built-in relay and `/api/ohttp` Target Gateway are operated by the same party unless requests are routed through an independent third-party OHTTP Relay.";
+
 /**
- * Deterministically derives the default Target Gateway X25519 keypair and RFC 9458 KeyConfig
- * so GET and POST `/api/ohttp` share a consistent gateway key configuration across requests.
+ * Normalizes and validates an inner HTTP target path against the strict internal gateway allowlist.
+ * Prevents SSRF or arbitrary internal route probing by rejecting external URLs, path traversal, and non-allowlisted routes.
  */
-export function getDefaultOhttpGatewayKeypair(keyId = 1): OhttpGatewayKeypair {
+export function resolveAllowlistedOhttpTarget(rawPath: string): {
+  allowed: boolean;
+  canonicalPath: "/api/v1/chat/completions" | "/api/v1/models" | "/api/v1/verify" | null;
+  reason?: string;
+} {
+  if (typeof rawPath !== "string" || !rawPath.trim()) {
+    return { allowed: false, canonicalPath: null, reason: "Missing inner target path" };
+  }
+  const trimmed = rawPath.trim();
+  if (trimmed.includes("://") || trimmed.startsWith("//") || trimmed.includes("..")) {
+    return {
+      allowed: false,
+      canonicalPath: null,
+      reason: `Disallowed OHTTP inner target path: ${trimmed}`,
+    };
+  }
+  const pathOnly = trimmed.split("?")[0];
+  if (pathOnly === "/api/v1/chat/completions" || pathOnly === "/v1/chat/completions") {
+    return { allowed: true, canonicalPath: "/api/v1/chat/completions" };
+  }
+  if (pathOnly === "/api/v1/models" || pathOnly === "/v1/models") {
+    return { allowed: true, canonicalPath: "/api/v1/models" };
+  }
+  if (pathOnly === "/api/v1/verify" || pathOnly === "/v1/verify") {
+    return { allowed: true, canonicalPath: "/api/v1/verify" };
+  }
+  return {
+    allowed: false,
+    canonicalPath: null,
+    reason: `Target path '${pathOnly}' is not in the OHTTP gateway allowlist (${OHTTP_ALLOWED_INTERNAL_TARGETS.join(", ")})`,
+  };
+}
+
+/**
+ * Derives the Target Gateway X25519 keypair and RFC 9458 KeyConfig from a server secret
+ * (`OHTTP_GATEWAY_SECRET` or `SIM_HARDWARE_SEED` via HKDF-SHA-256 with distinct domain separation
+ * `drouter/ohttp-gateway-x25519/v1/key-id:<keyId>`), never a hardcoded string.
+ */
+export function getDefaultOhttpGatewayKeypair(
+  keyId = 1,
+  seedOverride?: Uint8Array | string
+): OhttpGatewayKeypair {
+  if (!Number.isInteger(keyId) || keyId < 0 || keyId > 255) {
+    throw new Error(`Invalid OHTTP keyId: ${keyId} (expected uint8 0..255)`);
+  }
+  const ikm = resolveServerOhttpSeed(seedOverride);
   const privateKey = hkdf(
     sha256,
-    utf8ToBytes("drouter:rfc9458:ohttp-gateway-x25519-seed:v1"),
-    utf8ToBytes("drouter-ohttp-gateway-salt"),
-    utf8ToBytes(`gateway-key-id:${keyId}`),
+    ikm,
+    utf8ToBytes("drouter/ohttp-gateway-salt/v1"),
+    utf8ToBytes(`drouter/ohttp-gateway-x25519/v1/key-id:${keyId}`),
     32
   );
   const publicKey = x25519.getPublicKey(privateKey);

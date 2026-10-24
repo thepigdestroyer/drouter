@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  CHAFF_CORPUS_SOURCES,
   computePaddedBucketBytes,
   createDecoyBundle,
   DECOY_DOMAINS,
+  IS_OPTIONAL_CHAFF_LIBRARY,
 } from "@/lib/chaff/decoys";
 
 describe("k-Anonymity Decoy Bundling & Chaff Cover Traffic", () => {
@@ -96,6 +98,11 @@ describe("k-Anonymity Decoy Bundling & Chaff Cover Traffic", () => {
         expect(slot.paddedBucketBytes).toBe(expectedBucket);
         expect(computePaddedBucketBytes(slot.prompt).paddedBucketBytes).toBe(expectedBucket);
       }
+    }
+
+    expect(IS_OPTIONAL_CHAFF_LIBRARY).toBe(true);
+    for (const domain of DECOY_DOMAINS) {
+      expect(CHAFF_CORPUS_SOURCES[domain].length).toBeGreaterThan(10);
     }
   });
 });

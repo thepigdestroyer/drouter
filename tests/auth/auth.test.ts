@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  VAULT_STORAGE_KEY,
   VAULT_WORDLIST,
   deriveVaultIdentity,
   exportEncryptedVaultJson,
   generatePassphrase,
+  getActiveCustomScrubTerms,
   getCurrentVaultSession,
   getPersistedVaultMetadata,
   importEncryptedVaultJson,
@@ -168,6 +170,64 @@ describe("dRouter Zero-Knowledge Client Vault", () => {
       };
       const bundle = sealVaultBundle(payload, fastIdentity.vaultKeyHex);
       expect(openVaultBundle(bundle, fastIdentity.vaultKeyHex)).toEqual(payload);
+    }
+  });
+
+  it("implements getActiveCustomScrubTerms() (I3) and verifies localStorage contains zero plaintext secrets", () => {
+    // When locked, I3 must return an empty array
+    expect(getActiveCustomScrubTerms()).toEqual([]);
+
+    const fakeStorage = new Map<string, string>();
+    const origWindow = (globalThis as { window?: unknown }).window;
+    (globalThis as { window?: unknown }).window = {
+      localStorage: {
+        getItem: (k: string) => fakeStorage.get(k) ?? null,
+        setItem: (k: string, v: string) => {
+          fakeStorage.set(k, v);
+        },
+        removeItem: (k: string) => {
+          fakeStorage.delete(k);
+        },
+      },
+    };
+
+    try {
+      const pass = "abandon ability able about above absent";
+      const session = unlockVaultWithPassphrase(pass, true);
+      expect(session.vaultId).toMatch(/^vault-[0-9a-f]{10}$/);
+      expect(getActiveCustomScrubTerms()).toEqual([]);
+
+      updateVaultPayload({
+        customScrubTerms: ["Dana Reyes", "MRN-44810", "Project Chimera"],
+        notes: "Private workspace notes for Dana Reyes",
+      });
+
+      const activeTerms = getActiveCustomScrubTerms();
+      expect(activeTerms).toEqual(["Dana Reyes", "MRN-44810", "Project Chimera"]);
+
+      // Mutating returned array must not mutate internal vault state
+      activeTerms.push("Tampered");
+      expect(getActiveCustomScrubTerms()).toEqual([
+        "Dana Reyes",
+        "MRN-44810",
+        "Project Chimera",
+      ]);
+
+      // Inspect raw localStorage value: must contain zero plaintext secrets, passphrases, or private keys
+      const persistedRaw = fakeStorage.get(VAULT_STORAGE_KEY);
+      expect(typeof persistedRaw).toBe("string");
+      expect(persistedRaw).not.toContain("Dana Reyes");
+      expect(persistedRaw).not.toContain("MRN-44810");
+      expect(persistedRaw).not.toContain("Project Chimera");
+      expect(persistedRaw).not.toContain("Private workspace notes");
+      expect(persistedRaw).not.toContain(pass);
+      expect(persistedRaw).not.toContain(session.ed25519PrivateKeyHex);
+      expect(persistedRaw).not.toContain(session.vaultKeyHex);
+
+      lockVault();
+      expect(getActiveCustomScrubTerms()).toEqual([]);
+    } finally {
+      (globalThis as { window?: unknown }).window = origWindow;
     }
   });
 });

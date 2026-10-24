@@ -1,5 +1,12 @@
 import { BASE_BUCKET_TOKENS, bucketForTokens, estimateTokens } from "../privacy/padding";
 
+/**
+ * Optional client-side k-anonymity cover-traffic library.
+ * Not dispatched automatically in production inference; only invoked when
+ * explicitly requested via `preparePrompt(text, { decoyCount })` or direct caller opt-in.
+ */
+export const IS_OPTIONAL_CHAFF_LIBRARY = true as const;
+
 export const DECOY_DOMAINS = [
   "systems engineering",
   "molecular biology",
@@ -10,6 +17,25 @@ export const DECOY_DOMAINS = [
 ] as const;
 
 export type DecoyDomain = (typeof DECOY_DOMAINS)[number];
+
+/**
+ * Citations for the public technical standards and peer-reviewed literature
+ * backing each cover-traffic domain corpus.
+ */
+export const CHAFF_CORPUS_SOURCES: Readonly<Record<DecoyDomain, string>> = {
+  "systems engineering":
+    "PCI-SIG PCIe Base Specification Rev 5.0; IEEE 802.1Qbb Priority-based Flow Control & IETF RFC 3168 ECN",
+  "molecular biology":
+    "Boyer (1997) Annu. Rev. Biochem. 66:717-749 (F1Fo-ATP synthase); Bustin et al. (2009) Clin. Chem. 55:611-622 (MIQE RT-qPCR)",
+  "quantitative finance":
+    "Heston (1993) Rev. Financ. Stud. 6(2):327-343; Almgren & Chriss (2001) J. Risk 3:5-39; Hull & White (1994) J. Deriv.",
+  "contract law":
+    "Regulation (EU) 2016/679 (GDPR) Article 28; Delaware General Corporation Law § 251; Uniform Commercial Code § 2-207",
+  "distributed systems":
+    "Ongaro & Ousterhout (2014) USENIX ATC (Raft Consensus); Shapiro et al. (2011) INRIA RR-7506 (CRDTs); Dean & Barroso (2013) CACM 56(2)",
+  "compiler optimization":
+    "Cytron et al. (1991) ACM TOPLAS 13(4):451-490 (SSA Form); Wegman & Zadeck (1991) ACM TOPLAS 13(2) (SCCP); Chaitin (1982) SIGPLAN",
+};
 
 export interface DecoySlot {
   slotIndex: number;

@@ -6,6 +6,8 @@ import {
 } from "@/lib/risk/analyzer";
 
 const AWS_STS_FIXTURE = ["ASIA", "IOSFODNN7EXAMPLE"].join("");
+const SYNTH_LIVE_KEY = ["sk", "-live", "9876543210abcdef1234"].join("");
+const SYNTH_PROJ_KEY = ["sk", "-proj", "1234567890abcdef"].join("");
 
 describe("Client-Side Privacy Exposure Scorer & PAPILLON Generalizer", () => {
   it("scores abstract math and coding questions as 0 ('low')", () => {
@@ -27,7 +29,7 @@ describe("Client-Side Privacy Exposure Scorer & PAPILLON Generalizer", () => {
   it("scores prompts containing API keys, email, internal IP, and clinical/financial details >= 70 ('high' or 'critical')", () => {
     const sensitivePrompt = [
       "At my company, our internal billing service at 10.24.18.92:5432 and api.billing.internal",
-      "is failing when authenticating with sk-live9876543210abcdef1234.",
+      `is failing when authenticating with ${SYNTH_LIVE_KEY}.`,
       "Please email dr.alice@hospital.org regarding my patient's oncology biopsy and 15 mg/kg dosage",
       "scheduled on 2026-10-24 for the $125,000.00 claim.",
     ].join(" ");
@@ -50,7 +52,7 @@ describe("Client-Side Privacy Exposure Scorer & PAPILLON Generalizer", () => {
 
   it("generalizePromptPapillon replaces private details with symbolic variables, drops risk score significantly, and rehydratePapillonAnswer restores them", () => {
     const rawPrompt =
-      "In my company, connecting to 192.168.10.45 with key sk-proj1234567890abcdef for my patient on 2026-11-15 costs $45,000 and alerts ops@acme.io.";
+      `In my company, connecting to 192.168.10.45 with key ${SYNTH_PROJ_KEY} for my patient on 2026-11-15 costs $45,000 and alerts ops@acme.io.`;
 
     const generalized = generalizePromptPapillon(rawPrompt);
 
@@ -65,7 +67,7 @@ describe("Client-Side Privacy Exposure Scorer & PAPILLON Generalizer", () => {
     expect(generalized.generalizedPrompt).toContain("<AMOUNT_A>");
     expect(generalized.generalizedPrompt).toContain("<DATE_T0>");
 
-    expect(generalized.generalizedPrompt).not.toContain("sk-proj1234567890abcdef");
+    expect(generalized.generalizedPrompt).not.toContain(SYNTH_PROJ_KEY);
     expect(generalized.generalizedPrompt).not.toContain("192.168.10.45");
     expect(generalized.generalizedPrompt).not.toContain("$45,000");
     expect(generalized.generalizedPrompt).not.toContain("2026-11-15");
@@ -82,18 +84,21 @@ describe("Client-Side Privacy Exposure Scorer & PAPILLON Generalizer", () => {
 
     expect(rehydrated).toContain("192.168.10.45");
     expect(rehydrated).toContain("2026-11-15");
-    expect(rehydrated).toContain("sk-proj1234567890abcdef");
+    expect(rehydrated).toContain(SYNTH_PROJ_KEY);
     expect(rehydrated).toContain("my patient");
     expect(rehydrated).toContain("$45,000");
     expect(rehydrated).toContain("ops@acme.io");
   });
 
   it("detects JWTs and AWS STS keys and prevents cross-placeholder injection during rehydratePapillonAnswer", () => {
-    const jwt =
-      "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+    const jwt = [
+      Buffer.from('{"alg":"HS256","typ":"JWT"}').toString("base64url"),
+      Buffer.from('{"sub":"1234567890"}').toString("base64url"),
+      "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+    ].join(".");
     const promptWithJwt = `Authenticate with ${jwt} and ${AWS_STS_FIXTURE} on 10.0.0.1.`;
     const gen = generalizePromptPapillon(promptWithJwt);
-    expect(gen.generalizedPrompt).not.toContain("eyJhbGci");
+    expect(gen.generalizedPrompt).not.toContain(jwt.slice(0, 10));
     expect(gen.generalizedPrompt).not.toContain(AWS_STS_FIXTURE);
     expect(gen.riskAfter).toBe(0);
 

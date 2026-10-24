@@ -112,6 +112,7 @@ export function nodeHello(simId: string, req: HelloRequest, ctx: NodeContext = {
 
   const evidence: EvidenceBundle = {
     simId,
+    simulated: true,
     report: toHex(signReport(fields, vcek(simId).secretKey)),
     vcekCertificate: vcekCertificate(simId),
     gpus: Array.from({ length: GPUS_PER_NODE }, (_, i) => gpuEvidence(simId, i, clientNonce)),
@@ -138,7 +139,7 @@ export function nodeHello(simId: string, req: HelloRequest, ctx: NodeContext = {
     },
     now,
   );
-  return { evidence, ticket };
+  return { simulated: true, evidence, ticket };
 }
 
 export function nodeKeyshare(simId: string, req: KeyshareRequest, ctx: NodeContext = {}): KeyshareResponse {
@@ -188,7 +189,7 @@ export function nodeKeyshare(simId: string, req: KeyshareRequest, ctx: NodeConte
     },
     now,
   );
-  return { ready: toHex(ready), ticket };
+  return { simulated: true, ready: toHex(ready), ticket };
 }
 
 function respondTo(simId: string, input: string, tokensIn: number, contextBefore: number): string {
@@ -250,20 +251,23 @@ export function nodeTurn(simId: string, req: TurnRequest, ctx: NodeContext = {})
     },
     now,
   );
-  return { frames, ticket };
+  return { simulated: true, frames, ticket };
 }
 
 export function nodeClose(simId: string, req: CloseRequest, ctx: NodeContext = {}): PopReceiptWire {
   simNodeSpec(simId);
   const now = nowMs(ctx);
   const session = openTicket(simId, req?.ticket, "session", now);
-  return signPop(
-    {
-      nodeId: simId,
-      sessionIdHash: toHex(sha256(fromHex(session.sessionId))),
-      time: Math.floor(now / 1000),
-      measurement: toHex(APPROVED_MEASUREMENT),
-    },
-    identity(simId).secretKey,
-  );
+  return {
+    simulated: true,
+    ...signPop(
+      {
+        nodeId: simId,
+        sessionIdHash: toHex(sha256(fromHex(session.sessionId))),
+        time: Math.floor(now / 1000),
+        measurement: toHex(APPROVED_MEASUREMENT),
+      },
+      identity(simId).secretKey,
+    ),
+  };
 }

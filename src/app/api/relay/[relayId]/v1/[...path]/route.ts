@@ -1,4 +1,5 @@
 import { after } from "next/server";
+import { verifyAndSpendCreditHeader } from "@/lib/credits/ledger";
 import { logRelay } from "@/lib/db";
 import {
   BodyTooLargeError,
@@ -7,8 +8,11 @@ import {
   readBoundedBytes,
 } from "@/lib/ratelimit";
 import {
+  CREDIT_RATE_BONUS_PER_DENOM,
   FORWARD_REQUEST_HEADERS,
   FORWARD_RESPONSE_HEADERS,
+  MAX_CREDIT_RELAY_BODY_BYTES,
+  MAX_RELAY_BODY_BYTES,
   countingStream,
   isAllowedEnclave,
   isAllowedRelayModel,
@@ -19,8 +23,6 @@ import {
 } from "@/lib/relay";
 
 export const maxDuration = 300;
-
-const MAX_RELAY_BODY_BYTES = 262_144; // 256 KB max HPKE ciphertext
 
 const ipLimiter = createTokenBucketLimiter({
   name: "relay-hop-v1",
@@ -39,22 +41,19 @@ const globalLimiter = createGlobalBucketLimiter({
  * Forwards HPKE-encrypted request bodies to the attested Tinfoil enclave via the selected
  * oblivious relay hop, optionally enforces Spec §2.2 fixed-cadence response framing, and
  * records only encrypted byte counts.
+ *
+ * Credit-backed limit policy:
+ * - Without `x-drouter-credit`, requests use the per-IP free tier (20 burst, 0.5/s, 256 KB body cap).
+ * - With `x-drouter-credit`, the RSA blind signature is verified against the per-denomination exponent
+ *   and the nullifier is recorded atomically in `credit_nullifiers` (HTTP 409 on double-spend).
+ *   Spending a credit bypasses the per-IP free-tier gate, refills `denomination * 4` tokens into the
+ *   caller's per-IP bucket (up to 4x capacity), credits `denomination` to the global bucket, and raises
+ *   the request body cap to 512 KB.
  */
 export async function POST(
   request: Request,
   ctx: { params: Promise<{ relayId: string; path: string[] }> },
 ) {
-  const limited = ipLimiter.check(request);
-  if (limited) return limited;
-
-  const globalCheck = globalLimiter.consume(1);
-  if (!globalCheck.allowed) {
-    return Response.json(
-      { error: "Global relay capacity reached. Please retry shortly." },
-      { status: 429, headers: { "Retry-After": String(globalCheck.retryAfterSec) } },
-    );
-  }
-
   const { relayId, path } = await ctx.params;
   if (!isValidRelayId(relayId)) {
     return Response.json({ error: "Invalid relay hop identifier" }, { status: 400 });
@@ -83,9 +82,41 @@ export async function POST(
     );
   }
 
+  const rawCreditHeader =
+    request.headers.get("x-drouter-credit") ?? request.headers.get("x-drouter-credit-token");
+  let spentCredit: { nullifier: string; denomination: number } | null = null;
+
+  if (rawCreditHeader !== null && rawCreditHeader.trim().length > 0) {
+    const spendResult = await verifyAndSpendCreditHeader(rawCreditHeader, relayId);
+    if (!spendResult.ok) {
+      return Response.json(
+        { error: spendResult.error },
+        { status: spendResult.status, headers: { "X-DRouter-Relay-Hop": relayId } },
+      );
+    }
+    spentCredit = {
+      nullifier: spendResult.nullifier,
+      denomination: spendResult.denomination,
+    };
+    ipLimiter.credit(request, spendResult.denomination * CREDIT_RATE_BONUS_PER_DENOM, 4);
+    globalLimiter.credit(spendResult.denomination, 4);
+  } else {
+    const limited = ipLimiter.check(request);
+    if (limited) return limited;
+
+    const globalCheck = globalLimiter.consume(1);
+    if (!globalCheck.allowed) {
+      return Response.json(
+        { error: "Global relay capacity reached. Please retry shortly." },
+        { status: 429, headers: { "Retry-After": String(globalCheck.retryAfterSec) } },
+      );
+    }
+  }
+
+  const maxBodyBytes = spentCredit ? MAX_CREDIT_RELAY_BODY_BYTES : MAX_RELAY_BODY_BYTES;
   let requestBody: Uint8Array;
   try {
-    requestBody = await readBoundedBytes(request, MAX_RELAY_BODY_BYTES);
+    requestBody = await readBoundedBytes(request, maxBodyBytes);
   } catch (err) {
     if (err instanceof BodyTooLargeError) {
       return Response.json({ error: err.message }, { status: 413 });
@@ -97,10 +128,35 @@ export async function POST(
     return Response.json({ error: "Empty encrypted request body" }, { status: 400 });
   }
 
+  const creditHeaders: Record<string, string> = spentCredit
+    ? {
+        "X-DRouter-Credit-Nullifier": spentCredit.nullifier,
+        "X-DRouter-Credit-Denomination": String(spentCredit.denomination),
+      }
+    : {};
+
   if (process.env.DROUTER_STUB_UPSTREAM === "1") {
     return Response.json(
-      { stubbed: true, relayId, path: validatedPath, bytesUp: requestBody.byteLength },
-      { status: 200, headers: { "content-type": "application/json", "X-DRouter-Relay-Hop": relayId } },
+      {
+        stubbed: true,
+        relayId,
+        path: validatedPath,
+        bytesUp: requestBody.byteLength,
+        ...(spentCredit
+          ? {
+              creditNullifier: spentCredit.nullifier,
+              creditDenomination: spentCredit.denomination,
+            }
+          : {}),
+      },
+      {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          "X-DRouter-Relay-Hop": relayId,
+          ...creditHeaders,
+        },
+      },
     );
   }
 
@@ -108,7 +164,7 @@ export async function POST(
   if (!apiKey) {
     return Response.json(
       { error: "This relay has no Tinfoil API key configured. Simulated nodes still work." },
-      { status: 503 },
+      { status: 503, headers: { "X-DRouter-Relay-Hop": relayId, ...creditHeaders } },
     );
   }
 
@@ -126,11 +182,17 @@ export async function POST(
       cache: "no-store",
     });
   } catch {
-    return Response.json({ error: "Upstream enclave connection failed" }, { status: 502 });
+    return Response.json(
+      { error: "Upstream enclave connection failed" },
+      { status: 502, headers: { "X-DRouter-Relay-Hop": relayId, ...creditHeaders } },
+    );
   }
 
   const responseHeaders = pickHeaders(upstream.headers, FORWARD_RESPONSE_HEADERS);
   responseHeaders.set("X-DRouter-Relay-Hop", relayId);
+  for (const [k, v] of Object.entries(creditHeaders)) {
+    responseHeaders.set(k, v);
+  }
 
   const enclaveHost = parsedEnclave.host;
   let reportBytes: (bytes: number) => void = () => {};
@@ -149,7 +211,10 @@ export async function POST(
     reportBytes(0);
     return Response.json(
       { error: `Upstream enclave returned HTTP ${upstream.status}` },
-      { status: upstream.status >= 500 ? 502 : upstream.status, headers: { "X-DRouter-Relay-Hop": relayId } },
+      {
+        status: upstream.status >= 500 ? 502 : upstream.status,
+        headers: { "X-DRouter-Relay-Hop": relayId, ...creditHeaders },
+      },
     );
   }
 

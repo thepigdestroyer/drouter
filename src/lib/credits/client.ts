@@ -4,6 +4,7 @@ import type { BlindCreditToken } from "@/lib/types";
 import { getCurrentVaultSession } from "@/lib/auth/vault";
 import {
   blindToken,
+  formatCreditHeader,
   unblindSignature,
   verifyTokenSignature,
 } from "./blind";
@@ -103,10 +104,41 @@ export function storedCreditBalance(): number {
   return readStorage().reduce((sum, t) => sum + (t.denomination || 0), 0);
 }
 
+export function storeCreditTokens(tokens: BlindCreditToken[]): void {
+  const existing = readStorage();
+  writeStorage([...existing, ...tokens]);
+}
+
+export function clearStoredCredits(): void {
+  memoryStore = [];
+  if (typeof window !== "undefined" && window.localStorage) {
+    try {
+      window.localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      // Ignore storage errors
+    }
+  }
+}
+
+/**
+ * Interface I2: pops one unspent blind-signed credit token from storage and formats it
+ * as the `x-drouter-credit` request header value, or returns null when the wallet is empty.
+ */
+export async function takeCreditHeader(): Promise<string | null> {
+  const wallet = readStorage();
+  if (wallet.length === 0) {
+    return null;
+  }
+  const [token, ...rest] = wallet;
+  writeStorage(rest);
+  return formatCreditHeader(token);
+}
+
 export async function mintCredits(
   baseUrl: string,
   count = 4,
-  denomination = 1
+  denomination = 1,
+  opts?: { txHash?: string }
 ): Promise<BlindCreditToken[]> {
   const prefix = baseUrl.replace(/\/$/, "");
   const infoRes = await fetch(`${prefix}/api/credits`);
@@ -131,6 +163,7 @@ export async function mintCredits(
     body: JSON.stringify({
       blinded: pending.map((p) => p.blindedHex),
       denomination,
+      ...(opts?.txHash ? { txHash: opts.txHash } : {}),
     }),
   });
 

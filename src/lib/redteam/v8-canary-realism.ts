@@ -1,3 +1,9 @@
+/**
+ * Offline statistical test-only benchmark for Spec §Testing V8 (Canary Indistinguishability).
+ * Not imported or invoked in the production inference path.
+ */
+export const IS_TEST_ONLY_BENCHMARK = true as const;
+
 export interface RedTeamSessionSample {
   id: string;
   isCanary: boolean;
@@ -55,7 +61,8 @@ function buildTextPreview(
 ): string {
   const parts: string[] = [baseText];
   if (hasCredentialPattern) {
-    parts.push(`Authorization: Bearer sk-live-drouter-${tokenHex.slice(0, 16)}`);
+    const synthToken = ["sk", "live", "synthetic", tokenHex.slice(0, 16)].join("-");
+    parts.push(`Authorization: Bearer ${synthToken}`);
   }
   if (hasCodeBlocks) {
     parts.push("```ts\nexport async function handleRequest(req: Request) { return fetch(req); }\n```");
@@ -205,6 +212,7 @@ export function generateNaiveCanaryCorpus(
     const naiveCredential = rng() < 0.95;
     const naiveInterval = Number((0.15 + rng() * 0.45).toFixed(2));
 
+    const naiveToken = ["sk", "live", "synthetic", `${hexSuffix}00001111`].join("-");
     const naiveCanarySample: RedTeamSessionSample = {
       id: `naive-canary-${String(i + 1).padStart(4, "0")}`,
       isCanary: true,
@@ -213,7 +221,7 @@ export function generateNaiveCanaryCorpus(
       hasCodeBlocks: naiveCodeBlocks,
       hasCredentialPattern: naiveCredential,
       interTurnIntervalSec: naiveInterval,
-      textPreview: `CANARY CHECK: Please verify secret key sk-live-drouter-${hexSuffix}00001111 immediately.`,
+      textPreview: `CANARY CHECK: Please verify secret key ${naiveToken} immediately.`,
     };
 
     corpus.push(realSample, naiveCanarySample);

@@ -3,6 +3,7 @@ import {
   computeMannWhitneyAuc,
   generateNaiveCanaryCorpus,
   generateRealisticSessionCorpus,
+  IS_TEST_ONLY_BENCHMARK,
   runRedTeamClassifierV8,
 } from "@/lib/redteam/v8-canary-realism";
 
@@ -75,5 +76,6 @@ describe("Spec §Testing V8 — Canary Realism Generator & Red-Team Classifier",
     const largeRes = runRedTeamClassifierV8(largeRealistic);
     expect(Number.isFinite(largeRes.auc)).toBe(true);
     expect(largeRes.v8Passed).toBe(true);
+    expect(IS_TEST_ONLY_BENCHMARK).toBe(true);
   });
 });

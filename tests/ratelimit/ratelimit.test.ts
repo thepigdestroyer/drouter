@@ -80,9 +80,14 @@ describe("Privacy-Preserving Per-IP Token Bucket Limiter", () => {
     clock += 2000;
     expect(limiter.check(makeReq("198.51.100.10"))).toBeNull();
     expect(limiter.check(makeReq("198.51.100.10"))?.status).toBe(429);
+
+    // Crediting tokens back into the caller's bucket raises limits up to 4x capacity
+    limiter.credit(makeReq("198.51.100.10"), 4, 4);
+    expect(limiter.check(makeReq("198.51.100.10"))).toBeNull();
+    expect(limiter.check(makeReq("198.51.100.10"))).toBeNull();
   });
 
-  it("enforces global bucket limits across all callers", () => {
+  it("enforces global bucket limits across all callers and supports crediting", () => {
     let clock = 5_000_000;
     const globalLimiter = createGlobalBucketLimiter({
       name: "global-unit",
@@ -99,6 +104,8 @@ describe("Privacy-Preserving Per-IP Token Bucket Limiter", () => {
 
     clock += 1000;
     expect(globalLimiter.consume(1).allowed).toBe(true);
+    globalLimiter.credit(2, 4);
+    expect(globalLimiter.consume(2).allowed).toBe(true);
   });
 });
 

@@ -22,6 +22,7 @@ export function buildManifest(simId: string): Manifest {
     region: spec.region,
     board: "sim-board",
     memory: "sim",
+    simulated: true,
   };
 }
 

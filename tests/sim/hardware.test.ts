@@ -4,8 +4,11 @@ import { p384Verify } from "@/lib/sim/ecdsa";
 import { fromHex, toHex } from "@/lib/sim/bytes";
 import { APPROVED_MEASUREMENT } from "@/lib/sim/constants";
 import {
+  SYNTHETIC_CHIP_ID_HEX_PREFIX,
+  SYNTHETIC_CHIP_ID_PREFIX_TEXT,
   amdRoot,
   chipId,
+  chipIdDisplayLabel,
   gpuEvidence,
   gpuIds,
   identity,
@@ -28,7 +31,7 @@ describe("simulated hardware", () => {
     }
   });
 
-  it("derives deterministic, distinct keys per purpose and node", () => {
+  it("derives deterministic, distinct keys per purpose and node, with synthetic chipId prefix", () => {
     expect(toHex(amdRoot().publicKey)).toBe(toHex(amdRoot().publicKey));
     expect(toHex(vcek("sim-1").publicKey)).not.toBe(toHex(vcek("sim-2").publicKey));
     expect(toHex(amdRoot().publicKey)).not.toBe(toHex(vcek("sim-1").publicKey));
@@ -36,6 +39,15 @@ describe("simulated hardware", () => {
     expect(toHex(chipId("sim-1"))).not.toBe(toHex(chipId("sim-2")));
     expect(toHex(identity("sim-1").publicKey)).not.toBe(toHex(identity("sim-2").publicKey));
     expect(APPROVED_MEASUREMENT).toHaveLength(48);
+
+    // Every simulated chipId starts with the ASCII prefix "sim-chip-0000000" so it cannot be mistaken for real AMD silicon
+    for (const id of ["sim-1", "sim-2", "sim-3"]) {
+      const raw = chipId(id);
+      const hex = toHex(raw);
+      expect(hex.startsWith(SYNTHETIC_CHIP_ID_HEX_PREFIX)).toBe(true);
+      expect(new TextDecoder().decode(raw.subarray(0, 16))).toBe(SYNTHETIC_CHIP_ID_PREFIX_TEXT);
+      expect(chipIdDisplayLabel(id)).toMatch(/^sim-chip:sim-[123]:[0-9a-f]{16}$/);
+    }
   });
 
   it("signs the VCEK statement with the AMD root", () => {

@@ -1,18 +1,24 @@
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 import type { QuorumTicket } from "@/lib/types";
-import { canonicalJson, deriveEd25519Key } from "./log";
+import { canonicalJson, deriveEd25519Key, getOperatorKey, getOperatorPublicKey } from "./log";
 
 export const VERIFIER_THRESHOLD = 5;
 
+export interface SimulatedQuorumTicket extends QuorumTicket {
+  quorumSimulated: true;
+  operatorPublicKey: string;
+  operatorSignature: string;
+}
+
 const VERIFIER_ORGS = [
-  { id: "verifier-1", name: "Chaos Labs" },
-  { id: "verifier-2", name: "Trail of Bits" },
-  { id: "verifier-3", name: "OpenZeppelin" },
-  { id: "verifier-4", name: "Spearbit" },
-  { id: "verifier-5", name: "Zellic" },
-  { id: "verifier-6", name: "Runtime Verification" },
-  { id: "verifier-7", name: "Nethermind" },
+  { id: "verifier-1", name: "Simulated Verifier 1 (Local Demo Seed)" },
+  { id: "verifier-2", name: "Simulated Verifier 2 (Local Demo Seed)" },
+  { id: "verifier-3", name: "Simulated Verifier 3 (Local Demo Seed)" },
+  { id: "verifier-4", name: "Simulated Verifier 4 (Local Demo Seed)" },
+  { id: "verifier-5", name: "Simulated Verifier 5 (Local Demo Seed)" },
+  { id: "verifier-6", name: "Simulated Verifier 6 (Local Demo Seed)" },
+  { id: "verifier-7", name: "Simulated Verifier 7 (Local Demo Seed)" },
 ] as const;
 
 function verifierKey(verifierId: string) {
@@ -37,16 +43,21 @@ export function ticketSigningPayload(
 export function getVerifierSet(): {
   threshold: number;
   total: number;
-  verifiers: { id: string; name: string; publicKey: string }[];
+  quorumSimulated: true;
+  operatorPublicKey: string;
+  verifiers: { id: string; name: string; publicKey: string; simulated: true }[];
 } {
   const verifiers = VERIFIER_ORGS.map((org) => ({
     id: org.id,
     name: org.name,
     publicKey: verifierKey(org.id).publicKeyHex,
+    simulated: true as const,
   }));
   return {
     threshold: VERIFIER_THRESHOLD,
     total: verifiers.length,
+    quorumSimulated: true,
+    operatorPublicKey: getOperatorPublicKey(),
     verifiers,
   };
 }
@@ -59,7 +70,7 @@ export function issueQuorumTicket(params: {
   status?: "full" | "ramp" | "suspended";
   weight?: number;
   signerCount?: number;
-}): QuorumTicket {
+}): SimulatedQuorumTicket {
   const epoch = params.epoch ?? 1;
   const status = params.status ?? "full";
   const weight =
@@ -85,9 +96,15 @@ export function issueQuorumTicket(params: {
     };
   });
 
+  const opKey = getOperatorKey();
+  const operatorSignature = bytesToHex(ed25519.sign(payload, opKey.secretKey));
+
   return {
     ...core,
     signatures,
+    quorumSimulated: true,
+    operatorPublicKey: opKey.publicKeyHex,
+    operatorSignature,
   };
 }
 
@@ -98,6 +115,8 @@ export function verifyQuorumTicket(
   ok: boolean;
   validSignatures: number;
   required: number;
+  quorumSimulated: true;
+  operatorPublicKey: string;
   detail: string;
 } {
   const required = k;
@@ -152,8 +171,10 @@ export function verifyQuorumTicket(
     ok,
     validSignatures,
     required,
+    quorumSimulated: true,
+    operatorPublicKey: getOperatorPublicKey(),
     detail: ok
-      ? `Quorum ticket verified (${validSignatures}/${VERIFIER_ORGS.length} verifiers >= ${required}, status=${ticket.status}, weight=${ticket.weight} bps).`
+      ? `Simulated quorum ticket verified (${validSignatures}/${VERIFIER_ORGS.length} simulated verifiers >= ${required}, status=${ticket.status}, weight=${ticket.weight} bps).`
       : reasons.join("; "),
   };
 }

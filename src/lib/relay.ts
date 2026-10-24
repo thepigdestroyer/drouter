@@ -102,6 +102,22 @@ export function isAllowedEnclave(rawUrl: string | null): rawUrl is string {
 
 const HEADER_VALUE_SAFE_RE = /^[\x20-\x7E]{1,512}$/;
 
+/**
+ * Credit-backed relay limit policy:
+ * - Free tier (no `x-drouter-credit` header): per-salted-IP token bucket (20 burst, 0.5/sec)
+ *   and 256 KB max HPKE body (`MAX_RELAY_BODY_BYTES`).
+ * - Credit-backed tier (valid `x-drouter-credit` header verified against the per-denomination
+ *   RSA exponent and atomically recorded in `credit_nullifiers`):
+ *   1. Bypasses the per-IP free-tier limiter even when the caller's free bucket is exhausted.
+ *   2. Credits `denomination * CREDIT_RATE_BONUS_PER_DENOM` (4x denomination) tokens back into
+ *      the caller's per-IP bucket (up to 4x burst capacity = 80 requests) and credits the
+ *      global bucket by `denomination`.
+ *   3. Raises the maximum HPKE encrypted request body cap from 256 KB to 512 KB (`MAX_CREDIT_RELAY_BODY_BYTES`).
+ */
+export const MAX_RELAY_BODY_BYTES = 262_144; // 256 KB free-tier max HPKE ciphertext
+export const MAX_CREDIT_RELAY_BODY_BYTES = 524_288; // 512 KB credit-backed max HPKE ciphertext
+export const CREDIT_RATE_BONUS_PER_DENOM = 4;
+
 /** Request headers the relay forwards unchanged. The body is HPKE-encrypted and is never read. */
 export const FORWARD_REQUEST_HEADERS = ["content-type", "accept", "ehbp-encapsulated-key", "x-tinfoil-model"];
 

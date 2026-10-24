@@ -11,6 +11,7 @@ export interface VcekStatement {
   chipId: string;
   tcb: Tcb;
   vcekPublicKey: string;
+  simulated?: boolean;
 }
 
 export interface GpuCertStatement {
@@ -41,10 +42,12 @@ export interface Manifest {
   region: string;
   board: string;
   memory: string;
+  simulated?: boolean;
 }
 
 export interface EvidenceBundle {
   simId: string;
+  simulated: true;
   /** Full 1184-byte SEV-SNP attestation report. */
   report: string;
   vcekCertificate: SignedStatement<VcekStatement>;
@@ -63,6 +66,7 @@ export interface HelloRequest {
 }
 
 export interface HelloResponse {
+  simulated: true;
   evidence: EvidenceBundle;
   ticket: string;
 }
@@ -75,6 +79,7 @@ export interface KeyshareRequest {
 }
 
 export interface KeyshareResponse {
+  simulated: true;
   ready: string;
   ticket: string;
 }
@@ -86,6 +91,7 @@ export interface TurnRequest {
 }
 
 export interface TurnResponse {
+  simulated: true;
   frames: string[];
   ticket: string;
 }
@@ -95,6 +101,7 @@ export interface CloseRequest {
 }
 
 export interface PopReceiptWire {
+  simulated?: true;
   nodeId: string;
   sessionIdHash: string;
   time: number;
@@ -105,6 +112,7 @@ export interface PopReceiptWire {
 
 export interface RootsNode {
   simId: string;
+  simulated: true;
   region: string;
   chipId: string;
   manifestHash: string;
@@ -113,6 +121,7 @@ export interface RootsNode {
 }
 
 export interface SimRoots {
+  simulated: true;
   amdRoot: string;
   nvidiaRoot: string;
   approvedMeasurement: string;

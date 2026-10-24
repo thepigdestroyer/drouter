@@ -4,6 +4,9 @@ import { sha256, sha384 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 import type { FrozenSessionState } from "@/lib/types";
 
+export const COARSE_TIME_WINDOW_SECONDS = 3600;
+export const RESUME_CODE_PREFIX = "drouter-freeze-v1";
+
 export interface EncryptedFrozenBundle {
   blobId: string;
   freezeSecretHex: string;
@@ -13,6 +16,100 @@ export interface EncryptedFrozenBundle {
   ciphertextHex: string;
   modelId: string;
   createdAt: number;
+}
+
+export interface ParsedResumeCode {
+  blobId: string;
+  freezeSecretHex: string;
+  sessionIdHex?: string;
+}
+
+/**
+ * Coarsens a Unix timestamp (in seconds or milliseconds) down to the start of its UTC hour
+ * in Unix seconds, preventing exact timestamp correlation on the server or in logs.
+ */
+export function coarsenEpochSecToHour(timestamp?: number): number {
+  const raw =
+    typeof timestamp === "number" && Number.isFinite(timestamp) && timestamp > 0
+      ? timestamp
+      : Math.floor(Date.now() / 1000);
+  // If passed milliseconds (e.g. > year 2100 in seconds), convert to seconds first
+  const sec = raw > 10_000_000_000 ? Math.floor(raw / 1000) : Math.floor(raw);
+  return sec - (sec % COARSE_TIME_WINDOW_SECONDS);
+}
+
+/**
+ * Formats a compact, copyable resume code (`drouter-freeze-v1:<blobId>:<freezeSecretHex>[:<sessionIdHex>]`)
+ * so a user can resume a frozen session across page reloads or devices without the server holding the key.
+ */
+export function formatResumeCode(params: {
+  blobId: string;
+  freezeSecretHex: string;
+  sessionIdHex?: string;
+}): string {
+  const blobId = normalizeHex(params.blobId).toLowerCase();
+  const secret = normalizeHex(params.freezeSecretHex).toLowerCase();
+  if (!blobId || !secret || isZeroOrEmptyHex(secret)) {
+    throw new Error("Cannot format resume code without valid blobId and freezeSecretHex");
+  }
+  const sid = params.sessionIdHex ? normalizeHex(params.sessionIdHex).toLowerCase() : "";
+  return sid
+    ? `${RESUME_CODE_PREFIX}:${blobId}:${secret}:${sid}`
+    : `${RESUME_CODE_PREFIX}:${blobId}:${secret}`;
+}
+
+/**
+ * Parses either a compact `drouter-freeze-v1:<blobId>:<freezeSecretHex>` resume code,
+ * a `<blobId>:<freezeSecretHex>` pair, or a JSON receipt bundle.
+ */
+export function parseResumeCode(input: string): ParsedResumeCode {
+  const trimmed = (input ?? "").trim();
+  if (!trimmed) {
+    throw new Error("Resume code is empty");
+  }
+
+  if (trimmed.startsWith("{")) {
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    } catch {
+      throw new Error("Invalid JSON resume bundle");
+    }
+    const blobId = normalizeHex(String(parsed.blobId ?? "")).toLowerCase();
+    const freezeSecretHex = normalizeHex(String(parsed.freezeSecretHex ?? "")).toLowerCase();
+    const sessionIdHex = parsed.sessionIdHex
+      ? normalizeHex(String(parsed.sessionIdHex)).toLowerCase()
+      : undefined;
+    if (!blobId || isZeroOrEmptyHex(blobId) || !freezeSecretHex || isZeroOrEmptyHex(freezeSecretHex)) {
+      throw new Error("Resume JSON bundle is missing valid blobId or freezeSecretHex");
+    }
+    return { blobId, freezeSecretHex, sessionIdHex };
+  }
+
+  const parts = trimmed.split(":").map((p) => p.trim());
+  if (parts[0] === RESUME_CODE_PREFIX) {
+    if (parts.length < 3) {
+      throw new Error("Malformed resume code");
+    }
+    const blobId = normalizeHex(parts[1]).toLowerCase();
+    const freezeSecretHex = normalizeHex(parts[2]).toLowerCase();
+    const sessionIdHex = parts[3] ? normalizeHex(parts[3]).toLowerCase() : undefined;
+    if (isZeroOrEmptyHex(blobId) || isZeroOrEmptyHex(freezeSecretHex)) {
+      throw new Error("Resume code contains invalid hex values");
+    }
+    return { blobId, freezeSecretHex, sessionIdHex };
+  }
+
+  if (parts.length === 2 || parts.length === 3) {
+    const blobId = normalizeHex(parts[0]).toLowerCase();
+    const freezeSecretHex = normalizeHex(parts[1]).toLowerCase();
+    const sessionIdHex = parts[2] ? normalizeHex(parts[2]).toLowerCase() : undefined;
+    if (!isZeroOrEmptyHex(blobId) && !isZeroOrEmptyHex(freezeSecretHex)) {
+      return { blobId, freezeSecretHex, sessionIdHex };
+    }
+  }
+
+  throw new Error("Unrecognized resume code format");
 }
 
 function randomBytes(length: number): Uint8Array {
@@ -99,7 +196,7 @@ export function encryptFrozenState(
       aadHex: bytesToHex(aad),
       ciphertextHex: bytesToHex(ciphertext),
       modelId: state.modelId,
-      createdAt: state.createdAt,
+      createdAt: coarsenEpochSecToHour(state.createdAt),
     };
   } finally {
     key.fill(0);

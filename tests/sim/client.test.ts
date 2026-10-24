@@ -20,6 +20,8 @@ describe("browser client against the real routes", () => {
     const { promise, seen } = open();
     const session = await promise;
     expect(session.simId).toBe("sim-1");
+    expect(session.simulated).toBe(true);
+    expect(session.evidence.simulated).toBe(true);
     expect(seen.map((c) => c.id)).toEqual(["C1", "C2", "C3", "C4", "C5", "C6", "C7"]);
     expect(seen.map((c) => c.status)).toEqual(["pass", "pass", "pass", "pass", "pass", "skip", "pass"]);
     expect(seen[5].detail).toBe("Registry ticket checked against Arc by the app");
@@ -49,6 +51,7 @@ describe("browser client against the real routes", () => {
 
     const receipt = await session.close();
     expect(receipt.verified).toBe(true);
+    expect(receipt.simulated).toBe(true);
     expect(receipt.nodeId).toBe("sim-1");
     await expect(collect(session.send("after close"))).rejects.toThrow(/closed/);
   });
@@ -185,17 +188,20 @@ describe("HTTP behaviour", () => {
     const f = routeFetch();
     const unknown = await f("/api/sim/sim-42/hello", { method: "POST", body: "{}" });
     expect(unknown.status).toBe(404);
-    expect(await unknown.json()).toEqual({ error: "unknown simulated node" });
+    expect(await unknown.json()).toEqual({ simulated: true, error: "unknown simulated node" });
     const bad = await f("/api/sim/sim-1/hello", { method: "POST", body: "not json" });
     expect(bad.status).toBe(400);
     const invalid = await f("/api/sim/sim-1/hello", { method: "POST", body: JSON.stringify({ clientNonce: "zz", modelId: "sim-echo-1" }) });
     expect(invalid.status).toBe(400);
   });
 
-  it("serves the roots document", async () => {
-    const res = await routeFetch()("/api/sim/roots");
+  it("serves the roots document and marks every /api/sim response with simulated: true", async () => {
+    const f = routeFetch();
+    const res = await f("/api/sim/roots");
     const roots = await res.json();
     expect(res.status).toBe(200);
+    expect(roots.simulated).toBe(true);
+    expect(roots.nodes.every((n: { simulated?: boolean; chipId: string }) => n.simulated === true && n.chipId.startsWith("73696d2d636869702d30303030303030"))).toBe(true);
     expect(roots.nodes.map((n: { simId: string; region: string }) => [n.simId, n.region])).toEqual([
       ["sim-1", "eu-west"],
       ["sim-2", "us-east"],
@@ -204,6 +210,15 @@ describe("HTTP behaviour", () => {
     expect(roots.model.id).toBe("sim-echo-1");
     expect(roots.approvedMeasurement).toHaveLength(96);
     expect(roots.nodes[0].gpuIds).toHaveLength(8);
+
+    const helloRes = await f("/api/sim/sim-1/hello", {
+      method: "POST",
+      body: JSON.stringify({ clientNonce: "11".repeat(32), modelId: "sim-echo-1" }),
+    });
+    const helloBody = await helloRes.json();
+    expect(helloBody.simulated).toBe(true);
+    expect(helloBody.evidence.simulated).toBe(true);
+    expect(helloBody.evidence.manifest.simulated).toBe(true);
   });
 
   it("reports missing hardware seed without leaking details", async () => {
