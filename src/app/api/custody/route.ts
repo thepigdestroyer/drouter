@@ -4,7 +4,9 @@ import {
   CustodyCtrDrbg,
   HASH_BLOCK_TOKENS,
   PrefixCachePool,
+  constantTimeEqualBytes,
   runMemoryBusAndPopAudit,
+  verifyCustodyPrimitives,
 } from "@/lib/custody";
 import { createTokenBucketLimiter } from "@/lib/ratelimit";
 
@@ -15,16 +17,23 @@ const custodyLimiter = createTokenBucketLimiter({
 });
 
 export async function GET(request?: Request) {
-  await connection();
+  try {
+    await connection();
+  } catch {
+    // Allow direct invocation in unit tests outside Next request storage
+  }
   if (request) {
     const limited = custodyLimiter.check(request);
     if (limited) return limited;
   }
 
-  // 1. Run V1 (memory-bus probe) and V6 (pop zeroization) audit
+  // 1. Verify real software cryptographic primitives (CTR-DRBG, HMAC-SHA-256 prefix keys, constant-time compare)
+  const primitives = verifyCustodyPrimitives();
+
+  // 2. Software model check of monotonic-nonce AES-256-GCM frame encryption & Uint8Array zeroization (mode: "model")
   const audit = runMemoryBusAndPopAudit();
 
-  // 2. Run Prefix-Cache Isolation Demo (1,536-token identical prefix = 3 blocks of 512 tokens)
+  // 3. Prefix-Cache Isolation Demo (1,536-token identical prefix = 3 blocks of 512 tokens)
   const hardwareSeed = new Uint8Array(32);
   for (let i = 0; i < 32; i++) {
     hardwareSeed[i] = (0xa5 ^ (i * 13 + 7)) & 0xff;
@@ -53,17 +62,27 @@ export async function GET(request?: Request) {
     sessionB.sessionPrefixKey
   );
 
+  const constantTimeCompareCheck =
+    constantTimeEqualBytes(sessionA.sessionPrefixKey, new Uint8Array(sessionA.sessionPrefixKey)) &&
+    !constantTimeEqualBytes(sessionA.sessionPrefixKey, sessionB.sessionPrefixKey);
+
   const popAlpha = pool.popSession(sessionA.sessionId);
   const popBeta = pool.popSession(sessionB.sessionId);
   drbg.zeroize();
 
   return NextResponse.json({
-    subsystem: "gpu-custody-module",
+    subsystem: "custody-crypto-primitives",
+    executionEnvironment: "software-uint8array",
+    observesPhysicalGpuMemory: false,
+    disclosure:
+      "Exposes real software cryptographic primitives (AES-256 CTR-DRBG key derivation, HMAC-SHA-256 512-token prefix-cache key isolation, constant-time byte comparisons, and Uint8Array buffer zeroization). The `audit` field is a software model (`mode: \"model\"`) of AES-256-GCM frame encryption and does not observe physical GPU HBM or memory-bus hardware.",
     specRefs: ["§2.3", "§2.4", "V1", "V6"],
+    primitives,
     audit,
     prefixCacheDemo: {
       blockSizeTokens: HASH_BLOCK_TOKENS,
       testedPrefixTokens: sharedPrefixTokens.length,
+      constantTimeCompareCheck,
       sameSession: {
         sessionId: sessionA.sessionId,
         hitBlocks: sameSessionLookup.hitBlocks,

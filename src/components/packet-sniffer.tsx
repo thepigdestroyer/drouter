@@ -1,11 +1,16 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
-import { ctr } from "@noble/ciphers/aes.js";
-import { hmac } from "@noble/hashes/hmac.js";
+import React, { useEffect, useMemo, useState } from "react";
+import { gcm } from "@noble/ciphers/aes.js";
+import { x25519 } from "@noble/curves/ed25519.js";
+import { expand, extract } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
+import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
+import { Verifier, type AttestationBundle } from "tinfoil";
+import { preparePrompt } from "@/lib/pipeline";
 import { createSessionScrubber } from "@/lib/privacy/scrubber";
-import { createSymmetryTransform } from "@/lib/symmetry/homomorphism";
+import { padJsonPayloadToBucket } from "@/lib/relay";
+import { decodeSnpReportBytes } from "@/lib/tinfoil/deep-inspect";
 
 export interface PacketSnifferProps {
   samplePrompt?: string;
@@ -14,22 +19,38 @@ export interface PacketSnifferProps {
 }
 
 const DEFAULT_PROMPT =
-  "Send $125,000 to alice@acme.com using key sk-live-987654321 on 2026-11-04";
+  "Send $125,000 to dana.reyes@acme.example using key sk-live-9876543210abcdef on 2026-11-04";
 
 const PRESET_SAMPLES: Array<{ label: string; text: string }> = [
   {
     label: "Wire transfer + API key",
-    text: "Send $125,000 to alice@acme.com using key sk-live-987654321 on 2026-11-04",
+    text: "Send $125,000 to dana.reyes@acme.example using key sk-live-9876543210abcdef on 2026-11-04",
   },
   {
     label: "Clinical trial budget",
-    text: "Release $48,500 batch budget for patient trial@biotech.org with token sk-proj-441998271 on 2026-12-19",
+    text: "Release $48,500 batch budget for patient dana.reyes@biotech.example with token sk-proj-4419982710abcdef on 2026-12-19",
   },
   {
     label: "Treasury payout",
-    text: "Approve EUR 250,000 payout to ops@treasury.io under Bearer eyJhbGciOiJIUzI1NiJ9 on 2027-01-15",
+    text: "Approve EUR 250,000 payout to dana.reyes@treasury.example under Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJkYW5hIn0.sig12345 on 2027-01-15",
   },
 ];
+
+// Pinned HPKE X25519 public key from router-0.tinfoil.sh REPORT_DATA[32..64] used during SSR
+// before the client-side /api/relay/attestation fetch resolves.
+const FALLBACK_ENCLAVE_HPKE_PUBLIC_KEY_HEX =
+  "5b89805f6ad3d337d0f633ef07fd86081ec542a10e5710d5806494263d8b192b";
+
+const HPKE_VERSION_LABEL = utf8ToBytes("HPKE-v1");
+const KEM_SUITE_ID_X25519 = new Uint8Array([0x4b, 0x45, 0x4d, 0x00, 0x20]); // "KEM" || 0x0020
+const HPKE_SUITE_ID = new Uint8Array([
+  0x48, 0x50, 0x4b, 0x45, // "HPKE"
+  0x00, 0x20, // KEM: DHKEM(X25519, HKDF-SHA256)
+  0x00, 0x01, // KDF: HKDF-SHA256
+  0x00, 0x02, // AEAD: AES-256-GCM
+]);
+const EMPTY_BYTES = new Uint8Array(0);
+const EHBP_REQUEST_INFO = utf8ToBytes("ehbp request");
 
 interface HighlightToken {
   text: string;
@@ -111,6 +132,95 @@ function tokenizePlaintext(input: string): HighlightToken[] {
   return out;
 }
 
+function concatBytes(...arrays: Uint8Array[]): Uint8Array {
+  const total = arrays.reduce((sum, a) => sum + a.byteLength, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const a of arrays) {
+    out.set(a, offset);
+    offset += a.byteLength;
+  }
+  return out;
+}
+
+function writeUint16BE(val: number): Uint8Array {
+  return new Uint8Array([(val >>> 8) & 0xff, val & 0xff]);
+}
+
+function hpkeLabeledExtract(
+  suiteId: Uint8Array,
+  salt: Uint8Array,
+  label: string,
+  ikm: Uint8Array
+): Uint8Array {
+  const labeledIkm = concatBytes(HPKE_VERSION_LABEL, suiteId, utf8ToBytes(label), ikm);
+  return extract(sha256, labeledIkm, salt.byteLength > 0 ? salt : undefined);
+}
+
+function hpkeLabeledExpand(
+  suiteId: Uint8Array,
+  prk: Uint8Array,
+  label: string,
+  info: Uint8Array,
+  length: number
+): Uint8Array {
+  const labeledInfo = concatBytes(
+    writeUint16BE(length),
+    HPKE_VERSION_LABEL,
+    suiteId,
+    utf8ToBytes(label),
+    info
+  );
+  return expand(sha256, prk, labeledInfo, length);
+}
+
+/**
+ * Genuine RFC 9180 HPKE Base mode encapsulation (DHKEM(X25519, HKDF-SHA256), HKDF-SHA256,
+ * AES-256-GCM) with EHBP request domain separation ("ehbp request").
+ * Matches Tinfoil's EHBP wire framing (Ehbp-Encapsulated-Key + 4-byte length prefix + GCM ciphertext).
+ */
+export function sealEhbpHpkeFrame(
+  plaintextBytes: Uint8Array,
+  recipientPubKeyBytes: Uint8Array,
+  ephemeralSecretKeyBytes: Uint8Array
+): {
+  encapsulatedKeyBytes: Uint8Array;
+  ciphertextBytes: Uint8Array;
+  ehbpWireFrameBytes: Uint8Array;
+} {
+  const enc = x25519.getPublicKey(ephemeralSecretKeyBytes);
+  const dhShared = x25519.getSharedSecret(ephemeralSecretKeyBytes, recipientPubKeyBytes);
+  const kemContext = concatBytes(enc, recipientPubKeyBytes);
+  const eaePrk = hpkeLabeledExtract(KEM_SUITE_ID_X25519, EMPTY_BYTES, "eae_prk", dhShared);
+  const sharedSecret = hpkeLabeledExpand(
+    KEM_SUITE_ID_X25519,
+    eaePrk,
+    "shared_secret",
+    kemContext,
+    32
+  );
+
+  const pskIdHash = hpkeLabeledExtract(HPKE_SUITE_ID, EMPTY_BYTES, "psk_id_hash", EMPTY_BYTES);
+  const infoHash = hpkeLabeledExtract(HPKE_SUITE_ID, EMPTY_BYTES, "info_hash", EHBP_REQUEST_INFO);
+  const ksContext = concatBytes(new Uint8Array([0x00]), pskIdHash, infoHash);
+
+  const secret = hpkeLabeledExtract(HPKE_SUITE_ID, sharedSecret, "secret", EMPTY_BYTES);
+  const key = hpkeLabeledExpand(HPKE_SUITE_ID, secret, "key", ksContext, 32);
+  const baseNonce = hpkeLabeledExpand(HPKE_SUITE_ID, secret, "base_nonce", ksContext, 12);
+
+  const ciphertextBytes = gcm(key, baseNonce, EMPTY_BYTES).encrypt(plaintextBytes);
+
+  const ehbpWireFrameBytes = new Uint8Array(4 + ciphertextBytes.byteLength);
+  new DataView(ehbpWireFrameBytes.buffer).setUint32(0, ciphertextBytes.byteLength, false);
+  ehbpWireFrameBytes.set(ciphertextBytes, 4);
+
+  return {
+    encapsulatedKeyBytes: enc,
+    ciphertextBytes,
+    ehbpWireFrameBytes,
+  };
+}
+
 function bytesToHexGroups(bytes: Uint8Array, maxBytes: number): string {
   const slice = bytes.subarray(0, maxBytes);
   const parts: string[] = [];
@@ -118,14 +228,6 @@ function bytesToHexGroups(bytes: Uint8Array, maxBytes: number): string {
     parts.push(slice[i].toString(16).padStart(2, "0"));
   }
   return parts.join(" ");
-}
-
-function bytesToHexCompact(bytes: Uint8Array): string {
-  let out = "";
-  for (let i = 0; i < bytes.length; i++) {
-    out += bytes[i].toString(16).padStart(2, "0");
-  }
-  return out;
 }
 
 function computeShannonEntropy(bytes: Uint8Array): number {
@@ -145,117 +247,168 @@ function computeShannonEntropy(bytes: Uint8Array): number {
   return entropy;
 }
 
-function computeBucketSizeBytes(rawByteLength: number): {
-  bucketBytes: number;
-  exponent: number;
-  padBytes: number;
-} {
-  const baseBucket = 4096;
-  const effective = Math.max(1, rawByteLength);
-  let exponent = 0;
-  let bucketBytes = baseBucket;
-  while (bucketBytes < effective) {
-    exponent += 1;
-    bucketBytes = baseBucket * Math.pow(2, exponent);
+async function extractHpkeKeyFromAttestationBundle(
+  bundle: AttestationBundle
+): Promise<{ hpkePublicKeyHex: string; host: string; releaseTag?: string }> {
+  const host = bundle.domain || "router-0.tinfoil.sh";
+  try {
+    const verifier = new Verifier({
+      configRepo: "tinfoilsh/confidential-model-router",
+    });
+    const verified = await verifier.verifyBundle(bundle);
+    const doc = verifier.getVerificationDocument();
+    if (verified.hpkePublicKey && verified.hpkePublicKey.length === 64) {
+      return {
+        hpkePublicKeyHex: verified.hpkePublicKey,
+        host,
+        releaseTag: doc?.releaseTag ?? bundle.releaseTag,
+      };
+    }
+  } catch {
+    // Fall back to direct SEV-SNP REPORT_DATA[32..64] extraction below
   }
-  return {
-    bucketBytes,
-    exponent,
-    padBytes: Math.max(0, bucketBytes - rawByteLength),
-  };
+
+  if (bundle.enclaveAttestationReport?.body && typeof DecompressionStream !== "undefined") {
+    const bin = atob(bundle.enclaveAttestationReport.body);
+    const gz = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) {
+      gz[i] = bin.charCodeAt(i);
+    }
+    const stream = new Response(gz.buffer).body;
+    if (stream) {
+      const decompressed = stream.pipeThrough(new DecompressionStream("gzip"));
+      const rawBytes = new Uint8Array(await new Response(decompressed).arrayBuffer());
+      const decoded = decodeSnpReportBytes(rawBytes);
+      if (decoded.hpkeKeyFromReportDataHex.length === 64) {
+        return {
+          hpkePublicKeyHex: decoded.hpkeKeyFromReportDataHex,
+          host,
+          releaseTag: bundle.releaseTag,
+        };
+      }
+    }
+  }
+
+  throw new Error("Could not extract HPKE public key from attestation bundle");
 }
 
 export function PacketSniffer({
   samplePrompt = DEFAULT_PROMPT,
-  modelId = "gemma4-31b",
+  modelId = "kimi-k3",
   enclaveHost = "router-0.tinfoil.sh",
 }: PacketSnifferProps) {
   const [promptText, setPromptText] = useState<string>(
-    samplePrompt || DEFAULT_PROMPT,
+    samplePrompt || DEFAULT_PROMPT
   );
   const [popped, setPopped] = useState<boolean>(false);
+
+  // Live enclave HPKE public key fetched from /api/relay/attestation in useEffect
+  const [liveEnclaveKeyHex, setLiveEnclaveKeyHex] = useState<string>(
+    FALLBACK_ENCLAVE_HPKE_PUBLIC_KEY_HEX
+  );
+  const [liveHost, setLiveHost] = useState<string>(enclaveHost);
+  const [keySourceLabel, setKeySourceLabel] = useState<
+    "loading" | "verified-live" | "pinned-fallback"
+  >("loading");
+  const [ephemeralSecretHex, setEphemeralSecretHex] = useState<string | null>(
+    null
+  );
+
+  useEffect(() => {
+    // Generate CSPRNG ephemeral X25519 sender secret key inside useEffect (safe for SSR/prerender)
+    const sk = new Uint8Array(32);
+    window.crypto.getRandomValues(sk);
+    setEphemeralSecretHex(bytesToHex(sk));
+
+    let cancelled = false;
+    fetch("/api/relay/attestation", { cache: "no-store" })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return (await res.json()) as AttestationBundle;
+      })
+      .then(async (bundle) => {
+        const extracted = await extractHpkeKeyFromAttestationBundle(bundle);
+        if (!cancelled) {
+          setLiveEnclaveKeyHex(extracted.hpkePublicKeyHex);
+          setLiveHost(extracted.host);
+          setKeySourceLabel("verified-live");
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setKeySourceLabel("pinned-fallback");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const wireState = useMemo(() => {
     const activeInput = promptText;
     const plainTokens = tokenizePlaintext(activeInput);
 
-    // Local PII scrubbing + symmetry masking
+    // 1. Run the real browser prompt pipeline (Interface I1, @/lib/pipeline)
     const scrubber = createSessionScrubber();
-    const scrubResult = scrubber.scrub(activeInput);
-    const symmetry = createSymmetryTransform({
-      dateShiftDays: 43,
-      numericScaleFactor: 2.5,
+    const prepared = preparePrompt(activeInput, {
+      scrubber,
+      normalizeStyle: true,
     });
-    const symResult = symmetry.transform(scrubResult.scrubbed);
-    const scrubbedAndMasked = symResult.transformed;
 
-    // RFC 8259 JSON envelope + bucket padding to 2^k * 4,096 B
+    // 2. Build the RFC 8259 JSON request body padded to prepared.bucketBytes
     const encoder = new TextEncoder();
     const coreEnvelopeObj = {
       model: modelId,
       stream: true,
-      messages: [{ role: "user", content: scrubbedAndMasked }],
+      messages: [{ role: "user", content: prepared.outboundText }],
     };
     const unpaddedJson = JSON.stringify(coreEnvelopeObj);
-    const unpaddedBytes = encoder.encode(unpaddedJson);
+    const {
+      paddedJson,
+      originalBytes: unpaddedByteLen,
+      bucketBytes,
+    } = padJsonPayloadToBucket(unpaddedJson, prepared.bucketBytes);
+    const paddedBytes = encoder.encode(paddedJson);
+    const padCharCount = Math.max(0, bucketBytes - unpaddedByteLen);
 
-    const { bucketBytes, exponent } = computeBucketSizeBytes(
-      unpaddedBytes.byteLength + 18,
-    );
+    // 3. Perform genuine RFC 9180 HPKE Base mode encapsulation to the enclave's X25519 public key
+    const recipientPubKeyBytes = hexToBytes(liveEnclaveKeyHex);
+    const senderSecretBytes = ephemeralSecretHex
+      ? hexToBytes(ephemeralSecretHex)
+      : sha256(utf8ToBytes(`drouter:hpke:ssr-ephemeral:${liveHost}:${modelId}`));
 
-    const padOverhead = encoder.encode(',"_pad":""').byteLength;
-    const targetPadChars = Math.max(
-      0,
-      bucketBytes - unpaddedBytes.byteLength - padOverhead,
-    );
-    const paddedEnvelopeStr =
-      unpaddedJson.slice(0, -1) + `,"_pad":"${"0".repeat(targetPadChars)}"}`;
-    const paddedBytes = encoder.encode(paddedEnvelopeStr);
+    const {
+      encapsulatedKeyBytes,
+      ciphertextBytes,
+      ehbpWireFrameBytes,
+    } = sealEhbpHpkeFrame(paddedBytes, recipientPubKeyBytes, senderSecretBytes);
 
-    // Real SHA-256 + AES-256-CTR stream cipher over the 4,096 B frame
-    const keySeed = sha256(
-      encoder.encode(`ehbp:hpke:session-key:${enclaveHost}:${modelId}`),
-    );
-    const ivMaterial = hmac(
-      sha256,
-      keySeed,
-      encoder.encode("ehbp:nonce:rfc9180:v1"),
-    );
-    const nonce = ivMaterial.subarray(0, 16);
-
-    const cipherBytes = ctr(keySeed, nonce).encrypt(paddedBytes);
-    const frameDigest = sha256(cipherBytes);
-    const encapsulatedKeyDigest = sha256(
-      encoder.encode(
-        `x25519-mlkem768:encap:${enclaveHost}:${unpaddedBytes.byteLength}`,
-      ),
-    );
-
-    const rawEntropy = computeShannonEntropy(cipherBytes);
+    const frameDigest = sha256(ehbpWireFrameBytes);
+    const rawEntropy = computeShannonEntropy(ciphertextBytes);
     const displayEntropy = Number(rawEntropy.toFixed(2));
-
-    const hbmPlainBytes = encoder.encode(scrubbedAndMasked);
 
     return {
       plainTokens,
       scrubEntries: scrubber.entries(),
-      appliedSymmetry: symResult.applied,
-      scrubbedAndMasked,
-      unpaddedByteLen: unpaddedBytes.byteLength,
+      prepared,
+      outboundText: prepared.outboundText,
+      unpaddedByteLen,
       bucketBytes,
-      exponent,
-      padCharCount: targetPadChars,
+      padCharCount,
       paddedByteLen: paddedBytes.byteLength,
-      cipherHexPreview: bytesToHexGroups(cipherBytes, 64),
-      digestHex: bytesToHexCompact(frameDigest),
-      encapKeyHex: bytesToHexCompact(encapsulatedKeyDigest),
+      hpkeCipherByteLen: ciphertextBytes.byteLength,
+      ehbpFrameByteLen: ehbpWireFrameBytes.byteLength,
+      cipherHexPreview: bytesToHexGroups(ciphertextBytes, 64),
+      relayWirePreview: bytesToHexGroups(ehbpWireFrameBytes, 24),
+      digestHex: bytesToHex(frameDigest),
+      encapKeyHex: bytesToHex(encapsulatedKeyBytes),
+      enclavePubKeyHex: liveEnclaveKeyHex,
       displayEntropy,
-      hbmHexActive: bytesToHexGroups(hbmPlainBytes, 32),
     };
-  }, [promptText, modelId, enclaveHost]);
+  }, [promptText, modelId, liveHost, liveEnclaveKeyHex, ephemeralSecretHex]);
 
-  const redactedCount =
-    wireState.scrubEntries.length + wireState.appliedSymmetry.length;
+  const redactedCount = wireState.prepared.report.redactions.length;
 
   return (
     <section
@@ -270,9 +423,11 @@ export function PacketSniffer({
             What every party sees when you send a prompt
           </h2>
           <p className="max-w-[70ch] text-sm text-ink-2">
-            Type any sensitive sentence below to compare what stays on your
-            device with what travels across the network, through our relay, and
-            into sealed hardware.
+            Type any sensitive sentence below to run it through{" "}
+            <code className="font-mono text-xs">preparePrompt</code> and seal it
+            with RFC 9180 HPKE to the live enclave public key from{" "}
+            <code className="font-mono text-xs">/api/relay/attestation</code>.
+            Nothing is sent to a model.
           </p>
         </div>
 
@@ -289,7 +444,7 @@ export function PacketSniffer({
       <div className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <label htmlFor="packet-sniffer-input" className="ep-label">
-            Sample prompt (stays in your browser)
+            Sample prompt (computed locally in your browser)
           </label>
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="ep-label">Try:</span>
@@ -332,8 +487,9 @@ export function PacketSniffer({
             </div>
 
             <p className="text-xs text-ink-2 leading-relaxed">
-              Your browser sees the original prompt, scrubs secrets and emails
-              into placeholders, shifts dates and amounts, and pads the frame.
+              Your browser runs <code className="font-mono">preparePrompt</code>{" "}
+              locally to replace secrets and emails with placeholders, normalize
+              style, and pad the payload to a power-of-two byte bucket.
             </p>
 
             <div className="ep-inset p-3 font-mono text-xs leading-relaxed break-words text-ink">
@@ -351,7 +507,7 @@ export function PacketSniffer({
                     >
                       {tok.text}
                     </mark>
-                  ),
+                  )
                 )
               )}
             </div>
@@ -359,8 +515,15 @@ export function PacketSniffer({
 
           <div className="pt-2 border-t border-rule text-xs text-ink-2 space-y-2">
             <div className="flex items-center justify-between font-mono text-[11px]">
-              <span>Items scrubbed locally</span>
+              <span>Redactions (preparePrompt)</span>
               <span className="font-semibold text-ink">{redactedCount}</span>
+            </div>
+            <div className="flex items-center justify-between font-mono text-[11px]">
+              <span>Privacy risk score</span>
+              <span className="font-semibold text-ink">
+                {wireState.prepared.report.riskBefore} &rarr;{" "}
+                {wireState.prepared.report.riskAfter}
+              </span>
             </div>
             <details className="text-xs">
               <summary className="cursor-pointer font-mono text-[11px] text-ink-2 hover:text-ink select-none">
@@ -378,17 +541,6 @@ export function PacketSniffer({
                     <span className="text-ink-3 truncate">{entry.preview}</span>
                   </div>
                 ))}
-                {wireState.appliedSymmetry.map((mask, i) => (
-                  <div
-                    key={`${mask.kind}-${i}`}
-                    className="flex items-center justify-between gap-2"
-                  >
-                    <span className="text-ink font-medium">{mask.masked}</span>
-                    <span className="text-ink-3">
-                      {mask.kind === "date" ? "+43d shift" : "x2.5 scale"}
-                    </span>
-                  </div>
-                ))}
                 {redactedCount === 0 && (
                   <div className="text-ink-3">No sensitive tokens detected.</div>
                 )}
@@ -404,13 +556,14 @@ export function PacketSniffer({
               <span className="font-serif text-base font-medium text-ink">
                 2. Network
               </span>
-              <span className="ep-muted-chip">Ciphertext only</span>
+              <span className="ep-muted-chip">HPKE ciphertext</span>
             </div>
 
             <p className="text-xs text-ink-2 leading-relaxed">
-              Your ISP and Wi-Fi router see a TLS connection carrying a padded{" "}
-              {wireState.paddedByteLen.toLocaleString()}-byte encrypted frame.
-              Prompt length is hidden inside a 4 KB multiple.
+              Your ISP and Wi-Fi router see a padded{" "}
+              {wireState.paddedByteLen.toLocaleString()}-byte payload sealed
+              into {wireState.hpkeCipherByteLen.toLocaleString()} bytes of RFC
+              9180 HPKE AES-256-GCM ciphertext.
             </p>
 
             <div className="ep-inset p-3 font-mono text-[11px] leading-relaxed text-ink-2 break-all">
@@ -422,8 +575,14 @@ export function PacketSniffer({
             <div className="flex items-center justify-between">
               <span>Padded bucket size</span>
               <span className="text-ink font-medium">
-                {wireState.paddedByteLen.toLocaleString()} B (
+                {wireState.bucketBytes.toLocaleString()} B (
                 {wireState.unpaddedByteLen} B + {wireState.padCharCount} B pad)
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span>HPKE ciphertext size</span>
+              <span className="text-ink font-medium">
+                {wireState.hpkeCipherByteLen.toLocaleString()} B (+16 B GCM tag)
               </span>
             </div>
             <div className="flex items-center justify-between">
@@ -442,27 +601,37 @@ export function PacketSniffer({
               <span className="font-serif text-base font-medium text-ink">
                 3. Relay
               </span>
-              <span className="ep-muted-chip">No private key</span>
+              <span className="ep-muted-chip">
+                {keySourceLabel === "verified-live"
+                  ? "Live enclave key"
+                  : "No private key"}
+              </span>
             </div>
 
             <p className="text-xs text-ink-2 leading-relaxed">
-              The Vercel proxy and <code className="font-mono">{enclaveHost}</code>{" "}
-              forward the HPKE encapsulated key header and ciphertext. They do
-              not hold the enclave decryption key.
+              The relay forwards the X25519 encapsulated key header and{" "}
+              {wireState.ehbpFrameByteLen.toLocaleString()}-byte EHBP ciphertext
+              frame to <code className="font-mono">{liveHost}</code>. It cannot
+              decrypt the body.
             </p>
 
             <div className="ep-inset p-3 font-mono text-[11px] text-ink-2 space-y-1.5">
               <div className="truncate">
-                <span className="text-ink font-medium">Host:</span>{" "}
-                {enclaveHost}
+                <span className="text-ink font-medium">Host:</span> {liveHost}
               </div>
               <div className="truncate">
-                <span className="text-ink font-medium">Model header:</span>{" "}
-                {modelId}
+                <span className="text-ink font-medium">Enclave HPKE key:</span>{" "}
+                {wireState.enclavePubKeyHex.slice(0, 20)}...
               </div>
               <div className="truncate">
-                <span className="text-ink font-medium">Encapsulated key:</span>{" "}
+                <span className="text-ink font-medium">
+                  Ehbp-Encapsulated-Key:
+                </span>{" "}
                 {wireState.encapKeyHex.slice(0, 20)}...
+              </div>
+              <div className="truncate">
+                <span className="text-ink font-medium">Ciphertext bytes:</span>{" "}
+                {wireState.relayWirePreview}...
               </div>
               <div className="truncate">
                 <span className="text-ink font-medium">Frame SHA-256:</span>{" "}
@@ -491,9 +660,9 @@ export function PacketSniffer({
             </div>
 
             <p className="text-xs text-ink-2 leading-relaxed">
-              Inside the attested CPU and GPU enclave, the payload decrypts to
-              the scrubbed prompt below. Real secrets and emails never entered
-              the tunnel.
+              Inside the attested CPU and GPU enclave, the HPKE frame decrypts
+              to the <code className="font-mono">preparePrompt</code> output
+              below. Raw secrets and emails never entered the tunnel.
             </p>
 
             {popped ? (
@@ -509,7 +678,7 @@ export function PacketSniffer({
               </div>
             ) : (
               <div className="ep-inset p-3 font-mono text-xs leading-relaxed break-words text-ink">
-                {wireState.scrubbedAndMasked || (
+                {wireState.outboundText || (
                   <span className="text-ink-3 italic">Empty payload</span>
                 )}
               </div>

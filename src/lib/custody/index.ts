@@ -10,11 +10,15 @@ export {
   HASH_BLOCK_TOKENS,
   PrefixCachePool,
   computePrefixBlockHashes,
+  constantTimeEqualBytes,
   type PrefixLookupResult,
 } from "./prefix-cache";
 
 export {
+  buildMonotonicGcmNonce,
   computeShannonEntropyBitsPerByte,
   runMemoryBusAndPopAudit,
+  verifyCustodyPrimitives,
+  type CustodyPrimitiveVerificationReport,
   type MemoryBusAndPopAuditReport,
 } from "./probe-audit";

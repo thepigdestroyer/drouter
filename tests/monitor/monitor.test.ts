@@ -3,7 +3,6 @@ import {
   type Action,
   CHANNELS,
   PAYLOAD_ENCRYPTIONS,
-  PlaceholderVault,
   enumerateMonitorActions,
   evaluateMonitorExit,
   restorePlaceholders,
@@ -27,12 +26,18 @@ const BASE_ACTION: Action = {
   startsWithForbiddenPrefix: false,
 };
 
-describe("VMPL0 Inner Monitor Formal Exit-Policy Checker (Spec §2.2 & V3)", () => {
-  it("enumerates all 1,344 states and passes all 5 invariants with zero counterexamples", () => {
+describe("Exhaustive JavaScript Model Check of Exit-Policy Specification (1,344 states)", () => {
+  it("enumerates all 1,344 states of the JavaScript policy model, labels the report as a specification model check, and passes all 5 invariants", () => {
     const actions = enumerateMonitorActions();
     expect(actions).toHaveLength(1344);
 
     const report = verifyMonitorPolicyExhaustive();
+    expect(report.kind).toBe("javascript-policy-model-check");
+    expect(report.mode).toBe("model");
+    expect(report.simulated).toBe(true);
+    expect(report.runsInVmpl0Hardware).toBe(false);
+    expect(report.summary).toContain("JavaScript model of the exit-policy specification");
+    expect(report.summary).toContain("not running VMPL0 code");
     expect(report.verified).toBe(true);
     expect(report.statesChecked).toBe(1344);
     expect(report.allowedStates).toBe(60);
@@ -55,7 +60,6 @@ describe("VMPL0 Inner Monitor Formal Exit-Policy Checker (Spec §2.2 & V3)", () 
   });
 
   it("produces concrete counterexamples when faulty rules are injected via custom predicate", () => {
-    // Fault 1: Allow plaintext on relay-stream -> violates I1_NoPlaintextEgress
     const faultI1 = verifyMonitorPolicyExhaustive((action) => {
       if (
         action.actorVmpl === 0 &&
@@ -77,7 +81,6 @@ describe("VMPL0 Inner Monitor Formal Exit-Policy Checker (Spec §2.2 & V3)", () 
       payloadEncryption: "plaintext",
     });
 
-    // Fault 2: Allow stale nonce on blob-storage -> violates I2_NoNonceReuse
     const faultI2 = verifyMonitorPolicyExhaustive((action) => {
       if (
         action.actorVmpl === 0 &&
@@ -99,7 +102,6 @@ describe("VMPL0 Inner Monitor Formal Exit-Policy Checker (Spec §2.2 & V3)", () 
       nonceFresh: false,
     });
 
-    // Fault 3: Allow VMPL2 engine direct egress -> violates I3_NoEngineBypass
     const faultI3 = verifyMonitorPolicyExhaustive((action) => {
       if (
         action.actorVmpl === 2 &&
@@ -117,7 +119,6 @@ describe("VMPL0 Inner Monitor Formal Exit-Policy Checker (Spec §2.2 & V3)", () 
     expect(inv3?.passed).toBe(false);
     expect(inv3?.counterexample?.actorVmpl).toBe(2);
 
-    // Fault 4: Allow per-session fields on control-plane -> violates I4_NoPerSessionControlLeak
     const faultI4 = verifyMonitorPolicyExhaustive((action) => {
       if (
         action.actorVmpl === 0 &&
@@ -137,7 +138,6 @@ describe("VMPL0 Inner Monitor Formal Exit-Policy Checker (Spec §2.2 & V3)", () 
       hasPerSessionFields: true,
     });
 
-    // Fault 5: Allow forbidden prefix on snp-attest -> violates I5_ForbiddenPrefixNeverSigned
     const faultI5 = verifyMonitorPolicyExhaustive((action) => {
       if (
         action.actorVmpl === 0 &&
@@ -157,7 +157,7 @@ describe("VMPL0 Inner Monitor Formal Exit-Policy Checker (Spec §2.2 & V3)", () 
     });
   });
 
-  describe("Individual rules M0–M5", () => {
+  describe("Individual rules M0 to M5", () => {
     it("Rule M0 denies any action from actorVmpl > 0 with DENY_NON_VMPL0_EGRESS", () => {
       for (const actorVmpl of [1, 2] as const) {
         for (const channel of CHANNELS) {
@@ -299,7 +299,7 @@ describe("VMPL0 Inner Monitor Formal Exit-Policy Checker (Spec §2.2 & V3)", () 
   });
 });
 
-describe("Local OpenAI-Compatible Agent Proxy CLI & Scrubber (Spec §1)", () => {
+describe("Local OpenAI-Compatible Agent Proxy CLI & Scrubber", () => {
   it("scrubs emails and secrets into reversible placeholders and restores them", () => {
     const raw =
       "Email ops@drouter.io or backup@drouter.io using key sk-live-9876543210abcdefghij and token ghp_1234567890abcdefghijklmnopqrstuv.";
@@ -392,7 +392,6 @@ describe("Local OpenAI-Compatible Agent Proxy CLI & Scrubber (Spec §1)", () => 
     const baseUrl = `http://127.0.0.1:${port}`;
 
     try {
-      // 1. Check /health before first request
       const healthRes = await fetch(`${baseUrl}/health`);
       expect(healthRes.status).toBe(200);
       const healthJson = (await healthRes.json()) as {
@@ -403,7 +402,6 @@ describe("Local OpenAI-Compatible Agent Proxy CLI & Scrubber (Spec §1)", () => 
       expect(healthJson.monitorPolicy.verified).toBe(true);
       expect(healthJson.monitorPolicy.statesChecked).toBe(1344);
 
-      // 2. Send chat completion containing email and secret API key
       const chatRes = await fetch(`${baseUrl}/v1/chat/completions`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -424,7 +422,6 @@ describe("Local OpenAI-Compatible Agent Proxy CLI & Scrubber (Spec §1)", () => 
       expect(chatRes.headers.get("x-drouter-redactions")).toBe("2");
       expect(chatRes.headers.get("x-drouter-enclave-host")).toBe("enclave.tinfoil.sh");
 
-      // Upstream enclave must only see placeholders, never raw email or key
       expect(capturedCalls).toHaveLength(1);
       const sentBody = capturedCalls[0].body as {
         messages: Array<{ role: string; content: string }>;
@@ -434,7 +431,6 @@ describe("Local OpenAI-Compatible Agent Proxy CLI & Scrubber (Spec §1)", () => 
       expect(sentBody.messages[0].content).toContain("[[DROUTER_EMAIL_1]]");
       expect(sentBody.messages[0].content).toContain("[[DROUTER_SECRET_1]]");
 
-      // Local caller receives restored email and key in completion
       const chatJson = (await chatRes.json()) as {
         choices: Array<{ message: { content: string } }>;
       };

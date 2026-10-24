@@ -15,6 +15,8 @@ import {
   listModelRegistry,
   OPEN_MODEL_CATALOG,
   proveShardMembership,
+  verifyAllLiveModelProvenance,
+  verifyLiveModelWeightProvenance,
   verifyShardBeforeLoad,
 } from "@/lib/weights/open-shards";
 
@@ -27,30 +29,65 @@ const weightsLimiter = createTokenBucketLimiter({
 });
 
 export async function GET(request?: Request) {
-  await connection();
+  try {
+    await connection();
+  } catch {
+    // Allow direct invocation in unit tests outside Next request storage
+  }
   if (request) {
     const limited = weightsLimiter.check(request);
     if (limited) return limited;
   }
 
+  let requestedModel = "kimi-k3";
+  let requestedShardIndex = 0;
+  if (request?.url) {
+    try {
+      const url = new URL(request.url);
+      const m = url.searchParams.get("model");
+      if (m && OPEN_MODEL_CATALOG[m]) {
+        requestedModel = m;
+      }
+      const s = url.searchParams.get("shard");
+      if (s !== null) {
+        const parsedIdx = Number(s);
+        if (Number.isInteger(parsedIdx) && parsedIdx >= 0) {
+          requestedShardIndex = parsedIdx;
+        }
+      }
+    } catch {
+      // Ignore malformed URL in direct test invocation
+    }
+  }
+
   const models = listModelRegistry();
-  const sampleModel = OPEN_MODEL_CATALOG["kimi-k3"];
-  const sampleShardIndex = 0;
-  const sampleProof = proveShardMembership(sampleModel.shardHashes, sampleShardIndex);
+  const sampleModel = OPEN_MODEL_CATALOG[requestedModel] ?? OPEN_MODEL_CATALOG["kimi-k3"];
+  const safeShardIndex =
+    requestedShardIndex < sampleModel.shardHashes.length ? requestedShardIndex : 0;
+  const sampleProof = proveShardMembership(sampleModel.shardHashes, safeShardIndex);
   const verified = verifyShardBeforeLoad(
     sampleProof.shardHash,
     sampleProof,
-    sampleModel.merkleRoot
+    sampleModel.merkleRoot,
   );
+
+  const allModelsProvenance = await verifyAllLiveModelProvenance();
+  const provenance =
+    allModelsProvenance[sampleModel.modelId] ??
+    (await verifyLiveModelWeightProvenance(sampleModel.modelId));
 
   return NextResponse.json({
     models,
     sampleProof: {
       modelId: sampleModel.modelId,
-      shardIndex: sampleShardIndex,
+      shardIndex: safeShardIndex,
       verified,
+      hfRepo: sampleModel.hfRepo,
+      hfCommit: sampleModel.hfCommit,
       ...sampleProof,
     },
+    provenance,
+    allModelsProvenance,
   });
 }
 
@@ -82,15 +119,22 @@ export async function POST(request: Request) {
   const modelId =
     typeof body.modelId === "string" && body.modelId.trim()
       ? body.modelId.trim().slice(0, 128)
-      : "frontier-closed-x1";
+      : "kimi-k3";
+
+  const provenanceModelId = OPEN_MODEL_CATALOG[modelId]?.tinfoilRepo ? modelId : "kimi-k3";
+  const provenance = await verifyLiveModelWeightProvenance(provenanceModelId);
+
   const chipId =
     typeof body.chipId === "string" && body.chipId.trim()
       ? body.chipId.trim().slice(0, 128)
-      : "H200-SXM-NV-0042";
+      : (provenance.proxyTable.repo || "tinfoilsh/confidential-kimi-k3");
+  const defaultMeasurement =
+    provenance.deploymentManifest.snpMeasurement ||
+    bytesToHex(sha256(utf8ToBytes("drouter:approved-Rim-measurement:v1")));
   const approvedMeasurement =
     typeof body.approvedMeasurement === "string" && body.approvedMeasurement.length <= 256
       ? body.approvedMeasurement
-      : bytesToHex(sha256(utf8ToBytes("drouter:approved-Rim-measurement:v1")));
+      : defaultMeasurement;
   const measurement =
     typeof body.measurement === "string" && body.measurement.length <= 256
       ? body.measurement
@@ -108,9 +152,9 @@ export async function POST(request: Request) {
       ? Math.max(1, Math.min(20, Math.floor(body.requiredQuorum)))
       : 4;
 
-  // Simulated provider-held master weight key (never exposed outside provider / custody module)
+  // Simulated closed-weight key wrapping (Tinfoil serves open-weight models verified via provenance above)
   const simulatedWeightKeyHex = bytesToHex(
-    sha256(utf8ToBytes(`drouter:secret-weight-key:${providerId}:${modelId}`))
+    sha256(utf8ToBytes(`drouter:secret-weight-key:${providerId}:${modelId}`)),
   );
 
   const custodyKeys = createCustodyProviderKeypair();
@@ -136,15 +180,17 @@ export async function POST(request: Request) {
       {
         verdict: "REFUSED",
         released: false,
+        simulated: true,
+        mode: "Simulated",
         reason: releaseResult.reason,
         custodyBindingHash: custodyKeys.bindingHash,
         custodyUnwrapped: false,
+        provenance,
       },
-      { status: 403 }
+      { status: 403 },
     );
   }
 
-  // Unwrap inside simulated GPU TEE custody module and confirm integrity via digest without exposing raw key
   const unwrappedHex = custodyUnwrapWeightKey(releaseResult, custodyKeys);
   const unwrappedMatchesProviderKey = unwrappedHex === simulatedWeightKeyHex;
   const unwrappedKeyCommitment = bytesToHex(sha256(hexToBytes(unwrappedHex)));
@@ -152,6 +198,9 @@ export async function POST(request: Request) {
   return NextResponse.json({
     verdict: "APPROVED_AND_RELEASED",
     released: true,
+    simulated: true,
+    mode: "Simulated",
+    note: "Simulated: Closed-weight key wrapping runs locally in software using X25519 + ML-KEM-768 + AES-256-GCM + Ed25519. Live Tinfoil models use open weights verified via `provenance`.",
     providerId,
     modelId,
     chipId,
@@ -168,7 +217,9 @@ export async function POST(request: Request) {
       unwrappedInsideCustodyModule: unwrappedMatchesProviderKey,
       rawWeightKeyExposedToRouter: false,
       unwrappedKeySha256Commitment: unwrappedKeyCommitment,
-      decryptionTarget: "GPU_VRAM_TEE_ONLY",
+      decryptionTarget: "LOCAL_SOFTWARE_KEY_WRAP_MODEL",
+      simulated: true,
     },
+    provenance,
   });
 }

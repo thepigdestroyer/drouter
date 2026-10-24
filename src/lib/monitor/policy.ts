@@ -1,8 +1,10 @@
 /**
- * Subsystem 6 — VMPL0 Inner Monitor Formal Exit-Policy Checker (Spec §2.2 & V3 / SP1 AC5)
+ * Exhaustive JavaScript Model Check of the Exit-Policy Specification (1,344 states).
  *
- * Models every possible outbound/attestation action from the confidential VM and
- * exhaustively verifies all 1,344 states against the 5 safety invariants.
+ * Defines a finite JavaScript model of the exit-policy specification over 7 discrete
+ * action variables (3 x 7 x 4 x 2 x 2 x 2 x 2 = 1,344 combinations) and exhaustively
+ * enumerates all 1,344 states against 5 invariant predicates.
+ * This is a model check of the policy specification in JavaScript, not running VMPL0 code.
  */
 
 export const ACTOR_VMPLS = [0, 1, 2] as const;
@@ -52,6 +54,11 @@ export interface InvariantResult {
 }
 
 export interface VerificationReport {
+  kind: "javascript-policy-model-check";
+  mode: "model";
+  simulated: true;
+  runsInVmpl0Hardware: false;
+  summary: string;
   verified: boolean;
   statesChecked: number;
   allowedStates: number;
@@ -62,10 +69,10 @@ export interface VerificationReport {
 const BOOLEANS = [false, true] as const;
 
 /**
- * Evaluates the VMPL0 Inner Monitor exit policy for a single candidate action.
+ * Evaluates the JavaScript model of the exit-policy specification for a single candidate action.
  */
 export function evaluateMonitorExit(action: Action): MonitorDecision {
-  // Rule M0: Only actorVmpl === 0 may perform external I/O or request SNP reports.
+  // Rule M0: Only actorVmpl === 0 may perform external I/O or request SNP reports in the policy model.
   if (action.actorVmpl !== 0) {
     return { allowed: false, rule: "DENY_NON_VMPL0_EGRESS" };
   }
@@ -128,8 +135,8 @@ export function evaluateMonitorExit(action: Action): MonitorDecision {
 }
 
 /**
- * Enumerates the full Cartesian product of all state/action variables:
- * 3 × 7 × 4 × 2 × 2 × 2 × 2 = 1,344 states.
+ * Enumerates the full Cartesian product of the JavaScript exit-policy model variables:
+ * 3 x 7 x 4 x 2 x 2 x 2 x 2 = 1,344 states.
  */
 export function enumerateMonitorActions(): Action[] {
   const actions: Action[] = [];
@@ -206,9 +213,9 @@ const INVARIANT_SPECS: readonly InvariantSpec[] = [
 ];
 
 /**
- * Exhaustively verifies the VMPL0 Inner Monitor policy across all 1,344 states
- * and checks all 5 safety invariants. Accepts an optional custom predicate for
- * fault-injection testing.
+ * Exhaustively checks the JavaScript model of the exit-policy specification across all
+ * 1,344 states against the 5 safety invariants. Accepts an optional custom predicate
+ * for fault-injection testing. Does not execute VMPL0 hardware code.
  */
 export function verifyMonitorPolicyExhaustive(
   predicate: PolicyPredicate = evaluateMonitorExit,
@@ -252,8 +259,15 @@ export function verifyMonitorPolicyExhaustive(
     };
   });
 
+  const verified = invariants.every((inv) => inv.passed);
+
   return {
-    verified: invariants.every((inv) => inv.passed),
+    kind: "javascript-policy-model-check",
+    mode: "model",
+    simulated: true,
+    runsInVmpl0Hardware: false,
+    summary: `Simulated: Exhaustive enumeration of the ${actions.length}-state JavaScript model of the exit-policy specification (${allowedStates} allowed, ${deniedStates} denied). This is a model check of the policy specification in JavaScript, not running VMPL0 code.`,
+    verified,
     statesChecked: actions.length,
     allowedStates,
     deniedStates,

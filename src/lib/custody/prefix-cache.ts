@@ -3,7 +3,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 
 /**
- * Spec §2.3 & §2.4: Kimi K3-compatible 512-token block boundary for keyed prefix caching.
+ * 512-token block boundary for keyed HMAC-SHA-256 prefix hashing.
  */
 export const HASH_BLOCK_TOKENS = 512;
 
@@ -22,6 +22,25 @@ interface SessionPrefixState {
   blockHashHexSet: Map<number, Set<string>>;
 }
 
+/**
+ * Constant-time comparison of two `Uint8Array` byte slices.
+ * Evaluates all byte positions up to `Math.max(a.byteLength, b.byteLength)` without
+ * early exit on mismatch.
+ */
+export function constantTimeEqualBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (!(a instanceof Uint8Array) || !(b instanceof Uint8Array)) {
+    return false;
+  }
+  const maxLen = Math.max(a.byteLength, b.byteLength);
+  let diff = a.byteLength ^ b.byteLength;
+  for (let i = 0; i < maxLen; i++) {
+    const byteA = i < a.byteLength ? a[i] : 0;
+    const byteB = i < b.byteLength ? b[i] : 0;
+    diff |= byteA ^ byteB;
+  }
+  return diff === 0;
+}
+
 function packTokenBlock(tokens: number[], start: number, end: number): string {
   const parts = new Array<string>(end - start);
   for (let i = start; i < end; i++) {
@@ -31,11 +50,10 @@ function packTokenBlock(tokens: number[], start: number, end: number): string {
 }
 
 /**
- * Computes chained 512-token block hashes using HMAC-SHA-256 with a per-session key:
+ * Computes chained 512-token block hashes using HMAC-SHA-256 with a 32-byte per-session key:
  *   h_i = HMAC-SHA-256(sessionPrefixKey, (h_{i-1} || "") + ":" + packedTokens)
  *
- * Partial trailing tokens (< 512 tokens) do not form a block hash, matching
- * 512-token KV cache page granularity.
+ * Partial trailing tokens (< 512 tokens) do not form a block hash.
  */
 export function computePrefixBlockHashes(
   tokens: number[],
@@ -73,12 +91,11 @@ export function computePrefixBlockHashes(
 }
 
 /**
- * Spec §2.3 & §2.4: Keyed HMAC Prefix Cache Pool.
+ * In-memory Keyed HMAC-SHA-256 Prefix Cache Pool.
  *
- * Stores cached 512-token block hashes per session using keyed HMAC-SHA-256.
- * Because block hashes are keyed with each session's custody-derived HMAC key
- * and partitioned per session, prefix lookups hit at 512-token boundaries within
- * a session and produce 0 hits across different sessions even on identical tokens.
+ * Stores 512-token block digests per session keyed with each session's 32-byte HMAC key,
+ * compares session keys in constant time via `constantTimeEqualBytes`, and overwrites
+ * stored key and block-hash `Uint8Array` buffers in process memory on `popSession()`.
  */
 export class PrefixCachePool {
   private readonly sessions = new Map<string, SessionPrefixState>();
@@ -136,10 +153,6 @@ export class PrefixCachePool {
 
   /**
    * Look up the longest contiguous prefix of 512-token blocks cached for `sessionId`.
-   *
-   * Also caches any newly observed blocks for `sessionId` by default (`cacheOnMiss = true`)
-   * so subsequent turns in the same session automatically benefit from prefix hits,
-   * while remaining completely isolated from other sessions.
    */
   public lookupLongestPrefix(
     sessionId: string,
@@ -152,13 +165,7 @@ export class PrefixCachePool {
 
     let hitBlocks = 0;
     if (state) {
-      // Constant-time comparison of the session key against the registered session key
-      let diff = state.keyBuffer.byteLength ^ sessionPrefixKey.byteLength;
-      const len = Math.min(state.keyBuffer.byteLength, sessionPrefixKey.byteLength);
-      for (let i = 0; i < len; i++) {
-        diff |= state.keyBuffer[i] ^ sessionPrefixKey[i];
-      }
-      const keyMatches = diff === 0;
+      const keyMatches = constantTimeEqualBytes(state.keyBuffer, sessionPrefixKey);
 
       if (keyMatches) {
         for (let i = 0; i < blockHashes.length; i++) {
@@ -186,7 +193,8 @@ export class PrefixCachePool {
   }
 
   /**
-   * Zeroize all stored keys and block hash buffers for `sessionId` and evict the session.
+   * Overwrite stored key and block-hash `Uint8Array` buffers for `sessionId` with `0x00`
+   * and evict the session from the in-memory map.
    */
   public popSession(sessionId: string): {
     evicted: boolean;

@@ -13,7 +13,7 @@ export const metadata: Metadata = {
 
 export default function ExplainPage() {
   return (
-    <div className="min-h-screen flex flex-col bg-paper text-ink">
+    <div className="min-h-screen flex flex-col bg-paper text-ink overflow-x-hidden">
       <SpecimenHeader activePath="/explain" rightSlot={<AuthPill />} />
 
       <main className="mx-auto w-full max-w-5xl flex-1 space-y-12 px-4 py-10 sm:px-6">

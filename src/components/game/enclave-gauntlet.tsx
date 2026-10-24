@@ -1,14 +1,16 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   DEFAULT_HEART_GRID,
   PRESET_GRIDS,
   blindEnvelopeRound,
   evaluateNodeChoice,
+  fetchAndJudgeLiveAttestationNodes,
   judgeCandidateNodes,
   simulateSubpoenaPop,
   tapMemoryBus,
+  type CandidateEnclaveNode,
   type CandidateNodeId,
   type MemoryBusMode,
   type SubpoenaAction,
@@ -30,8 +32,11 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
   const [selectedPermIdx, setSelectedPermIdx] = useState<number | null>(null);
   const [round2Solved, setRound2Solved] = useState(false);
 
-  // Round 3 state
-  const candidateNodes = useMemo(() => judgeCandidateNodes(), []);
+  // Round 3 state: starts with synchronous binary report verification, then upgrades to live /api/relay/attestation in useEffect
+  const [candidateNodes, setCandidateNodes] = useState<CandidateEnclaveNode[]>(
+    () => judgeCandidateNodes()
+  );
+  const [liveAttestationLoaded, setLiveAttestationLoaded] = useState(false);
   const [chosenNodeId, setChosenNodeId] = useState<CandidateNodeId | null>(null);
   const [round3Solved, setRound3Solved] = useState(false);
 
@@ -39,19 +44,36 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
   const [subpoenaActions, setSubpoenaActions] = useState<SubpoenaAction[]>([]);
   const [round4Solved, setRound4Solved] = useState(false);
 
+  useEffect(() => {
+    let cancelled = false;
+    fetchAndJudgeLiveAttestationNodes("/api/relay/attestation")
+      .then((liveNodes) => {
+        if (!cancelled) {
+          setCandidateNodes(liveNodes);
+          setLiveAttestationLoaded(true);
+        }
+      })
+      .catch(() => {
+        // Keep baseline binary report verification if offline
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Computed results
   const probeResult = useMemo(() => tapMemoryBus(grid, busMode), [grid, busMode]);
   const blindRound = useMemo(
     () => blindEnvelopeRound({ t: tokenSecret, r: blindingFactor }),
-    [tokenSecret, blindingFactor],
+    [tokenSecret, blindingFactor]
   );
   const nodeEval = useMemo(
     () => (chosenNodeId ? evaluateNodeChoice(chosenNodeId, candidateNodes) : null),
-    [chosenNodeId, candidateNodes],
+    [chosenNodeId, candidateNodes]
   );
   const subpoenaState = useMemo(
     () => simulateSubpoenaPop(subpoenaActions),
-    [subpoenaActions],
+    [subpoenaActions]
   );
 
   const completedCount =
@@ -91,7 +113,7 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
   function handleRunSubpoenaSequence(nextActions: SubpoenaAction[]) {
     setSubpoenaActions(nextActions);
     const sim = simulateSubpoenaPop(nextActions);
-    if (sim.gpuPagesZeroed && nextActions.includes("host-ram-dump")) {
+    if (sim.gpuPagesZeroed && !sim.sessionDecryptable && nextActions.includes("host-ram-dump")) {
       setRound4Solved(true);
     }
   }
@@ -101,7 +123,7 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
       const filtered = prev.filter((a) => a !== action);
       const next = [...filtered, action];
       const sim = simulateSubpoenaPop(next);
-      if (sim.gpuPagesZeroed && next.includes("host-ram-dump")) {
+      if (sim.gpuPagesZeroed && !sim.sessionDecryptable && next.includes("host-ram-dump")) {
         setRound4Solved(true);
       }
       return next;
@@ -130,7 +152,7 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
               key={item.id}
               className={item.done ? "ep-pass" : "ep-muted-chip"}
             >
-              {item.label} {item.done ? "✓" : ""}
+              {item.label} {item.done ? "(Done)" : ""}
             </span>
           ))}
         </div>
@@ -151,12 +173,10 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
             </span>
           </div>
 
-          {/* One-sentence goal */}
           <p className="max-w-[68ch] text-sm text-ink-2">
-            Switch from static CPU memory encryption to fresh GPU nonces so a physical wire tap on the RAM bus cannot see repeated blocks.
+            Switch from deterministic AES-256-ECB memory encryption to AES-256-GCM with fresh per-transfer nonces so a physical wire tap on the RAM bus cannot spot repeated 16-byte blocks.
           </p>
 
-          {/* One primary interaction */}
           <div className="flex flex-wrap items-center gap-2.5">
             <button
               type="button"
@@ -165,7 +185,7 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
                 busMode === "naive-cpu-xts" ? "ep-btn" : "ep-btn-ghost"
               }
             >
-              Static CPU memory (leaks)
+              Static CPU memory (AES-ECB leaks)
             </button>
             <button
               type="button"
@@ -174,12 +194,12 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
                 busMode === "drouter-gpu-hbm" ? "ep-btn" : "ep-btn-ghost"
               }
             >
-              Fresh GPU nonce (blocks tap)
+              Fresh GPU nonce (AES-GCM blocks tap)
             </button>
           </div>
 
-          {/* Compact visual comparison: Secret vs Wire tap view */}
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 max-w-xl">
+          {/* Visual comparison: Secret vs Observed Ciphertext Blocks vs Wire tap reconstruction */}
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
             <div className="ep-inset p-3">
               <div className="ep-label mb-2">Your 4x4 secret pattern</div>
               <div className="grid grid-cols-4 gap-1.5">
@@ -203,7 +223,28 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
 
             <div className="ep-inset p-3">
               <div className="ep-label mb-2">
-                What the physical wire tap reconstructs ({probeResult.leakRatePct}% leaked)
+                16-byte bus ciphertext ({probeResult.repeatedBlocks} duplicates)
+              </div>
+              <div className="grid grid-cols-4 gap-1.5">
+                {probeResult.blocks.map((blk) => (
+                  <div
+                    key={blk.index}
+                    title={`Block #${blk.index}: 0x${blk.cipherBlockHex}`}
+                    className={`flex h-7 items-center justify-center rounded border font-mono text-[9px] px-1 truncate ${
+                      blk.matchesFirstActiveBlock
+                        ? "border-accent bg-accent-soft text-ink font-semibold"
+                        : "border-rule bg-paper text-ink-2"
+                    }`}
+                  >
+                    {blk.cipherBlockHex.slice(0, 4)}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="ep-inset p-3">
+              <div className="ep-label mb-2">
+                Wire tap reconstruction ({probeResult.leakRatePct}% leaked)
               </div>
               <div className="grid grid-cols-4 gap-1.5">
                 {probeResult.reconstructedGrid.map((rec, idx) => (
@@ -224,7 +265,6 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
             </div>
           </div>
 
-          {/* One result line */}
           <div className="ep-inset px-3.5 py-2.5 font-mono text-xs text-ink">
             {probeResult.summary}
           </div>
@@ -235,7 +275,7 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
             </summary>
             <div className="mt-2.5 space-y-3 border-t border-rule pt-3">
               <p className="max-w-[68ch] leading-relaxed">
-                Physical memory interposers like TEE.fail sit passively between the CPU and DDR5 DIMMs. When identical 16-byte blocks are encrypted with a fixed address tweak, duplicates reveal the silhouette. Keeping active pages inside on-package GPU HBM and using a monotonic 96-bit AES-256-GCM nonce for every transfer makes every block unique ({probeResult.entropyBitsPerByte.toFixed(2)} bits/byte entropy).
+                Physical memory interposers sit passively between the CPU and DDR5 DIMMs. When identical 16-byte blocks are encrypted deterministically without a fresh nonce, duplicate ciphertext blocks reveal the silhouette. Using a fresh 96-bit AES-256-GCM nonce per transfer makes every 16-byte ciphertext block unique ({probeResult.uniqueBlocks} of 16 unique blocks, {probeResult.entropyBitsPerByte.toFixed(2)} bits/byte entropy).
               </p>
               <div className="flex flex-wrap items-center gap-2">
                 <span className="ep-label">Pattern presets:</span>
@@ -268,12 +308,10 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
             </span>
           </div>
 
-          {/* One-sentence goal */}
           <p className="max-w-[68ch] text-sm text-ink-2">
-            Click any of the six possible buyer-to-session matchings below to see whether the billing server can link Alice, Bob, or Carol to their anonymous chats.
+            Click any of the six possible buyer-to-session matchings below to test whether the billing server can link Dana Reyes or other buyers to their anonymous chats.
           </p>
 
-          {/* One primary interaction */}
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {blindRound.permutations.map((perm, idx) => {
               const isSelected = selectedPermIdx === idx;
@@ -301,11 +339,10 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
             })}
           </div>
 
-          {/* One result line */}
           <div className="ep-inset px-3.5 py-2.5 font-mono text-xs text-ink">
             {selectedPermIdx === null
               ? "Select any buyer-to-session matching above to test if the billing server can rule it out."
-              : `Matching #${selectedPermIdx + 1} is 100% consistent with the bank log (${blindRound.validPermutationsCount} of 6 matchings are equally valid, so the server learns nothing).`}
+              : `Matching #${selectedPermIdx + 1} is 100% consistent with the ${blindRound.modulusBits}-bit RSA blind signature log (${blindRound.validPermutationsCount} of 6 matchings are equally valid, so the server learns nothing).`}
           </div>
 
           <details className="text-xs text-ink-2">
@@ -314,11 +351,11 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
             </summary>
             <div className="mt-2.5 space-y-3 border-t border-rule pt-3">
               <p className="max-w-[68ch] leading-relaxed">
-                Your browser multiplies token serial <code className="font-mono text-ink">t</code> by a random blinding factor <code className="font-mono text-ink">r^e mod n</code> before the mint signs it, then divides out <code className="font-mono text-ink">r</code> locally. For every possible buyer-to-spend pair, there is an exact factor <code className="font-mono text-ink">r_ij</code> that satisfies the equation.
+                Your browser hashes the token with Full-Domain Hash (<code className="font-mono text-ink">hashTokenMessage</code>) and blinds it with <code className="font-mono text-ink">r^e mod n</code> (<code className="font-mono text-ink">blindToken</code>) before the mint signs it (<code className="font-mono text-ink">signBlinded</code>), then divides out <code className="font-mono text-ink">r</code> locally (<code className="font-mono text-ink">unblindSignature</code>).
               </p>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 max-w-md">
                 <label className="block font-mono text-xs">
-                  <span className="text-ink-3">Token serial (t)</span>
+                  <span className="text-ink-3">Token seed</span>
                   <input
                     type="number"
                     min={2}
@@ -329,7 +366,7 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
                   />
                 </label>
                 <label className="block font-mono text-xs">
-                  <span className="text-ink-3">Blinding factor (r)</span>
+                  <span className="text-ink-3">Blinding factor seed</span>
                   <input
                     type="number"
                     min={2}
@@ -340,11 +377,12 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
                   />
                 </label>
               </div>
-              <div className="ep-inset p-3 font-mono text-[11px] space-y-1">
-                <div>1. Blinded envelope (t * r^e mod {blindRound.n.toString()}): {blindRound.blinded.toString()}</div>
-                <div>2. Bank signature on envelope (s&apos;): {blindRound.sPrime.toString()}</div>
-                <div>3. Unblinded signature (s = s&apos; * r^-1 mod n): {blindRound.s.toString()}</div>
-                <div>4. Enclave check (s^e mod n == t): {blindRound.recomputedFromSignature.toString()} == {blindRound.t.toString()} (Valid)</div>
+              <div className="ep-inset p-3 font-mono text-[11px] space-y-1 break-all">
+                <div>1. RSA modulus size: {blindRound.modulusBits} bits (e = {blindRound.e.toString()})</div>
+                <div>2. Blinded envelope hex: 0x{blindRound.blindedHex.slice(0, 32)}...</div>
+                <div>3. Unblinded signature hex: 0x{blindRound.signatureHex.slice(0, 32)}...</div>
+                <div>4. Spend nullifier SHA-256: 0x{blindRound.nullifierHex.slice(0, 32)}...</div>
+                <div>5. verifyTokenSignature(token, pub): {blindRound.signatureValid ? "Valid (s^e mod n == H(token))" : "Invalid"}</div>
               </div>
             </div>
           </details>
@@ -359,17 +397,22 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
                 Spot the forged enclave before sending your prompt
               </h3>
             </div>
-            <span className={round3Solved ? "ep-pass" : "ep-muted-chip"}>
-              {round3Solved ? "Solved" : "Unsolved"}
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="ep-muted-chip">
+                {liveAttestationLoaded
+                  ? "Live /api/relay/attestation"
+                  : "Binary SEV-SNP verifier"}
+              </span>
+              <span className={round3Solved ? "ep-pass" : "ep-muted-chip"}>
+                {round3Solved ? "Solved" : "Unsolved"}
+              </span>
+            </div>
           </div>
 
-          {/* One-sentence goal */}
           <p className="max-w-[68ch] text-sm text-ink-2">
-            Check the hardware reports from three servers and route your prompt to the only node where every check passes.
+            Compare the live hardware attestation report from <code className="font-mono text-xs">router-0.tinfoil.sh</code> against two tampered copies, and route your prompt to the only candidate where every check passes.
           </p>
 
-          {/* One primary interaction */}
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
             {candidateNodes.map((node) => {
               const isSelected = chosenNodeId === node.id;
@@ -381,9 +424,11 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
                   }`}
                 >
                   <div className="space-y-2">
-                    <div className="flex items-center justify-between font-mono text-xs">
+                    <div className="flex items-center justify-between gap-2 font-mono text-xs">
                       <span className="font-semibold text-ink">{node.name}</span>
-                      <span className="text-ink-3">{node.region}</span>
+                    </div>
+                    <div className="font-mono text-[11px] text-ink-3 truncate">
+                      {node.region}
                     </div>
 
                     <div className="space-y-1.5 border-t border-rule pt-2 font-mono text-[11px]">
@@ -413,11 +458,10 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
             })}
           </div>
 
-          {/* One result line */}
           <div className="ep-inset px-3.5 py-2.5 font-mono text-xs text-ink">
             {nodeEval
               ? `${nodeEval.verdictHeadline} (${nodeEval.caughtRegister})`
-              : "Pick one of the three servers above to verify its hardware report."}
+              : "Pick one of the three attestation reports above to run the hardware and Sigstore checks."}
           </div>
 
           <details className="text-xs text-ink-2">
@@ -426,11 +470,16 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
             </summary>
             <div className="mt-2.5 space-y-2 border-t border-rule pt-3">
               <p className="max-w-[68ch] leading-relaxed">
-                A valid AMD hardware signature alone is not enough. Node Alpha has guest policy bit 19 (DEBUG) enabled, which lets the host operator read enclave memory. Node Bravo has debug disabled, but its container root hash does not match the public Sigstore build log. Only Node Charlie passes all five hardware and transparency checks.
+                Candidate Charlie uses the authentic 1,184-byte AMD SEV-SNP report from <code className="font-mono text-ink">router-0.tinfoil.sh</code>. Candidate Alpha has bit 19 (DEBUG) flipped at byte offset 0x08 of the binary report. Candidate Bravo has a tampered release digest that fails the Sigstore transparency log check.
               </p>
               {nodeEval && (
                 <p className="font-mono text-[11px] text-ink">
                   {nodeEval.explanation}
+                </p>
+              )}
+              {nodeEval?.chosenNode.verifierError && (
+                <p className="font-mono text-[11px] text-accent">
+                  Verifier error: {nodeEval.chosenNode.verifierError}
                 </p>
               )}
             </div>
@@ -443,7 +492,7 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
             <div>
               <div className="ep-label">Round 4 of 4</div>
               <h3 className="ep-display text-xl mt-0.5">
-                Destroy enclave memory when you leave
+                Destroy the session key when you leave
               </h3>
             </div>
             <span className={round4Solved ? "ep-pass" : "ep-muted-chip"}>
@@ -451,12 +500,10 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
             </span>
           </div>
 
-          {/* One-sentence goal */}
           <p className="max-w-[68ch] text-sm text-ink-2">
-            Pop the enclave session to zero out GPU memory, then run a server RAM dump to confirm zero readable bytes remain.
+            Pop the enclave session to overwrite the 256-bit AES-GCM session key with zeros, then attempt decryption on a server RAM dump to confirm decryption fails.
           </p>
 
-          {/* One primary interaction */}
           <div className="flex flex-wrap items-center gap-2.5">
             <button
               type="button"
@@ -464,8 +511,8 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
               className={round4Solved ? "ep-btn" : "ep-btn-ghost"}
             >
               {round4Solved
-                ? "Session popped & RAM dump verified (0 bytes)"
-                : "Pop session & run server RAM dump"}
+                ? "Key zeroed & AES-GCM decryption failed (0 bytes)"
+                : "Destroy session key & test RAM dump decryption"}
             </button>
             {subpoenaActions.length > 0 && (
               <button
@@ -478,7 +525,6 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
             )}
           </div>
 
-          {/* One result line */}
           <div className="ep-inset px-3.5 py-2.5 font-mono text-xs text-ink">
             {subpoenaState.subpoenaYieldSummary}
           </div>
@@ -490,11 +536,17 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
             <div className="mt-2.5 space-y-3 border-t border-rule pt-3">
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 font-mono text-xs">
                 <div className="ep-inset p-3">
-                  <div className="ep-label">Enclave GPU memory</div>
+                  <div className="ep-label">256-bit session key</div>
+                  <div className="mt-1 font-semibold text-ink truncate">
+                    0x{subpoenaState.sessionKeyHex.slice(0, 16)}...
+                  </div>
+                </div>
+                <div className="ep-inset p-3">
+                  <div className="ep-label">AES-256-GCM decrypt test</div>
                   <div className="mt-1 font-semibold text-ink">
-                    {subpoenaState.gpuPagesZeroed
-                      ? "Zeroed (0x00)"
-                      : "Live (4,096 B active)"}
+                    {subpoenaState.sessionDecryptable
+                      ? "Decrypts (key live)"
+                      : "Failed (tag mismatch)"}
                   </div>
                 </div>
                 <div className="ep-inset p-3">
@@ -503,11 +555,12 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
                     {subpoenaState.hostDumpReadableBytes} bytes
                   </div>
                 </div>
-                <div className="ep-inset p-3">
-                  <div className="ep-label">Decryptable by server</div>
-                  <div className="mt-1 font-semibold text-ink">No (0 keys held)</div>
-                </div>
               </div>
+              {subpoenaState.decryptionError && (
+                <div className="ep-inset p-2.5 font-mono text-[11px] text-ink">
+                  {subpoenaState.decryptionError}
+                </div>
+              )}
               <div className="flex flex-wrap gap-2">
                 <button
                   type="button"
@@ -521,21 +574,21 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
                   onClick={() => handleToggleSubpoenaStep("pop")}
                   className="ep-btn-ghost py-1 px-2.5 text-xs"
                 >
-                  2. Pop session
+                  2. Pop session (zero key)
                 </button>
                 <button
                   type="button"
                   onClick={() => handleToggleSubpoenaStep("shred-secret")}
                   className="ep-btn-ghost py-1 px-2.5 text-xs"
                 >
-                  3. Shred local key
+                  3. Destroy local key
                 </button>
                 <button
                   type="button"
                   onClick={() => handleToggleSubpoenaStep("host-ram-dump")}
                   className="ep-btn-ghost py-1 px-2.5 text-xs"
                 >
-                  4. Run RAM dump
+                  4. Run RAM dump decrypt
                 </button>
               </div>
               <ul className="space-y-1 font-mono text-[11px] text-ink-2">

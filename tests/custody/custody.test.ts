@@ -1,16 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
+import { GET as getCustodyRoute } from "@/app/api/custody/route";
 import {
   CustodyCtrDrbg,
   HASH_BLOCK_TOKENS,
   PrefixCachePool,
   computePrefixBlockHashes,
+  constantTimeEqualBytes,
   runMemoryBusAndPopAudit,
+  verifyCustodyPrimitives,
 } from "@/lib/custody";
 
-describe("Subsystem 10: GPU Custody Module (§2.3, §2.4, V1, V6)", () => {
-  describe("CustodyCtrDrbg (Spec §2.4)", () => {
-    it("produces deterministic streams for identical hardware seeds and diverges when client entropy is mixed in", () => {
+describe("Subsystem 10: Custody Cryptographic Primitives & Software Model", () => {
+  describe("CustodyCtrDrbg (AES-256 CTR-DRBG in software Uint8Array)", () => {
+    it("produces deterministic streams for identical seeds and diverges when client entropy is mixed in", () => {
       const seed = new Uint8Array(32);
       for (let i = 0; i < 32; i++) {
         seed[i] = i + 1;
@@ -23,13 +26,11 @@ describe("Subsystem 10: GPU Custody Module (§2.3, §2.4, V1, V6)", () => {
       const streamB1 = bytesToHex(drbgB.generate(64));
       expect(streamA1).toBe(streamB1);
 
-      // Mix client entropy into drbgA only
       drbgA.reseed(utf8ToBytes("client-session-entropy-alpha"));
       const streamA2 = bytesToHex(drbgA.generate(64));
       const streamB2 = bytesToHex(drbgB.generate(64));
       expect(streamA2).not.toBe(streamB2);
 
-      // Two DRBGs with the same client entropy mix-in remain deterministic
       const drbgC = new CustodyCtrDrbg(seed);
       drbgC.generate(64);
       drbgC.reseed(utf8ToBytes("client-session-entropy-alpha"));
@@ -37,7 +38,7 @@ describe("Subsystem 10: GPU Custody Module (§2.3, §2.4, V1, V6)", () => {
       expect(streamA2).toBe(streamC2);
     });
 
-    it("overwrites internal key/counter/derived buffers with 0x00 and throws after zeroize()", () => {
+    it("overwrites internal key/counter/derived Uint8Array buffers with 0x00 and throws after zeroize()", () => {
       const seed = new Uint8Array(32).fill(0x42);
       const drbg = new CustodyCtrDrbg(seed, utf8ToBytes("initial-client-entropy"));
       const generated = drbg.generate(48);
@@ -50,6 +51,7 @@ describe("Subsystem 10: GPU Custody Module (§2.3, §2.4, V1, V6)", () => {
       expect(drbg.isZeroized()).toBe(true);
 
       const snapshot = drbg.inspectInternalBuffers();
+      expect(snapshot.executionEnvironment).toBe("software-uint8array");
       expect(snapshot.keyBytes.every((b) => b === 0)).toBe(true);
       expect(snapshot.counterBytes.every((b) => b === 0)).toBe(true);
       expect(generated.every((b) => b === 0)).toBe(true);
@@ -63,7 +65,18 @@ describe("Subsystem 10: GPU Custody Module (§2.3, §2.4, V1, V6)", () => {
     });
   });
 
-  describe("PrefixCachePool & Keyed HMAC Prefix Hashing (Spec §2.3 & §2.4)", () => {
+  describe("PrefixCachePool, Keyed HMAC Prefix Hashing & Constant-Time Compare", () => {
+    it("compares byte buffers in constant time via constantTimeEqualBytes", () => {
+      const a = utf8ToBytes("drouter-session-prefix-key-32byt");
+      const b = utf8ToBytes("drouter-session-prefix-key-32byt");
+      const c = utf8ToBytes("drouter-session-prefix-key-32byX");
+      const shorter = utf8ToBytes("short");
+
+      expect(constantTimeEqualBytes(a, b)).toBe(true);
+      expect(constantTimeEqualBytes(a, c)).toBe(false);
+      expect(constantTimeEqualBytes(a, shorter)).toBe(false);
+    });
+
     it("hits at 512-token block boundaries within the same session (1,200 matching tokens -> 1,024 tokens = 2 blocks)", () => {
       const seed = new Uint8Array(32).fill(0x19);
       const drbg = new CustodyCtrDrbg(seed);
@@ -72,11 +85,9 @@ describe("Subsystem 10: GPU Custody Module (§2.3, §2.4, V1, V6)", () => {
 
       const pool = new PrefixCachePool();
 
-      // Base prompt of 1,536 tokens (3 complete 512-token blocks)
       const baseTokens = Array.from({ length: 1536 }, (_, idx) => 500 + idx);
       pool.storePrefix(session1.sessionId, baseTokens, session1.sessionPrefixKey);
 
-      // Follow-up turn shares the first 1,200 tokens and diverges for the remaining 336 tokens
       const followUpTokens = baseTokens.map((tok, idx) => (idx < 1200 ? tok : tok + 90000));
       const sameSessionHit = pool.lookupLongestPrefix(
         session1.sessionId,
@@ -89,7 +100,6 @@ describe("Subsystem 10: GPU Custody Module (§2.3, §2.4, V1, V6)", () => {
       expect(sameSessionHit.hitTokens).toBe(1024);
       expect(sameSessionHit.crossSessionIsolated).toBe(true);
 
-      // Identical tokens in a different session produce 0 hits and completely distinct HMAC hashes
       const crossSessionHit = pool.lookupLongestPrefix(
         session2.sessionId,
         baseTokens,
@@ -106,7 +116,6 @@ describe("Subsystem 10: GPU Custody Module (§2.3, §2.4, V1, V6)", () => {
       expect(hashesS1[1]).not.toBe(hashesS2[1]);
       expect(hashesS1[2]).not.toBe(hashesS2[2]);
 
-      // Pop session 1 and verify its keys/entries are zeroed and evicted
       const popResult = pool.popSession(session1.sessionId);
       expect(popResult.evicted).toBe(true);
       expect(popResult.allZeroVerified).toBe(true);
@@ -114,10 +123,24 @@ describe("Subsystem 10: GPU Custody Module (§2.3, §2.4, V1, V6)", () => {
     });
   });
 
-  describe("V1 Memory-Bus Probe & V6 Pop Zeroization Audit (Spec V1 & V6)", () => {
-    it("passes both V1 and V6 verification checks across 5 identical sensitive turns", () => {
-      const report = runMemoryBusAndPopAudit();
+  describe("verifyCustodyPrimitives, Model-Labelled Audit & GET /api/custody", () => {
+    it("verifies real cryptographic primitives and explicitly labels runMemoryBusAndPopAudit as mode='model'", async () => {
+      const primitives = verifyCustodyPrimitives();
+      expect(primitives.executionEnvironment).toBe("software-uint8array");
+      expect(primitives.observesPhysicalGpuMemory).toBe(false);
+      expect(primitives.allPrimitivesPassed).toBe(true);
+      expect(primitives.ctrDrbg.deterministicForIdenticalSeeds).toBe(true);
+      expect(primitives.ctrDrbg.divergesOnClientEntropyReseed).toBe(true);
+      expect(primitives.ctrDrbg.zeroizedBuffersVerified).toBe(true);
+      expect(primitives.prefixCache.constantTimeCompareVerified).toBe(true);
+      expect(primitives.prefixCache.sameSessionHitBlocks).toBe(3);
+      expect(primitives.prefixCache.crossSessionHitBlocks).toBe(0);
 
+      const report = runMemoryBusAndPopAudit();
+      expect(report.mode).toBe("model");
+      expect(report.simulated).toBe(true);
+      expect(report.observesPhysicalGpuMemory).toBe(false);
+      expect(report.note).toContain("Simulated model");
       expect(report.turnsSimulated).toBe(5);
       expect(report.totalHostBytesObserved).toBeGreaterThan(8000);
       expect(report.plaintextLeakMatches).toBe(0);
@@ -127,6 +150,23 @@ describe("Subsystem 10: GPU Custody Module (§2.3, §2.4, V1, V6)", () => {
       expect(report.postPopOffloadDecryptFailed).toBe(true);
       expect(report.v1Passed).toBe(true);
       expect(report.v6Passed).toBe(true);
+
+      const res = await getCustodyRoute(new Request("http://localhost:3000/api/custody"));
+      expect(res.status).toBe(200);
+      const json = (await res.json()) as {
+        executionEnvironment: string;
+        observesPhysicalGpuMemory: boolean;
+        primitives: { allPrimitivesPassed: boolean };
+        audit: { mode: string; simulated: boolean };
+        prefixCacheDemo: { constantTimeCompareCheck: boolean; popZeroized: boolean };
+      };
+      expect(json.executionEnvironment).toBe("software-uint8array");
+      expect(json.observesPhysicalGpuMemory).toBe(false);
+      expect(json.primitives.allPrimitivesPassed).toBe(true);
+      expect(json.audit.mode).toBe("model");
+      expect(json.audit.simulated).toBe(true);
+      expect(json.prefixCacheDemo.constantTimeCompareCheck).toBe(true);
+      expect(json.prefixCacheDemo.popZeroized).toBe(true);
     });
 
     it("rejects all-zero hardware seeds, all-zero prefix keys, and non-positive or oversized generate requests", () => {
@@ -139,7 +179,6 @@ describe("Subsystem 10: GPU Custody Module (§2.3, §2.4, V1, V6)", () => {
       expect(() => drbg.generate(-8)).toThrow();
       expect(() => drbg.generate(32 * 1024 * 1024)).toThrow();
 
-      // Boundary sizes: 1B, 15B, 16B, 17B, 1MB
       for (const size of [1, 15, 16, 17, 1024 * 1024]) {
         const out = drbg.generate(size);
         expect(out.byteLength).toBe(size);

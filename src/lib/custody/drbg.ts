@@ -21,6 +21,7 @@ export interface DrbgInternalBufferSnapshot {
   destroyed: boolean;
   reseedCounter: number;
   generatedBlocks: number;
+  executionEnvironment: "software-uint8array";
 }
 
 /**
@@ -36,14 +37,12 @@ function incrementCounterBlockBE(counter: Uint8Array, steps: number): void {
 }
 
 /**
- * Spec §2.4: GPU Custody Module AES-256 CTR-DRBG.
+ * AES-256 CTR-DRBG cryptographic primitive implemented in local JavaScript memory (`Uint8Array`).
  *
- * At launch, the custody module receives one 256-bit seed from the monitor and
- * expands it with an AES-256 CTR-DRBG on the GPU. Session key agreement also
- * mixes in the client's entropy contribution via `reseed(clientEntropy)`.
- * When `zeroize()` is invoked (e.g., on `pop()`), all internal key, counter,
- * and derived session key buffers are overwritten with `0x00` and the instance
- * permanently refuses further operations.
+ * Expands a 256-bit seed using HMAC-SHA-256 conditioning and AES-256-CTR keystream generation
+ * with backtracking-resistant ratcheting after every generate or reseed operation.
+ * When `zeroize()` is invoked, internal key, counter, and tracked derived `Uint8Array` buffers
+ * in process memory are overwritten with `0x00` and the instance refuses further calls.
  */
 export class CustodyCtrDrbg {
   private readonly key: Uint8Array;
@@ -97,7 +96,7 @@ export class CustodyCtrDrbg {
 
   /**
    * Internal CTR-DRBG Update function: generates 48 bytes (3 AES blocks) using
-   * the current (Key, V) in AES-256-CTR mode and XORs conditioned `providedData`
+   * the current (Key, V) in AES-256-CTR mode and mixes conditioned `providedData`
    * to produce the next (Key, V).
    */
   private ctrDrbgUpdate(providedData: Uint8Array): void {
@@ -122,7 +121,7 @@ export class CustodyCtrDrbg {
   }
 
   /**
-   * Mix client entropy contribution into the CTR-DRBG state (Spec §2.4).
+   * Mix caller entropy contribution into the CTR-DRBG state.
    */
   public reseed(clientEntropy: Uint8Array): void {
     this.assertAlive();
@@ -171,8 +170,8 @@ export class CustodyCtrDrbg {
   }
 
   /**
-   * Derive a full per-session key bundle inside the custody module, optionally mixing
-   * in client ephemeral entropy first.
+   * Derive a per-session key bundle (`sessionTrafficKey`, `sessionOffloadKey`,
+   * `sessionPrefixKey`, `noncePrefix`), optionally mixing in caller entropy first.
    */
   public deriveSessionKeys(sessionId: string, clientEntropy?: Uint8Array): CustodySessionKeyBundle {
     this.assertAlive();
@@ -195,7 +194,7 @@ export class CustodyCtrDrbg {
   }
 
   /**
-   * Register an external custody page/key buffer so `zeroize()` wipes it on `pop()`.
+   * Register an external `Uint8Array` buffer so `zeroize()` overwrites it with `0x00`.
    */
   public trackCustodyBuffer(buffer: Uint8Array): void {
     this.assertAlive();
@@ -203,8 +202,8 @@ export class CustodyCtrDrbg {
   }
 
   /**
-   * Overwrite all internal key, counter, and tracked derived buffers with 0x00
-   * and mark the DRBG permanently destroyed.
+   * Overwrite internal key, counter, and tracked `Uint8Array` buffers in process memory
+   * with `0x00` and mark the DRBG permanently destroyed.
    */
   public zeroize(): void {
     this.key.fill(0);
@@ -220,7 +219,7 @@ export class CustodyCtrDrbg {
   }
 
   /**
-   * Exposes references to internal state buffers for V6 zeroization verification.
+   * Exposes references to internal `Uint8Array` state buffers for zeroization checks.
    */
   public inspectInternalBuffers(): DrbgInternalBufferSnapshot {
     return {
@@ -230,6 +229,7 @@ export class CustodyCtrDrbg {
       destroyed: this.destroyed,
       reseedCounter: this.reseedCounter,
       generatedBlocks: this.generatedBlocks,
+      executionEnvironment: "software-uint8array",
     };
   }
 }

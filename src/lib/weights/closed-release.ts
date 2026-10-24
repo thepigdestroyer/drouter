@@ -111,8 +111,8 @@ function buildReleaseTranscript(params: {
 }
 
 /**
- * At launch, the custody module inside the GPU TEE creates a fresh hybrid
- * X25519 + ML-KEM-768 keypair dedicated to the closed-model provider.
+ * Local software key-wrapping primitive: generates a hybrid X25519 + ML-KEM-768 keypair
+ * and computes a SHA-256 binding hash over the two public keys.
  */
 export function createCustodyProviderKeypair(seedHex?: string): CustodyProviderKeypair {
   const seedMaterial = seedHex
@@ -162,10 +162,10 @@ export function createCustodyProviderKeypair(seedHex?: string): CustodyProviderK
 }
 
 /**
- * Provider's key service verifies the node's attestation evidence and M-of-N quorum
- * independently, then encapsulates a hybrid X25519 + ML-KEM-768 secret to the custody
- * module's public keys, derives K_wrap via HKDF-SHA-384, encrypts weightKeyHex with
- * AES-256-GCM, and signs the release statement with the provider's Ed25519 key.
+ * Local software key-wrapping primitive: checks measurement and quorum fields in `nodeEvidence`,
+ * encapsulates a hybrid X25519 + ML-KEM-768 secret to the recipient public keys,
+ * derives K_wrap via HKDF-SHA-384, encrypts weightKeyHex with AES-256-GCM, and signs
+ * the release transcript with Ed25519.
  */
 export function providerWrapWeightKey(
   params: ProviderWrapWeightKeyParams
@@ -283,10 +283,9 @@ export function providerWrapWeightKey(
 }
 
 /**
- * Unwraps the provider's encrypted weight key inside the GPU TEE custody module.
- * Verifies the provider's Ed25519 release signature, decapsulates X25519 + ML-KEM-768,
- * derives K_wrap via HKDF-SHA-384, and decrypts the AES-256-GCM ciphertext.
- * Throws if any component is tampered with.
+ * Local software key-unwrapping primitive: verifies the Ed25519 signature over the
+ * release transcript, decapsulates X25519 + ML-KEM-768, derives K_wrap via HKDF-SHA-384,
+ * and decrypts the AES-256-GCM ciphertext. Throws if any component is tampered with.
  */
 export function custodyUnwrapWeightKey(
   release: ProviderKeyReleaseSuccess,
