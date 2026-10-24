@@ -5,6 +5,7 @@
 dRouter is a privacy-preserving AI inference router that verifies hardware attestation quotes from CPU and GPU Trusted Execution Environments (TEEs) in the client before sealing prompts with RFC 9180 HPKE encryption. It combines on-device PII and secret scrubbing, homomorphic symmetry masking, Gemini 4 Argon autonomous security orchestration, MongoDB Atlas hybrid search, and Circle Arc Testnet receipt settlement so cloud relays and model hosts cannot read raw user secrets.
 
 Live deployment: https://drouter-demo.vercel.app
+Source: https://github.com/thepigdestroyer/drouter
 
 ## Who It Is For
 

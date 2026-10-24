@@ -221,6 +221,14 @@ export function SpecimenFooter() {
         </p>
         <div className="flex flex-wrap items-center gap-4">
           <a
+            href="https://github.com/thepigdestroyer/drouter"
+            target="_blank"
+            rel="noreferrer"
+            className="ep-link text-xs"
+          >
+            Source on GitHub
+          </a>
+          <a
             href="https://testnet.arcscan.app/address/0xbc8085c2b6fe6e0db05f169925c0b841828f4481"
             target="_blank"
             rel="noreferrer"
