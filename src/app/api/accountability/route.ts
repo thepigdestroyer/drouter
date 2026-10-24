@@ -128,15 +128,20 @@ function createInitialStore(): AccountabilityStore {
   };
 }
 
-const store: AccountabilityStore = createInitialStore();
+// Created on first request so module evaluation at build time never needs server secrets.
+let storeInstance: AccountabilityStore | null = null;
+function getStore(): AccountabilityStore {
+  if (!storeInstance) storeInstance = createInitialStore();
+  return storeInstance;
+}
 
 function computeRampStates(): Record<string, HeartbeatEvaluation & { nodeId: string }> {
   const out: Record<string, HeartbeatEvaluation & { nodeId: string }> = {};
   for (const nodeId of DEMO_NODE_IDS) {
-    const events = store.heartbeatsByNode[nodeId] ?? [];
+    const events = getStore().heartbeatsByNode[nodeId] ?? [];
     out[nodeId] = {
       nodeId,
-      ...evaluateHeartbeatWindow(events, store.nowSec),
+      ...evaluateHeartbeatWindow(events, getStore().nowSec),
     };
   }
   return out;
@@ -209,7 +214,7 @@ export async function GET(request?: Request) {
   }
 
   const registry = await listNodes();
-  const latestClaim = store.recentClaims[0];
+  const latestClaim = getStore().recentClaims[0];
   const latestTx = latestClaim?.txHash ?? null;
   const explorerUrl = latestTx
     ? explorerTx(latestTx)
@@ -220,8 +225,8 @@ export async function GET(request?: Request) {
   return Response.json({
     manifests: defaultManifests(),
     rampStates: computeRampStates(),
-    activeCanaries: publicCanaries(store.activeCanaries),
-    recentClaims: store.recentClaims,
+    activeCanaries: publicCanaries(getStore().activeCanaries),
+    recentClaims: getStore().recentClaims,
     forbiddenPrefix: FORBIDDEN_PREFIX_HEX,
     latencyTriangulations: defaultLatencyTriangulations(),
     registrySource: registry.source,
@@ -234,9 +239,9 @@ export async function GET(request?: Request) {
 }
 
 function pushClaim(eventRecord: RecordedClaimEvent) {
-  store.recentClaims.unshift(eventRecord);
-  if (store.recentClaims.length > MAX_RECENT_CLAIMS) {
-    store.recentClaims.length = MAX_RECENT_CLAIMS;
+  getStore().recentClaims.unshift(eventRecord);
+  if (getStore().recentClaims.length > MAX_RECENT_CLAIMS) {
+    getStore().recentClaims.length = MAX_RECENT_CLAIMS;
   }
 }
 
@@ -297,19 +302,19 @@ export async function POST(request: Request) {
     );
   }
 
-  store.nowSec += 10;
+  getStore().nowSec += 10;
   const { publicKeyHex } = deriveNodeIdentityKey(nodeId);
   const { stakeUsdc } = await resolveNodeStakeUsdc(nodeId);
 
   if (action === "trigger-canary") {
     const canary =
-      store.activeCanaries[nodeId] ??
-      createCanarySession(nodeId, publicKeyHex, store.epoch);
+      getStore().activeCanaries[nodeId] ??
+      createCanarySession(nodeId, publicKeyHex, getStore().epoch);
     const verdict: CanaryLeakVerdict = verifyCanaryLeak({
       honeytoken: canary.honeytoken,
       salt: canary.salt,
       nodeIdentityPk: publicKeyHex,
-      epoch: store.epoch,
+      epoch: getStore().epoch,
       commitment: canary.commitment,
       stakeUsdc,
     });
@@ -321,17 +326,17 @@ export async function POST(request: Request) {
       commitment: canary.commitment,
       honeytokenHash: bytesToHex(sha256(utf8ToBytes(canary.honeytoken))),
       salt: canary.salt,
-      epoch: store.epoch,
+      epoch: getStore().epoch,
       stakeUsdc,
       valid: verdict.valid,
     };
     const chainRes = await recordAccountabilityEvidenceOnChain(nodeId, evidenceObj);
 
     const eventRecord: RecordedClaimEvent = {
-      id: `claim-${store.epoch}-${store.recentClaims.length + 1}`,
+      id: `claim-${getStore().epoch}-${getStore().recentClaims.length + 1}`,
       kind: "canary-leak",
       nodeId,
-      timestamp: store.nowSec,
+      timestamp: getStore().nowSec,
       slashUsdc: verdict.slashUsdc,
       bountyUsdc: verdict.reporterBountyUsdc,
       compensationPoolUsdc: verdict.compensationPoolUsdc,
@@ -343,8 +348,8 @@ export async function POST(request: Request) {
       onChain: chainRes.onChain,
     };
     pushClaim(eventRecord);
-    store.epoch += 1;
-    store.activeCanaries[nodeId] = createCanarySession(nodeId, publicKeyHex, store.epoch);
+    getStore().epoch += 1;
+    getStore().activeCanaries[nodeId] = createCanarySession(nodeId, publicKeyHex, getStore().epoch);
 
     return Response.json({
       ok: true,
@@ -358,8 +363,8 @@ export async function POST(request: Request) {
       explorerUrl: chainRes.explorerUrl,
       onChain: chainRes.onChain,
       rampStates: computeRampStates(),
-      activeCanaries: publicCanaries(store.activeCanaries),
-      recentClaims: store.recentClaims,
+      activeCanaries: publicCanaries(getStore().activeCanaries),
+      recentClaims: getStore().recentClaims,
     });
   }
 
@@ -390,10 +395,10 @@ export async function POST(request: Request) {
     const chainRes = await recordAccountabilityEvidenceOnChain(nodeId, evidenceObj);
 
     const eventRecord: RecordedClaimEvent = {
-      id: `claim-${store.epoch}-${store.recentClaims.length + 1}`,
+      id: `claim-${getStore().epoch}-${getStore().recentClaims.length + 1}`,
       kind: "key-compromise",
       nodeId,
-      timestamp: store.nowSec,
+      timestamp: getStore().nowSec,
       slashUsdc: verdict.slashUsdc,
       bountyUsdc: verdict.submitterBountyUsdc,
       compensationPoolUsdc: 0,
@@ -418,28 +423,28 @@ export async function POST(request: Request) {
       explorerUrl: chainRes.explorerUrl,
       onChain: chainRes.onChain,
       rampStates: computeRampStates(),
-      activeCanaries: publicCanaries(store.activeCanaries),
-      recentClaims: store.recentClaims,
+      activeCanaries: publicCanaries(getStore().activeCanaries),
+      recentClaims: getStore().recentClaims,
     });
   }
 
   if (action === "simulate-restart") {
     const rotatedPk = bytesToHex(
-      sha256(utf8ToBytes(`rotated-identity/${nodeId}/${store.nowSec}`)),
+      sha256(utf8ToBytes(`rotated-identity/${nodeId}/${getStore().nowSec}`)),
     );
-    const events = store.heartbeatsByNode[nodeId] ?? [];
+    const events = getStore().heartbeatsByNode[nodeId] ?? [];
     // Advance by > 60s and rotate ephemeral enclave identity key
-    store.nowSec += 120;
+    getStore().nowSec += 120;
     events.push({
       nodeIdentityPk: rotatedPk,
-      timestamp: store.nowSec,
+      timestamp: getStore().nowSec,
     });
     if (events.length > MAX_HEARTBEATS_PER_NODE) {
       events.splice(0, events.length - MAX_HEARTBEATS_PER_NODE);
     }
-    store.heartbeatsByNode[nodeId] = events;
+    getStore().heartbeatsByNode[nodeId] = events;
 
-    const evaluation = evaluateHeartbeatWindow(events, store.nowSec);
+    const evaluation = evaluateHeartbeatWindow(events, getStore().nowSec);
     const evidenceObj = {
       kind: "restart",
       nodeId,
@@ -447,15 +452,15 @@ export async function POST(request: Request) {
       restartsIn30d: evaluation.restartsIn30d,
       phase: evaluation.phase,
       weightBps: evaluation.weightBps,
-      timestamp: store.nowSec,
+      timestamp: getStore().nowSec,
     };
     const chainRes = await recordAccountabilityEvidenceOnChain(nodeId, evidenceObj);
 
     const eventRecord: RecordedClaimEvent = {
-      id: `claim-${store.epoch}-${store.recentClaims.length + 1}`,
+      id: `claim-${getStore().epoch}-${getStore().recentClaims.length + 1}`,
       kind: "restart",
       nodeId,
-      timestamp: store.nowSec,
+      timestamp: getStore().nowSec,
       slashUsdc: 0,
       bountyUsdc: 0,
       compensationPoolUsdc: 0,
@@ -479,29 +484,29 @@ export async function POST(request: Request) {
       explorerUrl: chainRes.explorerUrl,
       onChain: chainRes.onChain,
       rampStates: computeRampStates(),
-      activeCanaries: publicCanaries(store.activeCanaries),
-      recentClaims: store.recentClaims,
+      activeCanaries: publicCanaries(getStore().activeCanaries),
+      recentClaims: getStore().recentClaims,
     });
   }
 
   // action === "simulate-clone"
   const clonedPkA = bytesToHex(
-    sha256(utf8ToBytes(`clone-a/${nodeId}/${store.nowSec}`)),
+    sha256(utf8ToBytes(`clone-a/${nodeId}/${getStore().nowSec}`)),
   );
   const clonedPkB = bytesToHex(
-    sha256(utf8ToBytes(`clone-b/${nodeId}/${store.nowSec}`)),
+    sha256(utf8ToBytes(`clone-b/${nodeId}/${getStore().nowSec}`)),
   );
-  const events = store.heartbeatsByNode[nodeId] ?? [];
+  const events = getStore().heartbeatsByNode[nodeId] ?? [];
   events.push(
-    { nodeIdentityPk: clonedPkA, timestamp: store.nowSec - 5 },
-    { nodeIdentityPk: clonedPkB, timestamp: store.nowSec },
+    { nodeIdentityPk: clonedPkA, timestamp: getStore().nowSec - 5 },
+    { nodeIdentityPk: clonedPkB, timestamp: getStore().nowSec },
   );
   if (events.length > MAX_HEARTBEATS_PER_NODE) {
     events.splice(0, events.length - MAX_HEARTBEATS_PER_NODE);
   }
-  store.heartbeatsByNode[nodeId] = events;
+  getStore().heartbeatsByNode[nodeId] = events;
 
-  const evaluation = evaluateHeartbeatWindow(events, store.nowSec);
+  const evaluation = evaluateHeartbeatWindow(events, getStore().nowSec);
   const evidenceObj = {
     kind: "clone-detected",
     nodeId,
@@ -511,15 +516,15 @@ export async function POST(request: Request) {
     phase: evaluation.phase,
     weightBps: evaluation.weightBps,
     stakeUsdc,
-    timestamp: store.nowSec,
+    timestamp: getStore().nowSec,
   };
   const chainRes = await recordAccountabilityEvidenceOnChain(nodeId, evidenceObj);
 
   const eventRecord: RecordedClaimEvent = {
-    id: `claim-${store.epoch}-${store.recentClaims.length + 1}`,
+    id: `claim-${getStore().epoch}-${getStore().recentClaims.length + 1}`,
     kind: "clone-detected",
     nodeId,
-    timestamp: store.nowSec,
+    timestamp: getStore().nowSec,
     slashUsdc: stakeUsdc,
     bountyUsdc: 0,
     compensationPoolUsdc: 0,
@@ -543,7 +548,7 @@ export async function POST(request: Request) {
     explorerUrl: chainRes.explorerUrl,
     onChain: chainRes.onChain,
     rampStates: computeRampStates(),
-    activeCanaries: publicCanaries(store.activeCanaries),
-    recentClaims: store.recentClaims,
+    activeCanaries: publicCanaries(getStore().activeCanaries),
+    recentClaims: getStore().recentClaims,
   });
 }
