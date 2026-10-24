@@ -5,10 +5,15 @@ import {
   verifyModelEnclaveStatus,
   type DeepAttestationBundle,
   type ModelEnclaveAttestation,
+  type SnpChainVerificationResult,
 } from "@/lib/tinfoil/deep-inspect";
 import type { CheckResult } from "@/lib/types";
 
 export { RELAY_HOPS };
+
+export type EnrichedVerificationDocument = VerificationDocument & {
+  snpChainVerification?: SnpChainVerificationResult;
+};
 
 /** Models served inside Tinfoil's attested enclaves that the demo offers. */
 export const TINFOIL_MODELS = [
@@ -34,6 +39,7 @@ export interface TinfoilEvidence {
   chipId?: string;
   tcb?: string;
   guestPolicy?: string;
+  amdKdsChain?: string;
   gpuEnclaveHost?: string;
   gpuVmShape?: string;
   pinnedWeights?: string;
@@ -41,6 +47,7 @@ export interface TinfoilEvidence {
   "Chip ID"?: string;
   TCB?: string;
   "Guest policy"?: string;
+  "AMD KDS chain"?: string;
   "GPU enclave host"?: string;
   "GPU VM shape"?: string;
   "Pinned weights"?: string;
@@ -54,6 +61,7 @@ export interface TinfoilSession {
   evidence: TinfoilEvidence;
   relayHop: string;
   lastBucketBytes?: number;
+  verificationDocument?: EnrichedVerificationDocument;
   deepBundle?: DeepAttestationBundle;
   selectedModelAttestation?: ModelEnclaveAttestation;
   send(model: string, messages: { role: "user" | "assistant"; content: string }[]): AsyncIterable<string>;
@@ -77,8 +85,9 @@ function stepDetail(step: Step | undefined, ok: string): string {
 
 /** Maps Tinfoil's verification document onto the dRouter checklist (C1–C7). */
 export function checksFromDocument(
-  doc: VerificationDocument,
+  doc: EnrichedVerificationDocument,
   modelAttestation?: ModelEnclaveAttestation,
+  snpChain?: SnpChainVerificationResult,
 ): CheckResult[] {
   const s = doc.steps;
   const both = (a: Step | undefined, b: Step | undefined): CheckResult["status"] =>
@@ -88,17 +97,30 @@ export function checksFromDocument(
         ? "pass"
         : "skip";
 
+  const resolvedChain = snpChain ?? doc.snpChainVerification;
+  const baseC1Status = stepStatus(s.verifyEnclave);
+  const c1Status: CheckResult["status"] =
+    resolvedChain && !resolvedChain.verified ? "fail" : baseC1Status;
+  const c1ChainSuffix =
+    resolvedChain && resolvedChain.verified
+      ? `; VCEK -> ${resolvedChain.askSubject.split(",")[0] || "ASK"} -> ${resolvedChain.arkSubject.split(",")[0] || "ARK"} (${resolvedChain.productName}, arkFp=${resolvedChain.arkFingerprintSha256.slice(0, 12)}…) verified`
+      : "";
+  const c1Detail =
+    resolvedChain && !resolvedChain.verified
+      ? resolvedChain.error ?? "AMD SEV-SNP VCEK -> ASK -> ARK chain verification failed"
+      : stepDetail(
+          s.verifyEnclave,
+          `AMD SEV-SNP report verified to AMD's root (${doc.enclaveMeasurement.measurement.type}${c1ChainSuffix})`,
+        );
+
   const modelStatus = modelAttestation ? verifyModelEnclaveStatus(modelAttestation) : null;
 
   return [
     {
       id: "C1",
       label: "Hardware signature chain",
-      status: stepStatus(s.verifyEnclave),
-      detail: stepDetail(
-        s.verifyEnclave,
-        `AMD SEV-SNP report verified to AMD's root (${doc.enclaveMeasurement.measurement.type})`,
-      ),
+      status: c1Status,
+      detail: c1Detail,
     },
     {
       id: "C2",
@@ -130,7 +152,7 @@ export function checksFromDocument(
       status: modelStatus ? (modelStatus.c5Pass ? "pass" : "fail") : "skip",
       detail: modelStatus
         ? modelStatus.c5Detail
-        : "Tinfoil's browser verifier does not expose raw GPU SPDM reports; the router enclave attests the model enclaves",
+        : "Model enclave attestation bundle not provided; C5 requires model enclave verification",
     },
     {
       id: "C6",
@@ -141,21 +163,22 @@ export function checksFromDocument(
     {
       id: "C7",
       label: "Manifest-pinned model & dm-verity root",
-      status: modelStatus ? (modelStatus.c7Pass ? "pass" : "fail") : "pass",
+      status: modelStatus ? (modelStatus.c7Pass ? "pass" : "fail") : "skip",
       detail: modelStatus
         ? modelStatus.c7Detail
-        : "Model name is sent in a header and the enclave rejects requests whose encrypted body names a different model",
+        : "Model enclave attestation bundle not provided; C7 requires Sigstore-verified model manifest & dm-verity root",
     },
   ];
 }
 
 function evidenceFromDocument(
-  doc: VerificationDocument,
+  doc: EnrichedVerificationDocument,
   deepBundle?: DeepAttestationBundle,
   modelAttestation?: ModelEnclaveAttestation,
   relayHop?: string,
 ): TinfoilEvidence {
   const snp = deepBundle?.routerSnpReport;
+  const chain = doc.snpChainVerification ?? deepBundle?.routerSnpChain;
   const chipId = snp ? `${snp.chipIdHex.slice(0, 16)}…${snp.chipIdHex.slice(-8)}` : undefined;
   const tcb = snp
     ? `bl=${snp.tcb.bootloader} tee=${snp.tcb.tee} snp=${snp.tcb.snp} ucode=${snp.tcb.microcode} fmc=${snp.tcb.fmc}`
@@ -163,18 +186,23 @@ function evidenceFromDocument(
   const guestPolicy = snp
     ? `${snp.policyHex} (debug=${snp.debugAllowed ? "on" : "off"}, smt=${snp.smtAllowed ? "on" : "off"}, migrate=${snp.migrationAllowed ? "on" : "off"})`
     : undefined;
+  const amdKdsChain = chain?.verified
+    ? `VCEK -> ${chain.askSubject.split(",")[0]} -> ${chain.arkSubject.split(",")[0]} (ECDSA-P384 + RSASSA-PSS verified)`
+    : undefined;
 
-  const primaryGpuHost = modelAttestation?.enclaveHosts[0]?.host;
-  const gpuEnclaveHost = modelAttestation
+  const isModelAvailable = modelAttestation && modelAttestation.status !== "unavailable";
+  const primaryGpuHost = isModelAvailable ? modelAttestation.enclaveHosts[0]?.host : undefined;
+  const gpuEnclaveHost = isModelAvailable
     ? `${primaryGpuHost ?? modelAttestation.repo} (${modelAttestation.healthyHosts}/${modelAttestation.configuredHosts} healthy)`
     : undefined;
-  const gpuVmShape = modelAttestation
+  const gpuVmShape = isModelAvailable
     ? `${modelAttestation.vmShape.gpus}× GPU · ${modelAttestation.vmShape.cpus} vCPU · ${Math.round(modelAttestation.vmShape.memoryMb / 1024)} GB RAM`
     : undefined;
-  const pinnedWeights = modelAttestation
-    ? `${modelAttestation.weightRepoCommit} (mpk-${modelAttestation.weightMpkHash.replace(/^mpk-/, "").slice(0, 12)}…)`
-    : undefined;
-  const dmVerityRoot = modelAttestation?.dmVerityRootHash;
+  const pinnedWeights =
+    isModelAvailable && modelAttestation.weightRepoCommit
+      ? `${modelAttestation.weightRepoCommit} (mpk-${modelAttestation.weightMpkHash.replace(/^mpk-/, "").slice(0, 12)}…)`
+      : undefined;
+  const dmVerityRoot = isModelAvailable ? modelAttestation.dmVerityRootHash : undefined;
 
   return {
     enclaveHost: doc.enclaveHost,
@@ -190,6 +218,7 @@ function evidenceFromDocument(
     ...(chipId ? { chipId, "Chip ID": chipId } : {}),
     ...(tcb ? { tcb, TCB: tcb } : {}),
     ...(guestPolicy ? { guestPolicy, "Guest policy": guestPolicy } : {}),
+    ...(amdKdsChain ? { amdKdsChain, "AMD KDS chain": amdKdsChain } : {}),
     ...(gpuEnclaveHost ? { gpuEnclaveHost, "GPU enclave host": gpuEnclaveHost } : {}),
     ...(gpuVmShape ? { gpuVmShape, "GPU VM shape": gpuVmShape } : {}),
     ...(pinnedWeights ? { pinnedWeights, "Pinned weights": pinnedWeights } : {}),
@@ -250,9 +279,14 @@ export async function openTinfoilSession(
     );
   }
 
-  const doc = await client.getVerificationDocument();
-  const selectedModelAttestation =
-    deepBundle?.models[selectedModel] ?? deepBundle?.models["kimi-k3"];
+  const rawDoc = await client.getVerificationDocument();
+  const doc: EnrichedVerificationDocument = {
+    ...rawDoc,
+    ...(deepBundle?.routerSnpChain
+      ? { snpChainVerification: deepBundle.routerSnpChain }
+      : {}),
+  };
+  const selectedModelAttestation = deepBundle?.models[selectedModel];
 
   let activeRelayHop: string = initialRelayId ?? RELAY_HOPS[0].id;
   let turnCounter = Math.max(
@@ -300,9 +334,10 @@ export async function openTinfoilSession(
   const evidence = evidenceFromDocument(doc, deepBundle, selectedModelAttestation, activeRelayHop);
 
   const session: TinfoilSession = {
-    checks: checksFromDocument(doc, selectedModelAttestation),
+    checks: checksFromDocument(doc, selectedModelAttestation, deepBundle?.routerSnpChain),
     evidence,
     relayHop: activeRelayHop,
+    verificationDocument: doc,
     deepBundle,
     selectedModelAttestation,
     async *send(model, messages) {

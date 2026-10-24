@@ -13,6 +13,7 @@ import {
   type CandidateEnclaveNode,
   type CandidateNodeId,
   type MemoryBusMode,
+  type MemoryBusProbeResult,
   type SubpoenaAction,
 } from "@/lib/game/gauntlet";
 
@@ -33,9 +34,8 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
   const [round2Solved, setRound2Solved] = useState(false);
 
   // Round 3 state: starts with synchronous binary report verification, then upgrades to live /api/relay/attestation in useEffect
-  const [candidateNodes, setCandidateNodes] = useState<CandidateEnclaveNode[]>(
-    () => judgeCandidateNodes()
-  );
+  // Computed in an effect: signing uses crypto randomness, which must not run during prerender.
+  const [candidateNodes, setCandidateNodes] = useState<CandidateEnclaveNode[]>([]);
   const [liveAttestationLoaded, setLiveAttestationLoaded] = useState(false);
   const [chosenNodeId, setChosenNodeId] = useState<CandidateNodeId | null>(null);
   const [round3Solved, setRound3Solved] = useState(false);
@@ -46,6 +46,7 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
 
   useEffect(() => {
     let cancelled = false;
+    setCandidateNodes(judgeCandidateNodes());
     fetchAndJudgeLiveAttestationNodes("/api/relay/attestation")
       .then((liveNodes) => {
         if (!cancelled) {
@@ -62,7 +63,26 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
   }, []);
 
   // Computed results
-  const probeResult = useMemo(() => tapMemoryBus(grid, busMode), [grid, busMode]);
+  // tapMemoryBus encrypts with random keys and nonces, so it only runs after mount (never during prerender).
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+  const probeResult = useMemo<MemoryBusProbeResult>(
+    () =>
+      mounted
+        ? tapMemoryBus(grid, busMode)
+        : {
+            mode: busMode,
+            grid,
+            blocks: [],
+            repeatedBlocks: 0,
+            uniqueBlocks: 0,
+            entropyBitsPerByte: 0,
+            leakRatePct: 0,
+            reconstructedGrid: grid.map(() => null),
+            summary: "Encrypting the pattern in your browser...",
+          },
+    [mounted, grid, busMode],
+  );
   const blindRound = useMemo(
     () => blindEnvelopeRound({ t: tokenSecret, r: blindingFactor }),
     [tokenSecret, blindingFactor]

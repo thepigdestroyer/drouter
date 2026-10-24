@@ -1,3 +1,4 @@
+import { connection } from "next/server";
 import {
   BodyTooLargeError,
   InvalidJsonBodyError,
@@ -19,6 +20,7 @@ const ALLOWED_REPOS = new Set<string>([
   "tinfoilsh/confidential-deepseek-v4-1-flash",
   "tinfoilsh/confidential-gpt-oss-120b",
   "tinfoilsh/confidential-llama3-3-70b",
+  "tinfoilsh/confidential-gemma4-31b",
 ]);
 
 /**
@@ -26,6 +28,14 @@ const ALLOWED_REPOS = new Set<string>([
  * bundle itself (AMD SEV-SNP report, VCEK chain, Sigstore provenance), so the relay is untrusted.
  */
 async function relay(request: Request): Promise<Response> {
+  if (request.method === "GET") {
+    try {
+      await connection();
+    } catch {
+      // Allow direct invocation in unit tests outside Next.js request store.
+    }
+  }
+
   const limited = limiter.check(request);
   if (limited) return limited;
 
@@ -63,7 +73,15 @@ async function relay(request: Request): Promise<Response> {
   }
 
   if (process.env.DROUTER_STUB_UPSTREAM === "1") {
-    return Response.json({ domain: "router-0.tinfoil.sh", stubbed: true }, { status: 200 });
+    return Response.json(
+      {
+        status: "unavailable",
+        unavailable: true,
+        reason: "Upstream Tinfoil attestation disabled (DROUTER_STUB_UPSTREAM=1)",
+        error: "Upstream Tinfoil attestation disabled (DROUTER_STUB_UPSTREAM=1)",
+      },
+      { status: 503 },
+    );
   }
 
   try {
@@ -72,8 +90,17 @@ async function relay(request: Request): Promise<Response> {
       status: upstream.status,
       headers: { "content-type": upstream.headers.get("content-type") ?? "application/json" },
     });
-  } catch {
-    return Response.json({ error: "Upstream attestation service unreachable" }, { status: 502 });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : "Network error";
+    return Response.json(
+      {
+        status: "unavailable",
+        unavailable: true,
+        reason: `Upstream attestation service unreachable: ${detail}`,
+        error: "Upstream attestation service unreachable",
+      },
+      { status: 502 },
+    );
   }
 }
 

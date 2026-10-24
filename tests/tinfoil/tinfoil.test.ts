@@ -1,4 +1,8 @@
+import { gunzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
+import { GET as getRelayAttestation } from "@/app/api/relay/attestation/route";
+import { GET as getHopRelayAttestation } from "@/app/api/relay/[relayId]/attestation/route";
+import { GET as getEnclaveMatrix } from "@/app/api/relay/enclave-matrix/route";
 import { RELAY_HOPS, pacedStream, padJsonPayloadToBucket } from "@/lib/relay";
 import { toHex } from "@/lib/sim/bytes";
 import { SIM_TCB } from "@/lib/sim/constants";
@@ -6,12 +10,17 @@ import { encodeReport, REPORT_SIZE, SIM_POLICY, tcbToU64, type SnpReportFields }
 import { checksFromDocument, RELAY_HOPS as CLIENT_RELAY_HOPS } from "@/lib/tinfoil/client";
 import {
   decodeSnpReportBytes,
+  decodeTdxQuoteBytes,
   parseDeploymentConfigYaml,
+  verifyAmdSevSnpChainEndToEnd,
   verifyModelEnclaveStatus,
+  verifyNvidiaEatJwtAgainstJwks,
+  verifyTdxQuoteEndToEnd,
   type ModelEnclaveAttestation,
 } from "@/lib/tinfoil/deep-inspect";
 
-const REAL_KIMI_K3_YAML = `cvm-version: 0.14.14
+/** Recorded fixture for YAML parsing logic only (clearly named as a test fixture). */
+const FIXTURE_KIMI_K3_DEPLOYMENT_YAML = `cvm-version: 0.14.14
 cpus: 32
 memory: 524288
 gpus: 8
@@ -50,7 +59,7 @@ containers:
       ]
 `;
 
-function buildSampleSnpBytes(overrides: Partial<SnpReportFields> = {}): Uint8Array {
+function buildFixtureSnpReportBytes(overrides: Partial<SnpReportFields> = {}): Uint8Array {
   const fill = (len: number, byte: number) => new Uint8Array(len).fill(byte);
   const fields: SnpReportFields = {
     version: 5,
@@ -79,7 +88,7 @@ function buildSampleSnpBytes(overrides: Partial<SnpReportFields> = {}): Uint8Arr
   return encodeReport(fields);
 }
 
-function buildSampleModelAttestation(
+function buildFixtureModelAttestation(
   overrides: Partial<ModelEnclaveAttestation> = {},
 ): ModelEnclaveAttestation {
   return {
@@ -126,9 +135,17 @@ function buildSampleModelAttestation(
   };
 }
 
+function toBase64Url(bytes: Uint8Array): string {
+  return Buffer.from(bytes)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
 describe("Two-Hop Enclave & GPU Trust Verifier", () => {
-  it("decodeSnpReportBytes accurately parses a 1,184-byte binary SNP report", () => {
-    const rawBytes = buildSampleSnpBytes();
+  it("decodeSnpReportBytes accurately parses a 1,184-byte binary SNP report fixture", () => {
+    const rawBytes = buildFixtureSnpReportBytes();
     expect(rawBytes.length).toBe(REPORT_SIZE);
     expect(rawBytes.length).toBe(1184);
 
@@ -145,8 +162,8 @@ describe("Two-Hop Enclave & GPU Trust Verifier", () => {
     expect(decoded.reportDataHex).toBe(toHex(new Uint8Array(64).fill(0xaa)));
   });
 
-  it("parseDeploymentConfigYaml extracts weightRepoCommit, weightMpkHash, containerImageDigest, and ccGpuFlagsVerified from Kimi K3 YAML", () => {
-    const parsed = parseDeploymentConfigYaml(REAL_KIMI_K3_YAML);
+  it("parseDeploymentConfigYaml extracts weightRepoCommit, weightMpkHash, containerImageDigest, and ccGpuFlagsVerified from Kimi K3 YAML fixture", () => {
+    const parsed = parseDeploymentConfigYaml(FIXTURE_KIMI_K3_DEPLOYMENT_YAML);
     expect(parsed.weightRepoCommit).toBe(
       "moonshotai/Kimi-K3@a590ce090cb049c93a33dfe8c208ec652aa20503",
     );
@@ -158,12 +175,15 @@ describe("Two-Hop Enclave & GPU Trust Verifier", () => {
     );
     expect(parsed.ccGpuFlagsVerified).toBe(true);
 
-    const unsafeYaml = REAL_KIMI_K3_YAML.replace('VLLM_DISABLE_UVA: "1"', 'VLLM_DISABLE_UVA: "0"');
+    const unsafeYaml = FIXTURE_KIMI_K3_DEPLOYMENT_YAML.replace(
+      'VLLM_DISABLE_UVA: "1"',
+      'VLLM_DISABLE_UVA: "0"',
+    );
     expect(parseDeploymentConfigYaml(unsafeYaml).ccGpuFlagsVerified).toBe(false);
   });
 
-  it("verifyModelEnclaveStatus passes when hosts are verified and GPUs are in CC mode, and fails on unverified hosts or 0 GPUs", () => {
-    const healthy = buildSampleModelAttestation();
+  it("verifyModelEnclaveStatus passes when hosts are verified and GPUs are in CC mode, and fails on unverified hosts, 0 GPUs, or unavailable status", () => {
+    const healthy = buildFixtureModelAttestation();
     const res = verifyModelEnclaveStatus(healthy);
     expect(res.c5Pass).toBe(true);
     expect(res.c5Detail).toContain(
@@ -174,26 +194,41 @@ describe("Two-Hop Enclave & GPU Trust Verifier", () => {
       "Pinned weight package mpk-58d5e74b… (moonshotai/Kimi-K3@a590ce09) on dm-verity root 41068e07…",
     );
 
-    const withUnverified = buildSampleModelAttestation({
+    const withUnverified = buildFixtureModelAttestation({
       configuredHosts: 2,
       verifiedHosts: 1,
       unverifiedHosts: 1,
     });
     expect(verifyModelEnclaveStatus(withUnverified).c5Pass).toBe(false);
 
-    const withZeroGpus = buildSampleModelAttestation({
+    const withZeroGpus = buildFixtureModelAttestation({
       vmShape: { cpus: 32, memoryMb: 524288, gpus: 0, disks: 5 },
     });
     expect(verifyModelEnclaveStatus(withZeroGpus).c5Pass).toBe(false);
 
-    const withoutRootHash = buildSampleModelAttestation({
+    const withoutRootHash = buildFixtureModelAttestation({
       dmVerityRootHash: "",
     });
     expect(verifyModelEnclaveStatus(withoutRootHash).c7Pass).toBe(false);
+
+    const unavailableModel = buildFixtureModelAttestation({
+      status: "unavailable",
+      unavailableReason: "Upstream release manifest unreachable",
+    });
+    const unavailableRes = verifyModelEnclaveStatus(unavailableModel);
+    expect(unavailableRes.c5Pass).toBe(false);
+    expect(unavailableRes.c7Pass).toBe(false);
+    expect(unavailableRes.c5Detail).toContain("Unavailable: Upstream release manifest unreachable");
+
+    const failedSigstore = buildFixtureModelAttestation({
+      sigstoreVerified: false,
+    });
+    expect(verifyModelEnclaveStatus(failedSigstore).c5Pass).toBe(false);
+    expect(verifyModelEnclaveStatus(failedSigstore).c7Pass).toBe(false);
   });
 
-  it("checksFromDocument upgrades C5 and C7 using the model enclave attestation", () => {
-    const fakeDoc = {
+  it("checksFromDocument keeps C1-C7 labels stable, surfaces AMD SEV-SNP chain result, and upgrades C5 and C7 from model attestation", () => {
+    const fixtureDoc = {
       enclaveHost: "router-0.tinfoil.sh",
       releaseTag: "v0.0.167",
       releaseDigest: "5233a27f1468f474d27c103e06c1a7a607e6a722ff4f9299ddf4e32fa87f201e",
@@ -223,14 +258,208 @@ describe("Two-Hop Enclave & GPU Trust Verifier", () => {
       },
     };
 
-    const checks = checksFromDocument(fakeDoc, buildSampleModelAttestation());
+    const checks = checksFromDocument(fixtureDoc, buildFixtureModelAttestation(), {
+      verified: true,
+      productName: "Genoa",
+      arkSubject: "CN=ARK-Genoa, O=Advanced Micro Devices",
+      askSubject: "CN=SEV-Genoa, O=Advanced Micro Devices",
+      vcekSubject: "CN=SEV-VCEK, O=Advanced Micro Devices",
+      arkFingerprintSha256: "4c6598d19c18719c5dfd4a7d335f674e5bfe1d8f800cea2cf270c10d103db2f1",
+      askFingerprintSha256: "5464738c1546aed5f2cecf1dc98c5c960a92e8913238a61711bc90ec6e828521",
+      vcekFingerprintSha256: "abcd",
+      arkSelfSigned: true,
+      askSignedByArk: true,
+      vcekSignedByAsk: true,
+      vcekTcbMatched: true,
+      vcekHwidMatched: true,
+      reportSignatureVerified: true,
+      kdsVcekUrl: "https://kdsintf.amd.com/vcek/v1/Genoa/chip",
+      kdsCertChainUrl: "https://kdsintf.amd.com/vcek/v1/Genoa/cert_chain",
+    });
+
+    expect(checks.map((c) => `${c.id}:${c.label}`)).toEqual([
+      "C1:Hardware signature chain",
+      "C2:Approved software",
+      "C3:HPKE key bound to enclave report",
+      "C4:Running code = released code",
+      "C5:Router-attested confidential GPU pool",
+      "C6:Registry admission",
+      "C7:Manifest-pinned model & dm-verity root",
+    ]);
+
+    const c1 = checks.find((c) => c.id === "C1");
     const c5 = checks.find((c) => c.id === "C5");
     const c7 = checks.find((c) => c.id === "C7");
+    expect(c1?.status).toBe("pass");
+    expect(c1?.detail).toContain("VCEK -> CN=SEV-Genoa -> CN=ARK-Genoa");
     expect(c5?.status).toBe("pass");
     expect(c5?.detail).toContain("8× NVIDIA confidential GPUs attested by router");
     expect(c7?.status).toBe("pass");
     expect(c7?.detail).toContain("Pinned weight package mpk-58d5e74b…");
+
+    // Without modelAttestation, both C5 and C7 must be "skip", never "pass"
+    const checksWithoutModel = checksFromDocument(fixtureDoc);
+    expect(checksWithoutModel.find((c) => c.id === "C5")?.status).toBe("skip");
+    expect(checksWithoutModel.find((c) => c.id === "C7")?.status).toBe("skip");
   });
+
+  it("verifyNvidiaEatJwtAgainstJwks cryptographically verifies ES384 EAT JWTs and rejects tampered tokens", async () => {
+    const keyPair = await crypto.subtle.generateKey(
+      { name: "ECDSA", namedCurve: "P-384" },
+      true,
+      ["sign", "verify"],
+    );
+    const pubJwk = await crypto.subtle.exportKey("jwk", keyPair.publicKey);
+    const kid = "nv-eat-test-kid-01";
+    const jwks = {
+      keys: [{ ...pubJwk, kid }],
+    };
+
+    const headerB64 = toBase64Url(
+      new TextEncoder().encode(JSON.stringify({ alg: "ES384", typ: "JWT", kid })),
+    );
+    const payloadB64 = toBase64Url(
+      new TextEncoder().encode(
+        JSON.stringify({
+          iss: "https://nras.attestation.nvidia.com",
+          "x-nvidia-overall-att-result": true,
+          secboot: true,
+          dbgstat: "disabled",
+        }),
+      ),
+    );
+    const signingInput = new TextEncoder().encode(`${headerB64}.${payloadB64}`);
+    const sigBuf = await crypto.subtle.sign(
+      { name: "ECDSA", hash: "SHA-384" },
+      keyPair.privateKey,
+      signingInput,
+    );
+    const jwt = `${headerB64}.${payloadB64}.${toBase64Url(new Uint8Array(sigBuf))}`;
+
+    const verified = await verifyNvidiaEatJwtAgainstJwks(jwt, jwks);
+    expect(verified.verified).toBe(true);
+    expect(verified.kid).toBe(kid);
+    expect(verified.overallAttResult).toBe(true);
+    expect(verified.secboot).toBe(true);
+    expect(verified.dbgstat).toBe("disabled");
+
+    // Tamper signature byte
+    const tamperedSig = new Uint8Array(sigBuf);
+    tamperedSig[0] ^= 0xff;
+    const tamperedJwt = `${headerB64}.${payloadB64}.${toBase64Url(tamperedSig)}`;
+    const failed = await verifyNvidiaEatJwtAgainstJwks(tamperedJwt, jwks);
+    expect(failed.verified).toBe(false);
+  });
+
+  it("returns explicit unavailable state with reason when upstream is disabled or unreachable (no snapshot fallbacks)", async () => {
+    const prevStub = process.env.DROUTER_STUB_UPSTREAM;
+    process.env.DROUTER_STUB_UPSTREAM = "1";
+    try {
+      const matrixRes = await getEnclaveMatrix();
+      expect(matrixRes.status).toBe(503);
+      const matrixJson = await matrixRes.json();
+      expect(matrixJson.status).toBe("unavailable");
+      expect(matrixJson.unavailable).toBe(true);
+      expect(matrixJson.unavailableReason).toContain("DROUTER_STUB_UPSTREAM=1");
+      expect(matrixJson.routerHost).toBe("");
+      expect(matrixJson.routerReleaseDigest).toBe("");
+      expect(matrixJson.models["kimi-k3"].status).toBe("unavailable");
+      expect(matrixJson.models["kimi-k3"].enclaveHosts).toEqual([]);
+
+      const attRes = await getRelayAttestation(new Request("http://localhost:3000/api/relay/attestation"));
+      expect(attRes.status).toBe(503);
+      const attJson = await attRes.json();
+      expect(attJson.status).toBe("unavailable");
+      expect(attJson.unavailable).toBe(true);
+
+      const hopRes = await getHopRelayAttestation(
+        new Request("http://localhost:3000/api/relay/relay-eu-zurich/attestation"),
+        { params: Promise.resolve({ relayId: "relay-eu-zurich" }) },
+      );
+      expect(hopRes.status).toBe(503);
+      expect(hopRes.headers.get("x-drouter-relay-hop")).toBe("relay-eu-zurich");
+      const hopJson = await hopRes.json();
+      expect(hopJson.status).toBe("unavailable");
+      expect(hopJson.unavailable).toBe(true);
+    } finally {
+      if (prevStub === undefined) {
+        delete process.env.DROUTER_STUB_UPSTREAM;
+      } else {
+        process.env.DROUTER_STUB_UPSTREAM = prevStub;
+      }
+    }
+  });
+
+  it(
+    "cryptographically verifies live router AMD SEV-SNP (Genoa), model AMD SEV-SNP (Turin), and model Intel TDX v4 quotes end-to-end",
+    async () => {
+      if (process.env.DROUTER_STUB_UPSTREAM === "1") return;
+
+      // 1. Router AMD SEV-SNP (Genoa) end-to-end chain verification
+      const [routerAtc, genoaChainRes] = await Promise.all([
+        fetch("https://atc.tinfoil.sh/attestation").then((r) => r.json()),
+        fetch("https://kdsintf.amd.com/vcek/v1/Genoa/cert_chain").then((r) => r.text()),
+      ]);
+      const routerReportBytes = new Uint8Array(
+        gunzipSync(Buffer.from(routerAtc.enclaveAttestationReport.body, "base64")),
+      );
+      const routerChain = await verifyAmdSevSnpChainEndToEnd(
+        routerReportBytes,
+        routerAtc.vcek,
+        genoaChainRes,
+      );
+      expect(routerChain.verified).toBe(true);
+      expect(routerChain.productName).toBe("Genoa");
+      expect(routerChain.arkSelfSigned).toBe(true);
+      expect(routerChain.askSignedByArk).toBe(true);
+      expect(routerChain.vcekSignedByAsk).toBe(true);
+      expect(routerChain.vcekTcbMatched).toBe(true);
+      expect(routerChain.vcekHwidMatched).toBe(true);
+      expect(routerChain.reportSignatureVerified).toBe(true);
+
+      // Tampering a byte in the signed region must fail ECDSA-P384 verification
+      const tamperedRouterBytes = new Uint8Array(routerReportBytes);
+      tamperedRouterBytes[0x90] ^= 0xff;
+      const tamperedChain = await verifyAmdSevSnpChainEndToEnd(
+        tamperedRouterBytes,
+        routerAtc.vcek,
+        genoaChainRes,
+      );
+      expect(tamperedChain.verified).toBe(false);
+      expect(tamperedChain.reportSignatureVerified).toBe(false);
+
+      // 2. Model enclave Intel TDX v4 quote end-to-end verification (deepseek-v4-1-flash)
+      const proxy = await fetch("https://inference.tinfoil.sh/.well-known/tinfoil-proxy").then(
+        (r) => r.json(),
+      );
+      const dsModel = proxy.models["deepseek-v4-1-flash"];
+      const dsHost =
+        Object.keys(dsModel.enclaves).find(
+          (h) => dsModel.verification?.hosts?.[h]?.code_tag === dsModel.tag,
+        ) ?? Object.keys(dsModel.enclaves)[0];
+      const dsAtt = await fetch(`https://${dsHost}/.well-known/tinfoil-attestation`).then((r) =>
+        r.json(),
+      );
+      const dsQuoteBytes = new Uint8Array(gunzipSync(Buffer.from(dsAtt.body, "base64")));
+      const parsedTdx = decodeTdxQuoteBytes(dsQuoteBytes);
+      expect(parsedTdx.version).toBe(4);
+      expect(parsedTdx.teeType).toBe(0x81);
+      expect(parsedTdx.pckCertChainPems.length).toBe(3);
+
+      const tdxVerified = await verifyTdxQuoteEndToEnd(dsQuoteBytes, {
+        rtmr1Hex: dsModel.measurement.registers[1],
+        rtmr2Hex: dsModel.measurement.registers[2],
+      });
+      expect(tdxVerified.verified).toBe(true);
+      expect(tdxVerified.pckChainVerified).toBe(true);
+      expect(tdxVerified.qeReportSignatureVerified).toBe(true);
+      expect(tdxVerified.attKeyBindingVerified).toBe(true);
+      expect(tdxVerified.quoteBodySignatureVerified).toBe(true);
+      expect(tdxVerified.rtmr1Matched).toBe(true);
+      expect(tdxVerified.rtmr2Matched).toBe(true);
+    },
+    25_000,
+  );
 
   it("padJsonPayloadToBucket pads a 180-byte JSON payload to 4,096 B and a 5,000-byte payload to 8,192 B while preserving JSON.parse equivalence", () => {
     const baseObj = {
