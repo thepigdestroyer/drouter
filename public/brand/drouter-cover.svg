@@ -148,8 +148,8 @@
     <!-- Caption below Stage 2 -->
     <text x="112" y="268" text-anchor="middle" fill="#151515" font-family="'Iowan Old Style', 'Charter', 'Palatino', Georgia, serif" font-size="21" font-weight="600">Relay sees only noise:</text>
     <text x="112" y="293" text-anchor="middle" fill="#3f3e3b" font-family="'Iowan Old Style', 'Charter', 'Palatino', Georgia, serif" font-size="18.5" font-style="italic">same-sized ciphertext</text>
-    <text x="112" y="322" text-anchor="middle" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="11">Blind to prompt content,</text>
-    <text x="112" y="339" text-anchor="middle" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="11">length, and identity</text>
+    <text x="112" y="322" text-anchor="middle" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="11">Sees fixed-size blocks,</text>
+    <text x="112" y="339" text-anchor="middle" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="11">never your words</text>
   </g>
 
   <!-- Connector Arrow 2 -> 3 -->
@@ -220,7 +220,7 @@
     <text x="140" y="268" text-anchor="middle" fill="#151515" font-family="'Iowan Old Style', 'Charter', 'Palatino', Georgia, serif" font-size="21" font-weight="600">Sealed hardware:</text>
     <text x="140" y="293" text-anchor="middle" fill="#3f3e3b" font-family="'Iowan Old Style', 'Charter', 'Palatino', Georgia, serif" font-size="18.5" font-style="italic">signed report checked</text>
     <text x="140" y="322" text-anchor="middle" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="11">AMD SEV-SNP router enclave +</text>
-    <text x="140" y="339" text-anchor="middle" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="11">Intel TDX &amp; NVIDIA H100 GPU</text>
+    <text x="140" y="339" text-anchor="middle" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="11">Intel TDX &amp; NVIDIA CC GPU</text>
   </g>
 
   <!-- Architectural Specification Strip Below Diagram -->
@@ -230,7 +230,7 @@
     <line x1="450" y1="36" x2="450" y2="118" stroke="#d6d2c8" stroke-width="1.5"/>
 
     <text x="20" y="23" fill="#151515" font-family="'SF Mono', Menlo, monospace" font-size="11" font-weight="600" letter-spacing="1.2">ATTESTATION &amp; ORCHESTRATION PROTOCOL</text>
-    <text x="880" y="23" text-anchor="end" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="11" letter-spacing="1">ZERO HOST ACCESS</text>
+    <text x="880" y="23" text-anchor="end" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="11" letter-spacing="1">NO PLAINTEXT ON HOST</text>
 
     <!-- Left cell -->
     <text x="20" y="62" fill="#151515" font-family="'SF Mono', Menlo, monospace" font-size="11.5" font-weight="600">01 · HARDWARE QUOTE &amp; HPKE KEY BINDING</text>
