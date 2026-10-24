@@ -36,7 +36,12 @@ interface GeminiRouteResponse {
   mode?: "live" | "simulated";
   modelCalls?: ModelCallRecord[];
   autonomousRun?: ArgonAutonomousRunResult;
+  arcAnchor?: ArcAnchorResult;
 }
+
+type ArcAnchorResult =
+  | { broadcast: true; txHash: string; explorerUrl: string; receiptHash: string }
+  | { broadcast: false; reason: string };
 
 function buildFallbackModelCalls(
   run: ArgonAutonomousRunResult,
@@ -109,6 +114,7 @@ export default function ArgonShowcasePage() {
     null,
   );
   const [apiMode, setApiMode] = useState<"live" | "simulated">("simulated");
+  const [arcAnchor, setArcAnchor] = useState<ArcAnchorResult | null>(null);
   const [apiModelCalls, setApiModelCalls] = useState<ModelCallRecord[] | null>(
     null,
   );
@@ -197,6 +203,7 @@ export default function ArgonShowcasePage() {
               : "simulated");
           setApiMode(resolvedMode);
           setApiModelCalls(data.modelCalls ?? null);
+          setArcAnchor(data.arcAnchor ?? null);
           setIsRunning(false);
           return;
         }
@@ -772,10 +779,28 @@ export default function ArgonShowcasePage() {
                     <span className="text-ink-3">{act.status}</span>
                   </div>
                   <p className="text-ink-2">{act.description}</p>
-                  {act.txHashHex && (
+                  {act.kind === "anchor_arc_receipt" && arcAnchor?.broadcast ? (
                     <div className="font-mono text-[11px] text-ink-2 break-all">
-                      Simulated Arc tx: {act.txHashHex}
+                      Anchored on Arc testnet:{" "}
+                      <a
+                        href={arcAnchor.explorerUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="ep-link"
+                      >
+                        {arcAnchor.txHash}
+                      </a>
                     </div>
+                  ) : act.kind === "anchor_arc_receipt" && arcAnchor && !arcAnchor.broadcast ? (
+                    <div className="font-mono text-[11px] text-ink-2">
+                      Not anchored: {arcAnchor.reason}
+                    </div>
+                  ) : (
+                    act.txHashHex && (
+                      <div className="font-mono text-[11px] text-ink-2 break-all">
+                        Simulated Arc tx (not broadcast): {act.txHashHex}
+                      </div>
+                    )
                   )}
                 </li>
               ))}

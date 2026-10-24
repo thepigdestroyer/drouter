@@ -15,28 +15,33 @@ import {
   type ArgonThinkingLevel,
   type AtlasHybridRunnerResult,
 } from "@/lib/gemini";
+import { anchorReceipt, explorerTx } from "@/lib/arc/registry";
+import { createGlobalBucketLimiter, createTokenBucketLimiter } from "@/lib/ratelimit";
 
-const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX_REQUESTS = 20;
-const ipHits = new Map<string, number[]>();
+// POST runs paid inference (Tinfoil, and Gemini when a key is configured).
+const geminiPostIpLimiter = createTokenBucketLimiter({
+  name: "gemini-post",
+  capacity: 5,
+  refillPerSec: 1 / 12,
+});
+const geminiPostGlobalLimiter = createGlobalBucketLimiter({
+  name: "gemini-post-global",
+  capacity: 60,
+  refillPerSec: 60 / 3600,
+});
+// Human-approved Arc anchoring spends testnet USDC gas from the verifier wallet.
+const arcAnchorGlobalLimiter = createGlobalBucketLimiter({
+  name: "gemini-arc-anchor-global",
+  capacity: 10,
+  refillPerSec: 10 / 3600,
+});
 
-function checkGeminiPostRateLimit(ip: string): boolean {
-  const now = Date.now();
-  const cutoff = now - RATE_LIMIT_WINDOW_MS;
-  const recent = (ipHits.get(ip) ?? []).filter((t) => t > cutoff);
-  if (recent.length >= RATE_LIMIT_MAX_REQUESTS) {
-    ipHits.set(ip, recent);
-    return false;
-  }
-  recent.push(now);
-  ipHits.set(ip, recent);
-  return true;
-}
+const MAX_TASK_PROMPT_CHARS = 32_768;
 
-function getClientIp(req: Request): string {
-  const fwd = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  return fwd || req.headers.get("x-real-ip")?.trim() || "127.0.0.1";
-}
+// GET is hit on every /argon page load, so it serves a cached simulated run
+// and never records receipts.
+const GET_CACHE_MS = 10 * 60_000;
+let cachedGet: { atMs: number; body: unknown } | null = null;
 
 async function serverAtlasRunner(query: string): Promise<AtlasHybridRunnerResult> {
   const res = await runAtlasHybridSearch(query, { limit: 5 });
@@ -59,6 +64,11 @@ async function serverReceiptRecorder(
 export async function GET() {
   await connection();
 
+  const nowMs = Date.now();
+  if (cachedGet && nowMs - cachedGet.atMs < GET_CACHE_MS) {
+    return NextResponse.json(cachedGet.body);
+  }
+
   const preVerifiedRun = await runArgonAutonomousWorkflow({
     taskPrompt: DEFAULT_TASK_PROMPT,
     thinkingLevel: "medium",
@@ -67,7 +77,6 @@ export async function GET() {
     humanApprovedExternalAction: false,
     preferredEnclaveModel: "gemma4-31b",
     atlasRunner: serverAtlasRunner,
-    receiptRecorder: serverReceiptRecorder,
   });
 
   const configValidation = validateArgonRequestConfig({
@@ -79,7 +88,7 @@ export async function GET() {
     autonomousMultiStep: true,
   });
 
-  return NextResponse.json({
+  const body = {
     ok: true,
     mode: preVerifiedRun.mode,
     modelCalls: preVerifiedRun.modelCalls,
@@ -93,29 +102,37 @@ export async function GET() {
     interactionsCreatePreview: preVerifiedRun.stages.stage4.interactionsPayload,
     sdkSnippets: preVerifiedRun.stages.stage4.sdkSnippets,
     autonomousRun: preVerifiedRun,
-  });
+  };
+  cachedGet = { atMs: nowMs, body };
+  return NextResponse.json(body);
 }
 
 export async function POST(request: NextRequest) {
-  const ip = getClientIp(request);
-  if (!checkGeminiPostRateLimit(ip)) {
+  const limited = geminiPostIpLimiter.check(request);
+  if (limited) return limited;
+  const globalCheck = geminiPostGlobalLimiter.consume(1);
+  if (!globalCheck.allowed) {
     return NextResponse.json(
-      {
-        ok: false,
-        error: "RATE_LIMIT_EXCEEDED",
-      },
-      { status: 429, headers: { "Retry-After": "60" } },
+      { ok: false, error: "RATE_LIMIT_EXCEEDED" },
+      { status: 429, headers: { "Retry-After": String(globalCheck.retryAfterSec) } },
     );
   }
 
   let body: Record<string, unknown> = {};
   try {
     const parsed = (await request.json()) as unknown;
-    if (parsed && typeof parsed === "object") {
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       body = parsed as Record<string, unknown>;
     }
   } catch {
     body = {};
+  }
+
+  if (typeof body.taskPrompt === "string" && body.taskPrompt.length > MAX_TASK_PROMPT_CHARS) {
+    return NextResponse.json(
+      { ok: false, error: "TASK_PROMPT_TOO_LONG", maxChars: MAX_TASK_PROMPT_CHARS },
+      { status: 413 },
+    );
   }
 
   const thinkingLevelRaw =
@@ -182,9 +199,30 @@ export async function POST(request: NextRequest) {
     receiptRecorder: serverReceiptRecorder,
   });
 
+  // The human approved the external action, so anchor the signed run digest on
+  // Arc for real. Everything else in Stage 5 stays simulated and is labelled so.
+  let arcAnchor:
+    | { broadcast: true; txHash: string; explorerUrl: string; receiptHash: string }
+    | { broadcast: false; reason: string }
+    | undefined;
+  if (Boolean(body.humanApprovedExternalAction)) {
+    const receiptHash = `0x${autonomousRun.stages.stage6.forensicProofDigestHex}` as `0x${string}`;
+    if (!/^0x[0-9a-f]{64}$/i.test(receiptHash)) {
+      arcAnchor = { broadcast: false, reason: "Run digest is not a 32-byte hash." };
+    } else if (!arcAnchorGlobalLimiter.consume(1).allowed) {
+      arcAnchor = { broadcast: false, reason: "Hourly Arc anchoring quota reached. Try again later." };
+    } else {
+      const txHash = await anchorReceipt(receiptHash);
+      arcAnchor = txHash
+        ? { broadcast: true, txHash, explorerUrl: explorerTx(txHash), receiptHash }
+        : { broadcast: false, reason: "Arc verifier wallet is not configured or the transaction failed." };
+    }
+  }
+
   return NextResponse.json({
     ok: true,
     mode: autonomousRun.mode,
+    arcAnchor,
     modelCalls: autonomousRun.modelCalls,
     primaryModel: GEMINI_4_ARGON_MODEL_ID,
     companionModels: ARGON_COMPANION_MODELS,
