@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
 import {
   CipherSuite,
   AEAD_AES_256_GCM,
@@ -206,6 +208,105 @@ describe("The Enclave Gauntlet · 4 Interactive Security Exhibits", () => {
       expect(openedBytes.byteLength).toBe(4096);
       const openedObj = JSON.parse(new TextDecoder().decode(openedBytes));
       expect(openedObj.messages[0].content).toBe(prepared.outboundText);
+    });
+  });
+
+  describe("Wave 4 plain-language compliance & deRoute rename", () => {
+    const BANNED_WORDS = [
+      "attestation",
+      "attested",
+      "enclave",
+      "TEE",
+      "SEV-SNP",
+      "SNP",
+      "TDX",
+      "HPKE",
+      "RFC",
+      "Merkle",
+      "nullifier",
+      "RSA",
+      "quorum",
+      "Sigstore",
+      "Rekor",
+      "VCEK",
+      "CKKS",
+      "FHE",
+      "homomorphic",
+      "dm-verity",
+      "measurement",
+      "ciphertext",
+      "hash",
+      "digest",
+      "ECDSA",
+      "X25519",
+      "PII",
+      "OHTTP",
+      "SPRT",
+      "Arc testnet",
+      "relay hop",
+      "bucket bytes",
+    ];
+
+    function getJsxOutsideTechDetails(relPath: string): string {
+      const fullPath = path.resolve(process.cwd(), relPath);
+      const src = fs.readFileSync(fullPath, "utf8");
+      const returnIdx = src.lastIndexOf("return (");
+      const jsx = returnIdx >= 0 ? src.slice(returnIdx) : src;
+      return jsx.replace(/<TechDetails[\s\S]*?<\/TechDetails>/g, "");
+    }
+
+    it("keeps all banned technical jargon inside TechDetails across /explain, game, and packet-sniffer", () => {
+      for (const relPath of [
+        "src/app/explain/page.tsx",
+        "src/components/game/enclave-gauntlet.tsx",
+        "src/components/packet-sniffer.tsx",
+      ]) {
+        const defaultJsx = getJsxOutsideTechDetails(relPath)
+          // Strip JSX comments and attribute/identifier tokens that are not user-visible text
+          .replace(/\{\/\*[\s\S]*?\*\/\}/g, "")
+          .replace(/<[A-Za-z0-9_]+[^>]*>/g, " ")
+          .replace(/<\/[A-Za-z0-9_]+>/g, " ")
+          .replace(/\{[^}]*\}/g, " ");
+
+        for (const word of BANNED_WORDS) {
+          const re = new RegExp(`\\b${word.replace("-", "\\-")}\\b`, "i");
+          expect(defaultJsx, `${relPath} leaked banned word "${word}" outside TechDetails`).not.toMatch(re);
+        }
+        expect(defaultJsx).not.toContain("—");
+        expect(defaultJsx).not.toContain("dRouter");
+      }
+    });
+
+    it("includes the 4 story scenes, 4 playful rounds, and 4 person cards with TechDetails ('What really happened')", () => {
+      const explainSrc = fs.readFileSync(
+        path.resolve(process.cwd(), "src/app/explain/page.tsx"),
+        "utf8"
+      );
+      expect(explainSrc).toContain("How it works · deRoute");
+      expect(explainSrc).toContain("Scene One");
+      expect(explainSrc).toContain("Scene Two");
+      expect(explainSrc).toContain("Scene Three");
+      expect(explainSrc).toContain("Scene Four");
+
+      const gameSrc = fs.readFileSync(
+        path.resolve(process.cwd(), "src/components/game/enclave-gauntlet.tsx"),
+        "utf8"
+      );
+      expect(gameSrc).toContain("Spy on the wire");
+      expect(gameSrc).toContain("Pay without a name");
+      expect(gameSrc).toContain("Spot the fake");
+      expect(gameSrc).toContain("Vanish");
+      expect(gameSrc).toContain('label="What really happened"');
+
+      const snifferSrc = fs.readFileSync(
+        path.resolve(process.cwd(), "src/components/packet-sniffer.tsx"),
+        "utf8"
+      );
+      expect(snifferSrc).toContain("What each person can see");
+      expect(snifferSrc).toContain("Your internet provider");
+      expect(snifferSrc).toContain("Our server");
+      expect(snifferSrc).toContain("The sealed computer");
+      expect(snifferSrc).toContain('label="What really happened"');
     });
   });
 });

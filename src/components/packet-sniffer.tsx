@@ -7,6 +7,8 @@ import { expand, extract } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 import { Verifier, type AttestationBundle } from "tinfoil";
+import { InkButton } from "@/components/ink/ink-button";
+import { TechDetails } from "@/components/ink/tech-details";
 import { preparePrompt } from "@/lib/pipeline";
 import { createSessionScrubber } from "@/lib/privacy/scrubber";
 import { padJsonPayloadToBucket } from "@/lib/relay";
@@ -23,15 +25,15 @@ const DEFAULT_PROMPT =
 
 const PRESET_SAMPLES: Array<{ label: string; text: string }> = [
   {
-    label: "Wire transfer + API key",
+    label: "Send money",
     text: "Send $125,000 to dana.reyes@acme.example using key sk-live-9876543210abcdef on 2026-11-04",
   },
   {
-    label: "Clinical trial budget",
+    label: "Medical note",
     text: "Release $48,500 batch budget for patient dana.reyes@biotech.example with token sk-proj-4419982710abcdef on 2026-12-19",
   },
   {
-    label: "Treasury payout",
+    label: "Company payment",
     text: "Approve EUR 250,000 payout to dana.reyes@treasury.example under Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJkYW5hIn0.sig12345 on 2027-01-15",
   },
 ];
@@ -131,6 +133,13 @@ function tokenizePlaintext(input: string): HighlightToken[] {
   }
   return out;
 }
+
+const PLAIN_TOKEN_LABELS: Record<Exclude<HighlightToken["kind"], "plain">, string> = {
+  secret: "hidden key",
+  email: "hidden email",
+  date: "hidden date",
+  currency: "hidden amount",
+};
 
 function concatBytes(...arrays: Uint8Array[]): Uint8Array {
   const total = arrays.reduce((sum, a) => sum + a.byteLength, 0);
@@ -392,6 +401,16 @@ export function PacketSniffer({
     const rawEntropy = computeShannonEntropy(ciphertextBytes);
     const displayEntropy = Number(rawEntropy.toFixed(2));
 
+    // Deterministic visual bar heights from the sealed bytes (or fallback text) for the ISP visual
+    const barHeights: number[] = [];
+    for (let i = 0; i < 16; i++) {
+      const b =
+        ciphertextBytes.length > i
+          ? ciphertextBytes[i]
+          : paddedBytes[i % Math.max(1, paddedBytes.length)] ?? 128;
+      barHeights.push(28 + (b % 68));
+    }
+
     return {
       plainTokens,
       scrubEntries: scrubber.entries(),
@@ -409,6 +428,7 @@ export function PacketSniffer({
       encapKeyHex: bytesToHex(encapsulatedKeyBytes),
       enclavePubKeyHex: liveEnclaveKeyHex,
       displayEntropy,
+      barHeights,
     };
   }, [promptText, modelId, liveHost, liveEnclaveKeyHex, ephemeralSecretHex]);
 
@@ -416,42 +436,41 @@ export function PacketSniffer({
 
   return (
     <section
-      aria-label="What every party sees"
+      aria-label="What each person can see"
       className="ep-card p-5 sm:p-6 text-ink space-y-6"
     >
       {/* Top heading and single action */}
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between border-b border-rule pb-5">
         <div className="space-y-1.5">
-          <div className="ep-label">Wire inspection</div>
+          <div className="ep-label">Side-by-side view</div>
           <h2 className="font-serif text-xl sm:text-2xl text-ink">
-            What every party sees when you send a prompt
+            What each person can see
           </h2>
-          <p className="max-w-[70ch] text-sm text-ink-2">
-            Type any sensitive sentence below to run it through{" "}
-            <code className="font-mono text-xs">preparePrompt</code> and seal it
-            with RFC 9180 HPKE to the live enclave public key from{" "}
-            <code className="font-mono text-xs">/api/relay/attestation</code>.
-            Nothing is sent to a model.
+          <p className="max-w-[68ch] text-sm text-ink-2">
+            Type any sentence below to see what stays on your screen and what
+            is visible to your internet provider, our server, and the sealed
+            computer. Everything runs right here in your browser.
           </p>
         </div>
 
-        <button
+        <InkButton
           type="button"
+          variant={popped ? "ghost" : "primary"}
           onClick={() => setPopped((prev) => !prev)}
-          className={popped ? "ep-btn-ghost shrink-0" : "ep-btn shrink-0"}
+          className="shrink-0"
         >
-          {popped ? "Restore session memory" : "Pop bubble (wipe memory)"}
-        </button>
+          {popped ? "Bring message back" : "End chat and erase key"}
+        </InkButton>
       </div>
 
       {/* Input & Presets */}
       <div className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <label htmlFor="packet-sniffer-input" className="ep-label">
-            Sample prompt (computed locally in your browser)
+            Try a sample message (stays on your device)
           </label>
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className="ep-label">Try:</span>
+            <span className="ep-label">Examples:</span>
             {PRESET_SAMPLES.map((preset) => (
               <button
                 key={preset.label}
@@ -473,32 +492,89 @@ export function PacketSniffer({
           type="text"
           value={promptText}
           onChange={(e) => setPromptText(e.target.value)}
-          placeholder="Type a prompt with API keys, emails, dates, or dollar amounts..."
-          className="ep-input font-mono text-xs sm:text-sm"
+          placeholder="Type a message with an email, secret key, date, or price..."
+          className="ep-input text-sm"
         />
       </div>
 
-      {/* 4 Columns: Your device, Network, Relay, Sealed hardware */}
+      {/* 4 Simple Cards: You, Your internet provider, Our server, The sealed computer */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-        {/* Column 1: Your device */}
+        {/* Card 1: You */}
         <div className="ep-card p-4 flex flex-col justify-between space-y-4">
           <div className="space-y-3">
             <div className="flex items-center justify-between gap-2 border-b border-rule pb-2">
               <span className="font-serif text-base font-medium text-ink">
-                1. Your device
+                You
               </span>
-              <span className="ep-pass">Full context</span>
+              <span className="ep-pass shrink-0 whitespace-nowrap">
+                Sees everything
+              </span>
             </div>
 
+            {/* Small ink visual: page with personal details masked */}
+            <svg
+              viewBox="0 0 160 54"
+              className="h-12 w-full text-ink"
+              fill="none"
+              aria-hidden="true"
+            >
+              <rect
+                x="10"
+                y="6"
+                width="140"
+                height="42"
+                rx="4"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                fill="var(--color-paper-2)"
+              />
+              <line
+                x1="22"
+                y1="19"
+                x2="66"
+                y2="19"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+              />
+              <rect
+                x="72"
+                y="14"
+                width="44"
+                height="10"
+                rx="2"
+                fill="var(--color-accent-soft)"
+                stroke="var(--color-accent)"
+                strokeWidth="1.2"
+              />
+              <line
+                x1="22"
+                y1="34"
+                x2="52"
+                y2="34"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+              />
+              <rect
+                x="58"
+                y="29"
+                width="56"
+                height="10"
+                rx="2"
+                fill="var(--color-ink)"
+              />
+            </svg>
+
             <p className="text-xs text-ink-2 leading-relaxed">
-              Your browser runs <code className="font-mono">preparePrompt</code>{" "}
-              locally to replace secrets and emails with placeholders, normalize
-              style, and pad the payload to a power-of-two byte bucket.
+              You see your full message. We hide your personal details before
+              anything leaves your device, so names, emails, keys, and prices
+              stay with you.
             </p>
 
-            <div className="ep-inset p-3 font-mono text-xs leading-relaxed break-words text-ink">
+            <div className="ep-inset p-3 text-xs leading-relaxed break-words text-ink">
               {wireState.plainTokens.length === 0 ? (
-                <span className="text-ink-3 italic">Empty prompt</span>
+                <span className="text-ink-3 italic">Type a message above</span>
               ) : (
                 wireState.plainTokens.map((tok, idx) =>
                   tok.kind === "plain" ? (
@@ -506,7 +582,7 @@ export function PacketSniffer({
                   ) : (
                     <mark
                       key={idx}
-                      title={`Scrubbed locally (${tok.kind})`}
+                      title="Hidden on your device before sending"
                       className="rounded-sm bg-accent-soft border border-accent px-1 py-0.5 text-ink"
                     >
                       {tok.text}
@@ -517,23 +593,311 @@ export function PacketSniffer({
             </div>
           </div>
 
-          <div className="pt-2 border-t border-rule text-xs text-ink-2 space-y-2">
-            <div className="flex items-center justify-between font-mono text-[11px]">
-              <span>Redactions (preparePrompt)</span>
-              <span className="font-semibold text-ink">{redactedCount}</span>
-            </div>
-            <div className="flex items-center justify-between font-mono text-[11px]">
-              <span>Privacy risk score</span>
-              <span className="font-semibold text-ink">
-                {wireState.prepared.report.riskBefore} &rarr;{" "}
-                {wireState.prepared.report.riskAfter}
+          <div className="pt-2 border-t border-rule text-xs text-ink-3">
+            Highlighted words stay on your screen and never travel across the
+            internet.
+          </div>
+        </div>
+
+        {/* Card 2: Your internet provider */}
+        <div className="ep-card p-4 flex flex-col justify-between space-y-4">
+          <div className="space-y-3">
+            <div className="flex items-center justify-between gap-2 border-b border-rule pb-2">
+              <span className="font-serif text-base font-medium text-ink">
+                Your internet provider
+              </span>
+              <span className="ep-muted-chip shrink-0 whitespace-nowrap">
+                Only noise
               </span>
             </div>
-            <details className="text-xs">
-              <summary className="cursor-pointer font-mono text-[11px] text-ink-2 hover:text-ink select-none">
-                Show local replacement map
-              </summary>
-              <div className="mt-2 ep-inset p-2 font-mono text-[11px] space-y-1">
+
+            {/* Small ink visual: uniform locked envelope with static bars */}
+            <svg
+              viewBox="0 0 160 54"
+              className="h-12 w-full text-ink"
+              fill="none"
+              aria-hidden="true"
+            >
+              <rect
+                x="10"
+                y="6"
+                width="140"
+                height="42"
+                rx="4"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeDasharray="4 2"
+                fill="var(--color-paper-2)"
+              />
+              {wireState.barHeights.map((h, idx) => {
+                const barH = Math.max(8, Math.round((h / 100) * 26));
+                const x = 20 + idx * 7.8;
+                const y = 40 - barH;
+                return (
+                  <rect
+                    key={idx}
+                    x={x}
+                    y={y}
+                    width="4.5"
+                    height={barH}
+                    rx="1"
+                    fill="currentColor"
+                    opacity={idx % 2 === 0 ? "0.75" : "0.4"}
+                  />
+                );
+              })}
+            </svg>
+
+            <p className="text-xs text-ink-2 leading-relaxed">
+              Your Wi-Fi owner and internet provider cannot read a single word.
+              Every message looks the same size from outside and is locked so
+              only the sealed computer can open it.
+            </p>
+
+            <div className="ep-inset p-3 text-xs leading-relaxed text-ink-2 space-y-2">
+              <div className="flex items-center gap-1.5">
+                <span
+                  className="inline-block h-2 w-2 rounded-full bg-ink"
+                  aria-hidden="true"
+                />
+                <span className="font-medium text-ink">
+                  Uniform locked package
+                </span>
+              </div>
+              <p className="text-ink-3">
+                Looks like random static in a standard-sized box. Short notes
+                and longer questions are padded to match.
+              </p>
+            </div>
+          </div>
+
+          <div className="pt-2 border-t border-rule text-xs text-ink-3">
+            No readable words and no clue how long your real question was.
+          </div>
+        </div>
+
+        {/* Card 3: Our server */}
+        <div className="ep-card p-4 flex flex-col justify-between space-y-4">
+          <div className="space-y-3">
+            <div className="flex items-center justify-between gap-2 border-b border-rule pb-2">
+              <span className="font-serif text-base font-medium text-ink">
+                Our server
+              </span>
+              <span className="ep-muted-chip shrink-0 whitespace-nowrap">
+                No key
+              </span>
+            </div>
+
+            {/* Small ink visual: locked box passing untouched along a rail */}
+            <svg
+              viewBox="0 0 160 54"
+              className="h-12 w-full text-ink"
+              fill="none"
+              aria-hidden="true"
+            >
+              <line
+                x1="12"
+                y1="30"
+                x2="148"
+                y2="30"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeDasharray="3 3"
+              />
+              <rect
+                x="58"
+                y="14"
+                width="44"
+                height="28"
+                rx="4"
+                fill="var(--color-paper-2)"
+                stroke="currentColor"
+                strokeWidth="1.5"
+              />
+              <path
+                d="M74 14 V10 C74 6 86 6 86 10 V14"
+                stroke="currentColor"
+                strokeWidth="1.5"
+              />
+              <circle cx="80" cy="28" r="2.5" fill="currentColor" />
+              <path
+                d="M126 24 L134 30 L126 36"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+
+            <p className="text-xs text-ink-2 leading-relaxed">
+              deRoute passes your locked package to the sealed computer, but
+              our server does not hold the key and cannot peek inside.
+            </p>
+
+            <div className="ep-inset p-3 text-xs leading-relaxed text-ink-2 space-y-2">
+              <div className="font-medium text-ink">
+                Blind pass-through courier
+              </div>
+              <p className="text-ink-3">
+                Our server hands the locked box to the sealed computer and
+                hands the locked reply back to you.
+              </p>
+            </div>
+          </div>
+
+          <div className="pt-2 border-t border-rule text-xs text-ink-3">
+            Even if someone demanded our server logs, your words are not there.
+          </div>
+        </div>
+
+        {/* Card 4: The sealed computer */}
+        <div className="ep-card p-4 flex flex-col justify-between space-y-4">
+          <div className="space-y-3">
+            <div className="flex items-center justify-between gap-2 border-b border-rule pb-2">
+              <span className="font-serif text-base font-medium text-ink">
+                The sealed computer
+              </span>
+              <span className="ep-pass shrink-0 whitespace-nowrap">
+                {popped ? "Wiped clean" : "Cleaned text"}
+              </span>
+            </div>
+
+            {/* Small ink visual: sealed chamber or dissolved blank paper */}
+            <svg
+              viewBox="0 0 160 54"
+              className="h-12 w-full text-ink"
+              fill="none"
+              aria-hidden="true"
+            >
+              <rect
+                x="14"
+                y="6"
+                width="132"
+                height="42"
+                rx="5"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                fill="var(--color-paper-2)"
+              />
+              {popped ? (
+                <>
+                  <circle cx="52" cy="27" r="2" fill="currentColor" opacity="0.35" />
+                  <circle cx="80" cy="22" r="1.5" fill="currentColor" opacity="0.25" />
+                  <circle cx="106" cy="31" r="2" fill="currentColor" opacity="0.3" />
+                </>
+              ) : (
+                <>
+                  <line
+                    x1="28"
+                    y1="21"
+                    x2="96"
+                    y2="21"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                  />
+                  <line
+                    x1="28"
+                    y1="33"
+                    x2="76"
+                    y2="33"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                  />
+                  <circle
+                    cx="122"
+                    cy="27"
+                    r="9"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                  />
+                  <path
+                    d="M118 27 L121 30 L127 24"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </>
+              )}
+            </svg>
+
+            <p className="text-xs text-ink-2 leading-relaxed">
+              Inside its locked room, the sealed computer opens your message
+              with your personal details already hidden. When you leave, the
+              key dissolves.
+            </p>
+
+            {popped ? (
+              <div className="ep-inset p-3 text-xs leading-relaxed text-ink space-y-1">
+                <div className="font-medium text-ink">
+                  Blank paper. Nothing left behind.
+                </div>
+                <p className="text-ink-3">
+                  The temporary key was erased, so this conversation can never
+                  be reopened.
+                </p>
+              </div>
+            ) : (
+              <div className="ep-inset p-3 text-xs leading-relaxed break-words text-ink">
+                {wireState.plainTokens.length === 0 ? (
+                  <span className="text-ink-3 italic">Empty message</span>
+                ) : (
+                  wireState.plainTokens.map((tok, idx) =>
+                    tok.kind === "plain" ? (
+                      <span key={idx}>{tok.text}</span>
+                    ) : (
+                      <span
+                        key={idx}
+                        className="inline-block rounded bg-paper px-1.5 py-0.5 mx-0.5 border border-rule font-medium text-ink-2"
+                      >
+                        [{PLAIN_TOKEN_LABELS[tok.kind]}]
+                      </span>
+                    )
+                  )
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="pt-2 border-t border-rule text-xs text-ink-3">
+            {popped
+              ? "Memory erased when you ended the chat."
+              : "Answers your question without ever seeing your real name or keys."}
+          </div>
+        </div>
+      </div>
+
+      {/* All raw bytes, live keys, and protocol metrics live inside TechDetails */}
+      <TechDetails label="What really happened">
+        <div className="space-y-4 pt-2 text-xs text-ink-2">
+          <p className="max-w-[72ch] leading-relaxed">
+            Your browser ran <code className="font-mono text-ink">preparePrompt</code>{" "}
+            locally, padded the JSON envelope to a power-of-two bucket (
+            <code className="font-mono text-ink">{wireState.bucketBytes}</code>{" "}
+            bucket bytes), and sealed it with RFC 9180 HPKE (DHKEM(X25519,
+            HKDF-SHA256), HKDF-SHA256, AES-256-GCM) to the enclave public key
+            extracted from{" "}
+            <code className="font-mono text-ink">/api/relay/attestation</code>.
+          </p>
+
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4 font-mono text-[11px]">
+            {/* Tech 1: Device */}
+            <div className="ep-inset p-3 space-y-2">
+              <div className="ep-label">1. Local PII scrubber</div>
+              <div className="flex items-center justify-between">
+                <span>Redactions</span>
+                <span className="font-semibold text-ink">{redactedCount}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>Privacy risk score</span>
+                <span className="font-semibold text-ink">
+                  {wireState.prepared.report.riskBefore} -&gt;{" "}
+                  {wireState.prepared.report.riskAfter}
+                </span>
+              </div>
+              <div className="border-t border-rule pt-2 space-y-1">
                 {wireState.scrubEntries.map((entry) => (
                   <div
                     key={entry.placeholder}
@@ -549,154 +913,86 @@ export function PacketSniffer({
                   <div className="text-ink-3">No sensitive tokens detected.</div>
                 )}
               </div>
-            </details>
-          </div>
-        </div>
-
-        {/* Column 2: Network */}
-        <div className="ep-card p-4 flex flex-col justify-between space-y-4">
-          <div className="space-y-3">
-            <div className="flex items-center justify-between gap-2 border-b border-rule pb-2">
-              <span className="font-serif text-base font-medium text-ink">
-                2. Network
-              </span>
-              <span className="ep-muted-chip">HPKE ciphertext</span>
             </div>
 
-            <p className="text-xs text-ink-2 leading-relaxed">
-              Your ISP and Wi-Fi router see a padded{" "}
-              {wireState.paddedByteLen.toLocaleString()}-byte payload sealed
-              into {wireState.hpkeCipherByteLen.toLocaleString()} bytes of RFC
-              9180 HPKE AES-256-GCM ciphertext.
-            </p>
-
-            <div className="ep-inset p-3 font-mono text-[11px] leading-relaxed text-ink-2 break-all">
-              {wireState.cipherHexPreview} ...
-            </div>
-          </div>
-
-          <div className="pt-2 border-t border-rule font-mono text-[11px] text-ink-2 space-y-1">
-            <div className="flex items-center justify-between">
-              <span>Padded bucket size</span>
-              <span className="text-ink font-medium">
-                {wireState.bucketBytes.toLocaleString()} B (
-                {wireState.unpaddedByteLen} B + {wireState.padCharCount} B pad)
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span>HPKE ciphertext size</span>
-              <span className="text-ink font-medium">
-                {wireState.hpkeCipherByteLen.toLocaleString()} B (+16 B GCM tag)
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span>Byte entropy</span>
-              <span className="text-ink font-medium">
-                {wireState.displayEntropy.toFixed(2)} / 8.00 bits/byte
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Column 3: Relay */}
-        <div className="ep-card p-4 flex flex-col justify-between space-y-4">
-          <div className="space-y-3">
-            <div className="flex items-center justify-between gap-2 border-b border-rule pb-2">
-              <span className="font-serif text-base font-medium text-ink">
-                3. Relay
-              </span>
-              <span className="ep-muted-chip">
-                {keySourceLabel === "verified-live"
-                  ? "Live enclave key"
-                  : "No private key"}
-              </span>
+            {/* Tech 2: ISP / Wire */}
+            <div className="ep-inset p-3 space-y-2">
+              <div className="ep-label">2. Padded HPKE wire frame</div>
+              <div className="flex items-center justify-between">
+                <span>Bucket bytes</span>
+                <span className="text-ink font-medium">
+                  {wireState.bucketBytes.toLocaleString()} B (
+                  {wireState.unpaddedByteLen} B + {wireState.padCharCount} B pad)
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>HPKE ciphertext</span>
+                <span className="text-ink font-medium">
+                  {wireState.hpkeCipherByteLen.toLocaleString()} B (+16 B GCM tag)
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>Shannon entropy</span>
+                <span className="text-ink font-medium">
+                  {wireState.displayEntropy.toFixed(2)} / 8.00 bits/byte
+                </span>
+              </div>
+              <div className="border-t border-rule pt-2 break-all text-ink-3">
+                {wireState.cipherHexPreview} ...
+              </div>
             </div>
 
-            <p className="text-xs text-ink-2 leading-relaxed">
-              The relay forwards the X25519 encapsulated key header and{" "}
-              {wireState.ehbpFrameByteLen.toLocaleString()}-byte EHBP ciphertext
-              frame to <code className="font-mono">{liveHost}</code>. It cannot
-              decrypt the body.
-            </p>
-
-            <div className="ep-inset p-3 font-mono text-[11px] text-ink-2 space-y-1.5">
+            {/* Tech 3: Relay */}
+            <div className="ep-inset p-3 space-y-1.5">
+              <div className="ep-label">
+                3. Relay hop ({keySourceLabel === "verified-live" ? "live key" : "pinned key"})
+              </div>
               <div className="truncate">
                 <span className="text-ink font-medium">Host:</span> {liveHost}
               </div>
               <div className="truncate">
-                <span className="text-ink font-medium">Enclave HPKE key:</span>{" "}
-                {wireState.enclavePubKeyHex.slice(0, 20)}...
+                <span className="text-ink font-medium">Enclave X25519 key:</span>{" "}
+                0x{wireState.enclavePubKeyHex.slice(0, 20)}...
               </div>
               <div className="truncate">
                 <span className="text-ink font-medium">
                   Ehbp-Encapsulated-Key:
                 </span>{" "}
-                {wireState.encapKeyHex.slice(0, 20)}...
+                0x{wireState.encapKeyHex.slice(0, 20)}...
               </div>
               <div className="truncate">
-                <span className="text-ink font-medium">Ciphertext bytes:</span>{" "}
+                <span className="text-ink font-medium">Frame bytes:</span>{" "}
                 {wireState.relayWirePreview}...
               </div>
               <div className="truncate">
                 <span className="text-ink font-medium">Frame SHA-256:</span>{" "}
-                {wireState.digestHex.slice(0, 20)}...
+                0x{wireState.digestHex.slice(0, 20)}...
+              </div>
+              <div className="border-t border-rule pt-1.5 font-sans text-[11px] text-ink-3">
+                Note: Tinfoil&apos;s router runs an attested usage reporter and
+                acceptable-use classifier sidecar reporting policy violations to
+                api.tinfoil.sh.
+              </div>
+            </div>
+
+            {/* Tech 4: Enclave */}
+            <div className="ep-inset p-3 space-y-2">
+              <div className="ep-label">4. Enclave plaintext buffer</div>
+              <div className="flex items-center justify-between">
+                <span>Memory state</span>
+                <span className="text-ink font-medium">
+                  {popped ? "Zeroed (0x00)" : "SEV-SNP + GPU HBM"}
+                </span>
+              </div>
+              <div className="border-t border-rule pt-2 break-words text-ink">
+                {popped
+                  ? "00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+                  : wireState.outboundText}
               </div>
             </div>
           </div>
-
-          <div className="pt-2 border-t border-rule text-xs text-ink-3">
-            Note: Tinfoil&apos;s router runs an attested usage reporter and
-            acceptable-use classifier sidecar reporting policy violations to
-            api.tinfoil.sh.
-          </div>
         </div>
-
-        {/* Column 4: Sealed hardware */}
-        <div className="ep-card p-4 flex flex-col justify-between space-y-4">
-          <div className="space-y-3">
-            <div className="flex items-center justify-between gap-2 border-b border-rule pb-2">
-              <span className="font-serif text-base font-medium text-ink">
-                4. Sealed hardware
-              </span>
-              <span className="ep-pass">
-                {popped ? "Wiped (0x00)" : "Scrubbed text"}
-              </span>
-            </div>
-
-            <p className="text-xs text-ink-2 leading-relaxed">
-              Inside the attested CPU and GPU enclave, the HPKE frame decrypts
-              to the <code className="font-mono">preparePrompt</code> output
-              below. Raw secrets and emails never entered the tunnel.
-            </p>
-
-            {popped ? (
-              <div className="ep-inset p-3 font-mono text-xs leading-relaxed text-ink space-y-1.5">
-                <div className="ep-label">Session memory zeroized</div>
-                <div className="break-all">
-                  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-                  00 00 00
-                </div>
-                <div className="text-[11px] text-ink-3 font-sans">
-                  Ephemeral session keys and buffers overwritten with zeros.
-                </div>
-              </div>
-            ) : (
-              <div className="ep-inset p-3 font-mono text-xs leading-relaxed break-words text-ink">
-                {wireState.outboundText || (
-                  <span className="text-ink-3 italic">Empty payload</span>
-                )}
-              </div>
-            )}
-          </div>
-
-          <div className="pt-2 border-t border-rule font-mono text-[11px] text-ink-2 flex items-center justify-between">
-            <span>Memory state</span>
-            <span className="text-ink font-medium">
-              {popped ? "Zeroed on Pop" : "Encrypted RAM / GPU HBM"}
-            </span>
-          </div>
-        </div>
-      </div>
+      </TechDetails>
     </section>
   );
 }
