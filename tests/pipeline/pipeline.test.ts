@@ -112,4 +112,26 @@ describe("Interface I1: Browser-Safe Prompt Pipeline (preparePrompt)", () => {
       expect(slot.paddedBucketBytes).toBe(8192);
     }
   });
+
+  it("supports opt-in mechanical: true to run fail-closed mechanicalRedact while keeping PreparedPrompt compatible", () => {
+    const rawPrompt = [
+      "Contact Dr. Evelyn Vance at https://horizon-clinic.org/intake on 2026-10-25",
+      "regarding patient record 948201 at 742 Evergreen Terrace.",
+    ].join(" ");
+
+    const prepared = preparePrompt(rawPrompt, {
+      mechanical: true,
+      customTerms: ["Horizon Intake"],
+    });
+
+    expect(prepared.outboundText).not.toContain("Evelyn Vance");
+    expect(prepared.outboundText).not.toContain("https://horizon-clinic.org/intake");
+    expect(prepared.outboundText).not.toContain("2026-10-25");
+    expect(prepared.outboundText).not.toContain("948201");
+    expect(prepared.outboundText).not.toContain("742 Evergreen Terrace");
+    expect(prepared.bucketBytes).toBe(4096);
+    expect(prepared.report.redactions.length).toBeGreaterThanOrEqual(5);
+    expect(prepared.report.riskBefore).toBeGreaterThan(prepared.report.riskAfter);
+    expect(prepared.restore(prepared.outboundText)).toBe(rawPrompt);
+  });
 });

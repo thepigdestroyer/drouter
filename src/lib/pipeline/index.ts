@@ -2,6 +2,7 @@ import {
   createSessionScrubber,
   type SessionScrubber,
 } from "../privacy/scrubber";
+import { mechanicalRedact } from "../privacy/mechanical";
 import { padPayloadToBucket } from "../privacy/padding";
 import { scorePromptPrivacyRisk } from "../risk/analyzer";
 import { normalizeStylometry } from "../stylometry/normalizer";
@@ -26,22 +27,30 @@ export interface PreparePromptOptions {
   normalizeStyle?: boolean;
   scrubber?: SessionScrubber;
   decoyCount?: number;
+  mechanical?: boolean;
 }
 
 const REDACTION_RISK_WEIGHTS: Readonly<Record<string, number>> = {
   SECRET: 40,
   ACCT: 30,
   EMAIL: 25,
-  PHONE: 20,
   IP: 22,
+  ADDRESS: 22,
+  PHONE: 20,
   ENTITY: 18,
+  NAME: 18,
+  URL: 18,
+  ENTROPY: 25,
+  DATE: 16,
+  DIGITS: 15,
 };
 
 /**
  * Browser-safe prompt preparation pipeline (Interface I1).
- * Composes the session PII/secret scrubber (with custom terms),
- * privacy risk analyzer, optional stylometry normalization,
- * bucket wire padding, and optional k-anonymity chaff generation.
+ * Composes the session PII/secret scrubber (or deterministic fail-closed
+ * `mechanicalRedact` when `opts?.mechanical` is true), privacy risk analyzer,
+ * optional stylometry normalization, bucket wire padding, and optional
+ * k-anonymity chaff generation.
  */
 export function preparePrompt(
   text: string,
@@ -49,24 +58,49 @@ export function preparePrompt(
 ): PreparedPrompt {
   const inputText = text ?? "";
   const customTerms = opts?.customTerms ?? [];
-  const scrubber = opts?.scrubber ?? createSessionScrubber(customTerms);
-  if (opts?.scrubber && customTerms.length > 0) {
-    for (const term of customTerms) {
-      scrubber.addCustomTerm(term);
-    }
-  }
 
-  // 1. Scrub PII, secrets, account identifiers, and custom terms first so
-  //    stylometry normalization never alters secret/entity substrings.
-  const scrubResult = scrubber.scrub(inputText);
-  const redactions: Array<{ kind: string; placeholder: string }> =
-    scrubResult.replacements.map((r) => ({
+  let scrubbedText: string;
+  let redactions: Array<{ kind: string; placeholder: string }>;
+  let restoreFn: (modelText: string) => string;
+
+  if (opts?.mechanical) {
+    const mechResult = mechanicalRedact(inputText, {
+      customTerms,
+      scrubber: opts.scrubber,
+    });
+    scrubbedText = mechResult.text;
+    redactions = mechResult.redactions.map((r) => ({
       kind: r.kind,
       placeholder: r.placeholder,
     }));
+    restoreFn = (modelText: string) => {
+      if (!modelText) return modelText;
+      return mechResult.restore(modelText);
+    };
+  } else {
+    const scrubber = opts?.scrubber ?? createSessionScrubber(customTerms);
+    if (opts?.scrubber && customTerms.length > 0) {
+      for (const term of customTerms) {
+        scrubber.addCustomTerm(term);
+      }
+    }
+
+    // 1. Scrub PII, secrets, account identifiers, and custom terms first so
+    //    stylometry normalization never alters secret/entity substrings.
+    const scrubResult = scrubber.scrub(inputText);
+    scrubbedText = scrubResult.scrubbed;
+    redactions = scrubResult.replacements.map((r) => ({
+      kind: r.kind,
+      placeholder: r.placeholder,
+    }));
+    restoreFn = (modelText: string) => {
+      if (!modelText) return modelText;
+      return scrubber.restore(modelText);
+    };
+  }
 
   // 2. Optionally normalize stylometric fingerprint on the scrubbed text.
-  let outboundText = scrubResult.scrubbed;
+  let outboundText = scrubbedText;
   let styleChanges = 0;
   if (opts?.normalizeStyle) {
     const styleResult = normalizeStylometry(outboundText);
@@ -105,8 +139,7 @@ export function preparePrompt(
       styleChanges,
     },
     restore(modelText: string): string {
-      if (!modelText) return modelText;
-      return scrubber.restore(modelText);
+      return restoreFn(modelText);
     },
     ...(paddedBytes ? { paddedBytes } : {}),
     ...(decoyBundle ? { decoyBundle } : {}),

@@ -448,4 +448,22 @@ describe("Subsystem 5: Client-Side Privacy Guard", () => {
       expect(selectedIds).toEqual([0, 2, 4, 5, 6]);
     });
   });
+
+  describe("Wave 5 Privacy Barrel Exports (mechanicalRedact & attestedPiiFilter)", () => {
+    it("re-exports mechanicalRedact and attestedPiiFilter from @/lib/privacy", async () => {
+      const privacyMod = await import("@/lib/privacy");
+      expect(typeof privacyMod.mechanicalRedact).toBe("function");
+      expect(typeof privacyMod.attestedPiiFilter).toBe("function");
+
+      const sample =
+        "Contact Dr. Clara Vance at clara.vance@northvale.org or https://northvale.org/trial on 2026-10-25 (ID 849201).";
+      const res = privacyMod.mechanicalRedact(sample);
+      expect(res.text).not.toContain("Clara Vance");
+      expect(res.text).not.toContain("clara.vance@northvale.org");
+      expect(res.text).not.toContain("https://northvale.org/trial");
+      expect(res.text).not.toContain("2026-10-25");
+      expect(res.text).not.toContain("849201");
+      expect(res.restore(res.text)).toBe(sample);
+    });
+  });
 });
