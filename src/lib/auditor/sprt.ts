@@ -22,6 +22,8 @@ export interface SprtAuditOptions {
   alpha?: number;
   /** False-negative miss rate (Type II error). Default: 0.01 */
   beta?: number;
+  /** Initial cumulative log-likelihood ratio from prior sequential observations. Default: 0 */
+  initialLlr?: number;
 }
 
 export interface SprtAuditResult {
@@ -56,6 +58,7 @@ export function runSprtModelAudit(
   const p1 = opts?.p1 ?? 0.45;
   const alpha = opts?.alpha ?? 0.001;
   const beta = opts?.beta ?? 0.01;
+  const initialLlr = opts?.initialLlr ?? 0;
 
   if (p0 <= 0 || p0 >= 1 || p1 <= 0 || p1 >= 1) {
     throw new Error("SPRT pass probabilities p0 and p1 must be in (0, 1)");
@@ -70,7 +73,7 @@ export function runSprtModelAudit(
   const logPassRatio = Math.log(p1 / p0);
   const logFailRatio = Math.log((1 - p1) / (1 - p0));
 
-  let llr = 0;
+  let llr = Number.isFinite(initialLlr) ? initialLlr : 0;
   let probesEvaluated = 0;
   let passedCount = 0;
   let verdict: SprtVerdict = "CONTINUE_SAMPLING";
@@ -108,16 +111,14 @@ export function runSprtModelAudit(
 }
 
 /**
- * Generates deterministic, realistic mystery-shopper calibration probe streams
- * for either an honest `kimi-k3` (2.8T MoE, ~90% pass rate) provider or a
- * cheating provider that swapped in an 8B model (~35-45% pass rate on hard
- * calibration prompts).
+ * Generates deterministic, Synthetic / Simulated mystery-shopper calibration probe streams
+ * for unit testing SPRT decision bounds on an honest `kimi-k3` (2.8T MoE, ~90% pass rate)
+ * vs. a cheating provider that swapped in an 8B model (~35-45% pass rate).
  */
 export function generateMysteryShopperProbes(
   mode: "honest-kimi-k3" | "cheating-8b-swap",
   count = 15,
 ): MysteryShopperProbe[] {
-  // Deterministic pass patterns reflecting p0 ≈ 0.90 vs p1 ≤ 0.45
   const honestPattern = [
     true,
     true,

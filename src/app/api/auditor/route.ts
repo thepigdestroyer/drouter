@@ -1,8 +1,9 @@
 import { NextResponse, connection } from "next/server";
 import {
-  generateMysteryShopperProbes,
-  runSprtModelAudit,
-} from "@/lib/auditor/sprt";
+  CANARY_BATTERY,
+  MAX_CALLS_PER_AUDIT,
+  getAuditorRunsHistory,
+} from "@/lib/auditor";
 import { createTokenBucketLimiter } from "@/lib/ratelimit";
 
 const auditorLimiter = createTokenBucketLimiter({
@@ -18,11 +19,7 @@ export async function GET(request?: Request) {
     if (limited) return limited;
   }
 
-  const honestProbes = generateMysteryShopperProbes("honest-kimi-k3", 15);
-  const cheatingProbes = generateMysteryShopperProbes("cheating-8b-swap", 15);
-
-  const honestAudit = runSprtModelAudit(honestProbes);
-  const cheatingAudit = runSprtModelAudit(cheatingProbes);
+  const state = await getAuditorRunsHistory(25);
 
   return NextResponse.json({
     protocol: "mystery-shopper-sprt-v1",
@@ -32,18 +29,16 @@ export async function GET(request?: Request) {
       substitutePassRateP1: 0.45,
       falsePositiveAlpha: 0.001,
       falseNegativeBeta: 0.01,
+      maxCallsPerAudit: MAX_CALLS_PER_AUDIT,
+      canaryCategories: CANARY_BATTERY.map((c) => ({
+        probeId: c.probeId,
+        category: c.category,
+      })),
     },
-    comparison: {
-      honestProvider: {
-        mode: "honest-kimi-k3",
-        audit: honestAudit,
-        probes: honestProbes,
-      },
-      cheatingProvider: {
-        mode: "cheating-8b-swap",
-        audit: cheatingAudit,
-        probes: cheatingProbes,
-      },
-    },
+    mongoConfigured: state.mongoConfigured,
+    hasRun: state.hasRun,
+    statusMessage: state.statusMessage,
+    latestRun: state.latestRun,
+    history: state.history,
   });
 }
