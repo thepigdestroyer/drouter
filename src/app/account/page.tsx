@@ -28,9 +28,7 @@ function shortHex(hex: string, lead = 12, tail = 8): string {
 }
 
 export default function AccountPage() {
-  const [session, setSession] = useState<VaultSession | null>(() =>
-    getCurrentVaultSession(),
-  );
+  const [session, setSession] = useState<VaultSession | null>(null);
   const [persistEncrypted, setPersistEncrypted] = useState<boolean>(true);
   const [newCustomTerm, setNewCustomTerm] = useState<string>("");
   const [vaultNotes, setVaultNotes] = useState<string>("");
@@ -393,7 +391,7 @@ export default function AccountPage() {
 
                 <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
                   <div className="space-y-3">
-                    <form onSubmit={handleAddCustomTerm} className="flex gap-2">
+                    <form onSubmit={handleAddCustomTerm} className="flex flex-col sm:flex-row gap-2">
                       <label htmlFor="custom-term-input" className="sr-only">
                         Add a word or phrase to always hide
                       </label>
@@ -402,7 +400,7 @@ export default function AccountPage() {
                         type="text"
                         value={newCustomTerm}
                         onChange={(e) => setNewCustomTerm(e.target.value)}
-                        placeholder="Add a name, project title, or private word..."
+                        placeholder="Name, project, or private word..."
                         className="ep-input"
                       />
                       <InkButton
@@ -531,13 +529,6 @@ export default function AccountPage() {
                       Download your hidden words and notes as a locked backup file to keep on your computer or move to another device.
                     </p>
                     <div className="flex flex-wrap gap-2">
-                      <button
-                        type="button"
-                        onClick={handleExportVault}
-                        className="ep-btn-ghost text-xs"
-                      >
-                        Show backup file text
-                      </button>
                       <InkButton
                         variant="primary"
                         onClick={handleDownloadExport}
@@ -546,11 +537,6 @@ export default function AccountPage() {
                         Download backup file
                       </InkButton>
                     </div>
-                    {exportedJson && (
-                      <pre className="ep-inset max-h-40 overflow-auto p-3 font-mono text-[11px] text-ink-2">
-                        {exportedJson}
-                      </pre>
-                    )}
 
                     <div className="flex flex-wrap items-center justify-between gap-2 border-t border-rule pt-3">
                       <span className="text-xs text-ink-2">
@@ -576,7 +562,7 @@ export default function AccountPage() {
                       Choose a backup file you saved earlier. If it belongs to your signed-in account, click Restore backup right away. If it came from a 6-word account, enter those 6 words below.
                     </p>
 
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <input
                         ref={fileInputRef}
                         type="file"
@@ -591,23 +577,11 @@ export default function AccountPage() {
                       >
                         Choose backup file
                       </label>
-                    </div>
-
-                    <div>
-                      <label
-                        htmlFor="import-vault-json"
-                        className="mb-1 block font-mono text-xs text-ink-2"
-                      >
-                        Backup file text
-                      </label>
-                      <textarea
-                        id="import-vault-json"
-                        rows={3}
-                        value={importJsonText}
-                        onChange={(e) => setImportJsonText(e.target.value)}
-                        placeholder='{"format": "drouter-zk-vault-v1", ...}'
-                        className="ep-input font-mono text-xs"
-                      />
+                      {importJsonText.trim() && (
+                        <span className="ep-muted-chip text-ink">
+                          Backup loaded ({importJsonText.length.toLocaleString()} B)
+                        </span>
+                      )}
                     </div>
 
                     <div>
@@ -634,6 +608,47 @@ export default function AccountPage() {
                     </InkButton>
                   </form>
                 </div>
+
+                <TechDetails label="Paste or inspect backup text manually">
+                  <div className="grid grid-cols-1 gap-4 pt-1 lg:grid-cols-2">
+                    <div className="space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-mono text-xs text-ink">
+                          Inspect exported backup text
+                        </span>
+                        <button
+                          type="button"
+                          onClick={handleExportVault}
+                          className="ep-btn-ghost text-xs"
+                        >
+                          Show backup file text
+                        </button>
+                      </div>
+                      {exportedJson && (
+                        <pre className="ep-inset max-h-40 overflow-auto p-3 font-mono text-[11px] text-ink-2">
+                          {exportedJson}
+                        </pre>
+                      )}
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label
+                        htmlFor="import-vault-json"
+                        className="block font-mono text-xs text-ink"
+                      >
+                        Paste backup file text manually
+                      </label>
+                      <textarea
+                        id="import-vault-json"
+                        rows={3}
+                        value={importJsonText}
+                        onChange={(e) => setImportJsonText(e.target.value)}
+                        placeholder='{"format": "drouter-zk-vault-v1", ...}'
+                        className="ep-input font-mono text-xs"
+                      />
+                    </div>
+                  </div>
+                </TechDetails>
 
                 <div className="flex flex-wrap items-center justify-between gap-2 border-t border-rule pt-4 text-xs text-ink-2">
                   <span>Ready to send a private message?</span>

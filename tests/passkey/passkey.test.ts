@@ -281,6 +281,11 @@ describe("deRoute WebAuthn PRF Passkeys & AuthGate helpers", () => {
     expect(sanitizeNextPath("https://evil.example/phish")).toBe("/app");
     expect(sanitizeNextPath("//evil.example/phish")).toBe("/app");
     expect(sanitizeNextPath("/\\evil.example")).toBe("/app");
+    expect(sanitizeNextPath("/app\\evil")).toBe("/app");
+    expect(sanitizeNextPath("/%2fevil.example")).toBe("/app");
+    expect(sanitizeNextPath("/%2Fevil.example")).toBe("/app");
+    expect(sanitizeNextPath("/%5cevil.example")).toBe("/app");
+    expect(sanitizeNextPath("/%252fevil.example")).toBe("/app");
     expect(sanitizeNextPath("javascript:alert(1)")).toBe("/app");
     expect(sanitizeNextPath(null)).toBe("/app");
     expect(buildLoginRedirectHref("/argon")).toBe("/login?next=/argon");

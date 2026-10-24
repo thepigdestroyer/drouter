@@ -14,6 +14,16 @@ export interface AuthGateProps {
   children: React.ReactNode;
 }
 
+function isUnsafePathCandidate(candidate: string): boolean {
+  return (
+    !candidate.startsWith("/") ||
+    candidate.startsWith("//") ||
+    candidate.includes("\\") ||
+    candidate.includes("://") ||
+    /[\u0000-\u0020\u007f]/.test(candidate)
+  );
+}
+
 /**
  * Validates that a `?next=` redirect target is a safe same-site path starting with a single `/`.
  */
@@ -23,15 +33,27 @@ export function sanitizeNextPath(
 ): string {
   if (typeof raw !== "string") return fallback;
   const trimmed = raw.trim();
-  if (
-    !trimmed.startsWith("/") ||
-    trimmed.startsWith("//") ||
-    trimmed.startsWith("/\\") ||
-    trimmed.includes("://") ||
-    /[\u0000-\u001f\u007f]/.test(trimmed)
-  ) {
+  if (isUnsafePathCandidate(trimmed)) {
     return fallback;
   }
+
+  let current = trimmed;
+  for (let pass = 0; pass < 3; pass++) {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(current);
+    } catch {
+      return fallback;
+    }
+    if (isUnsafePathCandidate(decoded)) {
+      return fallback;
+    }
+    if (decoded === current) {
+      break;
+    }
+    current = decoded;
+  }
+
   return trimmed;
 }
 
@@ -42,9 +64,7 @@ export function buildLoginRedirectHref(pathname: string | null | undefined): str
 
 export function AuthGate({ children }: AuthGateProps): React.JSX.Element {
   const pathname = usePathname();
-  const [session, setSession] = useState<VaultSession | null>(() =>
-    getCurrentVaultSession(),
-  );
+  const [session, setSession] = useState<VaultSession | null>(null);
 
   useEffect(() => {
     setSession(getCurrentVaultSession());
