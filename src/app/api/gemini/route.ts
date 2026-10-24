@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse, connection } from "next/server";
 import {
+  recordAgentVerificationReceipt,
+  runAtlasHybridSearch,
+} from "@/lib/atlas";
+import {
   ARGON_COMPANION_MODELS,
   ARGON_TOOLKIT_MANIFEST,
   DEFAULT_TASK_PROMPT,
@@ -9,23 +13,66 @@ import {
   runArgonAutonomousWorkflow,
   validateArgonRequestConfig,
   type ArgonThinkingLevel,
+  type AtlasHybridRunnerResult,
 } from "@/lib/gemini";
+
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX_REQUESTS = 20;
+const ipHits = new Map<string, number[]>();
+
+function checkGeminiPostRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const cutoff = now - RATE_LIMIT_WINDOW_MS;
+  const recent = (ipHits.get(ip) ?? []).filter((t) => t > cutoff);
+  if (recent.length >= RATE_LIMIT_MAX_REQUESTS) {
+    ipHits.set(ip, recent);
+    return false;
+  }
+  recent.push(now);
+  ipHits.set(ip, recent);
+  return true;
+}
+
+function getClientIp(req: Request): string {
+  const fwd = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+  return fwd || req.headers.get("x-real-ip")?.trim() || "127.0.0.1";
+}
+
+async function serverAtlasRunner(query: string): Promise<AtlasHybridRunnerResult> {
+  const res = await runAtlasHybridSearch(query, { limit: 5 });
+  const top = res.results[0];
+  return {
+    topDocId: top?.docId ?? "provider-tinfoil",
+    topTitle: top?.title ?? "Tinfoil Confidential Inference Enclave",
+    engines: res.engines,
+    totalDocs: res.totalCorpusDocs,
+    matchingReceiptsCount: res.matchingReceipts.length,
+  };
+}
+
+async function serverReceiptRecorder(
+  receipt: Parameters<typeof recordAgentVerificationReceipt>[0],
+): Promise<void> {
+  await recordAgentVerificationReceipt(receipt);
+}
 
 export async function GET() {
   await connection();
 
   const preVerifiedRun = await runArgonAutonomousWorkflow({
     taskPrompt: DEFAULT_TASK_PROMPT,
-    thinkingLevel: "high",
+    thinkingLevel: "medium",
     background: true,
     injectFaultToTestSelfHealing: true,
     humanApprovedExternalAction: false,
     preferredEnclaveModel: "gemma4-31b",
+    atlasRunner: serverAtlasRunner,
+    receiptRecorder: serverReceiptRecorder,
   });
 
   const configValidation = validateArgonRequestConfig({
     model: GEMINI_4_ARGON_MODEL_ID,
-    thinking_level: "high",
+    thinking_level: "medium",
     background: true,
     max_output_tokens: 131_072,
     max_context_tokens: 1_000_000,
@@ -34,6 +81,8 @@ export async function GET() {
 
   return NextResponse.json({
     ok: true,
+    mode: preVerifiedRun.mode,
+    modelCalls: preVerifiedRun.modelCalls,
     track: "Google DeepMind Encode London Hackathon - Gemini 4 Argon Autonomous Agent",
     primaryModel: GEMINI_4_ARGON_MODEL_ID,
     companionModels: ARGON_COMPANION_MODELS,
@@ -48,6 +97,17 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  const ip = getClientIp(request);
+  if (!checkGeminiPostRateLimit(ip)) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "RATE_LIMIT_EXCEEDED",
+      },
+      { status: 429, headers: { "Retry-After": "60" } },
+    );
+  }
+
   let body: Record<string, unknown> = {};
   try {
     const parsed = (await request.json()) as unknown;
@@ -63,7 +123,7 @@ export async function POST(request: NextRequest) {
       ? body.thinkingLevel
       : typeof body.thinking_level === "string"
         ? body.thinking_level
-        : "high";
+        : "medium";
 
   const validation = validateArgonRequestConfig({
     model:
@@ -95,10 +155,16 @@ export async function POST(request: NextRequest) {
   }
 
   const thinkingLevel = (validation.normalizedConfig?.thinking_level ??
-    "high") as ArgonThinkingLevel;
+    "medium") as ArgonThinkingLevel;
 
   const preferredEnclaveModel =
     body.preferredEnclaveModel === "kimi-k3" ? "kimi-k3" : "gemma4-31b";
+
+  // Extract ephemeral per-request key without ever logging, persisting, or echoing it
+  const ephemeralGeminiKey =
+    typeof body.geminiApiKey === "string" && body.geminiApiKey.trim().length > 0
+      ? body.geminiApiKey.trim()
+      : undefined;
 
   const autonomousRun = await runArgonAutonomousWorkflow({
     taskPrompt:
@@ -110,12 +176,16 @@ export async function POST(request: NextRequest) {
     injectFaultToTestSelfHealing: Boolean(body.injectFaultToTestSelfHealing),
     humanApprovedExternalAction: Boolean(body.humanApprovedExternalAction),
     preferredEnclaveModel,
-    geminiApiKey:
-      typeof body.geminiApiKey === "string" ? body.geminiApiKey : undefined,
+    geminiApiKey: ephemeralGeminiKey,
+    enableLiveEnclaveInference: true,
+    atlasRunner: serverAtlasRunner,
+    receiptRecorder: serverReceiptRecorder,
   });
 
   return NextResponse.json({
     ok: true,
+    mode: autonomousRun.mode,
+    modelCalls: autonomousRun.modelCalls,
     primaryModel: GEMINI_4_ARGON_MODEL_ID,
     companionModels: ARGON_COMPANION_MODELS,
     persona: DEMO_PERSONA,

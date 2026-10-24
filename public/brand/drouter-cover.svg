@@ -15,15 +15,14 @@
 
   <!-- ================= LEFT COLUMN: LOCKUP & TAGLINE ================= -->
   <g transform="translate(80, 158)">
-    <!-- Monochrome Ink Mark (so the readable prompt inside the enclave ring is the single orange element on the canvas) -->
+    <!-- Monochrome Ink Mark (so the readable message inside the enclave ring is the single orange element on the canvas) -->
     <g transform="translate(0, 0)">
       <rect x="3" y="3" width="58" height="58" rx="13" fill="#f3f1ec" stroke="#151515" stroke-width="2.2"/>
-      <path d="M 17.2 28.5 A 14.5 14.5 0 1 1 17.2 41.5" stroke="#151515" stroke-width="3.2" stroke-linecap="round"/>
-      <line x1="14.5" y1="28.5" x2="19.5" y2="28.5" stroke="#151515" stroke-width="2" stroke-linecap="round"/>
-      <line x1="14.5" y1="41.5" x2="19.5" y2="41.5" stroke="#151515" stroke-width="2" stroke-linecap="round"/>
-      <line x1="45" y1="11" x2="45" y2="49.5" stroke="#151515" stroke-width="3.2" stroke-linecap="round"/>
-      <line x1="9.5" y1="35" x2="21.5" y2="35" stroke="#151515" stroke-width="2.5" stroke-linecap="round"/>
-      <circle cx="30.5" cy="35" r="4.8" fill="#151515"/>
+      <circle cx="31" cy="35" r="14.2" stroke="#151515" stroke-width="3.6"/>
+      <line x1="45.2" y1="11" x2="45.2" y2="49.2" stroke="#151515" stroke-width="3.6" stroke-linecap="round"/>
+      <line x1="8" y1="35" x2="23.5" y2="35" stroke="#f3f1ec" stroke-width="7.5" stroke-linecap="butt"/>
+      <line x1="9.5" y1="35" x2="22.5" y2="35" stroke="#151515" stroke-width="3" stroke-linecap="round"/>
+      <circle cx="31" cy="35" r="5" fill="#151515"/>
     </g>
 
     <!-- Wordmark -->
@@ -61,7 +60,7 @@
     <rect x="77" y="0" width="76" height="24" rx="12" stroke="#151515" stroke-width="1.5"/>
     <text x="115" y="16" text-anchor="middle" fill="#151515" font-family="'SF Mono', Menlo, monospace" font-size="11" letter-spacing="1">STEP 01</text>
 
-    <!-- Laptop / Browser Window Illustration (y=48..224, center y=136) -->
+    <!-- Laptop / Browser Window Illustration -->
     <g transform="translate(0, 56)">
       <!-- Screen bezel -->
       <rect x="10" y="0" width="210" height="150" rx="6" fill="#f3f1ec" stroke="#151515" stroke-width="2.2"/>
@@ -89,14 +88,14 @@
       <path d="M0 150 L230 150 L222 162 L8 162 Z" fill="#f3f1ec" stroke="#151515" stroke-width="2.2" stroke-linejoin="round"/>
     </g>
 
-    <!-- Caption below Stage 1 (y=268) -->
+    <!-- Caption below Stage 1 -->
     <text x="115" y="268" text-anchor="middle" fill="#151515" font-family="'Iowan Old Style', 'Charter', 'Palatino', Georgia, serif" font-size="21" font-weight="600">Your device:</text>
     <text x="115" y="293" text-anchor="middle" fill="#3f3e3b" font-family="'Iowan Old Style', 'Charter', 'Palatino', Georgia, serif" font-size="18.5" font-style="italic">scrub, pad, encrypt</text>
     <text x="115" y="322" text-anchor="middle" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="11">Verifies signed hardware</text>
     <text x="115" y="339" text-anchor="middle" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="11">report before sealing prompt</text>
   </g>
 
-  <!-- Connector Arrow 1 -> 2 (y=329) -->
+  <!-- Connector Arrow 1 -> 2 -->
   <g transform="translate(852, 329)">
     <line x1="0" y1="0" x2="48" y2="0" stroke="#151515" stroke-width="2"/>
     <polyline points="40,-6 48,0 40,6" stroke="#151515" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
@@ -153,7 +152,7 @@
     <text x="112" y="339" text-anchor="middle" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="11">length, and identity</text>
   </g>
 
-  <!-- Connector Arrow 2 -> 3 (y=329) -->
+  <!-- Connector Arrow 2 -> 3 -->
   <g transform="translate(1148, 329)">
     <line x1="0" y1="0" x2="48" y2="0" stroke="#151515" stroke-width="2"/>
     <polyline points="40,-6 48,0 40,6" stroke="#151515" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
@@ -178,43 +177,43 @@
       <line x1="197" y1="104" x2="207" y2="104" stroke="#151515" stroke-width="2.2"/>
       <line x1="1" y1="104" x2="11" y2="104" stroke="#151515" stroke-width="2.2"/>
 
-      <!-- Silicon Chip Package Inside the Ring (x=38..170, y=46..162) -->
-      <rect x="38" y="46" width="132" height="116" rx="6" fill="#f3f1ec" stroke="#151515" stroke-width="2.2"/>
+      <!-- Silicon Chip Package Inside the Ring (x=36..172, y=46..162, width=136) -->
+      <rect x="36" y="46" width="136" height="116" rx="6" fill="#f3f1ec" stroke="#151515" stroke-width="2.2"/>
 
-      <!-- Chip Pins (Top, Bottom, Left, Right) — cleanly inside r=91 ring! -->
-      <!-- Top pins (y=36..46) -->
-      <line x1="62" y1="36" x2="62" y2="46" stroke="#151515" stroke-width="2"/>
-      <line x1="83" y1="36" x2="83" y2="46" stroke="#151515" stroke-width="2"/>
+      <!-- Chip Pins (Top, Bottom, Left, Right) -->
+      <!-- Top pins -->
+      <line x1="60" y1="36" x2="60" y2="46" stroke="#151515" stroke-width="2"/>
+      <line x1="82" y1="36" x2="82" y2="46" stroke="#151515" stroke-width="2"/>
       <line x1="104" y1="36" x2="104" y2="46" stroke="#151515" stroke-width="2"/>
-      <line x1="125" y1="36" x2="125" y2="46" stroke="#151515" stroke-width="2"/>
-      <line x1="146" y1="36" x2="146" y2="46" stroke="#151515" stroke-width="2"/>
-      <!-- Bottom pins (y=162..172) -->
-      <line x1="62" y1="162" x2="62" y2="172" stroke="#151515" stroke-width="2"/>
-      <line x1="83" y1="162" x2="83" y2="172" stroke="#151515" stroke-width="2"/>
+      <line x1="126" y1="36" x2="126" y2="46" stroke="#151515" stroke-width="2"/>
+      <line x1="148" y1="36" x2="148" y2="46" stroke="#151515" stroke-width="2"/>
+      <!-- Bottom pins -->
+      <line x1="60" y1="162" x2="60" y2="172" stroke="#151515" stroke-width="2"/>
+      <line x1="82" y1="162" x2="82" y2="172" stroke="#151515" stroke-width="2"/>
       <line x1="104" y1="162" x2="104" y2="172" stroke="#151515" stroke-width="2"/>
-      <line x1="125" y1="162" x2="125" y2="172" stroke="#151515" stroke-width="2"/>
-      <line x1="146" y1="162" x2="146" y2="172" stroke="#151515" stroke-width="2"/>
-      <!-- Left pins (x=28..38) -->
-      <line x1="28" y1="68" x2="38" y2="68" stroke="#151515" stroke-width="2"/>
-      <line x1="28" y1="92" x2="38" y2="92" stroke="#151515" stroke-width="2"/>
-      <line x1="28" y1="116" x2="38" y2="116" stroke="#151515" stroke-width="2"/>
-      <line x1="28" y1="140" x2="38" y2="140" stroke="#151515" stroke-width="2"/>
-      <!-- Right pins (x=170..180) -->
-      <line x1="170" y1="68" x2="180" y2="68" stroke="#151515" stroke-width="2"/>
-      <line x1="170" y1="92" x2="180" y2="92" stroke="#151515" stroke-width="2"/>
-      <line x1="170" y1="116" x2="180" y2="116" stroke="#151515" stroke-width="2"/>
-      <line x1="170" y1="140" x2="180" y2="140" stroke="#151515" stroke-width="2"/>
+      <line x1="126" y1="162" x2="126" y2="172" stroke="#151515" stroke-width="2"/>
+      <line x1="148" y1="162" x2="148" y2="172" stroke="#151515" stroke-width="2"/>
+      <!-- Left pins -->
+      <line x1="26" y1="68" x2="36" y2="68" stroke="#151515" stroke-width="2"/>
+      <line x1="26" y1="92" x2="36" y2="92" stroke="#151515" stroke-width="2"/>
+      <line x1="26" y1="116" x2="36" y2="116" stroke="#151515" stroke-width="2"/>
+      <line x1="26" y1="140" x2="36" y2="140" stroke="#151515" stroke-width="2"/>
+      <!-- Right pins -->
+      <line x1="172" y1="68" x2="182" y2="68" stroke="#151515" stroke-width="2"/>
+      <line x1="172" y1="92" x2="182" y2="92" stroke="#151515" stroke-width="2"/>
+      <line x1="172" y1="116" x2="182" y2="116" stroke="#151515" stroke-width="2"/>
+      <line x1="172" y1="140" x2="182" y2="140" stroke="#151515" stroke-width="2"/>
 
-      <!-- Chip Header Label (Ink, inside chip top) -->
-      <text x="104" y="65" text-anchor="middle" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="9" letter-spacing="0.8">SEV-SNP · TDX · H100 TEE</text>
-      <line x1="48" y1="73" x2="160" y2="73" stroke="#d6d2c8" stroke-width="1.2"/>
+      <!-- Chip Header Label (cleanly centered inside chip width=136) -->
+      <text x="104" y="65" text-anchor="middle" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="9" letter-spacing="0.6">ATTESTED TEE CHIP</text>
+      <line x1="46" y1="73" x2="162" y2="73" stroke="#d6d2c8" stroke-width="1.2"/>
 
       <!-- THE SINGLE ORANGE ELEMENT ON THE ENTIRE IMAGE:
            The readable message unlocked ONLY inside the sealed hardware ring -->
-      <rect x="48" y="81" width="112" height="68" rx="4" fill="#d9531e"/>
+      <rect x="46" y="81" width="116" height="68" rx="4" fill="#d9531e"/>
       <text x="104" y="104" text-anchor="middle" fill="#f3f1ec" font-family="'SF Mono', Menlo, monospace" font-size="10" font-weight="600" letter-spacing="0.6">PROMPT READABLE</text>
       <text x="104" y="125" text-anchor="middle" fill="#f3f1ec" font-family="'Iowan Old Style', 'Charter', Georgia, serif" font-size="14.5" font-style="italic">"Review terms..."</text>
-      <text x="104" y="141" text-anchor="middle" fill="#f3f1ec" font-family="'SF Mono', Menlo, monospace" font-size="8.5" letter-spacing="0.6">ENCLAVE MEMORY ONLY</text>
+      <text x="104" y="141" text-anchor="middle" fill="#f3f1ec" font-family="'SF Mono', Menlo, monospace" font-size="8.5" letter-spacing="0.5">ENCLAVE MEMORY ONLY</text>
     </g>
 
     <!-- Caption below Stage 3 -->

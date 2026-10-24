@@ -69,7 +69,7 @@ const DETECTION_RULES: DetectionRule[] = [
     category: "pii",
     severity: 30,
     pattern:
-      /\b(?:\d{3}-\d{2}-\d{4}|[A-CEGHJ-PR-TW-Z]{2}\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-D])\b/g,
+      /\b(?:\d{3}-\d{2}-\d{4}|[A-CEGHJ-TW-Z]{2}\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-D])\b/g,
     recommendation:
       "Remove government identification numbers (SSN / National Insurance) prior to external inference.",
     maskPreview: true,
@@ -331,7 +331,7 @@ export function generalizePromptPapillon(
   );
 
   working = working.replace(
-    /\b(?:\d{3}-\d{2}-\d{4}|[A-CEGHJ-PR-TW-Z]{2}\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-D])\b/g,
+    /\b(?:\d{3}-\d{2}-\d{4}|[A-CEGHJ-TW-Z]{2}\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-D])\b/g,
     (match) =>
       assignVaultToken(
         localContextVault,

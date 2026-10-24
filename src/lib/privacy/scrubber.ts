@@ -167,8 +167,8 @@ const ACCT_PATTERNS: RegExp[] = [
   /\b0x[a-fA-F0-9]{40}\b/g,
   // US Social Security Number (SSN: XXX-XX-XXXX)
   /\b(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b/g,
-  // UK National Insurance Number (e.g. QQ 12 34 56 C)
-  /\b[A-CEGHJ-PR-TW-Z][A-CEGHJ-NPR-TW-Z]\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-D]\b/gi,
+  // UK National Insurance Number (including HMRC test prefix QQ, e.g. QQ 12 34 56 C or AB 12 34 56 C)
+  /\b[A-CEGHJ-TW-Z]{2}\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-D]\b/gi,
   // Explicit UK NHS number (labeled or 3-3-4 format)
   /\bNHS(?:\s*(?:No\.?|Number|#|:))?\s*\d{3}[\s-]?\d{3}[\s-]?\d{4}\b/gi,
   // IBAN (2 letters + 2 check digits + 11..30 alphanumeric chars, optional spaces)

@@ -1,18 +1,40 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   ARGON_COMPANION_MODELS,
   ARGON_TOOLKIT_MANIFEST,
+  assertOutboundPrivacyInvariant,
   buildInteractionsCreatePayload,
+  callGeminiInteractionsEndpoint,
   GEMINI_4_ARGON_MODEL_ID,
   generateInteractionsSdkSnippets,
   DEMO_PERSONA,
+  PrivacyInvariantViolationError,
   runArgonAutonomousWorkflow,
   sanitizeToArgonConfig,
   validateArgonRequestConfig,
+  type GenAIInteractionsClientLike,
 } from "@/lib/gemini";
 
 describe("Gemini 4 Argon API Contract & Validator (interactions.ts)", () => {
-  it("accepts valid gemini-4-argon configs with thinking_level and background: true", () => {
+  it("accepts valid gemini-4-argon configs, defaults thinking_level to medium, and forces background: true for long decode", () => {
+    const validDefault = validateArgonRequestConfig({
+      model: "gemini-4-argon",
+      max_output_tokens: 131_072,
+      max_context_tokens: 1_000_000,
+    });
+
+    expect(validDefault.valid).toBe(true);
+    expect(validDefault.ok).toBe(true);
+    expect(validDefault.errors).toEqual([]);
+    expect(validDefault.normalizedConfig).toEqual({
+      model: "gemini-4-argon",
+      thinking_level: "medium",
+      background: true,
+      max_output_tokens: 131_072,
+      max_context_tokens: 1_000_000,
+      implicit_caching: "enabled",
+    });
+
     const validHigh = validateArgonRequestConfig({
       model: "gemini-4-argon",
       thinking_level: "high",
@@ -20,27 +42,8 @@ describe("Gemini 4 Argon API Contract & Validator (interactions.ts)", () => {
       max_output_tokens: 131_072,
       max_context_tokens: 1_000_000,
     });
-
     expect(validHigh.valid).toBe(true);
-    expect(validHigh.ok).toBe(true);
-    expect(validHigh.errors).toEqual([]);
-    expect(validHigh.normalizedConfig).toEqual({
-      model: "gemini-4-argon",
-      thinking_level: "high",
-      background: true,
-      max_output_tokens: 131_072,
-      max_context_tokens: 1_000_000,
-      implicit_caching: "enabled",
-    });
-
-    // Long decode (> 65,536 tokens) automatically forces background: true
-    const autoBackground = validateArgonRequestConfig({
-      model: "gemini-4-argon",
-      thinking_level: "medium",
-      max_output_tokens: 100_000,
-    });
-    expect(autoBackground.valid).toBe(true);
-    expect(autoBackground.normalizedConfig?.background).toBe(true);
+    expect(validHigh.normalizedConfig?.thinking_level).toBe("high");
   });
 
   it("rejects any config containing thinking_budget, temperature, top_p, top_k, or cached_content", () => {
@@ -64,7 +67,6 @@ describe("Gemini 4 Argon API Contract & Validator (interactions.ts)", () => {
       expect(res.errors.some((e) => e.includes(item.key))).toBe(true);
     }
 
-    // Also test all 5 forbidden parameters passed simultaneously
     const combined = validateArgonRequestConfig({
       model: "gemini-4-argon",
       thinking_level: "high",
@@ -84,7 +86,7 @@ describe("Gemini 4 Argon API Contract & Validator (interactions.ts)", () => {
     ]);
   });
 
-  it("strips forbidden legacy parameters via sanitizeToArgonConfig and builds client.interactions.create payload", () => {
+  it("strips forbidden legacy parameters via sanitizeToArgonConfig, marks unused toolkit models as not-used, and builds client.interactions.create payload", () => {
     const sanitized = sanitizeToArgonConfig({
       thinking_level: "high",
       temperature: 0.5,
@@ -102,54 +104,83 @@ describe("Gemini 4 Argon API Contract & Validator (interactions.ts)", () => {
     ]);
 
     const payload = buildInteractionsCreatePayload({
-      scrubbedPrompt: "Audit ASSAY-774 inside attested B200 enclave.",
+      scrubbedPrompt: "Audit ASSAY-774 inside attested enclave.",
       thinkingLevel: "high",
       background: true,
     });
 
     expect(payload.model).toBe("gemini-4-argon");
     expect(payload.thinking_level).toBe("high");
+    expect(payload.generation_config.thinking_level).toBe("high");
     expect(payload.background).toBe(true);
-    expect(payload.subagent_routing.sandbox_verifier).toBe(
-      "antigravity-preview-09-2026",
-    );
-    expect(payload.subagent_routing.fast_swarm).toBe("gemini-3.8-flash");
-    expect(payload.subagent_routing.quorum_checker).toBe(
-      "gemini-3.5-flash-lite",
-    );
-    expect(payload.subagent_routing.deep_research).toBe(
-      "deep-research-preview-04-2026",
-    );
-    expect(payload.subagent_routing.live_voice_gate).toBe("gemini-3.8-live");
-    expect(payload.subagent_routing.voice_briefing).toBe(
-      "gemini-3.8-flash-tts",
-    );
-    expect(payload.subagent_routing.attested_enclave_model).toBe(
-      "gemma-4-31b-it",
-    );
-    expect(payload.subagent_routing.on_device_filter).toBe("gemma-4-e4b");
-    expect(payload.subagent_routing.tinfoil_enclave_target).toBe("gemma4-31b");
+    expect(payload.tools.every((t) => t.type === "function")).toBe(true);
 
     const snippets = generateInteractionsSdkSnippets(payload);
     expect(snippets.typescript).toContain("client.interactions.create");
     expect(snippets.python).toContain("client.interactions.create");
-    expect(ARGON_TOOLKIT_MANIFEST.length).toBeGreaterThanOrEqual(8);
+
+    const notUsedModels = ARGON_TOOLKIT_MANIFEST.filter((m) => m.statusInDemo === "not-used");
+    expect(notUsedModels.length).toBeGreaterThanOrEqual(4);
     expect(ARGON_COMPANION_MODELS.orchestrator).toBe("gemini-4-argon");
+  });
+
+  it("enforces the Privacy Invariant and aborts outbound SDK calls if any unredacted PII or secret is present", async () => {
+    const originals = [
+      "sk-test-4f9a2c7e1b8d6a3f5e0c",
+      "dana.reyes@example.org",
+      "Riverside Teaching Hospital",
+    ];
+
+    expect(() =>
+      assertOutboundPrivacyInvariant(
+        { input: " Safe scrubbed text [SECRET_1] [EMAIL_1] Northvale Institute " },
+        originals,
+      ),
+    ).not.toThrow();
+
+    expect(() =>
+      assertOutboundPrivacyInvariant(
+        { input: "Leaked credential sk-test-4f9a2c7e1b8d6a3f5e0c in prompt" },
+        originals,
+      ),
+    ).toThrow(PrivacyInvariantViolationError);
+
+    const spyCreate = vi.fn();
+    const mockClient: GenAIInteractionsClientLike = {
+      interactions: { create: spyCreate },
+    };
+
+    const leakyPayload = buildInteractionsCreatePayload({
+      scrubbedPrompt: "Contains dana.reyes@example.org by mistake",
+      thinkingLevel: "medium",
+    });
+
+    await expect(
+      callGeminiInteractionsEndpoint({
+        payload: leakyPayload,
+        sensitiveOriginals: originals,
+        genaiClient: mockClient,
+      }),
+    ).rejects.toThrow(PrivacyInvariantViolationError);
+
+    // Ensure Google SDK was never called when privacy check failed
+    expect(spyCreate).not.toHaveBeenCalled();
   });
 });
 
-describe("Autonomous 6-Stage Orchestrator, Self-Healing & Human-in-the-Loop Gate (orchestrator.ts)", () => {
-  it("runs all 6 stages for the demo persona, detects an injected fault, self-heals by re-routing, and passes all verification signals", async () => {
+describe("Autonomous 6-Stage Orchestrator, Self-Healing, Simulated Mode & Mocked Live Tool Loop (orchestrator.ts)", () => {
+  it("runs in simulated mode when no GEMINI_API_KEY is present, labels outputs honestly, fails a real check on fault injection, and blocks unapproved external actions", async () => {
     const result = await runArgonAutonomousWorkflow({
-      thinkingLevel: "high",
+      thinkingLevel: "medium",
       background: true,
       injectFaultToTestSelfHealing: true,
       humanApprovedExternalAction: false,
       preferredEnclaveModel: "gemma4-31b",
     });
 
+    expect(result.mode).toBe("simulated");
+    expect(result.modelCalls).toEqual([]);
     expect(result.persona.name).toBe(DEMO_PERSONA.name);
-    expect(result.persona.institution).toBe(DEMO_PERSONA.institution);
     expect(result.overallPassed).toBe(true);
     expect(result.selfHealingTriggeredAndResolved).toBe(true);
 
@@ -159,43 +190,46 @@ describe("Autonomous 6-Stage Orchestrator, Self-Healing & Human-in-the-Loop Gate
     expect(stage1.verificationSignal.plaintextLeakCount).toBe(0);
     expect(stage1.verificationSignal.bucketBytes % 4096).toBe(0);
     expect(stage1.verificationSignal.symmetryHomomorphismVerified).toBe(true);
-    expect(stage1.papillonGeneralizedPrompt).not.toContain(
-      "sk-test-4f9a2c7e1b8d6a3f5e0c",
-    );
-    expect(stage1.papillonGeneralizedPrompt).not.toContain(
-      "dana.reyes@example.org",
-    );
+    expect(stage1.papillonGeneralizedPrompt).not.toContain("sk-test-4f9a2c7e1b8d6a3f5e0c");
+    expect(stage1.papillonGeneralizedPrompt).not.toContain("dana.reyes@example.org");
+    expect(stage1.papillonGeneralizedPrompt).not.toContain("Riverside Teaching Hospital");
 
-    // Stage 2: Parallel Subagent Swarm
+    // Stage 2: Parallel Subagent Swarm with real Tinfoil enclave hostnames
     expect(stage2.passed).toBe(true);
     expect(stage2.verificationSignal.allSevenChecksPassed).toBe(true);
-    expect(stage2.sevenChecks).toHaveLength(7);
-    expect(stage2.subagents).toHaveLength(3);
+    expect(stage2.routerHost).toBe("router-0.tinfoil.sh");
+    expect(stage2.selectedEnclaveHost).toBe("gemma4-31b-inf10-0.tinfoil.containers.tinfoil.dev");
 
-    // Stage 3: Antigravity Sandbox Verification Loop with Fault Injection & Self-Healing
+    // Stage 3: Fault injection actually fails real verifyModelEnclaveStatus and verifyMonitorPolicyExhaustive checks
     expect(stage3.passed).toBe(true);
     expect(stage3.faultInjected).toBe(true);
     expect(stage3.selfHealed).toBe(true);
     expect(stage3.attempts).toHaveLength(2);
     expect(stage3.attempts[0].passed).toBe(false);
-    expect(stage3.attempts[0].candidateNodeId).toBe("node-bad-ecb-leak-01");
+    expect(stage3.attempts[0].candidateNodeId).toBe("simulated-compromised-node");
+    expect(stage3.attempts[0].enclaveAttestationVerified).toBe(false);
+    expect(stage3.attempts[0].vmpl0Verified).toBe(false);
     expect(stage3.attempts[0].failedInvariants).toContain("I1_NoPlaintextEgress");
-    expect(stage3.attempts[0].repeated16ByteBlocks).toBeGreaterThan(0);
+    expect(stage3.attempts[0].failedInvariants).toContain("C5_ConfidentialGpuFlagsTampered");
+    expect(stage3.attempts[0].failedInvariants).toContain("C7_DmVerityMeasurementTampered");
 
     expect(stage3.attempts[1].passed).toBe(true);
-    expect(stage3.attempts[1].candidateNodeId).toBe("tinfoil-b200-cc-prime-02");
+    expect(stage3.attempts[1].candidateNodeId).toBe(
+      "gemma4-31b-inf10-0.tinfoil.containers.tinfoil.dev",
+    );
+    expect(stage3.attempts[1].enclaveAttestationVerified).toBe(true);
     expect(stage3.verificationSignal.vmpl0All1344Passed).toBe(true);
     expect(stage3.verificationSignal.entropyBitsPerByte).toBeGreaterThan(7.5);
     expect(stage3.verificationSignal.repeated16ByteBlocks).toBe(0);
 
-    // Stage 4: Gemini 4 Argon 1M-Context Synthesis & Homomorphic Restoration
+    // Stage 4: Simulated label & local homomorphic restoration
     expect(stage4.passed).toBe(true);
-    expect(stage4.verificationSignal.argonConfigValid).toBe(true);
-    expect(stage4.verificationSignal.homomorphicRestoreVerified).toBe(true);
+    expect(stage4.enclaveMaxContextTokens).toBe(262_144);
+    expect(stage4.enclaveCompletionMasked).toContain("Simulated Enclave Output");
     expect(stage4.restoredClientOutput).toContain("Riverside Teaching Hospital");
     expect(stage4.restoredClientOutput).toContain("RTH-ONC-207");
 
-    // Stage 5: Human-in-the-Loop Gate (blocked when humanApprovedExternalAction: false)
+    // Stage 5: Human-in-the-Loop Gate blocks external state change
     expect(stage5.passed).toBe(true);
     expect(stage5.requiresHumanApproval).toBe(true);
     expect(stage5.approvedByHuman).toBe(false);
@@ -205,29 +239,119 @@ describe("Autonomous 6-Stage Orchestrator, Self-Healing & Human-in-the-Loop Gate
       stage5.pendingActions.every((a) => a.status === "blocked_pending_human"),
     ).toBe(true);
 
-    // Stage 6: Multimodal Voice Briefing & Signed Forensic Digest
+    // Stage 6: Signed Forensic Digest & Simulated Mode label
     expect(stage6.passed).toBe(true);
+    expect(stage6.voiceTranscript).toContain("Simulated Mode");
     expect(stage6.forensicProofDigestHex).toHaveLength(64);
     expect(stage6.verificationSignal.signatureVerified).toBe(true);
   });
 
-  it("permits Circle Arc external state changes when humanApprovedExternalAction is true", async () => {
-    const approvedRun = await runArgonAutonomousWorkflow({
+  it("executes a real multi-turn tool-calling loop with mocked @google/genai client.interactions.create without leaking any PII", async () => {
+    const recordedCalls: Array<Record<string, unknown>> = [];
+    let argonTurn = 0;
+
+    const mockGenaiClient: GenAIInteractionsClientLike = {
+      interactions: {
+        create: vi.fn(async (params: Record<string, unknown>) => {
+          recordedCalls.push(params);
+          const serialized = JSON.stringify(params);
+          // Assert zero PII ever reaches Google SDK
+          expect(serialized).not.toContain("sk-test-4f9a2c7e1b8d6a3f5e0c");
+          expect(serialized).not.toContain("dana.reyes@example.org");
+          expect(serialized).not.toContain("Riverside Teaching Hospital");
+          expect(serialized).not.toContain("RTH-ONC-207");
+
+          if (params.model === "gemini-3.8-flash" || params.model === "gemini-3.5-flash-lite") {
+            return {
+              id: `inter-sub-${String(params.model)}`,
+              status: "completed",
+              output_text: `Verified subagent summary from ${String(params.model)}.`,
+              usage: { total_input_tokens: 48, total_output_tokens: 18 },
+            };
+          }
+
+          argonTurn += 1;
+          if (argonTurn === 1) {
+            return {
+              id: "inter-argon-turn-1",
+              status: "requires_action",
+              steps: [
+                {
+                  type: "function_call",
+                  id: "call-1",
+                  name: "scrub_and_symmetry_mask",
+                  arguments: { rawPayload: "scrubbed", bucketQuantumBytes: 4096 },
+                },
+                {
+                  type: "function_call",
+                  id: "call-2",
+                  name: "verify_two_hop_enclave_and_quorum",
+                  arguments: { providerId: "tinfoil", enclaveModel: "kimi-k3" },
+                },
+                {
+                  type: "function_call",
+                  id: "call-3",
+                  name: "search_atlas_hybrid_kb",
+                  arguments: { query: "Tinfoil Kimi K3 confidential GPU enclave" },
+                },
+                {
+                  type: "function_call",
+                  id: "call-4",
+                  name: "run_antigravity_vmpl0_and_memory_audit",
+                  arguments: {
+                    candidateNodeId: "kimi-k3-inf14.tinfoil.containers.tinfoil.dev",
+                    autoPatchOnFailure: true,
+                  },
+                },
+                {
+                  type: "function_call",
+                  id: "call-5",
+                  name: "anchor_arc_settlement_with_human_gate",
+                  arguments: { actionKind: "anchor_receipt", humanApproved: false },
+                },
+              ],
+              usage: { total_input_tokens: 210, total_output_tokens: 95 },
+            };
+          }
+
+          return {
+            id: "inter-argon-turn-2",
+            status: "completed",
+            output_text:
+              "All 5 confidential tools executed and verified; awaiting human approval for Circle Arc settlement.",
+            usage: { total_input_tokens: 340, total_output_tokens: 64 },
+          };
+        }),
+      },
+    };
+
+    const liveRun = await runArgonAutonomousWorkflow({
       thinkingLevel: "high",
       background: true,
       injectFaultToTestSelfHealing: true,
       humanApprovedExternalAction: true,
       preferredEnclaveModel: "kimi-k3",
+      genaiClient: mockGenaiClient,
     });
 
-    expect(approvedRun.overallPassed).toBe(true);
-    expect(approvedRun.humanGateState).toBe("executed_with_human_approval");
-    expect(approvedRun.stages.stage5.approvedByHuman).toBe(true);
-    expect(approvedRun.stages.stage5.stateChangedOnChain).toBe(true);
-    expect(
-      approvedRun.stages.stage5.pendingActions.every(
-        (a) => a.status === "executed" && typeof a.txHashHex === "string",
-      ),
-    ).toBe(true);
+    expect(liveRun.mode).toBe("live");
+    expect(liveRun.overallPassed).toBe(true);
+    expect(liveRun.modelCalls).toHaveLength(3);
+    expect(liveRun.modelCalls.map((m) => m.model).sort()).toEqual([
+      "gemini-3.5-flash-lite",
+      "gemini-3.8-flash",
+      "gemini-4-argon",
+    ]);
+    expect(liveRun.stages.stage4.liveGeminiCall.toolCallsExecuted).toEqual([
+      "scrub_and_symmetry_mask",
+      "verify_two_hop_enclave_and_quorum",
+      "search_atlas_hybrid_kb",
+      "run_antigravity_vmpl0_and_memory_audit",
+      "anchor_arc_settlement_with_human_gate",
+    ]);
+    expect(liveRun.humanGateState).toBe("executed_with_human_approval");
+    expect(liveRun.stages.stage5.approvedByHuman).toBe(true);
+    expect(liveRun.stages.stage5.stateChangedOnChain).toBe(true);
+    expect(recordedCalls.length).toBe(4); // 2 subagent calls + 2 multi-turn Argon calls
   });
 });
