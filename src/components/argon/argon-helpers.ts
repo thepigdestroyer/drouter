@@ -481,7 +481,7 @@ export function buildPlainTimelineSteps(params: {
 /**
  * Formats a clean JSON representation of `ArgonAutonomousRunResult` for expert
  * inspection, omitting deprecated compatibility aliases (`quorumValidSignatures`,
- * `quorumRequired`, `vmpl0StatesChecked`, `vmpl0Verified`, `vmpl0All1344Passed`,
+ * `quorumRequired`, `vmpl0StatesChecked`, `vmpl0Verified`, `enclaveAttestationVerified`,
  * `sandboxReceipt`, and `mode: "simulated"`).
  */
 export function formatCleanRunJsonForDisplay(
@@ -545,7 +545,7 @@ export function formatCleanRunJsonForDisplay(
           rtmrMeasurementHex: stage3.sandboxReceipt.rtmr3Hex,
         },
         verificationSignal: {
-          enclaveAttestationVerified: stage3.verificationSignal.vmpl0All1344Passed,
+          enclaveAttestationVerified: stage3.verificationSignal.enclaveAttestationVerified,
           entropyBitsPerByte: stage3.verificationSignal.entropyBitsPerByte,
           repeated16ByteBlocks: stage3.verificationSignal.repeated16ByteBlocks,
         },

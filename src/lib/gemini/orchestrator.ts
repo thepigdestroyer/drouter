@@ -340,8 +340,6 @@ export interface Stage2SubagentSwarmResult {
     allSevenChecksPassed: boolean;
     checksPassed: number;
     checksTotal: number;
-    quorumValidSignatures: number;
-    quorumRequired: number;
     formula: "allSevenChecksPassed === true";
   };
   subagents: SubagentTaskTrace[];
@@ -356,8 +354,6 @@ export interface SandboxAttemptRecord {
   attemptNumber: number;
   candidateNodeId: string;
   candidateModelId?: "gemma4-31b" | "kimi-k3";
-  vmpl0StatesChecked: number;
-  vmpl0Verified: boolean;
   enclaveAttestationVerified: boolean;
   failedInvariants: string[];
   entropyBitsPerByte: number;
@@ -383,12 +379,12 @@ export interface Stage3SandboxVerificationResult {
     zeroizedOnDestroy: boolean;
   };
   verificationSignal: {
-    vmpl0All1344Passed: boolean;
+    enclaveAttestationVerified: boolean;
     entropyBitsPerByte: number;
     repeated16ByteBlocks: number;
     postPopAllZero: boolean;
     formula:
-      "vmpl0All1344Passed === true && entropyBitsPerByte > 7.5 && repeated16ByteBlocks === 0";
+      "enclaveAttestationVerified === true && entropyBitsPerByte > 7.5 && repeated16ByteBlocks === 0";
   };
 }
 
@@ -1335,8 +1331,6 @@ export async function runArgonAutonomousWorkflow(
       attemptNumber: 1,
       candidateNodeId: initialPrimaryHost,
       candidateModelId: initialEnclaveModel,
-      vmpl0StatesChecked: 1344,
-      vmpl0Verified: false,
       enclaveAttestationVerified: tamperedEnclavePassed,
       failedInvariants,
       entropyBitsPerByte: faultyEntropy,
@@ -1378,8 +1372,6 @@ export async function runArgonAutonomousWorkflow(
     attemptNumber: attempts.length + 1,
     candidateNodeId: activePrimaryHost,
     candidateModelId: activeEnclaveModel,
-    vmpl0StatesChecked: 1344,
-    vmpl0Verified: cleanEnclavePassed,
     enclaveAttestationVerified: cleanEnclavePassed,
     failedInvariants: [],
     entropyBitsPerByte: cleanEntropyBitsPerByte,
@@ -1403,8 +1395,6 @@ export async function runArgonAutonomousWorkflow(
       allSevenChecksPassed,
       checksPassed: checksPassedCount,
       checksTotal: sevenChecks.length,
-      quorumValidSignatures: checksPassedCount,
-      quorumRequired: sevenChecks.length,
       formula: "allSevenChecksPassed === true",
     },
     subagents: [
@@ -1446,12 +1436,12 @@ export async function runArgonAutonomousWorkflow(
       zeroizedOnDestroy: true,
     },
     verificationSignal: {
-      vmpl0All1344Passed: cleanEnclavePassed,
+      enclaveAttestationVerified: cleanEnclavePassed,
       entropyBitsPerByte: cleanEntropyBitsPerByte,
       repeated16ByteBlocks: cleanRepeated16ByteBlocks,
       postPopAllZero: true,
       formula:
-        "vmpl0All1344Passed === true && entropyBitsPerByte > 7.5 && repeated16ByteBlocks === 0",
+        "enclaveAttestationVerified === true && entropyBitsPerByte > 7.5 && repeated16ByteBlocks === 0",
     },
   };
 
