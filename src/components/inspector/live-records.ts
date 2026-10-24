@@ -2,7 +2,7 @@ import type {
   DeepAttestationBundle,
   ModelEnclaveAttestation,
 } from "@/lib/tinfoil/deep-inspect";
-import type { NodeRecord, QuorumTicket } from "@/lib/types";
+import type { NodeRecord } from "@/lib/types";
 
 export interface RawAttestationResponse {
   domain?: string;
@@ -27,53 +27,125 @@ export interface RawAttestationResponse {
   };
 }
 
-export interface TransparencyLogEntry {
+export interface VerificationLogEvent {
   index: number;
-  imageId: string;
-  version: string;
+  kind:
+    | "verification_event"
+    | "release_approval"
+    | "independent_verification";
+  nodeId: string;
+  nodeKind: "tinfoil";
+  ok: boolean;
   measurement: string;
-  approvedAt: number;
-  reviewWindowDays: number;
-  emergency: boolean;
-  builderSignatures: Array<{
-    builderId: string;
-    publicKey: string;
-    signature: string;
-  }>;
-  reviewerSignatures: Array<{
-    reviewerId: string;
-    publicKey: string;
-    signature: string;
-  }>;
+  evidenceHash: string;
+  releaseDigest?: string;
+  enclaveHost?: string;
+  verifierFingerprint?: string;
+  epochHourSec: number;
+  leafHash: string;
 }
 
 export interface TransparencyInclusionProof {
-  index: number;
   leafHash: string;
   root: string;
-  siblings: string[];
+  auditPath: Array<{ side: "left" | "right"; hash: string }>;
+  leafIndex?: number;
+  treeSize?: number;
+}
+
+export interface TransparencyConsistencyProof {
+  firstTreeSize: number;
+  secondTreeSize: number;
+  firstRoot: string;
+  secondRoot: string;
+  consistencyPath: string[];
+}
+
+export interface SignedTreeHead {
+  treeSize: number;
+  rootHash: string;
+  timestampSec: number;
+  operatorPublicKey: string;
+  signature: string;
+  anchorTx?: string | null;
+  anchoredAtSec?: number | null;
+}
+
+export interface VerifierSubmissionRecord {
+  verifierFingerprint: string;
+  epochHourSec: number;
+  overallOk: boolean;
+  checks: Array<{ id: string; status: "pass" | "fail" | "skip" }>;
+  router: {
+    nodeId: string;
+    enclaveHost: string;
+    configRepo: string;
+    releaseDigest: string;
+    measurement: string;
+  };
+  models: Array<{
+    id: string;
+    repo: string;
+    tag: string;
+    measurement: string;
+    dmVerityRootHash?: string;
+    weightRepoCommit?: string;
+    ok: boolean;
+  }>;
+  evidenceHash: string;
+  leafIndex: number;
+  leafHash: string;
 }
 
 export interface TransparencySnapshot {
-  log?: {
+  operatorPublicKey?: string;
+  signedTreeHead?: SignedTreeHead;
+  anchorExplorerUrl?: string | null;
+  persisted?: boolean;
+  verificationLog?: {
     root: string;
-    entries: TransparencyLogEntry[];
+    treeSize: number;
+    events: VerificationLogEvent[];
+    inclusionProofs?: TransparencyInclusionProof[];
+    consistencyProof?: TransparencyConsistencyProof | null;
   };
-  proofs?: TransparencyInclusionProof[];
-  verifierSet?: {
-    threshold: number;
-    total: number;
-    verifiers?: Array<{ id: string; publicKeyHex: string }>;
+  consistencyProof?: TransparencyConsistencyProof | null;
+  distinctVerifierCount?: number;
+  totalSubmissions?: number;
+  recentSubmissions?: VerifierSubmissionRecord[];
+  verifications?: {
+    distinctVerifierCount: number;
+    totalSubmissions: number;
+    recentSubmissions: VerifierSubmissionRecord[];
   };
-  tickets?: Record<string, QuorumTicket>;
+}
+
+export interface RegistryNodeRecord extends NodeRecord {
+  key?: string;
+  modelId?: string;
+  repo?: string;
+  releaseTag?: string;
+  hardwarePredicate?: string;
+  measurementRegisters?: string[];
+  hpkePublicKey?: string;
+  tlsKeyFp?: string;
+  enclaveHosts?: string[];
+  configuredHosts?: number;
+  verifiedHosts?: number;
+  healthyHosts?: number;
 }
 
 export interface RegistrySnapshot {
   source?: "arc" | "fallback";
+  onChain?: boolean;
   address?: string;
-  nodes?: NodeRecord[];
+  minStake?: string;
+  proxyVersion?: string;
+  proxyUpdatedAt?: string;
+  nodes?: RegistryNodeRecord[];
   chainId?: number;
   explorer?: string;
+  explorerUrl?: string;
 }
 
 export interface RekorLookupEntry {
@@ -305,18 +377,26 @@ export async function resolveModelDeploymentProvenance(
 export function resolveActiveRegistryNode(
   node: NodeRecord | null,
   registry: RegistrySnapshot | null,
-): NodeRecord | null {
-  const nodes = registry?.nodes ?? [];
-  if (node) {
+  modelId?: string,
+): RegistryNodeRecord | null {
+  const nodes = (registry?.nodes ?? []).filter((n) => n.kind === "tinfoil");
+  if (node && node.kind === "tinfoil") {
     const matched = nodes.find(
-      (n) =>
-        n.id === node.id ||
-        n.endpoint === node.endpoint ||
-        (node.kind === "tinfoil" && n.kind === "tinfoil"),
+      (n) => n.id === node.id || n.endpoint === node.endpoint,
     );
-    return matched ?? node;
+    if (matched) return matched;
   }
-  return nodes.find((n) => n.kind === "tinfoil") ?? nodes[0] ?? null;
+  if (modelId) {
+    const byModel = nodes.find(
+      (n) => n.modelId === modelId || n.key === `tinfoil-${modelId}`,
+    );
+    if (byModel) return byModel;
+  }
+  return (
+    nodes.find((n) => n.key === "tinfoil-router") ??
+    nodes[0] ??
+    (node && node.kind === "tinfoil" ? node : null)
+  );
 }
 
 export function isDeepAttestationBundle(

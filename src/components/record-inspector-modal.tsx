@@ -217,29 +217,33 @@ export function RecordInspectorModal({
   if (!open) return null;
 
   const snp = bundle?.routerSnpReport;
-  const activeNode = resolveActiveRegistryNode(node, registrySnapshot);
-  const isSim = activeNode?.kind === "sim";
+  const activeNode = resolveActiveRegistryNode(
+    node,
+    registrySnapshot,
+    selectedModelId,
+  );
+  const registryNodes = (registrySnapshot?.nodes ?? []).filter(
+    (n) => n.kind === "tinfoil",
+  );
   const loadingAny = loadingBundle || loadingAttestation;
 
-  const chipId = isSim
-    ? displayValue(evidence["Chip ID"] ?? evidence.chipId, false)
-    : displayValue(
-        snp?.chipIdHex ?? evidence["Chip ID"] ?? evidence.chipId,
-        loadingBundle,
-      );
+  const chipId = displayValue(
+    snp?.chipIdHex ?? evidence["Chip ID"] ?? evidence.chipId,
+    loadingBundle,
+  );
 
-  const measurement = isSim
-    ? displayValue(evidence.Measurement ?? activeNode?.measurement, false)
-    : displayValue(
-        snp?.measurementHex ??
-          evidence["Enclave fingerprint"] ??
-          evidence.Measurement,
-        loadingBundle,
-      );
+  const measurement = displayValue(
+    snp?.measurementHex ??
+      evidence["Enclave fingerprint"] ??
+      evidence.Measurement ??
+      activeNode?.measurement,
+    loadingBundle,
+  );
 
-  const reportData = isSim
-    ? displayValue(evidence["Report data"], false)
-    : displayValue(snp?.reportDataHex, loadingBundle);
+  const reportData = displayValue(
+    snp?.reportDataHex ?? evidence["Report data"],
+    loadingBundle,
+  );
 
   const tlsKeyFpFromReport = displayValue(
     snp?.tlsKeyFpFromReportDataHex,
@@ -341,13 +345,24 @@ export function RecordInspectorModal({
   );
   const sessionTxUrl = buildArcExplorerTxUrl(explorerBase, verifyAnchorUrl);
 
-  const nodeTicketKey =
-    activeNode?.kind === "tinfoil"
-      ? "tinfoil-router"
-      : activeNode?.endpoint.split("/").filter(Boolean).pop() ||
-        "tinfoil-router";
-  const activeTicket = transparency?.tickets?.[nodeTicketKey];
-  const logEntries = transparency?.log?.entries ?? [];
+  const verificationLog = transparency?.verificationLog;
+  const verificationEvents = verificationLog?.events ?? [];
+  const signedTreeHead = transparency?.signedTreeHead;
+  const distinctVerifierCount =
+    transparency?.distinctVerifierCount ??
+    transparency?.verifications?.distinctVerifierCount ??
+    0;
+  const totalSubmissions =
+    transparency?.totalSubmissions ??
+    transparency?.verifications?.totalSubmissions ??
+    0;
+  const recentSubmissions =
+    transparency?.recentSubmissions ??
+    transparency?.verifications?.recentSubmissions ??
+    [];
+  const treeAnchorUrl =
+    transparency?.anchorExplorerUrl ??
+    buildArcExplorerTxUrl(explorerBase, signedTreeHead?.anchorTx);
 
   const passedCount = checks.filter((c) => c.status === "pass").length;
 
@@ -359,7 +374,7 @@ export function RecordInspectorModal({
     { id: "silicon", label: "2. Router Silicon (SEV-SNP)" },
     { id: "gpu", label: "3. Model Enclave & Weights" },
     { id: "provenance", label: "4. Sigstore & Release" },
-    { id: "onchain", label: "5. Arc Testnet & Quorum" },
+    { id: "onchain", label: "5. Arc Testnet & Verifiers" },
     { id: "privacy", label: "6. Privacy & Limits" },
   ];
 
@@ -451,8 +466,6 @@ export function RecordInspectorModal({
                   loadingAny,
                 )}
                 ) attests with AMD SEV-SNP. The AMD Secure Processor signs a 1,184-byte binary report committing to the boot measurement, guest policy flags, and the enclave&apos;s ephemeral key.
-                {isSim &&
-                  " Note: the currently selected node in the console is Simulated in software."}
               </p>
 
               <div className="flex flex-wrap gap-2">
@@ -1048,22 +1061,37 @@ export function RecordInspectorModal({
                 </div>
               </div>
 
-              {logEntries.length > 0 && (
+              {verificationEvents.length > 0 && (
                 <div className="ep-inset p-3.5 sm:p-4 space-y-2.5 text-xs">
-                  <div className="ep-label">
-                    Local Merkle Transparency Log (Simulated Multi-Party Log · Root{" "}
-                    {transparency?.log?.root.slice(0, 16)}…)
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="ep-label">
+                      RFC 6962 Verification Log (Tree Size{" "}
+                      {signedTreeHead?.treeSize ?? verificationLog?.treeSize ?? verificationEvents.length}{" "}
+                      · Root{" "}
+                      {(signedTreeHead?.rootHash ?? verificationLog?.root ?? "").slice(0, 16)}
+                      …)
+                    </div>
+                    {treeAnchorUrl && (
+                      <a
+                        href={treeAnchorUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="ep-link text-xs"
+                      >
+                        Arc STH anchor tx
+                      </a>
+                    )}
                   </div>
                   <div className="space-y-1.5">
-                    {logEntries.map((entry) => (
+                    {verificationEvents.slice(-6).map((evt) => (
                       <div
-                        key={entry.index}
+                        key={evt.index}
                         className="rounded border border-rule bg-paper p-2 ep-mono text-[11px]"
                       >
-                        #{entry.index} {entry.imageId}@{entry.version} · measurement{" "}
-                        {entry.measurement.slice(0, 24)}… ·{" "}
-                        {entry.builderSignatures.length} builders,{" "}
-                        {entry.reviewerSignatures.length} reviewers
+                        #{evt.index} {evt.nodeId} ({evt.kind}) ·{" "}
+                        {evt.enclaveHost ?? "enclave"} · measurement{" "}
+                        {evt.measurement.slice(0, 20)}… · leaf{" "}
+                        {evt.leafHash.slice(0, 16)}…
                       </div>
                     ))}
                   </div>
@@ -1075,12 +1103,16 @@ export function RecordInspectorModal({
           {activeTab === "onchain" && (
             <div className="space-y-4">
               <p className="max-w-[70ch] text-sm text-ink-2">
-                Nodes register on the Circle Arc testnet (chain{" "}
+                Six live Tinfoil enclave nodes (the confidential router plus 5 model enclaves) are registered on the Circle Arc testnet (chain{" "}
                 {registrySnapshot?.chainId ?? 5042002}) at contract{" "}
                 <code className="font-mono text-ink break-all">
                   {displayValue(contractAddr, loadingRegistry)}
                 </code>
-                . Note: Arc is a public testnet, and the 5-of-7 verifier quorum tickets in this demo are signed by the local transparency service.
+                . Independent verifiers can run{" "}
+                <code className="font-mono text-ink">
+                  node scripts/drouter-cli.mjs verify --submit
+                </code>{" "}
+                to append signed C1-C7 verification claims to the RFC 6962 transparency log.
               </p>
 
               <div className="flex flex-wrap gap-2">
@@ -1114,13 +1146,24 @@ export function RecordInspectorModal({
                     Open session verification tx
                   </a>
                 )}
+                {treeAnchorUrl && (
+                  <a
+                    href={treeAnchorUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="ep-btn-ghost px-3 py-1.5 text-xs"
+                  >
+                    Open signed tree head anchor tx
+                  </a>
+                )}
               </div>
 
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                 <div className="ep-inset p-3.5 sm:p-4 space-y-2.5 text-xs min-w-0">
                   <div className="ep-label">
                     Arc Testnet Registry (Chain{" "}
-                    {registrySnapshot?.chainId ?? 5042002})
+                    {registrySnapshot?.chainId ?? 5042002} ·{" "}
+                    {registryNodes.length || 6} Tinfoil Nodes)
                   </div>
                   <div className="flex flex-col justify-between gap-1 border-b border-rule pb-2 sm:flex-row sm:gap-2">
                     <span className="text-ink-3">Registry source:</span>
@@ -1138,7 +1181,7 @@ export function RecordInspectorModal({
                     <span className="text-ink-3">Selected node:</span>
                     <span className="ep-mono">
                       {activeNode
-                        ? `${activeNode.name} (${activeNode.kind === "sim" ? "Simulated" : "Real enclave"})`
+                        ? `${activeNode.name} (Real enclave)`
                         : displayValue(null, loadingRegistry)}
                     </span>
                   </div>
@@ -1170,33 +1213,112 @@ export function RecordInspectorModal({
                         : displayValue(null, loadingRegistry)}
                     </span>
                   </div>
+
+                  {registryNodes.length > 0 && (
+                    <div className="border-t border-rule pt-2.5 space-y-1.5">
+                      <div className="ep-label">
+                        Registered Enclave Nodes ({registryNodes.length})
+                      </div>
+                      {registryNodes.map((n) => (
+                        <div
+                          key={n.id}
+                          className="flex flex-wrap items-center justify-between gap-2 rounded border border-rule bg-paper px-2.5 py-1.5 font-mono text-[11px]"
+                        >
+                          <span className="text-ink break-all">
+                            {n.key ?? n.name}
+                            {n.releaseTag ? ` (${n.releaseTag})` : ""}
+                          </span>
+                          <span className="text-ink-3">
+                            {n.healthyHosts !== undefined &&
+                            n.configuredHosts !== undefined
+                              ? `${n.healthyHosts}/${n.configuredHosts} hosts`
+                              : n.status}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 <div className="ep-inset p-3.5 sm:p-4 space-y-2.5 text-xs min-w-0">
                   <div className="ep-label">
-                    Demo Verifier Quorum Ticket (Simulated Verifier Set)
+                    Independent Verifiers &amp; Signed Tree Head
                   </div>
-                  {!activeTicket ? (
-                    <div className="text-ink-2">
-                      {displayValue(null, loadingTransparency)}
+                  <div className="grid grid-cols-3 gap-2 text-center">
+                    <div className="rounded border border-rule bg-paper p-2">
+                      <div className="font-mono text-[10px] uppercase text-ink-3">
+                        Verifiers
+                      </div>
+                      <div className="mt-0.5 font-mono text-sm font-semibold text-ink">
+                        {loadingTransparency && !transparency
+                          ? "…"
+                          : distinctVerifierCount}
+                      </div>
+                    </div>
+                    <div className="rounded border border-rule bg-paper p-2">
+                      <div className="font-mono text-[10px] uppercase text-ink-3">
+                        Submissions
+                      </div>
+                      <div className="mt-0.5 font-mono text-sm font-semibold text-ink">
+                        {loadingTransparency && !transparency
+                          ? "…"
+                          : totalSubmissions}
+                      </div>
+                    </div>
+                    <div className="rounded border border-rule bg-paper p-2">
+                      <div className="font-mono text-[10px] uppercase text-ink-3">
+                        Log Leaves
+                      </div>
+                      <div className="mt-0.5 font-mono text-sm font-semibold text-ink">
+                        {signedTreeHead?.treeSize ??
+                          verificationLog?.treeSize ??
+                          displayValue(null, loadingTransparency)}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded border border-rule bg-paper p-2 space-y-1">
+                    <div className="text-ink-3">
+                      Signed Tree Head Root (RFC 6962)
+                    </div>
+                    <div className="ep-mono text-[11px]">
+                      {displayValue(
+                        signedTreeHead?.rootHash ?? verificationLog?.root,
+                        loadingTransparency,
+                      )}
+                    </div>
+                  </div>
+
+                  {recentSubmissions.length === 0 ? (
+                    <div className="rounded border border-rule bg-paper p-2.5 text-ink-2">
+                      {loadingTransparency
+                        ? "Loading independent verifier submissions..."
+                        : "No recent CLI submissions in this window. Run node scripts/drouter-cli.mjs verify --submit to publish a signed C1-C7 verification claim."}
                     </div>
                   ) : (
                     <div className="space-y-1.5">
-                      <div className="text-ink-2">
-                        Node <code className="font-mono">{activeTicket.nodeId}</code> ·{" "}
-                        {activeTicket.signatures.length}/
-                        {transparency?.verifierSet?.total ?? 7} signatures (threshold{" "}
-                        {transparency?.verifierSet?.threshold ?? 5})
+                      <div className="text-ink-3">
+                        Recent Independent Verifier Claims
                       </div>
-                      {activeTicket.signatures.map((sig) => (
+                      {recentSubmissions.slice(0, 4).map((sub) => (
                         <div
-                          key={sig.verifierId}
+                          key={`${sub.leafIndex}-${sub.evidenceHash}`}
                           className="flex items-center justify-between gap-2 rounded border border-rule bg-paper px-2.5 py-1.5 font-mono text-[11px]"
                         >
                           <span className="text-ink break-all">
-                            {sig.verifierId} ({sig.signature.slice(0, 14)}...)
+                            leaf #{sub.leafIndex} · key{" "}
+                            {sub.verifierFingerprint.slice(0, 12)}… ·{" "}
+                            {sub.router.enclaveHost}
                           </span>
-                          <span className="ep-pass shrink-0">Signed</span>
+                          <span
+                            className={
+                              sub.overallOk
+                                ? "ep-pass shrink-0"
+                                : "ep-fail shrink-0"
+                            }
+                          >
+                            {sub.overallOk ? "C1-C7 PASS" : "FAIL"}
+                          </span>
                         </div>
                       ))}
                     </div>
@@ -1237,9 +1359,6 @@ export function RecordInspectorModal({
                   </li>
                   <li>
                     Kimi K3 context here is 262,144 tokens (not 1M).
-                  </li>
-                  <li>
-                    Nodes sim-1, sim-2, and sim-3 are simulated in software.
                   </li>
                   <li>
                     The Circle Arc registry (0xbc8085c2b6fe6e0db05f169925c0b841828f4481, chain 5042002) is a testnet.

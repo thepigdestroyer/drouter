@@ -3,10 +3,14 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
   buildTerminalSnippets,
+  DEFAULT_LIVE_MODEL_IDS,
   PRODUCTION_BASE_URL,
   type TerminalTabId,
 } from "@/components/inspector/terminal-snippets";
-import { InkModal, MODAL_PLAIN_SUMMARY } from "@/components/modal/ink-modal";
+import {
+  InkModal,
+  TERMINAL_MODAL_PLAIN_SUMMARY,
+} from "@/components/modal/ink-modal";
 
 export interface TerminalModalProps {
   open: boolean;
@@ -23,6 +27,9 @@ export function TerminalModal({
 }: TerminalModalProps) {
   const [activeTab, setActiveTab] = useState<TerminalTabId>("opencode");
   const [copied, setCopied] = useState<string | null>(null);
+  const [liveModelIds, setLiveModelIds] = useState<readonly string[]>(
+    DEFAULT_LIVE_MODEL_IDS,
+  );
   const copyTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -33,9 +40,33 @@ export function TerminalModal({
     };
   }, []);
 
+  useEffect(() => {
+    if (!open || typeof fetch !== "function") return;
+    let cancelled = false;
+    fetch("/v1/models")
+      .then(async (res) =>
+        res.ok
+          ? ((await res.json()) as { data?: Array<{ id?: string }> })
+          : null,
+      )
+      .then((payload) => {
+        if (cancelled) return;
+        const ids = (payload?.data ?? [])
+          .map((m) => (typeof m?.id === "string" ? m.id.trim() : ""))
+          .filter((id) => id.length > 0 && !id.toLowerCase().startsWith("sim-"));
+        if (ids.length > 0) {
+          setLiveModelIds(ids);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
   if (!open) return null;
 
-  const snippets = buildTerminalSnippets(baseUrl, defaultModel);
+  const snippets = buildTerminalSnippets(baseUrl, defaultModel, liveModelIds);
 
   const handleCopy = (key: string, text: string) => {
     if (typeof navigator !== "undefined" && navigator.clipboard) {
@@ -91,8 +122,7 @@ export function TerminalModal({
       onSelectTab={setActiveTab}
       tabListLabel="Terminal integration options"
       maxWidthClass="max-w-4xl"
-      summaryText={MODAL_PLAIN_SUMMARY}
-      summaryNote="Developers can also run the same seal check and encrypted connection directly from a terminal or code editor."
+      summaryText={TERMINAL_MODAL_PLAIN_SUMMARY}
     >
       <div className="ep-inset space-y-2 p-3.5 text-xs text-ink-2 sm:p-4">
         <div>
@@ -127,8 +157,7 @@ export function TerminalModal({
       <div className="ep-inset overflow-hidden">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-rule bg-paper px-3 py-2 sm:px-4">
           <span className="font-mono text-[11px] text-ink-3 break-words">
-            Models: kimi-k3 · glm-5-3 · deepseek-v4-1-flash · gpt-oss-120b ·
-            llama3-3-70b · sim-echo-1
+            Models: {liveModelIds.join(" · ")}
           </span>
           <button
             type="button"

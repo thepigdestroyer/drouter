@@ -12,6 +12,24 @@ export interface TerminalSnippets {
 export const PRODUCTION_BASE_URL = "https://drouter-demo.vercel.app";
 export const REPO_CLONE_URL = "https://github.com/thepigdestroyer/drouter";
 
+export const DEFAULT_LIVE_MODEL_IDS = [
+  "kimi-k3",
+  "glm-5-3",
+  "deepseek-v4-1-flash",
+  "gpt-oss-120b",
+  "llama3-3-70b",
+  "gemma4-31b",
+  "voxtral-small-24b",
+] as const;
+
+export function sanitizeLiveModelId(model?: string): string {
+  const trimmed = (model || "").trim();
+  if (!trimmed || trimmed.toLowerCase().startsWith("sim-")) {
+    return "kimi-k3";
+  }
+  return trimmed;
+}
+
 export function normalizeBaseUrl(baseUrl?: string): string {
   const raw = (baseUrl || PRODUCTION_BASE_URL).trim().replace(/\/+$/, "");
   return raw || PRODUCTION_BASE_URL;
@@ -34,8 +52,13 @@ export function resolveCliUpstreamUrl(baseUrl?: string): string {
 export function buildTerminalSnippets(
   baseUrl = PRODUCTION_BASE_URL,
   defaultModel = "kimi-k3",
+  liveModelIds: readonly string[] = DEFAULT_LIVE_MODEL_IDS,
 ): TerminalSnippets {
   const cleanBase = normalizeBaseUrl(baseUrl);
+  const resolvedModel = sanitizeLiveModelId(defaultModel);
+  const modelList = (
+    liveModelIds.length > 0 ? liveModelIds : DEFAULT_LIVE_MODEL_IDS
+  ).filter((id) => id && !id.toLowerCase().startsWith("sim-"));
   const gatewayV1 = `${cleanBase}/v1`;
   const prodV1 = `${PRODUCTION_BASE_URL}/v1`;
   const cliUpstream = resolveCliUpstreamUrl(cleanBase);
@@ -67,11 +90,17 @@ export function buildTerminalSnippets(
         },
         "llama3-3-70b": {
           "name": "Llama 3.3 70B Instruct (Intel TDX + NVIDIA CC GPU)"
+        },
+        "gemma4-31b": {
+          "name": "Gemma 4 31B (AMD SEV-SNP / Intel TDX + NVIDIA CC GPUs)"
+        },
+        "voxtral-small-24b": {
+          "name": "Voxtral Small 24B (Intel TDX + NVIDIA CC GPU)"
         }
       }
     }
   },
-  "model": "drouter-confidential/${defaultModel}"
+  "model": "drouter-confidential/${resolvedModel}"
 }`;
 
   const opencodeRemoteComment = `// Or point at your local zero-trust HPKE proxy (after running scripts/drouter-cli.mjs proxy):
@@ -96,7 +125,7 @@ export OPENAI_API_KEY="any-value"
 export OPENAI_BASE_URL="http://127.0.0.1:4141/v1"
 export OPENAI_API_KEY="any-value"
 
-# Model IDs: kimi-k3 | glm-5-3 | deepseek-v4-1-flash | gpt-oss-120b | llama3-3-70b | sim-echo-1`;
+# Live Models (/v1/models): ${modelList.join(" | ")}`;
 
   const curlSnippet = `# 1. List attested enclave models:
 curl ${prodV1}/models
@@ -106,7 +135,7 @@ curl -sS -X POST "${prodV1}/chat/completions" \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer any-value" \\
   -d '{
-    "model": "${defaultModel}",
+    "model": "${resolvedModel}",
     "messages": [
       { "role": "user", "content": "Reply with one short sentence." }
     ]
@@ -114,7 +143,7 @@ curl -sS -X POST "${prodV1}/chat/completions" \\
 
 # 3. Verify all 7 checks and ask from the local zero-trust CLI:
 git clone ${REPO_CLONE_URL} && cd drouter && npm ci && node scripts/drouter-cli.mjs verify${upstreamFlag}
-node scripts/drouter-cli.mjs ask "Explain AMD SEV-SNP in one sentence." --model ${defaultModel}${upstreamFlag}`;
+node scripts/drouter-cli.mjs ask "Explain AMD SEV-SNP in one sentence." --model ${resolvedModel}${upstreamFlag}`;
 
   const sdkSnippet = `// TypeScript / Node.js (OpenAI SDK)
 import OpenAI from "openai";
@@ -125,7 +154,7 @@ const client = new OpenAI({
 });
 
 const response = await client.chat.completions.create({
-  model: "${defaultModel}",
+  model: "${resolvedModel}",
   messages: [{ role: "user", content: "Summarize how AMD SEV-SNP isolates guest memory." }],
 });
 console.log(response.choices[0]?.message?.content);
@@ -140,7 +169,7 @@ client = OpenAI(
 )
 
 res = client.chat.completions.create(
-    model="${defaultModel}",
+    model="${resolvedModel}",
     messages=[{"role": "user", "content": "Summarize how AMD SEV-SNP isolates guest memory."}],
 )
 print(res.choices[0].message.content)`;

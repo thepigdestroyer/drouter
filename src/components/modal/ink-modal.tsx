@@ -4,6 +4,7 @@ import React, { useEffect, useId, useRef } from "react";
 import {
   FOCUSABLE_SELECTOR,
   MODAL_PLAIN_SUMMARY,
+  TERMINAL_MODAL_PLAIN_SUMMARY,
   resolveFocusTrapTarget,
   resolveNextTabId,
 } from "@/components/modal/modal-a11y";
@@ -49,16 +50,6 @@ const INK_BLOOM_CSS = `
     transform: scale(1) translateY(0);
   }
 }
-@keyframes ep-ink-drop-spread {
-  0% {
-    opacity: 0;
-    transform: scale(0.35);
-  }
-  100% {
-    opacity: 0.08;
-    transform: scale(1);
-  }
-}
 @media (prefers-reduced-motion: no-preference) {
   .ep-ink-backdrop-anim {
     animation: ep-ink-backdrop-fade 180ms ease-out both;
@@ -66,14 +57,10 @@ const INK_BLOOM_CSS = `
   .ep-ink-surface-anim {
     animation: ep-ink-modal-bloom 250ms cubic-bezier(0.16, 1, 0.3, 1) both;
   }
-  .ep-ink-blot-anim {
-    animation: ep-ink-drop-spread 420ms cubic-bezier(0.16, 1, 0.3, 1) both;
-  }
 }
 @media (prefers-reduced-motion: reduce) {
   .ep-ink-backdrop-anim,
-  .ep-ink-surface-anim,
-  .ep-ink-blot-anim {
+  .ep-ink-surface-anim {
     animation: none !important;
     transition: none !important;
     transform: none !important;
@@ -109,23 +96,12 @@ export function InkModal<T extends string>({
     onCloseRef.current = onClose;
   }, [onClose]);
 
-  // Reset body scroll to top when switching tabs and keep active tab centered in horizontal tablist
+  // Reset body scroll to top when switching tabs
   useEffect(() => {
     if (!open) return;
     if (bodyRef.current) {
       bodyRef.current.scrollTop = 0;
     }
-    const syncActiveTabScroll = () => {
-      const activeTabBtn = tabRefs.current[activeTab];
-      if (activeTabBtn && typeof activeTabBtn.scrollIntoView === "function") {
-        activeTabBtn.scrollIntoView({ block: "nearest", inline: "center" });
-      }
-    };
-    syncActiveTabScroll();
-    window.addEventListener("resize", syncActiveTabScroll);
-    return () => {
-      window.removeEventListener("resize", syncActiveTabScroll);
-    };
   }, [open, activeTab]);
 
   // Focus capture, initial focus, Escape & Tab trap, body scroll lock, and return focus on close
@@ -163,7 +139,8 @@ export function InkModal<T extends string>({
         ).filter(
           (el) =>
             !el.hasAttribute("disabled") &&
-            el.getAttribute("aria-hidden") !== "true",
+            el.getAttribute("aria-hidden") !== "true" &&
+            el.getAttribute("tabindex") !== "-1",
         );
 
         const activeEl =
@@ -238,23 +215,11 @@ export function InkModal<T extends string>({
         data-testid="ink-modal-surface"
         className={`ep-card ep-ink-surface-anim relative z-10 flex max-h-[calc(100dvh-1.25rem)] w-full ${maxWidthClass} flex-col overflow-hidden border border-ink bg-paper text-ink shadow-xl sm:max-h-[calc(100dvh-2.5rem)]`}
       >
-        {/* Fixed Header: never shrinks, never overlaps tabs */}
+        {/* Fixed Header: never shrinks, never overlaps tabs, no decorative blot overlapping title/Close */}
         <header
           data-testid="ink-modal-header"
-          className="relative z-20 flex shrink-0 items-start justify-between gap-3 overflow-hidden border-b border-rule bg-paper-2 px-4 py-3.5 sm:px-6 sm:py-4"
+          className="relative z-20 flex shrink-0 items-start justify-between gap-3 border-b border-rule bg-paper-2 px-4 py-3.5 sm:px-6 sm:py-4"
         >
-          {/* Decorative ink bloom blot in top-right corner */}
-          <svg
-            aria-hidden="true"
-            viewBox="0 0 160 160"
-            className="ep-ink-blot-anim pointer-events-none absolute -top-12 -right-10 h-36 w-36 text-ink opacity-[0.06]"
-          >
-            <path
-              fill="currentColor"
-              d="M83.5,14C108,15.5,134,31,142.5,54.5C151,78,141.5,109,120.5,126.5C99.5,144,67,148,43.5,133.5C20,119,5.5,86,12.5,58.5C19.5,31,59,12.5,83.5,14Z"
-            />
-          </svg>
-
           <div className="relative z-10 min-w-0 flex-1">
             <div className="ep-label">{eyebrow}</div>
             <h2
@@ -281,7 +246,7 @@ export function InkModal<T extends string>({
           </button>
         </header>
 
-        {/* Non-clipping, non-shrinking Tab Bar */}
+        {/* Non-clipping, non-shrinking Tab Bar: wraps cleanly onto multiple rows on narrow screens, single row on wide screens */}
         <div
           data-testid="ink-modal-tabbar"
           className="relative z-20 shrink-0 border-b border-rule bg-paper"
@@ -290,8 +255,7 @@ export function InkModal<T extends string>({
             role="tablist"
             aria-label={tabListLabel}
             onKeyDown={handleTabKeyDown}
-            className="flex items-center gap-1.5 overflow-x-auto overscroll-x-contain px-3 py-2.5 sm:px-6"
-            style={{ scrollbarWidth: "thin" }}
+            className="flex flex-wrap items-center gap-1.5 px-3 py-2 sm:px-4 sm:py-2.5 lg:gap-1.5 lg:px-5"
           >
             {tabs.map((t) => {
               const active = activeTab === t.id;
@@ -306,10 +270,11 @@ export function InkModal<T extends string>({
                   id={tabDomId}
                   role="tab"
                   type="button"
+                  tabIndex={active ? 0 : -1}
                   aria-selected={active}
                   aria-controls={panelDomId}
                   onClick={() => onSelectTab(t.id)}
-                  className={`shrink-0 whitespace-nowrap rounded px-3 py-1.5 text-xs font-medium leading-normal transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink ${
+                  className={`shrink-0 whitespace-nowrap rounded px-2.5 py-1 text-xs font-medium leading-snug transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink sm:py-1.5 lg:px-2 xl:px-2.5 ${
                     active
                       ? "border border-ink bg-ink text-paper"
                       : "border border-rule bg-paper-2/70 text-ink-2 hover:border-ink hover:bg-paper-2 hover:text-ink"
@@ -350,4 +315,7 @@ export function InkModal<T extends string>({
   );
 }
 
-export { MODAL_PLAIN_SUMMARY } from "@/components/modal/modal-a11y";
+export {
+  MODAL_PLAIN_SUMMARY,
+  TERMINAL_MODAL_PLAIN_SUMMARY,
+} from "@/components/modal/modal-a11y";

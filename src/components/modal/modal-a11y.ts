@@ -1,12 +1,15 @@
 export const MODAL_PLAIN_SUMMARY =
   "What this shows: the sealed computer's signed proof that it runs the published code. You do not need to read this; it is here so experts can check our work.";
 
+export const TERMINAL_MODAL_PLAIN_SUMMARY =
+  "What this shows: how developers can use deRoute from their own computer or code editor. You do not need any of this to use the chat.";
+
 export const FOCUSABLE_SELECTOR = [
-  "button:not([disabled])",
-  "a[href]",
-  "input:not([disabled])",
-  "select:not([disabled])",
-  "textarea:not([disabled])",
+  'button:not([disabled]):not([tabindex="-1"])',
+  'a[href]:not([tabindex="-1"])',
+  'input:not([disabled]):not([tabindex="-1"])',
+  'select:not([disabled]):not([tabindex="-1"])',
+  'textarea:not([disabled]):not([tabindex="-1"])',
   '[tabindex]:not([tabindex="-1"])',
 ].join(", ");
 
