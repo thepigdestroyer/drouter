@@ -1,0 +1,6 @@
+node_modules
+test
+*.md
+.gitignore
+.dockerignore
+vitest.config.mjs
