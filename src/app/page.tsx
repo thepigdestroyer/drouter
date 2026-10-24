@@ -8,10 +8,17 @@ export default function Home() {
     <div className="min-h-screen flex flex-col overflow-x-hidden bg-paper text-ink">
       <SpecimenHeader activePath="/" rightSlot={<AuthPill />} />
 
-      <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-10 px-4 py-8 sm:px-6 sm:py-12">
-        <section className="max-w-[70ch]">
+      <main
+        id="main-content"
+        tabIndex={-1}
+        className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-10 px-4 py-8 sm:px-6 sm:py-12"
+      >
+        <section aria-labelledby="home-hero-heading" className="max-w-[70ch]">
           <div className="ep-label">Confidential AI Router</div>
-          <h1 className="ep-display mt-2 text-3xl sm:text-4xl lg:text-5xl">
+          <h1
+            id="home-hero-heading"
+            className="ep-display mt-2 text-3xl sm:text-4xl lg:text-5xl"
+          >
             Ask frontier AI models without anyone, including us, reading your prompt.
           </h1>
           <p className="mt-3 text-base text-ink-2">

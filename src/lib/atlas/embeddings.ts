@@ -1,5 +1,3 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 
 export const EMBEDDING_DIMENSIONS = 768 as const;
 export const TINFOIL_EMBEDDING_MODEL_ID = "nomic-embed-text" as const;
@@ -67,38 +65,8 @@ export function seedLiveEmbeddingCache(text: string, result: EmbeddingResult): v
 }
 
 export function resolveTinfoilApiKey(): string | null {
-  const fromEnv = process.env.TINFOIL_API_KEY?.trim();
-  if (fromEnv) return fromEnv;
-
-  if (process.env.VITEST || process.env.NODE_ENV === "test") {
-    return null;
-  }
-
-  try {
-    const envPath = join(process.cwd(), ".env.local");
-    if (existsSync(envPath)) {
-      const content = readFileSync(envPath, "utf8");
-      for (const line of content.split(/\r?\n/)) {
-        const trimmed = line.trim();
-        if (trimmed.startsWith("TINFOIL_API_KEY=")) {
-          let val = trimmed.slice("TINFOIL_API_KEY=".length).trim();
-          if (
-            (val.startsWith('"') && val.endsWith('"')) ||
-            (val.startsWith("'") && val.endsWith("'"))
-          ) {
-            val = val.slice(1, -1);
-          }
-          if (val) {
-            process.env.TINFOIL_API_KEY = val;
-            return val;
-          }
-        }
-      }
-    }
-  } catch {
-    // Ignore filesystem errors in restricted runtimes
-  }
-  return null;
+  // Next.js and `node --env-file=.env.local` load env vars; never read secret files from disk here.
+  return process.env.TINFOIL_API_KEY?.trim() || null;
 }
 
 /**

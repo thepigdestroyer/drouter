@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AuthPill } from "@/components/auth-pill";
 import { SpecimenFooter, SpecimenHeader } from "@/components/specimen-chrome";
 import {
@@ -20,41 +20,16 @@ import {
   wipeLocalVault,
   type VaultSession,
 } from "@/lib/auth/vault";
+import { preparePrompt } from "@/lib/pipeline";
 
 function shortHex(hex: string, lead = 12, tail = 8): string {
   if (!hex || hex.length <= lead + tail + 2) return hex;
   return `${hex.slice(0, lead)}...${hex.slice(-tail)}`;
 }
 
-function previewCustomTermScrub(text: string, terms: string[]): {
-  scrubbed: string;
-  matches: { term: string; placeholder: string }[];
-} {
-  let scrubbed = text;
-  const matches: { term: string; placeholder: string }[] = [];
-  const sorted = [...terms]
-    .map((t) => t.trim())
-    .filter((t) => t.length > 0)
-    .sort((a, b) => b.length - a.length);
-
-  sorted.forEach((term, idx) => {
-    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const regex = new RegExp(escaped, "gi");
-    if (regex.test(scrubbed)) {
-      const placeholder = `[ENTITY_${idx + 1}]`;
-      scrubbed = scrubbed.replace(regex, placeholder);
-      matches.push({ term, placeholder });
-    }
-  });
-
-  return { scrubbed, matches };
-}
-
 export default function LoginPage() {
   const [session, setSession] = useState<VaultSession | null>(null);
-  const [burnerPassphrase, setBurnerPassphrase] = useState<string>(
-    "argon cobalt velvet cipher obsidian quartz",
-  );
+  const [burnerPassphrase, setBurnerPassphrase] = useState<string>("");
   const [savedConfirmed, setSavedConfirmed] = useState<boolean>(false);
   const [existingPassphrase, setExistingPassphrase] = useState<string>("");
   const [persistEncrypted, setPersistEncrypted] = useState<boolean>(false);
@@ -62,7 +37,7 @@ export default function LoginPage() {
   const [newCustomTerm, setNewCustomTerm] = useState<string>("");
   const [vaultNotes, setVaultNotes] = useState<string>("");
   const [samplePrompt, setSamplePrompt] = useState<string>(
-    "Summarize the Q4 merger architecture for Project Helios and patient record MRN-88412.",
+    "Synthetic test prompt: review Fictional-Project-X and test@example.invalid with token sk-test-synthetic0000.",
   );
   const [exportedJson, setExportedJson] = useState<string>("");
   const [importJsonText, setImportJsonText] = useState<string>("");
@@ -77,6 +52,7 @@ export default function LoginPage() {
     exportedAt?: number;
   }>({ exists: false });
   const [mounted, setMounted] = useState<boolean>(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setMounted(true);
@@ -95,7 +71,7 @@ export default function LoginPage() {
   }, []);
 
   const burnerPreview = useMemo(() => {
-    if (!mounted) return null;
+    if (!mounted || !burnerPassphrase.trim()) return null;
     try {
       return deriveVaultIdentity(burnerPassphrase);
     } catch {
@@ -112,13 +88,13 @@ export default function LoginPage() {
     }
   }, [existingPassphrase]);
 
-  const activeCustomTerms = session?.payload.customScrubTerms ?? [
-    "Project Helios",
-    "MRN-88412",
-  ];
+  const activeCustomTerms = session?.payload.customScrubTerms ?? [];
 
-  const scrubDemo = useMemo(
-    () => previewCustomTermScrub(samplePrompt, activeCustomTerms),
+  const scrubPreview = useMemo(
+    () =>
+      preparePrompt(samplePrompt, {
+        customTerms: activeCustomTerms,
+      }),
     [samplePrompt, activeCustomTerms],
   );
 
@@ -134,6 +110,7 @@ export default function LoginPage() {
   };
 
   const handleCopyBurner = async () => {
+    if (!burnerPassphrase) return;
     try {
       await navigator.clipboard.writeText(burnerPassphrase);
       setCopiedBurner(true);
@@ -151,6 +128,13 @@ export default function LoginPage() {
       setStatusBanner({
         kind: "err",
         text: "Confirm that you saved your 6 words before creating the vault.",
+      });
+      return;
+    }
+    if (!burnerPassphrase.trim()) {
+      setStatusBanner({
+        kind: "err",
+        text: "Generate a 6-word passphrase first.",
       });
       return;
     }
@@ -191,6 +175,15 @@ export default function LoginPage() {
     }
   };
 
+  const handleLockVault = () => {
+    lockVault();
+    setExportedJson("");
+    setStatusBanner({
+      kind: "info",
+      text: "Locked vault and zeroed keys in browser memory.",
+    });
+  };
+
   const handleTogglePersistence = (nextPersist: boolean) => {
     setPersistEncrypted(nextPersist);
     if (session) {
@@ -198,8 +191,8 @@ export default function LoginPage() {
       setStatusBanner({
         kind: "info",
         text: nextPersist
-          ? `Saved encrypted vault in localStorage under "${VAULT_STORAGE_KEY}".`
-          : "Switched to RAM-only mode and cleared localStorage copy.",
+          ? `Saved AES-256-GCM encrypted vault in localStorage under "${VAULT_STORAGE_KEY}".`
+          : "Switched to RAM-only mode and removed the encrypted copy from localStorage.",
       });
     }
   };
@@ -210,8 +203,13 @@ export default function LoginPage() {
     if (!trimmed) return;
 
     if (!session) {
-      unlockVaultWithPassphrase(burnerPassphrase, persistEncrypted);
+      setStatusBanner({
+        kind: "err",
+        text: "Create or unlock a vault above before adding custom scrub terms.",
+      });
+      return;
     }
+
     const updated = updateVaultPayload((prev) => ({
       ...prev,
       customScrubTerms: [...prev.customScrubTerms, trimmed],
@@ -219,7 +217,7 @@ export default function LoginPage() {
     setNewCustomTerm("");
     setStatusBanner({
       kind: "ok",
-      text: `Added "${trimmed}" to vault ${updated.vaultId}.`,
+      text: `Added "${trimmed}" to vault ${updated.vaultId}. The chat console will replace it with an [ENTITY_N] placeholder before encryption.`,
     });
   };
 
@@ -229,6 +227,10 @@ export default function LoginPage() {
       ...prev,
       customScrubTerms: prev.customScrubTerms.filter((t) => t !== termToRemove),
     }));
+    setStatusBanner({
+      kind: "info",
+      text: `Removed "${termToRemove}" from active custom scrub terms.`,
+    });
   };
 
   const handleSaveNotes = () => {
@@ -239,7 +241,7 @@ export default function LoginPage() {
     }));
     setStatusBanner({
       kind: "ok",
-      text: "Updated encrypted notes locally.",
+      text: "Updated encrypted notes in your local vault.",
     });
   };
 
@@ -249,7 +251,7 @@ export default function LoginPage() {
       setExportedJson(json);
       setStatusBanner({
         kind: "ok",
-        text: "Prepared encrypted .drouter-vault.json in browser memory.",
+        text: "Prepared Ed25519-signed, AES-256-GCM encrypted .drouter-vault.json in browser memory.",
       });
     } catch (err) {
       setStatusBanner({
@@ -260,14 +262,20 @@ export default function LoginPage() {
   };
 
   const handleDownloadExport = () => {
-    if (!exportedJson && session) {
-      const fresh = exportEncryptedVaultJson();
-      setExportedJson(fresh);
-      triggerJsonDownload(fresh, session.vaultId);
-      return;
-    }
-    if (exportedJson) {
-      triggerJsonDownload(exportedJson, session?.vaultId ?? "passphrase-vault");
+    if (!session && !exportedJson) return;
+    try {
+      const content = exportedJson || exportEncryptedVaultJson();
+      if (!exportedJson) setExportedJson(content);
+      triggerJsonDownload(content, session?.vaultId ?? "passphrase-vault");
+      setStatusBanner({
+        kind: "ok",
+        text: "Downloaded encrypted .drouter-vault.json backup.",
+      });
+    } catch (err) {
+      setStatusBanner({
+        kind: "err",
+        text: err instanceof Error ? err.message : "Unlock a vault first before downloading.",
+      });
     }
   };
 
@@ -281,17 +289,54 @@ export default function LoginPage() {
     URL.revokeObjectURL(url);
   }
 
+  const handleUploadVaultFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") {
+        setImportJsonText(reader.result);
+        setStatusBanner({
+          kind: "info",
+          text: `Loaded ${file.name} (${file.size} bytes). Enter its passphrase and click Verify & import vault.`,
+        });
+      }
+    };
+    reader.onerror = () => {
+      setStatusBanner({
+        kind: "err",
+        text: "Could not read the selected vault file.",
+      });
+    };
+    reader.readAsText(file);
+  };
+
   const handleImportVault = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!importJsonText.trim()) {
+      setStatusBanner({
+        kind: "err",
+        text: "Paste or upload an encrypted .drouter-vault.json file first.",
+      });
+      return;
+    }
+    if (!importPassphrase.trim()) {
+      setStatusBanner({
+        kind: "err",
+        text: "Enter the passphrase for the imported vault file.",
+      });
+      return;
+    }
     try {
       const restored = importEncryptedVaultJson(
         importJsonText,
         importPassphrase,
         persistEncrypted,
       );
+      setImportPassphrase("");
       setStatusBanner({
         kind: "ok",
-        text: `Verified signature and unlocked ${restored.vaultId} (${restored.payload.customScrubTerms.length} custom scrub terms restored).`,
+        text: `Verified Ed25519 signature and unlocked ${restored.vaultId} (${restored.payload.customScrubTerms.length} custom scrub terms restored).`,
       });
     } catch (err) {
       setStatusBanner({
@@ -318,18 +363,25 @@ export default function LoginPage() {
     <div className="min-h-screen flex flex-col bg-paper text-ink">
       <SpecimenHeader activePath="/login" rightSlot={<AuthPill />} />
 
-      <main className="mx-auto w-full max-w-4xl flex-1 space-y-8 px-4 py-10 sm:px-6">
+      <main
+        id="main-content"
+        tabIndex={-1}
+        className="mx-auto w-full max-w-4xl flex-1 space-y-8 px-4 py-10 sm:px-6"
+      >
         {/* Hero */}
-        <section className="space-y-3 border-b border-rule pb-6">
+        <section aria-labelledby="login-heading" className="space-y-3 border-b border-rule pb-6">
           <div className="ep-label">Passphrase vault</div>
-          <h1 className="ep-display text-3xl sm:text-4xl">Passphrase vault</h1>
+          <h1 id="login-heading" className="ep-display text-3xl sm:text-4xl">
+            Passphrase vault
+          </h1>
           <p className="max-w-[65ch] text-base leading-relaxed text-ink-2">
-            No account and no email. Your passphrase never leaves this device.
+            No account and no email. Your passphrase derives AES-256-GCM and Ed25519 keys inside your browser and never leaves this device.
           </p>
 
           {statusBanner && (
             <div
               role="status"
+              aria-live="polite"
               className={`mt-3 rounded border px-3.5 py-2.5 text-xs font-mono ${
                 statusBanner.kind === "err"
                   ? "border-accent bg-accent-soft text-accent"
@@ -343,19 +395,25 @@ export default function LoginPage() {
 
         {/* Active Vault Banner (when unlocked) */}
         {session && (
-          <section className="ep-card p-5 space-y-3">
+          <section
+            aria-label="Active passphrase vault"
+            className="ep-card p-5 space-y-3"
+          >
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="space-y-0.5">
                 <div className="ep-label">Active Passphrase Vault</div>
                 <div className="font-mono text-sm font-semibold text-ink">
                   {session.vaultId}
                 </div>
+                <div className="font-mono text-[11px] text-ink-3">
+                  Ed25519 pubkey: {shortHex(session.ed25519PublicKeyHex, 12, 8)} · Custom scrub terms: {session.payload.customScrubTerms.length}
+                </div>
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <span className="ep-pass">Unlocked locally</span>
                 <button
                   type="button"
-                  onClick={() => lockVault()}
+                  onClick={handleLockVault}
                   className="ep-btn-ghost text-xs py-1.5 px-3"
                 >
                   Lock vault
@@ -368,22 +426,32 @@ export default function LoginPage() {
                 Storage mode:{" "}
                 <strong className="font-mono text-ink">
                   {persistEncrypted
-                    ? "Encrypted in browser localStorage"
+                    ? "AES-256-GCM ciphertext in browser localStorage"
                     : "RAM only (clears when tab closes)"}
                 </strong>
               </span>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2" role="group" aria-label="Vault storage mode">
                 <button
                   type="button"
+                  aria-pressed={!persistEncrypted}
                   onClick={() => handleTogglePersistence(false)}
-                  className={!persistEncrypted ? "ep-btn text-xs py-1 px-2.5" : "ep-btn-ghost text-xs py-1 px-2.5"}
+                  className={
+                    !persistEncrypted
+                      ? "ep-btn text-xs py-1 px-2.5"
+                      : "ep-btn-ghost text-xs py-1 px-2.5"
+                  }
                 >
                   RAM only
                 </button>
                 <button
                   type="button"
+                  aria-pressed={persistEncrypted}
                   onClick={() => handleTogglePersistence(true)}
-                  className={persistEncrypted ? "ep-btn text-xs py-1 px-2.5" : "ep-btn-ghost text-xs py-1 px-2.5"}
+                  className={
+                    persistEncrypted
+                      ? "ep-btn text-xs py-1 px-2.5"
+                      : "ep-btn-ghost text-xs py-1 px-2.5"
+                  }
                 >
                   Save encrypted on device
                 </button>
@@ -395,22 +463,30 @@ export default function LoginPage() {
         {/* Two Clear Choices */}
         <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
           {/* Choice 1: Create a new vault */}
-          <section className="ep-card p-5 flex flex-col justify-between space-y-5">
+          <section
+            aria-labelledby="create-vault-heading"
+            className="ep-card p-5 flex flex-col justify-between space-y-5"
+          >
             <div className="space-y-3">
               <div className="ep-label">Option 1</div>
-              <h2 className="ep-display text-2xl">Create a new vault</h2>
+              <h2 id="create-vault-heading" className="ep-display text-2xl">
+                Create a new vault
+              </h2>
               <p className="text-xs leading-relaxed text-ink-2">
                 Copy these six random words and save them in your password manager or on paper. They derive your local encryption keys inside your browser.
               </p>
 
               <div className="ep-inset p-3.5 space-y-2">
-                <div className="ep-label">Your 6-word passphrase</div>
-                <div className="select-all font-mono text-sm font-semibold text-ink">
-                  {burnerPassphrase}
+                <div className="ep-label">Your 6-word passphrase (generated on device)</div>
+                <div
+                  data-testid="generated-passphrase"
+                  className="select-all font-mono text-sm font-semibold text-ink min-h-[1.25rem]"
+                >
+                  {mounted ? burnerPassphrase : "Generating in browser..."}
                 </div>
                 {burnerPreview && (
                   <div className="border-t border-rule pt-2 font-mono text-[11px] text-ink-3">
-                    Vault ID: <span className="text-ink">{burnerPreview.vaultId}</span>
+                    Derived Vault ID: <span className="text-ink">{burnerPreview.vaultId}</span>
                   </div>
                 )}
               </div>
@@ -419,6 +495,7 @@ export default function LoginPage() {
                 <button
                   type="button"
                   onClick={() => void handleCopyBurner()}
+                  disabled={!mounted || !burnerPassphrase}
                   className="ep-btn-ghost text-xs"
                 >
                   {copiedBurner ? "Copied" : "Copy 6 words"}
@@ -426,6 +503,7 @@ export default function LoginPage() {
                 <button
                   type="button"
                   onClick={handleGenerateBurner}
+                  disabled={!mounted}
                   className="ep-btn-ghost text-xs"
                 >
                   Generate new words
@@ -441,13 +519,13 @@ export default function LoginPage() {
                   onChange={(e) => setSavedConfirmed(e.target.checked)}
                   className="h-4 w-4 accent-ink"
                 />
-                <span>I saved it in a safe place</span>
+                <span>I saved these 6 words in a safe place</span>
               </label>
 
               <button
                 type="button"
                 onClick={handleCreateVault}
-                disabled={!savedConfirmed}
+                disabled={!savedConfirmed || !mounted}
                 className="ep-btn-accent w-full"
               >
                 Create a new vault
@@ -456,14 +534,19 @@ export default function LoginPage() {
           </section>
 
           {/* Choice 2: Unlock with my passphrase */}
-          <section className="ep-card p-5 flex flex-col justify-between space-y-5">
+          <section
+            aria-labelledby="unlock-vault-heading"
+            className="ep-card p-5 flex flex-col justify-between space-y-5"
+          >
             <form
               onSubmit={handleUnlockExisting}
               className="flex h-full flex-col justify-between space-y-5"
             >
               <div className="space-y-3">
                 <div className="ep-label">Option 2</div>
-                <h2 className="ep-display text-2xl">Unlock with my passphrase</h2>
+                <h2 id="unlock-vault-heading" className="ep-display text-2xl">
+                  Unlock with my passphrase
+                </h2>
                 <p className="text-xs leading-relaxed text-ink-2">
                   Enter your existing passphrase to derive your vault keys in browser memory. The same words always produce the same vault ID.
                 </p>
@@ -478,9 +561,11 @@ export default function LoginPage() {
                   <input
                     id="existing-passphrase-input"
                     type="text"
+                    autoComplete="off"
+                    spellCheck={false}
                     value={existingPassphrase}
                     onChange={(e) => setExistingPassphrase(e.target.value)}
-                    placeholder="e.g. orbit maple cable harvest velvet lunar"
+                    placeholder="Synthetic example: word1 word2 word3 word4 word5 word6"
                     className="ep-input font-mono"
                   />
                 </div>
@@ -495,12 +580,12 @@ export default function LoginPage() {
                         </span>
                       </div>
                       <div>
-                        Public key: {shortHex(existingPreview.x25519PublicKeyHex, 10, 8)}
+                        X25519 public key: {shortHex(existingPreview.x25519PublicKeyHex, 10, 8)}
                       </div>
                     </div>
                   ) : persistedMeta.exists ? (
                     <span>
-                      Saved vault {persistedMeta.vaultId} found on this device. Enter its passphrase to decrypt.
+                      Encrypted vault {persistedMeta.vaultId} is stored on this device. Enter its passphrase to decrypt.
                     </span>
                   ) : (
                     <span>
@@ -519,171 +604,244 @@ export default function LoginPage() {
           </section>
         </div>
 
-        {/* More options: Custom scrub terms, Import/Export, Wipe */}
-        <details className="ep-card p-5">
-          <summary className="cursor-pointer font-serif text-lg text-ink">
-            More options (custom scrub terms, export, import)
-          </summary>
+        {/* Custom Scrub Terms (I3 -> I1 pipeline) */}
+        <section
+          aria-labelledby="custom-scrub-heading"
+          className="ep-card p-5 space-y-5"
+        >
+          <div className="flex flex-wrap items-start justify-between gap-3 border-b border-rule pb-4">
+            <div className="space-y-1">
+              <div className="ep-label">Local Scrubber Dictionary (Feeds Console)</div>
+              <h2 id="custom-scrub-heading" className="ep-display text-2xl">
+                Custom scrub terms
+              </h2>
+              <p className="max-w-[68ch] text-xs leading-relaxed text-ink-2">
+                Terms saved in your unlocked vault automatically feed the chat console through the client prompt pipeline. Your browser replaces each term with <code className="font-mono text-ink">[ENTITY_N]</code> before HPKE encryption and restores it when the enclave replies.
+              </p>
+            </div>
+            <span className={session ? "ep-pass" : "ep-muted-chip"}>
+              {session
+                ? `${activeCustomTerms.length} active term${activeCustomTerms.length === 1 ? "" : "s"}`
+                : "Vault locked (0 active terms)"}
+            </span>
+          </div>
 
-          <div className="mt-5 space-y-8 border-t border-rule pt-5">
-            {/* Custom Scrub Terms */}
-            <div className="space-y-4">
-              <div>
-                <div className="ep-label">Local Scrubber Dictionary</div>
-                <h3 className="font-serif text-lg text-ink mt-0.5">
-                  Custom scrub terms
-                </h3>
-                <p className="max-w-[68ch] text-xs text-ink-2">
-                  Add project names, client names, or internal IDs. Your browser replaces them with placeholders like <code className="font-mono text-ink">[ENTITY_1]</code> before encrypting your prompt.
-                </p>
-              </div>
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+            <div className="space-y-3">
+              <form onSubmit={handleAddCustomTerm} className="flex gap-2">
+                <label htmlFor="custom-term-input" className="sr-only">
+                  Add custom scrub term
+                </label>
+                <input
+                  id="custom-term-input"
+                  type="text"
+                  value={newCustomTerm}
+                  onChange={(e) => setNewCustomTerm(e.target.value)}
+                  disabled={!session}
+                  placeholder={
+                    session
+                      ? "Add project codename, client, or internal ID..."
+                      : "Unlock a vault above to add custom scrub terms"
+                  }
+                  className="ep-input"
+                />
+                <button
+                  type="submit"
+                  disabled={!session || !newCustomTerm.trim()}
+                  className="ep-btn shrink-0"
+                >
+                  Add term
+                </button>
+              </form>
 
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                <div className="space-y-3">
-                  <form onSubmit={handleAddCustomTerm} className="flex gap-2">
-                    <label htmlFor="custom-term-input" className="sr-only">
-                      Add custom scrub term
-                    </label>
-                    <input
-                      id="custom-term-input"
-                      type="text"
-                      value={newCustomTerm}
-                      onChange={(e) => setNewCustomTerm(e.target.value)}
-                      placeholder="Add project name, client, or ID..."
-                      className="ep-input"
-                    />
-                    <button type="submit" className="ep-btn shrink-0">
-                      Add term
-                    </button>
-                  </form>
-
-                  <div className="flex flex-wrap gap-1.5">
+              {session ? (
+                activeCustomTerms.length > 0 ? (
+                  <div className="flex flex-wrap gap-1.5" aria-label="Saved custom scrub terms">
                     {activeCustomTerms.map((term, i) => (
-                      <span key={term} className="ep-muted-chip">
+                      <span key={term} className="ep-muted-chip text-ink">
                         <span>
                           {term} &rarr; [ENTITY_{i + 1}]
                         </span>
-                        {session && (
-                          <button
-                            type="button"
-                            onClick={() => handleRemoveCustomTerm(term)}
-                            className="ml-1 font-bold text-ink hover:text-accent"
-                            aria-label={`Remove ${term}`}
-                          >
-                            &times;
-                          </button>
-                        )}
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveCustomTerm(term)}
+                          className="ml-1 font-bold text-ink hover:text-accent"
+                          aria-label={`Remove custom scrub term ${term}`}
+                        >
+                          &times;
+                        </button>
                       </span>
                     ))}
                   </div>
-
-                  {session && (
-                    <div className="space-y-1.5 pt-2">
-                      <label
-                        htmlFor="vault-notes-input"
-                        className="block font-mono text-xs text-ink-2"
-                      >
-                        Encrypted vault notes
-                      </label>
-                      <div className="flex gap-2">
-                        <input
-                          id="vault-notes-input"
-                          type="text"
-                          value={vaultNotes}
-                          onChange={(e) => setVaultNotes(e.target.value)}
-                          placeholder="Optional private notes..."
-                          className="ep-input"
-                        />
-                        <button
-                          type="button"
-                          onClick={handleSaveNotes}
-                          className="ep-btn-ghost shrink-0 text-xs"
-                        >
-                          Save
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                <div className="ep-inset p-3.5 space-y-2">
-                  <div className="ep-label">
-                    Scrubber preview ({scrubDemo.matches.length} matched)
+                ) : (
+                  <div className="ep-inset p-3 text-xs text-ink-3">
+                    No custom scrub terms saved in this vault yet. Add a term above (for example, <code className="font-mono text-ink">Fictional-Project-X</code>) to test redaction.
                   </div>
-                  <label htmlFor="sample-prompt-textarea" className="sr-only">
-                    Sample prompt for scrubber preview
+                )
+              ) : (
+                <div className="ep-inset p-3 text-xs text-ink-3">
+                  Vault is locked. Create or unlock a vault above to add custom scrub terms.
+                </div>
+              )}
+
+              {session && (
+                <div className="space-y-1.5 pt-2 border-t border-rule">
+                  <label
+                    htmlFor="vault-notes-input"
+                    className="block font-mono text-xs text-ink-2"
+                  >
+                    Encrypted vault notes (AES-256-GCM sealed when persisted or exported)
                   </label>
-                  <textarea
-                    id="sample-prompt-textarea"
-                    rows={2}
-                    value={samplePrompt}
-                    onChange={(e) => setSamplePrompt(e.target.value)}
-                    className="ep-input font-mono text-xs"
-                  />
-                  <div className="font-mono text-xs text-ink">
-                    <span className="text-ink-3">Outbound text: </span>
-                    {scrubDemo.scrubbed}
+                  <div className="flex gap-2">
+                    <input
+                      id="vault-notes-input"
+                      type="text"
+                      value={vaultNotes}
+                      onChange={(e) => setVaultNotes(e.target.value)}
+                      placeholder="Optional private notes..."
+                      className="ep-input"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleSaveNotes}
+                      className="ep-btn-ghost shrink-0 text-xs"
+                    >
+                      Save notes
+                    </button>
                   </div>
                 </div>
+              )}
+            </div>
+
+            <div className="ep-inset p-3.5 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="ep-label">
+                  Synthetic Scrubber Preview ({scrubPreview.report.redactions.length} redaction
+                  {scrubPreview.report.redactions.length === 1 ? "" : "s"})
+                </div>
+                <span className="ep-muted-chip">Synthetic test input</span>
+              </div>
+              <label htmlFor="sample-prompt-textarea" className="sr-only">
+                Synthetic test prompt for scrubber preview
+              </label>
+              <textarea
+                id="sample-prompt-textarea"
+                rows={2}
+                value={samplePrompt}
+                onChange={(e) => setSamplePrompt(e.target.value)}
+                className="ep-input font-mono text-xs"
+              />
+              <div className="font-mono text-xs text-ink break-words">
+                <span className="text-ink-3">Outbound text: </span>
+                {scrubPreview.outboundText}
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-rule pt-2 font-mono text-[11px] text-ink-3">
+                <span>
+                  Padded frame: {scrubPreview.bucketBytes.toLocaleString()} B
+                </span>
+                <span>
+                  Risk score: {scrubPreview.report.riskBefore} &rarr; {scrubPreview.report.riskAfter}
+                </span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Export, Import, and Wipe */}
+        <section
+          aria-labelledby="backup-restore-heading"
+          className="ep-card p-5 space-y-6"
+        >
+          <div className="border-b border-rule pb-4">
+            <div className="ep-label">Portable Encrypted Backup</div>
+            <h2 id="backup-restore-heading" className="ep-display text-2xl mt-0.5">
+              Export, import, or wipe your vault
+            </h2>
+            <p className="max-w-[68ch] text-xs text-ink-2 mt-1">
+              Exported files contain only AES-256-GCM ciphertext and an Ed25519 signature. Neither your passphrase nor plaintext terms are written to disk or localStorage.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+            {/* Export */}
+            <div className="space-y-3">
+              <div className="ep-label">Export</div>
+              <h3 className="font-serif text-lg text-ink">
+                Export encrypted vault file
+              </h3>
+              <p className="text-xs text-ink-2">
+                Download your custom scrub terms and notes as an AES-256-GCM encrypted, Ed25519-signed <code className="font-mono text-ink">.drouter-vault.json</code> file.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={handleExportVault}
+                  disabled={!session}
+                  className="ep-btn-ghost text-xs"
+                >
+                  Show encrypted JSON
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDownloadExport}
+                  disabled={!session && !exportedJson}
+                  className="ep-btn text-xs"
+                >
+                  Download .drouter-vault.json
+                </button>
+              </div>
+              {exportedJson && (
+                <pre className="ep-inset max-h-40 overflow-auto p-3 font-mono text-[11px] text-ink-2">
+                  {exportedJson}
+                </pre>
+              )}
+
+              <div className="border-t border-rule pt-3 flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs text-ink-2">
+                  Zero in-memory keys and clear browser storage:
+                </span>
+                <button
+                  type="button"
+                  onClick={handleCryptoWipe}
+                  className="ep-btn-ghost text-xs"
+                >
+                  Wipe local vault
+                </button>
               </div>
             </div>
 
-            {/* Export & Import */}
-            <div className="grid grid-cols-1 gap-6 border-t border-rule pt-6 lg:grid-cols-2">
-              <div className="space-y-3">
-                <div className="ep-label">Backup</div>
-                <h3 className="font-serif text-lg text-ink">
-                  Export encrypted vault file
-                </h3>
-                <p className="text-xs text-ink-2">
-                  Download your custom terms and notes as an AES-256-GCM encrypted, Ed25519-signed <code className="font-mono text-ink">.drouter-vault.json</code> file.
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={handleExportVault}
-                    className="ep-btn-ghost text-xs"
-                  >
-                    Show encrypted JSON
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleDownloadExport}
-                    disabled={!session && !exportedJson}
-                    className="ep-btn text-xs"
-                  >
-                    Download .drouter-vault.json
-                  </button>
-                </div>
-                {exportedJson && (
-                  <pre className="ep-inset max-h-40 overflow-auto p-3 font-mono text-[11px] text-ink-2">
-                    {exportedJson}
-                  </pre>
-                )}
+            {/* Import */}
+            <form onSubmit={handleImportVault} className="space-y-3">
+              <div className="ep-label">Import</div>
+              <h3 className="font-serif text-lg text-ink">
+                Import encrypted vault file
+              </h3>
+              <p className="text-xs text-ink-2">
+                Upload or paste an exported <code className="font-mono text-ink">.drouter-vault.json</code> bundle and enter its passphrase to verify the Ed25519 signature and decrypt.
+              </p>
 
-                <div className="border-t border-rule pt-3 flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-xs text-ink-2">
-                    Clear keys from memory and browser storage:
-                  </span>
-                  <button
-                    type="button"
-                    onClick={handleCryptoWipe}
-                    className="ep-btn-ghost text-xs"
-                  >
-                    Wipe local vault
-                  </button>
-                </div>
+              <div className="flex items-center gap-2">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".json,application/json"
+                  onChange={handleUploadVaultFile}
+                  className="sr-only"
+                  id="import-vault-file-input"
+                />
+                <label
+                  htmlFor="import-vault-file-input"
+                  className="ep-btn-ghost text-xs cursor-pointer"
+                >
+                  Choose .drouter-vault.json file
+                </label>
               </div>
 
-              <form onSubmit={handleImportVault} className="space-y-3">
-                <div className="ep-label">Restore</div>
-                <h3 className="font-serif text-lg text-ink">
-                  Import encrypted vault file
-                </h3>
-                <p className="text-xs text-ink-2">
-                  Paste an exported <code className="font-mono text-ink">.drouter-vault.json</code> bundle and enter its passphrase to verify and unlock.
-                </p>
-                <label htmlFor="import-vault-json" className="sr-only">
+              <div>
+                <label
+                  htmlFor="import-vault-json"
+                  className="block font-mono text-xs text-ink-2 mb-1"
+                >
                   Encrypted vault JSON
                 </label>
                 <textarea
@@ -694,34 +852,42 @@ export default function LoginPage() {
                   placeholder='{"format": "drouter-zk-vault-v1", ...}'
                   className="ep-input font-mono text-xs"
                 />
-                <label htmlFor="import-vault-passphrase" className="sr-only">
-                  Passphrase for imported vault
+              </div>
+
+              <div>
+                <label
+                  htmlFor="import-vault-passphrase"
+                  className="block font-mono text-xs text-ink-2 mb-1"
+                >
+                  Passphrase for imported backup
                 </label>
                 <input
                   id="import-vault-passphrase"
                   type="text"
+                  autoComplete="off"
+                  spellCheck={false}
                   value={importPassphrase}
                   onChange={(e) => setImportPassphrase(e.target.value)}
-                  placeholder="Passphrase for this backup file"
+                  placeholder="Enter passphrase for this backup file"
                   className="ep-input font-mono text-xs"
                 />
-                <button type="submit" className="ep-btn text-xs">
-                  Verify &amp; import vault
-                </button>
-              </form>
-            </div>
+              </div>
 
-            {/* Technical KDF note */}
-            <div className="border-t border-rule pt-4 text-xs text-ink-3 flex flex-wrap items-center justify-between gap-2">
-              <span>
-                Key derivation: PBKDF2-HMAC-SHA-512 (210,000 rounds) + HKDF-SHA-384 (AES-256-GCM, Ed25519, X25519).
-              </span>
-              <Link href="/" className="ep-link">
-                Return to console
-              </Link>
-            </div>
+              <button type="submit" className="ep-btn text-xs">
+                Verify &amp; import vault
+              </button>
+            </form>
           </div>
-        </details>
+
+          <div className="border-t border-rule pt-4 text-xs text-ink-3 flex flex-wrap items-center justify-between gap-2">
+            <span>
+              Key derivation: PBKDF2-HMAC-SHA-512 (210,000 rounds) + HKDF-SHA-384 (AES-256-GCM, Ed25519, X25519).
+            </span>
+            <Link href="/" className="ep-link">
+              Return to console
+            </Link>
+          </div>
+        </section>
       </main>
 
       <SpecimenFooter />

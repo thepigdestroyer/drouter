@@ -27,15 +27,18 @@ export function AuthPill({ className = "" }: AuthPillProps) {
     return (
       <Link
         href="/login"
+        aria-label="Open passphrase vault"
         className={`ep-btn-ghost px-3 py-1 text-xs ${className}`}
       >
-        Sign in
+        Vault locked
       </Link>
     );
   }
 
   return (
     <div
+      role="group"
+      aria-label={`Passphrase vault ${session.vaultId} unlocked`}
       className={`inline-flex items-center gap-2 rounded border border-ink bg-paper px-2.5 py-1 text-xs text-ink ${className}`}
     >
       <span className="h-1.5 w-1.5 rounded-full bg-ink" aria-hidden="true" />
@@ -47,13 +50,17 @@ export function AuthPill({ className = "" }: AuthPillProps) {
         Vault unlocked
       </Link>
       {session.payload.customScrubTerms.length > 0 && (
-        <span className="font-mono text-[11px] text-ink-3">
+        <span
+          className="font-mono text-[11px] text-ink-3"
+          title={`${session.payload.customScrubTerms.length} custom scrub terms active`}
+        >
           ({session.payload.customScrubTerms.length})
         </span>
       )}
       <button
         type="button"
         onClick={() => lockVault()}
+        aria-label={`Lock passphrase vault ${session.vaultId}`}
         className="ml-1 border-l border-rule pl-2 font-mono text-[11px] text-ink-3 hover:text-ink"
       >
         Lock

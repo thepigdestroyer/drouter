@@ -1,5 +1,3 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { MongoClient, type Collection, type Db } from "mongodb";
 import { createSessionScrubber } from "@/lib/privacy/scrubber";
 import {
@@ -190,42 +188,12 @@ export function coarsenIsoToUtcHour(input?: string | Date): string {
 }
 
 /**
- * Resolves `MONGODB_URI` from `process.env` or `.env.local` if available.
- * In unit test environments (`VITEST` or `NODE_ENV=test`), never reads `.env.local`
- * from disk so unit tests stay isolated from live network connections unless explicitly mocked.
+ * Resolves `MONGODB_URI` from the environment only. Unit tests run without it, so they
+ * stay isolated from the live cluster unless they mock the connection.
  */
 export function resolveMongoUri(): string | null {
-  if (process.env.MONGODB_URI?.trim()) {
-    return process.env.MONGODB_URI.trim();
-  }
-  if (process.env.VITEST || process.env.NODE_ENV === "test") {
-    return null;
-  }
-  try {
-    const envPath = join(process.cwd(), ".env.local");
-    if (existsSync(envPath)) {
-      const content = readFileSync(envPath, "utf8");
-      for (const line of content.split(/\r?\n/)) {
-        const trimmed = line.trim();
-        if (trimmed.startsWith("MONGODB_URI=")) {
-          let val = trimmed.slice("MONGODB_URI=".length).trim();
-          if (
-            (val.startsWith('"') && val.endsWith('"')) ||
-            (val.startsWith("'") && val.endsWith("'"))
-          ) {
-            val = val.slice(1, -1);
-          }
-          if (val) {
-            process.env.MONGODB_URI = val;
-            return val;
-          }
-        }
-      }
-    }
-  } catch {
-    // Ignore fs errors in restricted runtimes
-  }
-  return null;
+  // Next.js and `node --env-file=.env.local` load env vars; never read secret files from disk here.
+  return process.env.MONGODB_URI?.trim() || null;
 }
 
 export async function getAtlasDb(): Promise<Db | null> {

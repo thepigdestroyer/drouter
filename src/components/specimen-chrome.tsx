@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useId, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { AuthPill } from "@/components/auth-pill";
@@ -49,6 +49,19 @@ export function SpecimenGrainOverlay() {
   return null;
 }
 
+function skipToMainContent(e: React.MouseEvent<HTMLAnchorElement>) {
+  const target =
+    document.getElementById("main-content") ?? document.querySelector("main");
+  if (target instanceof HTMLElement) {
+    e.preventDefault();
+    if (!target.hasAttribute("tabindex")) {
+      target.setAttribute("tabindex", "-1");
+    }
+    target.focus();
+    target.scrollIntoView({ block: "start" });
+  }
+}
+
 export function SpecimenHeader({
   activePath,
   rightSlot,
@@ -56,15 +69,25 @@ export function SpecimenHeader({
   onOpenInspector,
 }: SpecimenHeaderProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const mobileMenuId = useId();
   const pathname = usePathname();
   const currentPath = activePath ?? (pathname as SpecimenRoutePath) ?? "/";
 
   return (
     <header className="w-full border-b border-rule bg-paper text-ink">
+      <a
+        href="#main-content"
+        onClick={skipToMainContent}
+        className="ep-skip-link"
+      >
+        Skip to main content
+      </a>
+
       <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-4 py-3.5 sm:px-6">
         <div className="flex items-center gap-6">
           <Link
             href="/"
+            aria-label="dRouter home"
             className="ep-display text-xl font-normal tracking-tight text-ink hover:opacity-80"
           >
             dRouter
@@ -123,7 +146,8 @@ export function SpecimenHeader({
             type="button"
             onClick={() => setMobileOpen((prev) => !prev)}
             aria-expanded={mobileOpen}
-            aria-label="Toggle navigation menu"
+            aria-controls={mobileMenuId}
+            aria-label={mobileOpen ? "Close navigation menu" : "Open navigation menu"}
             className="inline-flex md:hidden ep-btn-ghost px-2.5 py-1 text-xs"
           >
             {mobileOpen ? "Close" : "Menu"}
@@ -132,7 +156,10 @@ export function SpecimenHeader({
       </div>
 
       {mobileOpen && (
-        <div className="md:hidden border-t border-rule bg-paper-2 px-4 py-3 sm:px-6">
+        <div
+          id={mobileMenuId}
+          className="md:hidden border-t border-rule bg-paper-2 px-4 py-3 sm:px-6"
+        >
           <nav aria-label="Mobile navigation" className="flex flex-col gap-1">
             {NAV_ITEMS.map((item) => {
               const isActive = currentPath === item.href;
@@ -214,12 +241,15 @@ export const Section = ExhibitSection;
 
 export function SpecimenFooter() {
   return (
-    <footer className="mt-auto w-full border-t border-rule bg-paper text-ink-3">
+    <footer
+      aria-label="Site footer"
+      className="mt-auto w-full border-t border-rule bg-paper text-ink-3"
+    >
       <div className="mx-auto flex max-w-5xl flex-col items-start justify-between gap-3 px-4 py-6 text-xs sm:flex-row sm:items-center sm:px-6">
         <p className="text-ink-2">
           dRouter. Hardware-attested confidential AI routing.
         </p>
-        <div className="flex flex-wrap items-center gap-4">
+        <nav aria-label="Footer links" className="flex flex-wrap items-center gap-4">
           <a
             href="https://github.com/thepigdestroyer/drouter"
             target="_blank"
@@ -239,7 +269,7 @@ export function SpecimenFooter() {
           <Link href="/about" className="ep-link text-xs">
             About
           </Link>
-        </div>
+        </nav>
       </div>
     </footer>
   );
