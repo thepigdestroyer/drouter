@@ -11,10 +11,10 @@
   </g>
 
   <!-- Wordmark -->
-  <text x="80" y="47" fill="#151515" font-family="'Iowan Old Style', 'Charter', 'Palatino', Georgia, serif" font-size="42" font-weight="600" letter-spacing="-0.8">dRouter</text>
+  <text x="80" y="47" fill="#151515" font-family="'Iowan Old Style', 'Charter', 'Palatino', Georgia, serif" font-size="42" font-weight="600" letter-spacing="-0.8">deRoute</text>
 
   <!-- Subtle vertical rule and mono tag -->
   <line x1="238" y1="21" x2="238" y2="51" stroke="#d6d2c8" stroke-width="1.5"/>
-  <text x="250" y="33" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="9.5" letter-spacing="1.2">ATTESTED</text>
-  <text x="250" y="47" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="9.5" letter-spacing="1.2">AI ROUTER</text>
+  <text x="250" y="33" fill="#595752" font-family="'SF Mono', Menlo, monospace" font-size="9.5" letter-spacing="1.2">PRIVATE</text>
+  <text x="250" y="47" fill="#595752" font-family="'SF Mono', Menlo, monospace" font-size="9.5" letter-spacing="1.2">AI ROUTE</text>
 </svg>

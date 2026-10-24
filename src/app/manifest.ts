@@ -2,10 +2,10 @@ import type { MetadataRoute } from "next";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: "dRouter · Confidential AI Router",
-    short_name: "dRouter",
+    name: "deRoute | Private AI Routing",
+    short_name: "deRoute",
     description:
-      "Ask frontier AI models without anyone, including us, reading your prompt. Browser-verified AMD SEV-SNP and Intel TDX hardware attestation with HPKE encryption.",
+      "Ask frontier AI models without anyone, including us, reading what you write. Your device checks the seal on a locked computer and hides your personal details before anything leaves your screen.",
     start_url: "/",
     display: "standalone",
     background_color: "#f3f1ec",

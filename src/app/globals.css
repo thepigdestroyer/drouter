@@ -1,10 +1,9 @@
 @import "tailwindcss";
 
 /*
- * E-paper ink system.
- * Paper and ink carry everything. Orange is reserved for the one thing on a
- * screen that needs attention (a failed check, a pending human approval, the
- * primary call to action). If a screen has more than two orange marks, remove one.
+ * E-paper living ink system for deRoute.
+ * Warm cotton paper and crisp black ink carry everything. Signal orange is
+ * reserved for the single focal point, failure alert, or primary call to action.
  */
 
 @theme {
@@ -12,9 +11,9 @@
   --color-paper-2: #ebe8e1;
   --color-paper-3: #e2ded5;
   --color-ink: #151515;
-  --color-ink-2: #3f3e3b;
-  --color-ink-3: #6e6c67;
-  --color-ink-4: #a19e97;
+  --color-ink-2: #3a3936;
+  --color-ink-3: #595752;
+  --color-ink-4: #8c8982;
   --color-rule: #d6d2c8;
   --color-rule-2: #b9b4a8;
   --color-accent: #d9531e;
@@ -47,6 +46,62 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+/* Let the root living InkField remain visible behind page-level shells while keeping warm paper on html/body. */
+div.min-h-screen.bg-paper {
+  background-color: transparent !important;
+}
+
+.ep-ink-drift-a {
+  animation: ep-ink-float-a 26s ease-in-out infinite alternate;
+  transform-origin: center;
+}
+
+.ep-ink-drift-b {
+  animation: ep-ink-float-b 32s ease-in-out infinite alternate;
+  transform-origin: center;
+}
+
+.ep-ink-drift-c {
+  animation: ep-ink-float-c 22s ease-in-out infinite alternate;
+  transform-origin: center;
+}
+
+@keyframes ep-ink-float-a {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(34px, 22px, 0) scale(1.05);
+  }
+  100% {
+    transform: translate3d(-24px, 38px, 0) scale(0.97);
+  }
+}
+
+@keyframes ep-ink-float-b {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(-38px, 28px, 0) scale(1.04);
+  }
+  100% {
+    transform: translate3d(26px, -24px, 0) scale(0.96);
+  }
+}
+
+@keyframes ep-ink-float-c {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(24px, -26px, 0) scale(1.06);
+  }
+  100% {
+    transform: translate3d(-18px, 20px, 0) scale(0.98);
+  }
+}
+
 ::selection {
   background: var(--color-ink);
   color: var(--color-paper);
@@ -61,7 +116,7 @@ body {
   position: fixed;
   left: 0.75rem;
   top: 0.5rem;
-  z-index: 50;
+  z-index: 60;
   transform: translateY(-200%);
   border-radius: 4px;
   border: 2px solid var(--color-ink);
@@ -101,16 +156,16 @@ body {
     color: var(--color-ink-3);
   }
 
-  /* A sheet of paper: flat, hairline border, no shadow. */
+  /* A sheet of paper: flat, hairline border, subtle translucency so living ink breathes underneath. */
   .ep-card {
-    background: var(--color-paper);
+    background: color-mix(in srgb, var(--color-paper) 91%, transparent);
     border: 1px solid var(--color-rule);
     border-radius: 6px;
   }
 
   /* A recessed area for code, raw records, or secondary content. */
   .ep-inset {
-    background: var(--color-paper-2);
+    background: color-mix(in srgb, var(--color-paper-2) 92%, transparent);
     border: 1px solid var(--color-rule);
     border-radius: 4px;
   }
@@ -119,8 +174,11 @@ body {
     border-color: var(--color-rule);
   }
 
-  /* Primary action: solid ink. */
+  /* Primary action: solid ink with organic ink-spread micro-interaction. */
   .ep-btn {
+    position: relative;
+    overflow: hidden;
+     isolation: isolate;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -131,33 +189,92 @@ body {
     padding: 0.5rem 1rem;
     font-size: 0.875rem;
     font-weight: 500;
-    transition: background-color 120ms ease;
+    transition:
+      background-color 160ms ease,
+      transform 120ms ease;
   }
-  .ep-btn:hover {
-    background: var(--color-ink-2);
+  .ep-btn::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background: radial-gradient(
+      circle at var(--ink-x, 50%) var(--ink-y, 50%),
+      var(--color-ink-2) 0%,
+      transparent 72%
+    );
+    opacity: 0;
+    transform: scale(0.35);
+    transition:
+      opacity 220ms ease,
+      transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
+    pointer-events: none;
+  }
+  .ep-btn:hover::before {
+    opacity: 1;
+    transform: scale(1.65);
+  }
+  .ep-btn:active {
+    transform: translateY(0.5px);
+  }
+  .ep-btn:active::before {
+    opacity: 1;
+    transform: scale(2.2);
   }
   .ep-btn:disabled {
     opacity: 0.45;
     cursor: not-allowed;
   }
 
-  /* Secondary action: outlined ink. */
+  /* Secondary action: outlined ink with warm paper-ink spread on hover/press. */
   .ep-btn-ghost {
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     gap: 0.5rem;
     border-radius: 4px;
     border: 1px solid var(--color-ink);
-    background: transparent;
+    background: color-mix(in srgb, var(--color-paper) 82%, transparent);
     color: var(--color-ink);
     padding: 0.5rem 1rem;
     font-size: 0.875rem;
     font-weight: 500;
-    transition: background-color 120ms ease;
+    transition:
+      background-color 160ms ease,
+      border-color 160ms ease,
+      transform 120ms ease;
   }
-  .ep-btn-ghost:hover {
-    background: var(--color-paper-2);
+  .ep-btn-ghost::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background: radial-gradient(
+      circle at var(--ink-x, 50%) var(--ink-y, 50%),
+      var(--color-paper-3) 0%,
+      var(--color-paper-2) 55%,
+      transparent 78%
+    );
+    opacity: 0;
+    transform: scale(0.35);
+    transition:
+      opacity 220ms ease,
+      transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
+    pointer-events: none;
+  }
+  .ep-btn-ghost:hover::before {
+    opacity: 1;
+    transform: scale(1.65);
+  }
+  .ep-btn-ghost:active {
+    transform: translateY(0.5px);
+  }
+  .ep-btn-ghost:active::before {
+    opacity: 1;
+    transform: scale(2.2);
   }
   .ep-btn-ghost:disabled {
     opacity: 0.45;
@@ -166,6 +283,9 @@ body {
 
   /* The single orange call to action on a page, at most. */
   .ep-btn-accent {
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -176,10 +296,76 @@ body {
     padding: 0.5rem 1rem;
     font-size: 0.875rem;
     font-weight: 500;
+    transition:
+      background-color 160ms ease,
+      transform 120ms ease;
+  }
+  .ep-btn-accent::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background: radial-gradient(
+      circle at var(--ink-x, 50%) var(--ink-y, 50%),
+      #b64012 0%,
+      transparent 72%
+    );
+    opacity: 0;
+    transform: scale(0.35);
+    transition:
+      opacity 220ms ease,
+      transform 280ms cubic-bezier(0.22, 1, 0.36, 1);
+    pointer-events: none;
+  }
+  .ep-btn-accent:hover::before {
+    opacity: 1;
+    transform: scale(1.65);
+  }
+  .ep-btn-accent:active {
+    transform: translateY(0.5px);
+  }
+  .ep-btn-accent:active::before {
+    opacity: 1;
+    transform: scale(2.2);
   }
   .ep-btn-accent:disabled {
     opacity: 0.45;
     cursor: not-allowed;
+  }
+
+  .ep-ink-button-label {
+    position: relative;
+    z-index: 1;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  /* Ink-wipe section reveal */
+  .ep-ink-reveal {
+    transition:
+      opacity 420ms cubic-bezier(0.22, 1, 0.36, 1),
+      transform 420ms cubic-bezier(0.22, 1, 0.36, 1),
+      clip-path 460ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .ep-ink-reveal[data-ink-reveal="pending"] {
+    opacity: 0.01;
+    transform: translateY(10px);
+    clip-path: inset(0 0 14% 0);
+  }
+  .ep-ink-reveal[data-ink-reveal="visible"],
+  .ep-ink-reveal[data-ink-reveal="ssr"] {
+    opacity: 1;
+    transform: translateY(0);
+    clip-path: inset(0 0 0 0);
+  }
+
+  /* Technical details disclosure */
+  .ep-tech-summary::-webkit-details-marker {
+    display: none;
+  }
+  .ep-tech-body {
+    animation: ep-ink-wipe-down 220ms cubic-bezier(0.22, 1, 0.36, 1);
   }
 
   .ep-link {
@@ -255,5 +441,65 @@ body {
     font-size: 12px;
     color: var(--color-ink-2);
     word-break: break-all;
+  }
+}
+
+/* Fix technical pop-up windows ("Inspect raw records", "Use from terminal"):
+   keep modal cards opaque and prevent flexbox from shrinking or overlapping the top tab strip. */
+[role="dialog"] .ep-card {
+  background: var(--color-paper);
+}
+[role="dialog"] .ep-card > div:not(.flex-1) {
+  flex-shrink: 0;
+}
+[role="dialog"] .ep-card > div.overflow-x-auto,
+[role="dialog"] [role="tablist"] {
+  flex-shrink: 0;
+  overflow-y: hidden;
+  min-height: 2.75rem;
+  align-items: stretch;
+  position: relative;
+  z-index: 2;
+}
+[role="dialog"] .ep-card > div.overflow-x-auto > button,
+[role="dialog"] [role="tablist"] > button {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  line-height: 1.3;
+  padding-top: 0.55rem;
+  padding-bottom: 0.55rem;
+}
+
+@keyframes ep-ink-wipe-down {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ep-ink-drift-a,
+  .ep-ink-drift-b,
+  .ep-ink-drift-c,
+  .ep-btn,
+  .ep-btn::before,
+  .ep-btn-ghost,
+  .ep-btn-ghost::before,
+  .ep-btn-accent,
+  .ep-btn-accent::before,
+  .ep-ink-reveal,
+  .ep-tech-body {
+    transition: none !important;
+    animation: none !important;
+    transform: none !important;
+    clip-path: none !important;
+  }
+  .ep-ink-reveal[data-ink-reveal="pending"] {
+    opacity: 1 !important;
   }
 }

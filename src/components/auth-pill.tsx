@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
+import { InkButton } from "@/components/ink/ink-button";
 import {
   getCurrentVaultSession,
   lockVault,
@@ -13,7 +14,7 @@ export interface AuthPillProps {
   className?: string;
 }
 
-export function AuthPill({ className = "" }: AuthPillProps) {
+export function AuthPill({ className = "" }: AuthPillProps): React.JSX.Element {
   const [session, setSession] = useState<VaultSession | null>(null);
 
   useEffect(() => {
@@ -25,34 +26,35 @@ export function AuthPill({ className = "" }: AuthPillProps) {
 
   if (!session) {
     return (
-      <Link
+      <InkButton
         href="/login"
-        aria-label="Open passphrase vault"
-        className={`ep-btn-ghost px-3 py-1 text-xs ${className}`}
+        variant="ghost"
+        aria-label="Sign in to deRoute"
+        className={`px-3 py-1 text-xs ${className}`.trim()}
       >
-        Vault locked
-      </Link>
+        Sign in
+      </InkButton>
     );
   }
 
   return (
     <div
       role="group"
-      aria-label={`Passphrase vault ${session.vaultId} unlocked`}
-      className={`inline-flex items-center gap-2 rounded border border-ink bg-paper px-2.5 py-1 text-xs text-ink ${className}`}
+      aria-label="Account menu"
+      className={`inline-flex items-center gap-2 rounded border border-ink bg-paper/90 px-2.5 py-1 text-xs text-ink ${className}`.trim()}
     >
       <span className="h-1.5 w-1.5 rounded-full bg-ink" aria-hidden="true" />
       <Link
-        href="/login"
+        href="/account"
         className="font-medium text-ink hover:underline"
-        title={`Vault ID: ${session.vaultId}`}
+        title="Manage your deRoute account"
       >
-        Vault unlocked
+        Account
       </Link>
       {session.payload.customScrubTerms.length > 0 && (
         <span
           className="font-mono text-[11px] text-ink-3"
-          title={`${session.payload.customScrubTerms.length} custom scrub terms active`}
+          title={`${session.payload.customScrubTerms.length} custom words always hidden`}
         >
           ({session.payload.customScrubTerms.length})
         </span>
@@ -60,10 +62,10 @@ export function AuthPill({ className = "" }: AuthPillProps) {
       <button
         type="button"
         onClick={() => lockVault()}
-        aria-label={`Lock passphrase vault ${session.vaultId}`}
-        className="ml-1 border-l border-rule pl-2 font-mono text-[11px] text-ink-3 hover:text-ink"
+        aria-label="Sign out of deRoute"
+        className="ml-1 border-l border-rule pl-2 font-mono text-[11px] text-ink-3 hover:text-ink cursor-pointer"
       >
-        Lock
+        Sign out
       </button>
     </div>
   );

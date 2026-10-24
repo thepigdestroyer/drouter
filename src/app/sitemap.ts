@@ -15,27 +15,37 @@ export default function sitemap(): MetadataRoute.Sitemap {
       priority: 0.9,
     },
     {
-      url: `${BASE_URL}/argon`,
+      url: `${BASE_URL}/about`,
+      changeFrequency: "monthly",
+      priority: 0.85,
+    },
+    {
+      url: `${BASE_URL}/app`,
       changeFrequency: "weekly",
       priority: 0.85,
+    },
+    {
+      url: `${BASE_URL}/argon`,
+      changeFrequency: "weekly",
+      priority: 0.8,
     },
     {
       url: `${BASE_URL}/audit`,
       changeFrequency: "weekly",
-      priority: 0.85,
+      priority: 0.8,
     },
     {
       url: `${BASE_URL}/network`,
       changeFrequency: "hourly",
-      priority: 0.8,
-    },
-    {
-      url: `${BASE_URL}/about`,
-      changeFrequency: "monthly",
-      priority: 0.8,
+      priority: 0.75,
     },
     {
       url: `${BASE_URL}/login`,
+      changeFrequency: "monthly",
+      priority: 0.65,
+    },
+    {
+      url: `${BASE_URL}/account`,
       changeFrequency: "monthly",
       priority: 0.6,
     },

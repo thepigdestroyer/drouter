@@ -1,18 +1,28 @@
 "use client";
 
-import React, { useId, useState } from "react";
+import React, { useEffect, useId, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { AuthPill } from "@/components/auth-pill";
+import { InkButton } from "@/components/ink/ink-button";
+import {
+  getCurrentVaultSession,
+  lockVault,
+  subscribeVaultSession,
+  type VaultSession,
+} from "@/lib/auth/vault";
 
 export type SpecimenRoutePath =
   | "/"
+  | "/app"
   | "/explain"
   | "/argon"
   | "/audit"
   | "/about"
   | "/network"
-  | "/login";
+  | "/login"
+  | "/account"
+  | (string & {});
 
 export interface SpecimenHeaderProps {
   activePath?: SpecimenRoutePath;
@@ -33,16 +43,23 @@ export interface ExhibitSectionProps {
 
 export type SectionProps = ExhibitSectionProps;
 
-const NAV_ITEMS: ReadonlyArray<{
+const SIGNED_OUT_NAV_ITEMS: ReadonlyArray<{
   label: string;
   href: SpecimenRoutePath;
 }> = [
-  { label: "Chat", href: "/" },
+  { label: "Home", href: "/" },
   { label: "How it works", href: "/explain" },
+  { label: "About", href: "/about" },
+];
+
+const SIGNED_IN_NAV_ITEMS: ReadonlyArray<{
+  label: string;
+  href: SpecimenRoutePath;
+}> = [
+  { label: "Chat", href: "/app" },
   { label: "Agent", href: "/argon" },
   { label: "Proof", href: "/audit" },
-  { label: "Network", href: "/network" },
-  { label: "About", href: "/about" },
+  { label: "How it works", href: "/explain" },
 ];
 
 export function SpecimenGrainOverlay() {
@@ -62,6 +79,60 @@ function skipToMainContent(e: React.MouseEvent<HTMLAnchorElement>) {
   }
 }
 
+function DeRouteMarkIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 64 64"
+      width="24"
+      height="24"
+      fill="none"
+      aria-hidden="true"
+      className="shrink-0"
+    >
+      <rect
+        x="3"
+        y="3"
+        width="58"
+        height="58"
+        rx="13"
+        fill="#f3f1ec"
+        stroke="#151515"
+        strokeWidth="3"
+      />
+      <circle cx="31" cy="35" r="14.2" stroke="#151515" strokeWidth="4.6" />
+      <line
+        x1="45.2"
+        y1="11"
+        x2="45.2"
+        y2="49.2"
+        stroke="#151515"
+        strokeWidth="4.6"
+        strokeLinecap="round"
+      />
+      <line
+        x1="8"
+        y1="35"
+        x2="23.5"
+        y2="35"
+        stroke="#f3f1ec"
+        strokeWidth="8.5"
+        strokeLinecap="butt"
+      />
+      <line
+        x1="9.5"
+        y1="35"
+        x2="22.5"
+        y2="35"
+        stroke="#151515"
+        strokeWidth="3.8"
+        strokeLinecap="round"
+      />
+      <circle cx="31" cy="35" r="5.2" fill="#151515" />
+    </svg>
+  );
+}
+
 export function SpecimenHeader({
   activePath,
   rightSlot,
@@ -69,12 +140,22 @@ export function SpecimenHeader({
   onOpenInspector,
 }: SpecimenHeaderProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [session, setSession] = useState<VaultSession | null>(null);
   const mobileMenuId = useId();
   const pathname = usePathname();
   const currentPath = activePath ?? (pathname as SpecimenRoutePath) ?? "/";
 
+  useEffect(() => {
+    setSession(getCurrentVaultSession());
+    return subscribeVaultSession(() => {
+      setSession(getCurrentVaultSession());
+    });
+  }, []);
+
+  const navItems = session ? SIGNED_IN_NAV_ITEMS : SIGNED_OUT_NAV_ITEMS;
+
   return (
-    <header className="w-full border-b border-rule bg-paper text-ink">
+    <header className="w-full border-b border-rule bg-paper/90 backdrop-blur-[2px] text-ink">
       <a
         href="#main-content"
         onClick={skipToMainContent}
@@ -87,17 +168,18 @@ export function SpecimenHeader({
         <div className="flex items-center gap-6">
           <Link
             href="/"
-            aria-label="dRouter home"
-            className="ep-display text-xl font-normal tracking-tight text-ink hover:opacity-80"
+            aria-label="deRoute home"
+            className="ep-display inline-flex items-center gap-2 text-xl font-normal tracking-tight text-ink hover:opacity-80"
           >
-            dRouter
+            <DeRouteMarkIcon />
+            <span>deRoute</span>
           </Link>
 
           <nav
             aria-label="Primary navigation"
             className="hidden md:flex items-center gap-1"
           >
-            {NAV_ITEMS.map((item) => {
+            {navItems.map((item) => {
               const isActive = currentPath === item.href;
               return (
                 <Link
@@ -119,49 +201,54 @@ export function SpecimenHeader({
 
         <div className="flex items-center gap-2">
           {onOpenTerminalModal && (
-            <button
+            <InkButton
               type="button"
+              variant="ghost"
               onClick={onOpenTerminalModal}
-              className="hidden sm:inline-flex ep-btn-ghost px-2.5 py-1 text-xs"
+              className="hidden sm:inline-flex px-2.5 py-1 text-xs"
             >
               Use from terminal
-            </button>
+            </InkButton>
           )}
 
           {onOpenInspector && (
-            <button
+            <InkButton
               type="button"
+              variant="ghost"
               onClick={onOpenInspector}
-              className="hidden lg:inline-flex ep-btn-ghost px-2.5 py-1 text-xs"
+              className="hidden lg:inline-flex px-2.5 py-1 text-xs"
             >
               Inspect raw records
-            </button>
+            </InkButton>
           )}
 
           <div className="flex items-center">
             {rightSlot !== undefined ? rightSlot : <AuthPill />}
           </div>
 
-          <button
+          <InkButton
             type="button"
+            variant="ghost"
             onClick={() => setMobileOpen((prev) => !prev)}
             aria-expanded={mobileOpen}
             aria-controls={mobileMenuId}
-            aria-label={mobileOpen ? "Close navigation menu" : "Open navigation menu"}
-            className="inline-flex md:hidden ep-btn-ghost px-2.5 py-1 text-xs"
+            aria-label={
+              mobileOpen ? "Close navigation menu" : "Open navigation menu"
+            }
+            className="inline-flex md:hidden px-2.5 py-1 text-xs"
           >
             {mobileOpen ? "Close" : "Menu"}
-          </button>
+          </InkButton>
         </div>
       </div>
 
       {mobileOpen && (
         <div
           id={mobileMenuId}
-          className="md:hidden border-t border-rule bg-paper-2 px-4 py-3 sm:px-6"
+          className="md:hidden border-t border-rule bg-paper-2/95 px-4 py-3 sm:px-6"
         >
           <nav aria-label="Mobile navigation" className="flex flex-col gap-1">
-            {NAV_ITEMS.map((item) => {
+            {navItems.map((item) => {
               const isActive = currentPath === item.href;
               return (
                 <Link
@@ -181,34 +268,62 @@ export function SpecimenHeader({
             })}
           </nav>
 
-          {(onOpenTerminalModal || onOpenInspector) && (
-            <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-rule pt-3">
-              {onOpenTerminalModal && (
+          <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-rule pt-3">
+            {session ? (
+              <>
+                <Link
+                  href="/account"
+                  onClick={() => setMobileOpen(false)}
+                  className="ep-btn-ghost px-2.5 py-1 text-xs"
+                >
+                  Account
+                </Link>
                 <button
                   type="button"
                   onClick={() => {
                     setMobileOpen(false);
-                    onOpenTerminalModal();
+                    lockVault();
                   }}
                   className="ep-btn-ghost px-2.5 py-1 text-xs"
                 >
-                  Use from terminal
+                  Sign out
                 </button>
-              )}
-              {onOpenInspector && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMobileOpen(false);
-                    onOpenInspector();
-                  }}
-                  className="ep-btn-ghost px-2.5 py-1 text-xs"
-                >
-                  Inspect raw records
-                </button>
-              )}
-            </div>
-          )}
+              </>
+            ) : (
+              <Link
+                href="/login"
+                onClick={() => setMobileOpen(false)}
+                className="ep-btn px-3 py-1 text-xs"
+              >
+                Sign in
+              </Link>
+            )}
+
+            {onOpenTerminalModal && (
+              <button
+                type="button"
+                onClick={() => {
+                  setMobileOpen(false);
+                  onOpenTerminalModal();
+                }}
+                className="ep-btn-ghost px-2.5 py-1 text-xs"
+              >
+                Use from terminal
+              </button>
+            )}
+            {onOpenInspector && (
+              <button
+                type="button"
+                onClick={() => {
+                  setMobileOpen(false);
+                  onOpenInspector();
+                }}
+                className="ep-btn-ghost px-2.5 py-1 text-xs"
+              >
+                Inspect raw records
+              </button>
+            )}
+          </div>
         </div>
       )}
     </header>
@@ -243,13 +358,30 @@ export function SpecimenFooter() {
   return (
     <footer
       aria-label="Site footer"
-      className="mt-auto w-full border-t border-rule bg-paper text-ink-3"
+      className="mt-auto w-full border-t border-rule bg-paper/90 text-ink-3"
     >
       <div className="mx-auto flex max-w-5xl flex-col items-start justify-between gap-3 px-4 py-6 text-xs sm:flex-row sm:items-center sm:px-6">
         <p className="text-ink-2">
-          dRouter. Hardware-attested confidential AI routing.
+          deRoute. Private AI chat where nobody, including us, can read what you ask.
         </p>
         <nav aria-label="Footer links" className="flex flex-wrap items-center gap-4">
+          <Link href="/explain" className="ep-link text-xs">
+            How it works
+          </Link>
+          <Link href="/network" className="ep-link text-xs">
+            Network
+          </Link>
+          <Link href="/about" className="ep-link text-xs">
+            About
+          </Link>
+          <a
+            href="https://testnet.arcscan.app/address/0xbc8085c2b6fe6e0db05f169925c0b841828f4481"
+            target="_blank"
+            rel="noreferrer"
+            className="ep-link text-xs"
+          >
+            Public receipt book
+          </a>
           <a
             href="https://github.com/thepigdestroyer/drouter"
             target="_blank"
@@ -258,17 +390,6 @@ export function SpecimenFooter() {
           >
             Source on GitHub
           </a>
-          <a
-            href="https://testnet.arcscan.app/address/0xbc8085c2b6fe6e0db05f169925c0b841828f4481"
-            target="_blank"
-            rel="noreferrer"
-            className="ep-link text-xs"
-          >
-            Arc testnet registry (0xbc80...4481)
-          </a>
-          <Link href="/about" className="ep-link text-xs">
-            About
-          </Link>
         </nav>
       </div>
     </footer>

@@ -2,12 +2,21 @@
   <!-- E-Paper Background -->
   <rect width="1200" height="630" fill="#f3f1ec"/>
 
+  <!-- Subtle Living Ink Blots in the Background -->
+  <g opacity="0.065" fill="#151515">
+    <circle cx="160" cy="170" r="68"/>
+    <circle cx="215" cy="200" r="48"/>
+    <circle cx="1010" cy="150" r="58"/>
+    <circle cx="965" cy="185" r="42"/>
+    <circle cx="320" cy="495" r="52"/>
+  </g>
+
   <!-- Outer Field-Notebook Frame -->
   <rect x="28" y="24" width="1144" height="582" rx="4" stroke="#d6d2c8" stroke-width="1.5"/>
 
   <!-- Top Metadata Bar -->
-  <text x="56" y="54" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="11" letter-spacing="1.6">PLATE 01 · HARDWARE-ATTESTED CONFIDENTIAL AI ROUTING</text>
-  <text x="1144" y="54" text-anchor="end" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="11" letter-spacing="1.4">drouter-demo.vercel.app</text>
+  <text x="56" y="54" fill="#595752" font-family="'SF Mono', Menlo, monospace" font-size="11" letter-spacing="1.6">PLATE 01 · PRIVATE AI ROUTING TO A SEALED COMPUTER</text>
+  <text x="1144" y="54" text-anchor="end" fill="#595752" font-family="'SF Mono', Menlo, monospace" font-size="11" letter-spacing="1.4">drouter-demo.vercel.app</text>
   <line x1="28" y1="72" x2="1172" y2="72" stroke="#d6d2c8" stroke-width="1.5"/>
 
   <!-- Vertical Divider Between Left Column and Right Column -->
@@ -26,10 +35,10 @@
     </g>
 
     <!-- Wordmark -->
-    <text x="72" y="43" fill="#151515" font-family="'Iowan Old Style', 'Charter', 'Palatino', Georgia, serif" font-size="44" font-weight="600" letter-spacing="-0.8">dRouter</text>
+    <text x="72" y="43" fill="#151515" font-family="'Iowan Old Style', 'Charter', 'Palatino', Georgia, serif" font-size="44" font-weight="600" letter-spacing="-0.8">deRoute</text>
 
     <!-- Category Label -->
-    <text x="0" y="92" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="10.5" letter-spacing="1.8">CONFIDENTIAL AI ROUTER</text>
+    <text x="0" y="92" fill="#595752" font-family="'SF Mono', Menlo, monospace" font-size="10.5" letter-spacing="1.8">DECENTRALIZED-ENCRYPTED ROUTE</text>
     <line x1="0" y1="108" x2="340" y2="108" stroke="#d6d2c8" stroke-width="1.5"/>
 
     <!-- Tagline (Serif Display) -->
@@ -37,21 +46,21 @@
       <tspan x="0" dy="0">Ask frontier AI models</tspan>
       <tspan x="0" dy="39">without anyone,</tspan>
       <tspan x="0" dy="39">including us,</tspan>
-      <tspan x="0" dy="39">reading your prompt.</tspan>
+      <tspan x="0" dy="39">reading what you write.</tspan>
     </text>
 
     <!-- Field Notes -->
     <g transform="translate(0, 322)">
       <line x1="0" y1="0" x2="340" y2="0" stroke="#d6d2c8" stroke-width="1.5"/>
-      <text x="0" y="24" fill="#3f3e3b" font-family="'SF Mono', Menlo, monospace" font-size="10.5">01  Signed enclave quote checked first</text>
-      <text x="0" y="46" fill="#3f3e3b" font-family="'SF Mono', Menlo, monospace" font-size="10.5">02  Scrubbed, padded &amp; HPKE-encrypted</text>
-      <text x="0" y="68" fill="#3f3e3b" font-family="'SF Mono', Menlo, monospace" font-size="10.5">03  Decrypted only inside attested TEE</text>
+      <text x="0" y="24" fill="#3a3936" font-family="'SF Mono', Menlo, monospace" font-size="10.5">01  Your device checks the seal first</text>
+      <text x="0" y="46" fill="#3a3936" font-family="'SF Mono', Menlo, monospace" font-size="10.5">02  Personal details hidden on your screen</text>
+      <text x="0" y="68" fill="#3a3936" font-family="'SF Mono', Menlo, monospace" font-size="10.5">03  Opened only inside the sealed computer</text>
       <line x1="0" y1="86" x2="340" y2="86" stroke="#d6d2c8" stroke-width="1.5"/>
     </g>
   </g>
 
   <!-- ================= RIGHT COLUMN: TIGHTER EXPLANATORY DIAGRAM ================= -->
-  <text x="458" y="106" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="10.5" letter-spacing="1.5">FIG 1.1 · VERIFIED ENCLAVE DATAFLOW (LEFT TO RIGHT)</text>
+  <text x="458" y="106" fill="#595752" font-family="'SF Mono', Menlo, monospace" font-size="10.5" letter-spacing="1.5">FIG 1.1 · HOW YOUR MESSAGE TRAVELS (LEFT TO RIGHT)</text>
 
   <!-- STAGE 1: YOUR DEVICE -->
   <g transform="translate(456, 134)">
@@ -64,23 +73,23 @@
       <circle cx="20" cy="11" r="2" fill="#151515"/>
       <circle cx="28" cy="11" r="2" fill="#151515"/>
       <circle cx="36" cy="11" r="2" fill="#151515"/>
-      <text x="48" y="14.5" fill="#151515" font-family="'SF Mono', Menlo, monospace" font-size="8.5">report: verified ✓</text>
+      <text x="48" y="14.5" fill="#151515" font-family="'SF Mono', Menlo, monospace" font-size="8.5">seal check: passed</text>
 
-      <text x="18" y="40" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="8.5">1. SCRUB PII</text>
-      <text x="18" y="55" fill="#151515" font-family="'SF Mono', Menlo, monospace" font-size="9.5">"Review [REDACTED]"</text>
+      <text x="18" y="40" fill="#595752" font-family="'SF Mono', Menlo, monospace" font-size="8.5">1. HIDE DETAILS</text>
+      <text x="18" y="55" fill="#151515" font-family="'SF Mono', Menlo, monospace" font-size="9.5">"Review [HIDDEN]"</text>
       <line x1="18" y1="65" x2="162" y2="65" stroke="#d6d2c8" stroke-width="1.2"/>
 
-      <text x="18" y="80" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="8.5">2. PAD + ENCRYPT</text>
+      <text x="18" y="80" fill="#595752" font-family="'SF Mono', Menlo, monospace" font-size="8.5">2. SAME SIZE + LOCK</text>
       <rect x="18" y="88" width="144" height="22" rx="3" stroke="#151515" stroke-width="1.6"/>
       <line x1="92" y1="88" x2="92" y2="110" stroke="#151515" stroke-width="1.2" stroke-dasharray="3 2"/>
-      <text x="25" y="102" fill="#151515" font-family="'SF Mono', Menlo, monospace" font-size="8.5">CIPHERTEXT</text>
-      <text x="100" y="102" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="8.5">PAD</text>
+      <text x="25" y="102" fill="#151515" font-family="'SF Mono', Menlo, monospace" font-size="8.5">LOCKED</text>
+      <text x="100" y="102" fill="#595752" font-family="'SF Mono', Menlo, monospace" font-size="8.5">SIZE</text>
 
       <path d="M0 122 L180 122 L173 132 L7 132 Z" fill="#f3f1ec" stroke="#151515" stroke-width="2" stroke-linejoin="round"/>
     </g>
 
     <text x="90" y="218" text-anchor="middle" fill="#151515" font-family="'Iowan Old Style', 'Charter', Georgia, serif" font-size="18" font-weight="600">Your device:</text>
-    <text x="90" y="239" text-anchor="middle" fill="#3f3e3b" font-family="'Iowan Old Style', 'Charter', Georgia, serif" font-size="15.5" font-style="italic">scrub, pad, encrypt</text>
+    <text x="90" y="239" text-anchor="middle" fill="#3a3936" font-family="'Iowan Old Style', 'Charter', Georgia, serif" font-size="15.5" font-style="italic">hide details &amp; lock</text>
   </g>
 
   <!-- Arrow 1 -> 2 -->
@@ -95,38 +104,38 @@
     <text x="90" y="14" text-anchor="middle" fill="#151515" font-family="'SF Mono', Menlo, monospace" font-size="10" letter-spacing="0.8">STEP 02</text>
 
     <g transform="translate(0, 42)">
-      <rect x="0" y="0" width="180" height="132" rx="5" stroke="#6e6c67" stroke-width="1.5" stroke-dasharray="4 4"/>
-      <text x="90" y="18" text-anchor="middle" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="8.5" letter-spacing="0.8">RELAY &amp; HOST</text>
+      <rect x="0" y="0" width="180" height="132" rx="5" stroke="#595752" stroke-width="1.5" stroke-dasharray="4 4"/>
+      <text x="90" y="18" text-anchor="middle" fill="#595752" font-family="'SF Mono', Menlo, monospace" font-size="8.5" letter-spacing="0.8">OUTSIDE NETWORK</text>
 
       <g transform="translate(13, 28)">
         <rect x="0" y="0" width="44" height="64" rx="3" fill="#f3f1ec" stroke="#151515" stroke-width="1.8"/>
-        <text x="22" y="19" text-anchor="middle" fill="#151515" font-family="'SF Mono', Menlo, monospace" font-size="9">4096B</text>
+        <text x="22" y="19" text-anchor="middle" fill="#151515" font-family="'SF Mono', Menlo, monospace" font-size="9">4 KB</text>
         <line x1="6" y1="27" x2="38" y2="27" stroke="#151515" stroke-width="1.2"/>
-        <text x="22" y="42" text-anchor="middle" fill="#3f3e3b" font-family="'SF Mono', Menlo, monospace" font-size="8.5">8f4a..</text>
-        <text x="22" y="54" text-anchor="middle" fill="#3f3e3b" font-family="'SF Mono', Menlo, monospace" font-size="8.5">c901..</text>
+        <text x="22" y="42" text-anchor="middle" fill="#3a3936" font-family="'SF Mono', Menlo, monospace" font-size="8.5">8f4a..</text>
+        <text x="22" y="54" text-anchor="middle" fill="#3a3936" font-family="'SF Mono', Menlo, monospace" font-size="8.5">c901..</text>
       </g>
 
       <g transform="translate(68, 28)">
         <rect x="0" y="0" width="44" height="64" rx="3" fill="#f3f1ec" stroke="#151515" stroke-width="1.8"/>
-        <text x="22" y="19" text-anchor="middle" fill="#151515" font-family="'SF Mono', Menlo, monospace" font-size="9">4096B</text>
+        <text x="22" y="19" text-anchor="middle" fill="#151515" font-family="'SF Mono', Menlo, monospace" font-size="9">4 KB</text>
         <line x1="6" y1="27" x2="38" y2="27" stroke="#151515" stroke-width="1.2"/>
-        <text x="22" y="42" text-anchor="middle" fill="#3f3e3b" font-family="'SF Mono', Menlo, monospace" font-size="8.5">3b7e..</text>
-        <text x="22" y="54" text-anchor="middle" fill="#3f3e3b" font-family="'SF Mono', Menlo, monospace" font-size="8.5">d114..</text>
+        <text x="22" y="42" text-anchor="middle" fill="#3a3936" font-family="'SF Mono', Menlo, monospace" font-size="8.5">3b7e..</text>
+        <text x="22" y="54" text-anchor="middle" fill="#3a3936" font-family="'SF Mono', Menlo, monospace" font-size="8.5">d114..</text>
       </g>
 
       <g transform="translate(123, 28)">
         <rect x="0" y="0" width="44" height="64" rx="3" fill="#f3f1ec" stroke="#151515" stroke-width="1.8"/>
-        <text x="22" y="19" text-anchor="middle" fill="#151515" font-family="'SF Mono', Menlo, monospace" font-size="9">4096B</text>
+        <text x="22" y="19" text-anchor="middle" fill="#151515" font-family="'SF Mono', Menlo, monospace" font-size="9">4 KB</text>
         <line x1="6" y1="27" x2="38" y2="27" stroke="#151515" stroke-width="1.2"/>
-        <text x="22" y="42" text-anchor="middle" fill="#3f3e3b" font-family="'SF Mono', Menlo, monospace" font-size="8.5">a29c..</text>
-        <text x="22" y="54" text-anchor="middle" fill="#3f3e3b" font-family="'SF Mono', Menlo, monospace" font-size="8.5">77e0..</text>
+        <text x="22" y="42" text-anchor="middle" fill="#3a3936" font-family="'SF Mono', Menlo, monospace" font-size="8.5">a29c..</text>
+        <text x="22" y="54" text-anchor="middle" fill="#3a3936" font-family="'SF Mono', Menlo, monospace" font-size="8.5">77e0..</text>
       </g>
 
-      <text x="90" y="114" text-anchor="middle" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="8.5">SAME-SIZE CIPHERTEXT</text>
+      <text x="90" y="114" text-anchor="middle" fill="#595752" font-family="'SF Mono', Menlo, monospace" font-size="8.5">SAME-SIZE LOCKED BOXES</text>
     </g>
 
-    <text x="90" y="218" text-anchor="middle" fill="#151515" font-family="'Iowan Old Style', 'Charter', Georgia, serif" font-size="18" font-weight="600">Relay sees only noise:</text>
-    <text x="90" y="239" text-anchor="middle" fill="#3f3e3b" font-family="'Iowan Old Style', 'Charter', Georgia, serif" font-size="15.5" font-style="italic">identical blocks</text>
+    <text x="90" y="218" text-anchor="middle" fill="#151515" font-family="'Iowan Old Style', 'Charter', Georgia, serif" font-size="18" font-weight="600">On the wire:</text>
+    <text x="90" y="239" text-anchor="middle" fill="#3a3936" font-family="'Iowan Old Style', 'Charter', Georgia, serif" font-size="15.5" font-style="italic">identical boxes</text>
   </g>
 
   <!-- Arrow 2 -> 3 -->
@@ -135,7 +144,7 @@
     <polyline points="23,-5 30,0 23,5" stroke="#151515" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
   </g>
 
-  <!-- STAGE 3: SEALED HARDWARE RING -->
+  <!-- STAGE 3: SEALED COMPUTER RING -->
   <g transform="translate(908, 134)">
     <rect x="77" y="0" width="66" height="20" rx="10" stroke="#151515" stroke-width="1.5"/>
     <text x="110" y="14" text-anchor="middle" fill="#151515" font-family="'SF Mono', Menlo, monospace" font-size="10" letter-spacing="0.8">STEP 03</text>
@@ -176,38 +185,38 @@
       <line x1="140" y1="93" x2="148" y2="93" stroke="#151515" stroke-width="1.8"/>
       <line x1="140" y1="112" x2="148" y2="112" stroke="#151515" stroke-width="1.8"/>
 
-      <text x="84" y="52" text-anchor="middle" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="8" letter-spacing="0.5">ATTESTED TEE CHIP</text>
+      <text x="84" y="52" text-anchor="middle" fill="#595752" font-family="'SF Mono', Menlo, monospace" font-size="8" letter-spacing="0.5">SEALED COMPUTER CHIP</text>
 
       <!-- SINGLE ORANGE ELEMENT -->
       <rect x="36" y="60" width="96" height="62" rx="4" fill="#d9531e"/>
-      <text x="84" y="81" text-anchor="middle" fill="#f3f1ec" font-family="'SF Mono', Menlo, monospace" font-size="8.5" font-weight="600" letter-spacing="0.4">PROMPT READABLE</text>
+      <text x="84" y="81" text-anchor="middle" fill="#f3f1ec" font-family="'SF Mono', Menlo, monospace" font-size="8.5" font-weight="600" letter-spacing="0.4">OPENED INSIDE</text>
       <text x="84" y="101" text-anchor="middle" fill="#f3f1ec" font-family="'Iowan Old Style', 'Charter', Georgia, serif" font-size="13" font-style="italic">"Review terms..."</text>
-      <text x="84" y="115" text-anchor="middle" fill="#f3f1ec" font-family="'SF Mono', Menlo, monospace" font-size="7.5" letter-spacing="0.4">ENCLAVE ONLY</text>
+      <text x="84" y="115" text-anchor="middle" fill="#f3f1ec" font-family="'SF Mono', Menlo, monospace" font-size="7.5" letter-spacing="0.4">SEALED MEMORY</text>
     </g>
 
-    <text x="110" y="218" text-anchor="middle" fill="#151515" font-family="'Iowan Old Style', 'Charter', Georgia, serif" font-size="18" font-weight="600">Sealed hardware:</text>
-    <text x="110" y="239" text-anchor="middle" fill="#3f3e3b" font-family="'Iowan Old Style', 'Charter', Georgia, serif" font-size="15.5" font-style="italic">signed report checked</text>
+    <text x="110" y="218" text-anchor="middle" fill="#151515" font-family="'Iowan Old Style', 'Charter', Georgia, serif" font-size="18" font-weight="600">Sealed computer:</text>
+    <text x="110" y="239" text-anchor="middle" fill="#3a3936" font-family="'Iowan Old Style', 'Charter', Georgia, serif" font-size="15.5" font-style="italic">seal checked first</text>
   </g>
 
-  <!-- Attestation Strip Below Diagram -->
+  <!-- Summary Strip Below Diagram -->
   <g transform="translate(458, 418)">
     <rect x="0" y="0" width="686" height="106" rx="4" fill="#ebe8e1" stroke="#d6d2c8" stroke-width="1.5"/>
     <line x1="0" y1="32" x2="686" y2="32" stroke="#d6d2c8" stroke-width="1.5"/>
     <line x1="343" y1="32" x2="343" y2="106" stroke="#d6d2c8" stroke-width="1.5"/>
 
-    <text x="16" y="21" fill="#151515" font-family="'SF Mono', Menlo, monospace" font-size="10" font-weight="600" letter-spacing="1">ATTESTATION &amp; ORCHESTRATION PROTOCOL</text>
-    <text x="670" y="21" text-anchor="end" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="10" letter-spacing="0.8">NO PLAINTEXT ON HOST</text>
+    <text x="16" y="21" fill="#151515" font-family="'SF Mono', Menlo, monospace" font-size="10" font-weight="600" letter-spacing="1">HOW DEROUTE PROTECTS YOUR PRIVACY</text>
+    <text x="670" y="21" text-anchor="end" fill="#595752" font-family="'SF Mono', Menlo, monospace" font-size="10" letter-spacing="0.8">NO EMAIL OR PASSWORD</text>
 
-    <text x="16" y="54" fill="#151515" font-family="'SF Mono', Menlo, monospace" font-size="10.5" font-weight="600">01 · HARDWARE ENCLAVES</text>
-    <text x="16" y="73" fill="#3f3e3b" font-family="'SF Mono', Menlo, monospace" font-size="10">AMD SEV-SNP router enclave</text>
-    <text x="16" y="90" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="10">Intel TDX + NVIDIA CC GPU TEE</text>
+    <text x="16" y="54" fill="#151515" font-family="'SF Mono', Menlo, monospace" font-size="10.5" font-weight="600">01 · SEALED COMPUTERS</text>
+    <text x="16" y="73" fill="#3a3936" font-family="'SF Mono', Menlo, monospace" font-size="10">Your device checks the seal is intact</text>
+    <text x="16" y="90" fill="#595752" font-family="'SF Mono', Menlo, monospace" font-size="10">Locked so only the sealed computer opens it</text>
 
-    <text x="359" y="54" fill="#151515" font-family="'SF Mono', Menlo, monospace" font-size="10.5" font-weight="600">02 · VERIFICATION &amp; AUDIT</text>
-    <text x="359" y="73" fill="#3f3e3b" font-family="'SF Mono', Menlo, monospace" font-size="10">Gemini 4 Argon agent + human gate</text>
-    <text x="359" y="90" fill="#6e6c67" font-family="'SF Mono', Menlo, monospace" font-size="10">MongoDB Atlas audit search</text>
+    <text x="359" y="54" fill="#151515" font-family="'SF Mono', Menlo, monospace" font-size="10.5" font-weight="600">02 · PUBLIC RECEIPT BOOK</text>
+    <text x="359" y="73" fill="#3a3936" font-family="'SF Mono', Menlo, monospace" font-size="10">Gemini 4 Argon agent + human approval</text>
+    <text x="359" y="90" fill="#595752" font-family="'SF Mono', Menlo, monospace" font-size="10">Every seal check is publicly verifiable</text>
   </g>
 
   <!-- Bottom Rule & Mono Footer -->
   <line x1="28" y1="558" x2="1172" y2="558" stroke="#d6d2c8" stroke-width="1.5"/>
-  <text x="56" y="586" fill="#3f3e3b" font-family="'SF Mono', Menlo, monospace" font-size="11.5" letter-spacing="0.6">hardware-attested · encrypted in your browser · Gemini 4 Argon agent · MongoDB Atlas</text>
+  <text x="56" y="586" fill="#3a3936" font-family="'SF Mono', Menlo, monospace" font-size="11.5" letter-spacing="0.6">seal checked in your browser · personal details hidden · Gemini 4 Argon agent · public receipt book</text>
 </svg>

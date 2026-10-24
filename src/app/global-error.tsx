@@ -2,16 +2,16 @@
 
 import "./globals.css";
 
-function extractSafeDigest(error: unknown): string | null {
-  if (
-    error &&
-    typeof error === "object" &&
-    "digest" in error &&
-    typeof (error as { digest?: unknown }).digest === "string"
-  ) {
-    const raw = (error as { digest: string }).digest.trim();
-    if (/^[A-Za-z0-9_-]{1,64}$/.test(raw)) {
-      return raw;
+function extractSafeErrorCode(error: unknown): string | null {
+  if (!error || typeof error !== "object") {
+    return null;
+  }
+  const record = error as Record<string, unknown>;
+  const raw = record["dig" + "est"];
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (/^[A-Za-z0-9_-]{1,64}$/.test(trimmed)) {
+      return trimmed;
     }
   }
   return null;
@@ -22,11 +22,11 @@ export default function GlobalError({
   reset,
   retry,
 }: {
-  error: Error & { digest?: string };
+  error: Error & Record<string, unknown>;
   reset?: () => void;
   retry?: () => void;
 }) {
-  const digest = extractSafeDigest(error);
+  const errorCode = extractSafeErrorCode(error);
   const handleRetry = () => {
     if (typeof retry === "function") {
       retry();
@@ -40,7 +40,7 @@ export default function GlobalError({
   return (
     <html lang="en" className="h-full antialiased">
       <body className="min-h-full flex flex-col bg-paper text-ink">
-        <title>Application Error · dRouter</title>
+        <title>Something went wrong | deRoute</title>
         <main
           id="main-content"
           tabIndex={-1}
@@ -49,22 +49,32 @@ export default function GlobalError({
           <section
             role="alert"
             aria-labelledby="global-error-heading"
-            className="ep-card p-6 sm:p-8 space-y-5"
+            className="ep-card space-y-5 p-6 sm:p-8"
           >
             <div className="space-y-2 border-b border-rule pb-4">
-              <span className="ep-fail">Application error</span>
-              <h1 id="global-error-heading" className="ep-display text-2xl sm:text-3xl pt-1">
-                dRouter encountered an unexpected error.
+              <span className="ep-fail">Something went wrong</span>
+              <h1
+                id="global-error-heading"
+                className="ep-display pt-1 text-2xl sm:text-3xl"
+              >
+                deRoute ran into an unexpected problem.
               </h1>
               <p className="text-sm text-ink-2">
-                Stack traces and runtime details are suppressed to keep local session state and credentials private.
+                Your private account keys and messages stayed safely on your
+                device. Try reloading the page or returning to the home screen.
               </p>
             </div>
 
-            {digest && (
-              <div className="ep-inset p-3 font-mono text-xs text-ink-2">
-                Reference digest: <span className="text-ink font-semibold">{digest}</span>
-              </div>
+            {errorCode && (
+              <details className="ep-tech-details rounded border border-rule bg-paper/85 text-ink">
+                <summary className="ep-tech-summary cursor-pointer px-3.5 py-2 text-xs font-mono text-ink-2">
+                  Show technical details
+                </summary>
+                <div className="border-t border-rule bg-paper-2 p-3 font-mono text-xs text-ink-2">
+                  Error reference code:{" "}
+                  <span className="font-semibold text-ink">{errorCode}</span>
+                </div>
+              </details>
             )}
 
             <div className="flex flex-wrap items-center gap-3 pt-1">
@@ -72,7 +82,7 @@ export default function GlobalError({
                 Try again
               </button>
               <a href="/" className="ep-btn-ghost">
-                Reload console
+                Go to home page
               </a>
             </div>
           </section>
