@@ -31,7 +31,6 @@ export interface ThreatScenario {
     rawArtifact: string;
   };
   residualNote: string;
-  simulated?: boolean;
 }
 
 export interface VillainScenario {
@@ -77,10 +76,10 @@ export const THREAT_VILLAINS: VillainScenario[] = [
     label: "A fake server",
     shortTag: "Impostor or cheap brain",
     whatTheyTry:
-      "They pretend to be a real sealed computer or quietly swap the smart AI brain for a cheaper, dumber one to save money.",
+      "They pretend to be a real sealed computer, swap the smart AI brain for a cheaper one, or try to erase a bad check from the log.",
     whatStopsThem:
-      "Your browser runs a seal check before sending a single word, and our secret shopper sends surprise test questions to catch any brain swap.",
-    scenarioIds: ["model-weight-swap", "colluding-verifiers"],
+      "Your browser runs a seal check before sending a single word, our secret shopper sends surprise test questions to catch any brain swap, and every check is locked into a public receipt book.",
+    scenarioIds: ["model-weight-swap", "transparency-log-tampering"],
   },
   {
     id: "leaky-company",
@@ -165,14 +164,6 @@ export const THREAT_SCENARIOS: ThreatScenario[] = [
     ],
     defenseTests: [
       {
-        filePath: "tests/custody/custody.test.ts",
-        testName:
-          "verifies real cryptographic primitives and explicitly labels runMemoryBusAndPopAudit as mode='model'",
-        githubUrl: githubBlobUrl("tests/custody/custody.test.ts"),
-        codePath: "src/lib/custody/index.ts",
-        codeUrl: githubBlobUrl("src/lib/custody/index.ts"),
-      },
-      {
         filePath: "tests/tinfoil/tinfoil.test.ts",
         testName:
           "verifyModelEnclaveStatus passes when hosts are verified and GPUs are in CC mode, and fails on unverified hosts, 0 GPUs, or unavailable status",
@@ -180,13 +171,21 @@ export const THREAT_SCENARIOS: ThreatScenario[] = [
         codePath: "src/lib/tinfoil/deep-inspect.ts",
         codeUrl: githubBlobUrl("src/lib/tinfoil/deep-inspect.ts"),
       },
+      {
+        filePath: "tests/custody/custody.test.ts",
+        testName:
+          "overwrites internal key/counter/derived Uint8Array buffers with 0x00 and throws after zeroize()",
+        githubUrl: githubBlobUrl("tests/custody/custody.test.ts"),
+        codePath: "src/lib/custody/index.ts",
+        codeUrl: githubBlobUrl("src/lib/custody/index.ts"),
+      },
     ],
     telemetryProof: {
-      metricLabel: "Host bus audit invariant (V1)",
-      metricValue: "0 plaintext matches and 0 repeated 16-byte blocks across turns",
-      verificationTag: "V1-BUS-AUDIT-PASS",
+      metricLabel: "Confidential GPU flags",
+      metricValue: "8x NVIDIA CC GPUs with VLLM_DISABLE_UVA=1 and SYMM_MEM=0",
+      verificationTag: "CC-GPU-VERIFIED",
       rawArtifact:
-        "bus_audit=V1 | plaintext_matches=0 | repeated_16b_blocks=0",
+        "VLLM_DISABLE_UVA=1 | VLLM_ALLREDUCE_USE_SYMM_MEM=0 | cc_gpus=8",
     },
     residualNote:
       "A physical RAM probe captures only randomized ciphertext with no repeated blocks.",
@@ -336,100 +335,100 @@ export const THREAT_SCENARIOS: ThreatScenario[] = [
       "Note: Tinfoil's upstream router runs an attested acceptable-use classifier sidecar that reports policy violations to api.tinfoil.sh.",
   },
   {
-    id: "colluding-verifiers",
+    id: "transparency-log-tampering",
     index: "06",
-    specimenCode: "QUORUM-SYBIL",
-    vectorCategory: "Verifier quorum",
-    attackTitle: "A minority of verifiers collude to approve a bad node",
+    specimenCode: "LOG-INTEGRITY",
+    vectorCategory: "Transparency log and quote verification",
+    attackTitle: "An operator tries to forge a seal check or rewrite the receipt book",
     attackerGoal:
-      "Bribe 3 verifiers into signing a routing ticket for an unverified server.",
+      "Serve an unverified server quote or secretly delete a failed verification entry from the transparency log.",
     whatAttackerSees:
-      "Quorum check rejects tickets with fewer than 5 of 7 signatures, and the client still checks the raw hardware quote.",
-    neutralizingLayer: "5-of-7 quorum (Simulated) + quote check",
+      "End-to-end AMD SEV-SNP / Intel TDX signature checks and RFC 6962 Merkle consistency proofs reject any tampered quote or altered log history.",
+    neutralizingLayer: "Direct quote check + RFC 6962 Merkle proofs",
     defenseSummary:
-      "Routing tickets require at least 5 of 7 verifier signatures (Simulated), and the client independently verifies the hardware quote.",
+      "Clients verify AMD SEV-SNP and Intel TDX quotes directly against hardware roots, and verify RFC 6962 Merkle inclusion and consistency proofs signed by the operator key.",
     plainExplanation:
-      "Admitting a node to the simulated routing table requires 5 of 7 verifier signatures, and direct hardware quote verification provides an independent check.",
+      "Clients and independent verifiers check the AMD KDS VCEK chain and Intel TDX PCK chain directly, while every verification event is appended to an RFC 6962 SHA-256 Merkle tree whose Signed Tree Head is anchored on Circle Arc Testnet.",
     controls: [
-      "5-of-7 Ed25519 verifier quorum threshold (Simulated)",
-      "RFC 6962 Merkle transparency log inclusion proof",
-      "Direct hardware quote verification",
+      "Direct AMD SEV-SNP and Intel TDX quote verification",
+      "RFC 6962 Merkle inclusion and consistency proofs",
+      "Ed25519 Signed Tree Head anchored on Circle Arc Testnet",
     ],
     defenseTests: [
       {
         filePath: "tests/transparency/transparency.test.ts",
         testName:
-          "passes with 5-of-7 signatures and fails with 4-of-7, forged signature, or suspended status",
-        githubUrl: githubBlobUrl("tests/transparency/transparency.test.ts"),
-        codePath: "src/lib/transparency/quorum.ts",
-        codeUrl: githubBlobUrl("src/lib/transparency/quorum.ts"),
-      },
-      {
-        filePath: "tests/transparency/transparency.test.ts",
-        testName:
-          "verifies Merkle inclusion proof and consistency proof for each approved release entry",
+          "matches official RFC 6962 / Certificate Transparency SHA-256 Merkle tree test vectors",
         githubUrl: githubBlobUrl("tests/transparency/transparency.test.ts"),
         codePath: "src/lib/transparency/log.ts",
         codeUrl: githubBlobUrl("src/lib/transparency/log.ts"),
       },
+      {
+        filePath: "tests/tinfoil/tinfoil.test.ts",
+        testName:
+          "cryptographically verifies live router AMD SEV-SNP (Genoa), model AMD SEV-SNP (Turin), and model Intel TDX v4 quotes end-to-end",
+        githubUrl: githubBlobUrl("tests/tinfoil/tinfoil.test.ts"),
+        codePath: "src/lib/tinfoil/deep-inspect.ts",
+        codeUrl: githubBlobUrl("src/lib/tinfoil/deep-inspect.ts"),
+      },
     ],
     telemetryProof: {
-      metricLabel: "Quorum threshold check",
-      metricValue: "Requires >= 5 of 7 valid Ed25519 signatures (Simulated)",
-      verificationTag: "QUORUM-ENFORCED",
+      metricLabel: "RFC 6962 Merkle & hardware quote check",
+      metricValue: "SHA-256 inclusion + consistency proofs + Ed25519 STH verified",
+      verificationTag: "MERKLE-STH-OK",
       rawArtifact:
-        "quorum_sigs_min=5/7 | status=full | weight_gt=0",
+        "tree=RFC6962-SHA256 | sth_sig=Ed25519 | chain=AMD-KDS+INTEL-PCK",
     },
     residualNote:
-      "Quorum verifier keys are derived deterministically in local simulation; tree heads are signed by the operator key.",
-    simulated: true,
+      "Tree heads are signed by the operator Ed25519 key and anchored on Circle Arc Testnet so split views or history rewrites are detectable.",
   },
   {
     id: "lab-key-extraction",
     index: "07",
-    specimenCode: "KEY-EXTRACTION",
-    vectorCategory: "Physical key extraction",
-    attackTitle: "An attacker extracts a node signing key in a lab",
+    specimenCode: "CONTINUOUS-MONITOR",
+    vectorCategory: "Continuous monitoring and on-chain failure logging",
+    attackTitle: "An enclave fails attestation or changes code without a signed release",
     attackerGoal:
-      "Extract a node's attestation key to sign fake reports and impersonate an honest enclave.",
+      "Serve requests from an unverified host, tamper with the enclave report, or deploy an unannounced binary change.",
     whatAttackerSees:
-      "Anyone with the extracted key can sign a forbidden prefix to prove key extraction and trigger an on-chain verification failure record.",
-    neutralizingLayer: "Forbidden-prefix key proof + Arc registry",
+      "Continuous hourly monitoring detects any attestation failure or unannounced measurement change, suspends traffic weight, and records the failure evidence hash on Circle Arc Testnet.",
+    neutralizingLayer: "Continuous enclave monitor + Arc registry",
     defenseSummary:
-      "Honest enclaves never sign the forbidden prefix F, so any signature over F proves key extraction and flags the node on Circle Arc Testnet.",
+      "Continuous monitoring verifies every live Tinfoil enclave against AMD KDS, Intel TDX, Sigstore Rekor, and Hugging Face commits, recording any failure on Circle Arc Testnet.",
     plainExplanation:
-      "Honest enclaves refuse to sign REPORT_DATA starting with F = sha256('drouter/forbidden-report-data/v1'). A valid P-384 signature over F proves key compromise and records the evidence hash on the Circle Arc Testnet DRouterRegistry contract.",
+      "Every hour, the continuous monitor checks the router and all model enclaves end to end, tracks release upgrades and host restarts, and writes any verification failure with its evidence hash to the Circle Arc Testnet DRouterRegistry contract.",
     controls: [
-      "Forbidden report_data prefix F check",
-      "P-384 ECDSA compromise proof verification",
-      "On-chain evidence anchor on Circle Arc Testnet",
+      "Continuous enclave attestation and provenance check",
+      "Release change and unannounced restart ramp control",
+      "On-chain failure evidence recording on Circle Arc Testnet",
     ],
     defenseTests: [
       {
-        filePath: "tests/sim/snp.test.ts",
-        testName: "refuses to sign REPORT_DATA with the forbidden prefix",
-        githubUrl: githubBlobUrl("tests/sim/snp.test.ts"),
-        codePath: "src/lib/sim/snp.ts",
-        codeUrl: githubBlobUrl("src/lib/sim/snp.ts"),
-      },
-      {
         filePath: "tests/accountability/accountability.test.ts",
         testName:
-          "accepts a validly signed forbidden-prefix attestation report and uses contract stake without fabricated percentage splits",
+          "records verification failures on Arc with evidence hashes when attestation, weight provenance, or SPRT auditor fails (capped at <= 3 Arc tx)",
         githubUrl: githubBlobUrl("tests/accountability/accountability.test.ts"),
-        codePath: "src/lib/accountability/bounty.ts",
-        codeUrl: githubBlobUrl("src/lib/accountability/bounty.ts"),
+        codePath: "src/lib/accountability/monitor.ts",
+        codeUrl: githubBlobUrl("src/lib/accountability/monitor.ts"),
+      },
+      {
+        filePath: "tests/arc/registry.test.ts",
+        testName:
+          "executes recordVerification and anchorReceipt via mocked viem wallet client",
+        githubUrl: githubBlobUrl("tests/arc/registry.test.ts"),
+        codePath: "src/lib/arc/registry.ts",
+        codeUrl: githubBlobUrl("src/lib/arc/registry.ts"),
       },
     ],
     telemetryProof: {
-      metricLabel: "Compromised key penalty",
-      metricValue: "Full registered stake (0.01 USDC) eligible for slash on DRouterRegistry",
-      verificationTag: "BOUNTY-TRAP-VERIFIED",
+      metricLabel: "Continuous monitor and on-chain failure log",
+      metricValue: "Hourly verification of router + model enclaves with on-chain evidence hashes",
+      verificationTag: "MONITOR-AND-ARC-VERIFIED",
       rawArtifact:
-        "F=sha256('drouter/forbidden-report-data/v1') | contract=DRouterRegistry",
+        "cron=/api/cron/monitor | contract=DRouterRegistry",
     },
     residualNote:
-      "Fault injection uses simulated nodes sim-1, sim-2, and sim-3, while evidence hashes are recorded on Circle Arc Testnet.",
+      "Verification failure evidence hashes and receipt roots are recorded on the Circle Arc Testnet DRouterRegistry contract.",
   },
 ];
 

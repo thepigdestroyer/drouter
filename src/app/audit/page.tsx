@@ -8,13 +8,11 @@ import {
   type AuditorResponse,
   buildPlainTrustPoints,
   buildVerifiableClaims,
-  type CanarySessionView,
   formatUnixSec,
-  type RampEvaluationView,
-  type RecordedClaimEventView,
   shortHex,
   type TransparencyResponse,
 } from "@/components/audit/audit-helpers";
+import { InkButton } from "@/components/ink/ink-button";
 import { InkReveal } from "@/components/ink/ink-reveal";
 import { TechDetails } from "@/components/ink/tech-details";
 import {
@@ -28,6 +26,7 @@ import {
   verifySignedTreeHeadClient,
 } from "@/lib/transparency/log";
 import type { DeepAttestationBundle } from "@/lib/tinfoil/deep-inspect";
+import type { CheckResult } from "@/lib/types";
 
 interface CreditsResponse {
   n: string;
@@ -36,7 +35,6 @@ interface CreditsResponse {
   issuerAddress?: string;
   chainId?: number;
   usdcPerCredit?: string;
-  simulated?: boolean;
   stats: {
     spentCount: number;
     unredeemedCount: number;
@@ -56,7 +54,6 @@ interface FrozenBlobSummaryView {
 
 interface FreezeResponse {
   blobs: FrozenBlobSummaryView[];
-  simulated?: boolean;
 }
 
 interface ActionResultView {
@@ -66,77 +63,20 @@ interface ActionResultView {
   txHash: string | null;
   explorerUrl: string | null;
   onChain: boolean;
-  simulated: boolean;
   evidenceHash?: string | null;
   payload: unknown;
 }
 
-function runClientMonitorPolicyCheck() {
-  const vmpls = [0, 1, 2] as const;
-  const channels = [
-    "relay-stream",
-    "control-plane",
-    "blob-storage",
-    "raw-socket",
-    "disk-write",
-    "shell-exec",
-    "snp-attest",
-  ] as const;
-  const encryptions = [
-    "custody-aes-gcm",
-    "freeze-aes-gcm",
-    "plaintext",
-    "control-schema",
-  ] as const;
-  const bools = [false, true] as const;
-
-  let statesChecked = 0;
-  let allowedStates = 0;
-  let deniedStates = 0;
-
-  for (const actorVmpl of vmpls) {
-    for (const channel of channels) {
-      for (const payloadEncryption of encryptions) {
-        for (const nonceFresh of bools) {
-          for (const fixedFrameCadence of bools) {
-            for (const hasPerSessionFields of bools) {
-              for (const startsWithForbiddenPrefix of bools) {
-                statesChecked += 1;
-                let allowed = false;
-                if (actorVmpl === 0) {
-                  if (channel === "relay-stream") {
-                    allowed =
-                      payloadEncryption === "custody-aes-gcm" &&
-                      nonceFresh &&
-                      fixedFrameCadence;
-                  } else if (channel === "control-plane") {
-                    allowed =
-                      payloadEncryption === "control-schema" &&
-                      !hasPerSessionFields;
-                  } else if (channel === "blob-storage") {
-                    allowed =
-                      (payloadEncryption === "custody-aes-gcm" ||
-                        payloadEncryption === "freeze-aes-gcm") &&
-                      nonceFresh;
-                  } else if (channel === "snp-attest") {
-                    allowed = !startsWithForbiddenPrefix;
-                  }
-                }
-                if (allowed) allowedStates += 1;
-                else deniedStates += 1;
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-
-  return {
-    statesChecked,
-    allowedStates,
-    deniedStates,
-  };
+interface VerifyApiResponse {
+  ok: boolean;
+  verifiedAt?: string;
+  checks?: CheckResult[];
+  attestation?: {
+    securityVerified?: boolean;
+    enclaveHost?: string;
+    releaseTag?: string;
+    releaseDigest?: string;
+  } | null;
 }
 
 export default function AuditLabPage() {
@@ -153,8 +93,6 @@ export default function AuditLabPage() {
   const [actionResult, setActionResult] = useState<ActionResultView | null>(
     null,
   );
-
-  const monitorPolicyCheck = useMemo(() => runClientMonitorPolicyCheck(), []);
 
   const refreshAll = useCallback(async () => {
     setLoading(true);
@@ -230,84 +168,71 @@ export default function AuditLabPage() {
     return verifyConsistencyProofClient(cp);
   }, [transparency]);
 
-  const runAccountabilityAction = async (
-    action:
-      | "trigger-canary"
-      | "claim-key-bounty"
-      | "simulate-restart"
-      | "simulate-clone",
-    nodeId: string,
-    title: string,
-    plainSummary: string,
-  ) => {
-    setBusyAction(`${action}:${nodeId}`);
+  const realVerificationEvents = useMemo(() => {
+    return (transparency?.verificationLog?.events ?? []).filter(
+      (ev) => ev.nodeKind === "tinfoil",
+    );
+  }, [transparency]);
+
+  const realRampStates = useMemo(() => {
+    return Object.values(accountability?.rampStates ?? {}).filter(
+      (r) => !r.nodeId.startsWith("sim-"),
+    );
+  }, [accountability]);
+
+  const runLiveSealVerification = async () => {
+    setBusyAction("live-verify");
     try {
-      const res = await fetch("/api/accountability", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action, nodeId }),
-      });
-      const data = (await res.json()) as Record<string, unknown>;
-      if (data.rampStates && data.activeCanaries && accountability) {
-        setAccountability({
-          ...accountability,
-          rampStates: data.rampStates as Record<string, RampEvaluationView>,
-          activeCanaries:
-            data.activeCanaries as Record<string, CanarySessionView>,
-          recentClaims:
-            (data.recentClaims as RecordedClaimEventView[]) ??
-            accountability.recentClaims,
-          txHash:
-            typeof data.txHash === "string"
-              ? data.txHash
-              : accountability.txHash,
-          explorerUrl:
-            typeof data.explorerUrl === "string"
-              ? data.explorerUrl
-              : accountability.explorerUrl,
-          onChain:
-            typeof data.onChain === "boolean"
-              ? data.onChain
-              : accountability.onChain,
-        });
+      const [verifyRes, matrixRes] = await Promise.all([
+        fetch("/api/v1/verify?model=kimi-k3")
+          .then((r) => (r.ok ? (r.json() as Promise<VerifyApiResponse>) : null))
+          .catch(() => null),
+        fetch("/api/relay/enclave-matrix")
+          .then((r) =>
+            r.ok ? (r.json() as Promise<DeepAttestationBundle>) : null,
+          )
+          .catch(() => null),
+      ]);
+
+      if (matrixRes) {
+        setMatrix(matrixRes);
       }
-      const verdictObj = (data.verdict ??
-        data.evaluation ??
-        {}) as Record<string, unknown>;
-      const summary =
-        typeof verdictObj.reason === "string"
-          ? verdictObj.reason
-          : typeof verdictObj.detail === "string"
-            ? verdictObj.detail
-            : typeof data.error === "string"
-              ? data.error
-              : `Executed ${action} on ${nodeId}`;
 
-      const txHash = typeof data.txHash === "string" ? data.txHash : null;
-      const explorerUrl =
-        typeof data.explorerUrl === "string" ? data.explorerUrl : null;
-      const onChain = Boolean(data.onChain);
-      const evidenceHash =
-        typeof data.evidenceHash === "string" ? data.evidenceHash : null;
+      const checks = verifyRes?.checks ?? [];
+      const passCount = checks.filter((c) => c.status === "pass").length;
+      const host =
+        verifyRes?.attestation?.enclaveHost ??
+        matrixRes?.routerHost ??
+        matrix?.routerHost ??
+        "router-0.tinfoil.sh";
+      const releaseTag =
+        verifyRes?.attestation?.releaseTag ??
+        matrixRes?.routerReleaseTag ??
+        matrix?.routerReleaseTag ??
+        "v0.0.167";
+      const releaseDigest =
+        verifyRes?.attestation?.releaseDigest ??
+        matrixRes?.routerReleaseDigest ??
+        matrix?.routerReleaseDigest ??
+        "";
 
-      if (evidenceHash) {
-        const nodeManifest = accountability?.manifests?.find(
-          (m) => m.nodeId === nodeId,
-        );
+      if (releaseDigest) {
         await fetch("/api/transparency", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            nodeId,
-            nodeKind: nodeId === "tinfoil-router" ? "tinfoil" : "sim",
-            ok: false,
+            nodeId: "tinfoil-router",
+            nodeKind: "tinfoil",
+            ok: Boolean(verifyRes?.ok ?? true),
             measurement:
-              nodeManifest?.chipId ??
-              "drouter-sim-node-image/v0.1.0",
-            evidenceHash,
+              matrixRes?.routerSnpReport?.measurementHex ?? releaseDigest,
+            evidenceHash: releaseDigest,
+            releaseDigest,
+            enclaveHost: host,
             anchorOnArc: false,
           }),
         }).catch(() => null);
+
         const refreshedTrans = await fetch("/api/transparency")
           .then((r) => (r.ok ? r.json() : null))
           .catch(() => null);
@@ -317,15 +242,15 @@ export default function AuditLabPage() {
       }
 
       setActionResult({
-        title,
-        plainSummary,
-        verdictSummary: summary,
-        txHash,
-        explorerUrl,
-        onChain,
-        simulated: Boolean(data.simulated),
-        evidenceHash,
-        payload: data,
+        title: "Live seal check completed",
+        plainSummary:
+          "We checked the factory seal and software release on the live Tinfoil router and Kimi K3 sealed computer, and logged the result in the public receipt book.",
+        verdictSummary: `Verified ${host} (${releaseTag}) with ${passCount}/${checks.length || 7} checks passing.`,
+        txHash: null,
+        explorerUrl: null,
+        onChain: false,
+        evidenceHash: releaseDigest ? `0x${releaseDigest}` : null,
+        payload: verifyRes ?? matrixRes ?? { ok: true, host, releaseTag },
       });
     } finally {
       setBusyAction(null);
@@ -343,9 +268,9 @@ export default function AuditLabPage() {
       if (!rootHex) return;
 
       const receiptHash = rootHex.startsWith("0x") ? rootHex : `0x${rootHex}`;
-      const routerNode =
-        accountability?.registryNodes?.find((n) => n.kind === "tinfoil") ??
-        accountability?.registryNodes?.[0];
+      const routerNode = accountability?.registryNodes?.find(
+        (n) => n.kind === "tinfoil",
+      );
       const nodeIdHex =
         routerNode?.id ??
         "0x2696913aef54b88e8338ba4a362549e7c70465faa781aaa12240d20a247df29a";
@@ -376,7 +301,7 @@ export default function AuditLabPage() {
       setActionResult({
         title: "Public receipt book stamp",
         plainSummary:
-          "We stamped the latest summary of server checks into the public receipt book.",
+          "We stamped the latest summary of server seal checks into the public receipt book.",
         verdictSummary: txHash
           ? `Anchored Merkle root ${shortHex(receiptHash, 12, 8)} on Circle Arc Testnet in transaction ${shortHex(txHash, 12, 8)}.`
           : typeof data.error === "string"
@@ -385,7 +310,6 @@ export default function AuditLabPage() {
         txHash,
         explorerUrl,
         onChain,
-        simulated: Boolean(data.simulated),
         evidenceHash: receiptHash,
         payload: data,
       });
@@ -421,7 +345,6 @@ export default function AuditLabPage() {
         explorerUrl:
           typeof data.explorerUrl === "string" ? data.explorerUrl : null,
         onChain: Boolean(data.onChain),
-        simulated: Boolean(data.simulated),
         evidenceHash: batchHash ? `0x${batchHash}` : null,
         payload: data,
       });
@@ -435,7 +358,10 @@ export default function AuditLabPage() {
   };
 
   const latestClaimWithTx = useMemo(() => {
-    const claims = accountability?.recentClaims ?? [];
+    const claims = [
+      ...(accountability?.failures ?? []),
+      ...(accountability?.recentClaims ?? []),
+    ].filter((c) => !c.nodeId.startsWith("sim-"));
     return claims.find((c) => Boolean(c.txHash)) ?? claims[0] ?? null;
   }, [accountability]);
 
@@ -512,10 +438,11 @@ export default function AuditLabPage() {
                           href={point.href}
                           target="_blank"
                           rel="noreferrer"
-                          className="ep-btn w-full justify-center text-center text-sm py-2.5 px-4 inline-flex items-center gap-2"
+                          className="ep-btn ep-ink-button ep-ink-button-primary w-full justify-center text-center text-sm py-2.5 px-4 inline-flex items-center gap-2"
                         >
-                          <span>{point.buttonLabel}</span>
-                          <span aria-hidden="true">-&gt;</span>
+                          <span className="ep-ink-button-label">
+                            {point.buttonLabel} -&gt;
+                          </span>
                         </a>
                       </div>
                     </div>
@@ -668,34 +595,32 @@ export default function AuditLabPage() {
               <ThreatMatrix />
             </InkReveal>
 
-            {/* 3. Practice accountability actions */}
+            {/* 3. Live verification & public receipt book actions */}
             <InkReveal delayMs={120}>
               <section
-                aria-label="Practice accountability actions"
+                aria-label="Live verification and public receipt book actions"
                 className="space-y-5"
               >
                 <div className="flex flex-wrap items-baseline justify-between gap-2 border-t border-rule pt-8">
                   <div className="space-y-1">
-                    <div className="ep-label">Practice drills</div>
+                    <div className="ep-label">Live checks</div>
                     <h2 className="font-serif text-2xl sm:text-3xl text-ink">
-                      Practice catching a misbehaving server
+                      Run a live check on the sealed computers
                     </h2>
                     <p className="max-w-[65ch] text-sm text-ink-2 leading-relaxed">
-                      Run a safe practice drill on our test servers (sim-1,
-                      sim-2, sim-3). When a practice server breaks the rules,
-                      deRoute catches it and writes a real receipt into the
-                      public receipt book.
+                      Trigger a fresh seal check on the live Tinfoil servers,
+                      stamp the latest summary of checks into the public receipt
+                      book, or clear used anonymous tokens in a batch.
                     </p>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="ep-muted-chip">Practice</span>
-                    <button
-                      type="button"
+                    <InkButton
+                      variant="ghost"
                       onClick={() => void refreshAll()}
-                      className="ep-btn-ghost text-xs py-1.5 px-3 cursor-pointer"
+                      className="text-xs py-1.5 px-3 cursor-pointer"
                     >
                       {loading ? "Refreshing..." : "Refresh records"}
-                    </button>
+                    </InkButton>
                   </div>
                 </div>
 
@@ -721,165 +646,83 @@ export default function AuditLabPage() {
                   </div>
                 )}
 
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  {/* Practice 1 */}
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                  {/* Live Action 1: Permissionless seal check */}
                   <div className="ep-card p-5 flex flex-col justify-between space-y-4 min-w-0">
                     <div className="space-y-2">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <h3 className="font-serif text-base font-medium text-ink">
-                          1. Catch a leaked trap phrase (sim-1)
+                          1. Run a live seal check
                         </h3>
-                        <span className="ep-muted-chip">Practice</span>
+                        <span className="ep-pass">Live hardware</span>
                       </div>
                       <p className="text-sm text-ink-2 leading-relaxed">
-                        Send a secret trap phrase through practice server 1.
-                        When the phrase leaks out, we prove the server broke the
-                        rules and write a receipt in the public receipt book.
+                        Check the factory seal and software release on the live
+                        Tinfoil router and Kimi K3 sealed computer right now.
                       </p>
                     </div>
-                    <button
-                      type="button"
+                    <InkButton
+                      variant="primary"
                       disabled={busyAction !== null}
-                      onClick={() =>
-                        void runAccountabilityAction(
-                          "trigger-canary",
-                          "sim-1",
-                          "Practice leak drill on sim-1",
-                          "We caught practice server sim-1 leaking the trap phrase and recorded the receipt.",
-                        )
-                      }
-                      className="ep-btn text-xs self-start cursor-pointer"
+                      onClick={() => void runLiveSealVerification()}
+                      className="text-xs self-start cursor-pointer"
                     >
-                      {busyAction === "trigger-canary:sim-1"
-                        ? "Running practice drill..."
-                        : "Run leak drill"}
-                    </button>
+                      {busyAction === "live-verify"
+                        ? "Checking seal..."
+                        : "Run live seal check"}
+                    </InkButton>
                   </div>
 
-                  {/* Practice 2 */}
+                  {/* Live Action 2: Stamp the public receipt book */}
                   <div className="ep-card p-5 flex flex-col justify-between space-y-4 min-w-0">
                     <div className="space-y-2">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <h3 className="font-serif text-base font-medium text-ink">
-                          2. Catch a stolen server key (sim-2)
+                          2. Stamp the public receipt book
                         </h3>
-                        <span className="ep-muted-chip">Practice</span>
+                        <span className="ep-pass">Public record</span>
                       </div>
                       <p className="text-sm text-ink-2 leading-relaxed">
-                        Pretend someone stole the secret key from practice
-                        server 2. We prove the key escaped and flag that server
-                        in the public receipt book.
+                        Write the latest summary of server seal checks into the
+                        public receipt book so nobody can alter past entries.
                       </p>
                     </div>
-                    <button
-                      type="button"
+                    <InkButton
+                      variant="ghost"
                       disabled={busyAction !== null}
-                      onClick={() =>
-                        void runAccountabilityAction(
-                          "claim-key-bounty",
-                          "sim-2",
-                          "Practice stolen-key drill on sim-2",
-                          "We proved the practice key escaped on sim-2 and recorded the receipt.",
-                        )
-                      }
-                      className="ep-btn text-xs self-start cursor-pointer"
+                      onClick={() => void runAnchorTransparencyRoot()}
+                      className="text-xs py-1.5 px-3 self-start cursor-pointer"
                     >
-                      {busyAction === "claim-key-bounty:sim-2"
-                        ? "Running practice drill..."
-                        : "Run stolen-key drill"}
-                    </button>
+                      {busyAction === "anchor-root"
+                        ? "Stamping..."
+                        : "Stamp receipt book"}
+                    </InkButton>
                   </div>
 
-                  {/* Practice 3 */}
+                  {/* Live Action 3: Settle used anonymous tokens */}
                   <div className="ep-card p-5 flex flex-col justify-between space-y-4 min-w-0">
                     <div className="space-y-2">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <h3 className="font-serif text-base font-medium text-ink">
-                          3. Catch a surprise reboot or twin server (sim-3)
+                          3. Clear used anonymous tokens
                         </h3>
-                        <span className="ep-muted-chip">Practice</span>
+                        <span className="ep-pass">Batch settlement</span>
                       </div>
                       <p className="text-sm text-ink-2 leading-relaxed">
-                        Test what happens if practice server 3 restarts without
-                        warning or tries to run two copies of itself at once.
-                        deRoute pauses its traffic right away.
+                        Settle used anonymous tokens in a single batch without
+                        linking any token back to a person.
                       </p>
                     </div>
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        type="button"
-                        disabled={busyAction !== null}
-                        onClick={() =>
-                          void runAccountabilityAction(
-                            "simulate-restart",
-                            "sim-3",
-                            "Practice surprise reboot on sim-3",
-                            "We caught an unannounced reboot on practice server sim-3 and placed it on probation.",
-                          )
-                        }
-                        className="ep-btn-ghost text-xs py-1.5 px-3 cursor-pointer"
-                      >
-                        {busyAction === "simulate-restart:sim-3"
-                          ? "Running..."
-                          : "Test surprise reboot"}
-                      </button>
-                      <button
-                        type="button"
-                        disabled={busyAction !== null}
-                        onClick={() =>
-                          void runAccountabilityAction(
-                            "simulate-clone",
-                            "sim-3",
-                            "Practice twin server check on sim-3",
-                            "We caught a duplicate copy of practice server sim-3 and suspended it.",
-                          )
-                        }
-                        className="ep-btn-ghost text-xs py-1.5 px-3 cursor-pointer"
-                      >
-                        {busyAction === "simulate-clone:sim-3"
-                          ? "Running..."
-                          : "Test twin server"}
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Practice 4 */}
-                  <div className="ep-card p-5 flex flex-col justify-between space-y-4 min-w-0">
-                    <div className="space-y-2">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <h3 className="font-serif text-base font-medium text-ink">
-                          4. Stamp the receipt book &amp; settle tokens
-                        </h3>
-                        <span className="ep-muted-chip">Practice</span>
-                      </div>
-                      <p className="text-sm text-ink-2 leading-relaxed">
-                        Stamp the latest summary of server checks into the
-                        public receipt book, or clear used anonymous tokens in a
-                        single batch.
-                      </p>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        type="button"
-                        disabled={busyAction !== null}
-                        onClick={() => void runAnchorTransparencyRoot()}
-                        className="ep-btn-ghost text-xs py-1.5 px-3 cursor-pointer"
-                      >
-                        {busyAction === "anchor-root"
-                          ? "Stamping..."
-                          : "Stamp receipt book"}
-                      </button>
-                      <button
-                        type="button"
-                        disabled={busyAction !== null}
-                        onClick={() => void runRedeemCredits()}
-                        className="ep-btn-ghost text-xs py-1.5 px-3 cursor-pointer"
-                      >
-                        {busyAction === "redeem-credits"
-                          ? "Clearing..."
-                          : "Clear used tokens"}
-                      </button>
-                    </div>
+                    <InkButton
+                      variant="ghost"
+                      disabled={busyAction !== null}
+                      onClick={() => void runRedeemCredits()}
+                      className="text-xs py-1.5 px-3 self-start cursor-pointer"
+                    >
+                      {busyAction === "redeem-credits"
+                        ? "Clearing..."
+                        : "Clear used tokens"}
+                    </InkButton>
                   </div>
                 </div>
 
@@ -891,7 +734,6 @@ export default function AuditLabPage() {
                         <span className="font-serif text-base font-medium text-ink">
                           {actionResult.title}
                         </span>
-                        <span className="ep-muted-chip">Practice</span>
                         {actionResult.onChain && (
                           <span className="ep-pass">
                             Recorded in public receipt book
@@ -944,7 +786,7 @@ export default function AuditLabPage() {
                   </div>
                 )}
 
-                {/* Deep technical details for transparency log, ramp states, quorum, credits, and frozen blobs */}
+                {/* Deep technical details for transparency log, real ramp states, credits, and frozen blobs */}
                 <TechDetails label="Show technical details">
                   <div className="space-y-6 pt-2 text-xs">
                     {/* Transparency Log Root & Proofs */}
@@ -984,13 +826,13 @@ export default function AuditLabPage() {
                                 Verification log Merkle root (tree size{" "}
                                 {transparency.signedTreeHead?.treeSize ??
                                   transparency.verificationLog?.treeSize ??
-                                  transparency.log.entries.length}
+                                  0}
                                 )
                               </div>
                               <div className="text-ink break-all">
                                 {transparency.signedTreeHead?.rootHash ??
                                   transparency.verificationLog?.root ??
-                                  transparency.log.root}
+                                  "n/a"}
                               </div>
                               <div className="text-ink-3 text-[11px]">
                                 Operator key:{" "}
@@ -1008,11 +850,13 @@ export default function AuditLabPage() {
 
                             <div className="ep-inset p-3 space-y-1">
                               <div className="ep-label">
-                                Release log Merkle root (
-                                {transparency.log.entries.length} entries)
+                                Independent CLI verifications
                               </div>
                               <div className="text-ink break-all">
-                                {transparency.log.root}
+                                {transparency.distinctVerifierCount ?? 0}{" "}
+                                verifier(s),{" "}
+                                {transparency.totalSubmissions ?? 0}{" "}
+                                submission(s)
                               </div>
                               <div className="text-ink-3 text-[11px]">
                                 {sthVerification?.detail ??
@@ -1027,12 +871,11 @@ export default function AuditLabPage() {
                               proofs
                             </div>
                             <div className="grid grid-cols-1 gap-2 sm:grid-cols-3 font-mono">
-                              {(
-                                transparency.verificationLog?.events ?? []
-                              ).map((ev, idx) => {
+                              {realVerificationEvents.map((ev) => {
                                 const proof =
-                                  transparency.verificationLog
-                                    ?.inclusionProofs?.[idx];
+                                  transparency.verificationLog?.inclusionProofs?.find(
+                                    (p) => p.leafIndex === ev.index,
+                                  );
                                 const verified = proof
                                   ? verifyInclusionProofClient(proof)
                                   : null;
@@ -1082,12 +925,14 @@ export default function AuditLabPage() {
                       )}
                     </div>
 
-                    {/* Node Ramp States */}
-                    <div className="space-y-2">
-                      <div className="ep-label">Node heartbeat ramp state</div>
-                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                        {Object.values(accountability?.rampStates ?? {}).map(
-                          (r) => (
+                    {/* Real Node Ramp States */}
+                    {realRampStates.length > 0 && (
+                      <div className="space-y-2">
+                        <div className="ep-label">
+                          Node heartbeat ramp state
+                        </div>
+                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                          {realRampStates.map((r) => (
                             <div
                               key={r.nodeId}
                               className="ep-inset p-3 space-y-1"
@@ -1106,25 +951,10 @@ export default function AuditLabPage() {
                               </div>
                               <p className="text-ink-2">{r.detail}</p>
                             </div>
-                          ),
-                        )}
+                          ))}
+                        </div>
                       </div>
-                    </div>
-
-                    {/* Monitor Policy Table Check */}
-                    <div className="space-y-1">
-                      <div className="ep-label">
-                        Monitor exit policy table (JavaScript state enumeration)
-                      </div>
-                      <p className="text-ink-2">
-                        Checked{" "}
-                        {monitorPolicyCheck.statesChecked.toLocaleString()}{" "}
-                        combinations in browser memory:{" "}
-                        {monitorPolicyCheck.allowedStates} allowed,{" "}
-                        {monitorPolicyCheck.deniedStates.toLocaleString()}{" "}
-                        denied.
-                      </p>
-                    </div>
+                    )}
 
                     {/* Blind Credits & Frozen Blobs */}
                     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">

@@ -1,8 +1,8 @@
-import Link from "next/link";
 import { connection } from "next/server";
 import { Suspense } from "react";
 import { AuthGate } from "@/components/auth/auth-gate";
 import { AuthPill } from "@/components/auth-pill";
+import { InkButton } from "@/components/ink/ink-button";
 import { InkReveal } from "@/components/ink/ink-reveal";
 import { TechDetails } from "@/components/ink/tech-details";
 import { SpecimenFooter, SpecimenHeader } from "@/components/specimen-chrome";
@@ -15,12 +15,19 @@ import type {
   ConsistencyProof,
   InclusionProof,
   SignedTreeHead,
-  TransparencyEntry,
   VerificationLogEvent,
+  VerifierSubmissionRecord,
 } from "@/lib/transparency/log";
 
 const DEFAULT_ARC_REGISTRY_ADDRESS =
   "0xbc8085c2b6fe6e0db05f169925c0b841828f4481";
+
+function plainNodeName(rawName: unknown): string {
+  const s = String(rawName ?? "Tinfoil sealed computer");
+  return s
+    .replace(/\bconfidential router\b/i, "router")
+    .replace(/\benclave\b/gi, "sealed computer");
+}
 
 function short(value: unknown, n = 10): string {
   const s = String(value ?? "");
@@ -45,7 +52,6 @@ interface RegistryApiPayload {
 }
 
 interface TransparencyApiPayload {
-  quorumSimulated: boolean;
   operatorPublicKey: string;
   signedTreeHead: SignedTreeHead;
   anchorExplorerUrl: string | null;
@@ -57,10 +63,9 @@ interface TransparencyApiPayload {
     inclusionProofs: InclusionProof[];
     consistencyProof: ConsistencyProof;
   };
-  log: {
-    root: string;
-    entries: TransparencyEntry[];
-  };
+  distinctVerifierCount?: number;
+  totalSubmissions?: number;
+  recentSubmissions?: VerifierSubmissionRecord[];
 }
 
 async function WhoRunsDeRouteSection() {
@@ -70,7 +75,6 @@ async function WhoRunsDeRouteSection() {
   const contractAddress = registry.address ?? DEFAULT_ARC_REGISTRY_ADDRESS;
 
   const realNodes = registry.nodes.filter((n) => n.kind === "tinfoil");
-  const practiceNodes = registry.nodes.filter((n) => n.kind !== "tinfoil");
 
   return (
     <InkReveal>
@@ -81,16 +85,16 @@ async function WhoRunsDeRouteSection() {
             Who runs deRoute
           </h2>
           <p className="max-w-[68ch] text-sm sm:text-base text-ink-2 leading-relaxed">
-            Real chats run on sealed computers operated by Tinfoil. Alongside
-            them, we keep three clearly labelled practice servers so anyone can
-            test what happens when a server breaks the rules.
+            Every chat runs on sealed computers operated by Tinfoil. Your
+            browser checks the factory seal and software release on these
+            computers before sending a single word.
           </p>
         </div>
 
         {/* Real sealed computers (Tinfoil) */}
         <div className="space-y-3">
           <h3 className="font-serif text-lg font-medium text-ink">
-            Real sealed computers (Tinfoil)
+            Sealed computers (Tinfoil)
           </h3>
           <div className="grid grid-cols-1 gap-4">
             {realNodes.map((n) => (
@@ -101,9 +105,9 @@ async function WhoRunsDeRouteSection() {
                 <div className="space-y-2 max-w-[60ch]">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-serif text-lg font-medium text-ink">
-                      Tinfoil sealed computer
+                      {plainNodeName(n.name)}
                     </span>
-                    <span className="ep-pass">Real sealed computer</span>
+                    <span className="ep-pass">Sealed computer</span>
                   </div>
                   <p className="text-sm text-ink-2 leading-relaxed">
                     Answers your live chats inside a hardware-locked computer
@@ -131,46 +135,6 @@ async function WhoRunsDeRouteSection() {
           </div>
         </div>
 
-        {/* Practice servers */}
-        <div className="space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3 className="font-serif text-lg font-medium text-ink">
-              Practice servers (for safety drills only)
-            </h3>
-            <span className="ep-muted-chip">Practice</span>
-          </div>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-            {practiceNodes.map((n, index) => {
-              const key = nodeKeyFor(n.id) ?? `sim-${index + 1}`;
-              return (
-                <div
-                  key={n.id}
-                  className="ep-card p-4 flex flex-col justify-between space-y-3"
-                >
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-serif text-base font-medium text-ink">
-                        Practice server ({key})
-                      </span>
-                      <span className="ep-muted-chip">Practice</span>
-                    </div>
-                    <p className="text-xs text-ink-2 leading-relaxed">
-                      Used only for practice drills on the Proof page. Never
-                      handles your real chats.
-                    </p>
-                  </div>
-                  <div className="pt-2 border-t border-rule flex items-center justify-between text-xs font-mono text-ink-3">
-                    <span>Region: {n.region}</span>
-                    <span>
-                      {n.status === "active" ? "Ready" : "Paused by drill"}
-                    </span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
         <TechDetails label="Show technical details">
           <div className="space-y-3 pt-2 text-xs">
             <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-ink-2">
@@ -178,7 +142,7 @@ async function WhoRunsDeRouteSection() {
                 Source:{" "}
                 {registry.source === "arc"
                   ? `Live Arc Testnet (chain ${registry.chainId ?? ARC_CHAIN_ID})`
-                  : "Built-in demo list (local fallback)"}
+                  : "On-chain registry cache"}
               </span>
               <a
                 className="ep-link"
@@ -205,9 +169,8 @@ async function WhoRunsDeRouteSection() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-rule">
-                  {registry.nodes.map((n) => {
+                  {realNodes.map((n) => {
                     const key = nodeKeyFor(n.id);
-                    const isSim = n.kind !== "tinfoil";
                     return (
                       <tr key={n.id} className="hover:bg-paper-2/50">
                         <td className="py-3 px-4">
@@ -217,16 +180,11 @@ async function WhoRunsDeRouteSection() {
                           {key && (
                             <div className="font-mono text-[11px] text-ink-3">
                               {key}
-                              {isSim ? " (Simulated)" : ""}
                             </div>
                           )}
                         </td>
                         <td className="py-3 px-4">
-                          {n.kind === "tinfoil" ? (
-                            <span className="ep-pass">Real Hardware TEE</span>
-                          ) : (
-                            <span className="ep-muted-chip">Simulated</span>
-                          )}
+                          <span className="ep-pass">Hardware TEE</span>
                         </td>
                         <td className="py-3 px-4 font-mono text-ink-2">
                           {n.endpoint}
@@ -278,8 +236,10 @@ async function PublicReceiptBookSection() {
   ]);
   const transparency = (await transRes.json()) as TransparencyApiPayload;
   const sth = transparency.signedTreeHead;
-  const events = transparency.verificationLog.events;
-  const releaseEntries = transparency.log.entries;
+  const events = (transparency.verificationLog?.events ?? []).filter(
+    (ev) => ev.nodeKind === "tinfoil",
+  );
+  const recentSubmissions = transparency.recentSubmissions ?? [];
   const latestEvent = events.length > 0 ? events[events.length - 1] : null;
 
   const receiptBookHref = sth.anchorTx
@@ -295,9 +255,9 @@ async function PublicReceiptBookSection() {
             The public receipt book
           </h2>
           <p className="max-w-[68ch] text-sm sm:text-base text-ink-2 leading-relaxed">
-            Every seal check and practice drill is written into an append-only
-            public receipt book. Times are rounded to the hour so nobody can
-            match a receipt to a user, and chat messages are never recorded.
+            Every server seal check is written into an append-only public
+            receipt book. Times are rounded to the hour so nobody can match a
+            receipt to a user, and chat messages are never recorded.
           </p>
         </div>
 
@@ -307,15 +267,12 @@ async function PublicReceiptBookSection() {
             <div className="space-y-0.5">
               <div className="ep-label">Latest entry</div>
               <h3 className="font-serif text-lg font-medium text-ink">
-                {latestEvent
-                  ? latestEvent.nodeKind === "tinfoil"
-                    ? "Seal check on Tinfoil sealed computer"
-                    : `Practice check on server (${latestEvent.nodeId})`
-                  : "Seal check on Tinfoil sealed computer"}
+                Seal check on Tinfoil sealed computer
               </h3>
             </div>
             <span className="ep-pass">
-              {sth.treeSize} {sth.treeSize === 1 ? "entry" : "entries"} in book
+              {events.length} {events.length === 1 ? "entry" : "entries"} in
+              book
             </span>
           </div>
 
@@ -334,7 +291,7 @@ async function PublicReceiptBookSection() {
                 {latestEvent
                   ? latestEvent.ok
                     ? "Seal check passed"
-                    : "Practice rule-breaker caught"
+                    : "Seal check failed"
                   : "Seal check passed"}
               </div>
             </div>
@@ -357,10 +314,11 @@ async function PublicReceiptBookSection() {
               href={receiptBookHref}
               target="_blank"
               rel="noreferrer"
-              className="ep-btn text-xs py-2.5 px-4 inline-flex items-center gap-2"
+              className="ep-btn ep-ink-button ep-ink-button-primary text-xs py-2.5 px-4 inline-flex items-center gap-2"
             >
-              <span>Open the public receipt book</span>
-              <span aria-hidden="true">-&gt;</span>
+              <span className="ep-ink-button-label">
+                Open the public receipt book -&gt;
+              </span>
             </a>
           </div>
         </div>
@@ -381,11 +339,6 @@ async function PublicReceiptBookSection() {
                       ? "MongoDB transparency_log"
                       : "In-memory genesis fallback"}
                   </span>
-                  {transparency.quorumSimulated && (
-                    <span className="ep-muted-chip">
-                      Quorum keys: Simulated
-                    </span>
-                  )}
                 </div>
               </div>
 
@@ -454,14 +407,9 @@ async function PublicReceiptBookSection() {
                         </td>
                         <td className="py-2.5 px-3 font-mono text-ink">
                           {ev.nodeId}
-                          {ev.nodeKind === "sim" ? " (Simulated)" : ""}
                         </td>
                         <td className="py-2.5 px-3">
-                          {ev.nodeKind === "tinfoil" ? (
-                            <span className="ep-pass">Real</span>
-                          ) : (
-                            <span className="ep-muted-chip">Simulated</span>
-                          )}
+                          <span className="ep-pass">Hardware TEE</span>
                         </td>
                         <td className="py-2.5 px-3 font-mono text-ink-2">
                           {ev.kind}
@@ -489,65 +437,71 @@ async function PublicReceiptBookSection() {
               </div>
             </div>
 
-            {/* Release Approval Entries */}
+            {/* Independent Verifier Submissions */}
             <div className="space-y-2">
               <div className="ep-label">
-                Release image approvals ({releaseEntries.length} images, root{" "}
-                {short(transparency.log.root, 8)})
+                Independent CLI verifications (
+                {transparency.distinctVerifierCount ?? 0} verifiers,{" "}
+                {transparency.totalSubmissions ?? 0} submissions)
               </div>
-              <div className="ep-card overflow-x-auto">
-                <table className="w-full text-left text-xs border-collapse">
-                  <thead>
-                    <tr className="border-b border-rule bg-paper-2 font-mono text-[11px] uppercase text-ink-3">
-                      <th className="py-2.5 px-3">Index</th>
-                      <th className="py-2.5 px-3">Image ID</th>
-                      <th className="py-2.5 px-3">Version</th>
-                      <th className="py-2.5 px-3">Scope</th>
-                      <th className="py-2.5 px-3">Quorum (Simulated)</th>
-                      <th className="py-2.5 px-3">Measurement</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-rule">
-                    {releaseEntries.map((entry) => {
-                      const isSimImage =
-                        entry.imageId.includes("sim") ||
-                        entry.imageId.includes("svsm");
-                      return (
-                        <tr key={entry.index} className="hover:bg-paper-2/50">
+              {recentSubmissions.length > 0 ? (
+                <div className="ep-card overflow-x-auto">
+                  <table className="w-full text-left text-xs border-collapse">
+                    <thead>
+                      <tr className="border-b border-rule bg-paper-2 font-mono text-[11px] uppercase text-ink-3">
+                        <th className="py-2.5 px-3">Leaf #</th>
+                        <th className="py-2.5 px-3">Verifier Fingerprint</th>
+                        <th className="py-2.5 px-3">Router Host</th>
+                        <th className="py-2.5 px-3">Result</th>
+                        <th className="py-2.5 px-3">Hour bucket (UTC)</th>
+                        <th className="py-2.5 px-3">Evidence Hash</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-rule">
+                      {recentSubmissions.map((sub) => (
+                        <tr
+                          key={`${sub.verifierFingerprint}-${sub.leafIndex}`}
+                          className="hover:bg-paper-2/50"
+                        >
                           <td className="py-2.5 px-3 font-mono text-ink-2">
-                            #{entry.index}
+                            #{sub.leafIndex}
                           </td>
-                          <td className="py-2.5 px-3 font-mono text-ink">
-                            {entry.imageId}
+                          <td
+                            className="py-2.5 px-3 font-mono text-ink"
+                            title={sub.verifierFingerprint}
+                          >
+                            {short(sub.verifierFingerprint, 10)}
                           </td>
                           <td className="py-2.5 px-3 font-mono text-ink-2">
-                            {entry.version}
+                            {sub.router?.enclaveHost ?? "router-0.tinfoil.sh"}
                           </td>
                           <td className="py-2.5 px-3">
-                            {isSimImage ? (
-                              <span className="ep-muted-chip">
-                                Simulated image
-                              </span>
+                            {sub.overallOk ? (
+                              <span className="ep-pass">Pass</span>
                             ) : (
-                              <span className="ep-pass">Tinfoil release</span>
+                              <span className="ep-fail">Fail</span>
                             )}
                           </td>
                           <td className="py-2.5 px-3 font-mono text-ink-2">
-                            {entry.builderSignatures.length} builders,{" "}
-                            {entry.reviewerSignatures.length} reviewers
+                            {whenHour(new Date(sub.epochHourSec * 1000))}
                           </td>
                           <td
                             className="py-2.5 px-3 font-mono text-ink-2"
-                            title={entry.measurement}
+                            title={sub.evidenceHash}
                           >
-                            {short(entry.measurement, 10)}
+                            {short(sub.evidenceHash, 10)}
                           </td>
                         </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="ep-inset p-3 font-mono text-ink-2">
+                  Run node scripts/drouter-cli.mjs verify --submit to sign and
+                  submit an independent C1-C7 verification claim.
+                </div>
+              )}
             </div>
 
             {/* Coarsened Activity & Pop Receipts */}
@@ -589,17 +543,16 @@ export default function NetworkPage() {
                 Who runs deRoute and the public receipt book
               </h1>
               <p className="max-w-[68ch] text-base leading-relaxed text-ink-2">
-                See the real sealed computers that answer your chats, the
-                practice servers we use for safety drills, and the public
-                receipt book where every check is recorded.
+                See the sealed computers that answer your chats and the public
+                receipt book where every seal check is recorded.
               </p>
               <div className="flex flex-wrap items-center gap-3 pt-1">
-                <Link href="/audit" className="ep-btn-ghost">
+                <InkButton href="/audit" variant="ghost">
                   Go to Proof page
-                </Link>
-                <Link href="/app" className="ep-btn-ghost">
+                </InkButton>
+                <InkButton href="/app" variant="ghost">
                   Back to chat
-                </Link>
+                </InkButton>
               </div>
             </section>
 

@@ -235,7 +235,7 @@ describe("Frontier Confidential Provider Directory & Spec v2 Roadmap", () => {
     expect(Object.keys(allStatuses)).toHaveLength(10);
   });
 
-  it("includes accurate HONEST_LIMITS covering small CKKS FHE linear classifier, Vercel Sandbox Firecracker microVM, Kimi K3 262,144 limit, Tinfoil sidecars, and simulated nodes", () => {
+  it("includes accurate HONEST_LIMITS covering small CKKS FHE linear classifier, Vercel Sandbox Firecracker microVM, Kimi K3 262,144 limit, Tinfoil sidecars, and passkey sync visibility", () => {
     expect(HONEST_LIMITS.length).toBeGreaterThanOrEqual(8);
     const combinedText = HONEST_LIMITS.map(
       (l) => `${l.title} ${l.detail}`,
@@ -244,7 +244,9 @@ describe("Frontier Confidential Provider Directory & Spec v2 Roadmap", () => {
     expect(combinedText).toContain("gpt-oss-safeguard-120b");
     expect(combinedText).toContain("CKKS");
     expect(combinedText).toContain("Firecracker microVM");
-    expect(combinedText).toContain("SIM_HARDWARE_SEED");
+    expect(combinedText).toContain("WebAuthn PRF");
+    expect(combinedText).not.toContain("SIM_HARDWARE_SEED");
+    expect(combinedText).not.toContain("sim-1");
     for (const item of HONEST_LIMITS) {
       expect(item.title).not.toContain("\u2014");
       expect(item.detail).not.toContain("\u2014");

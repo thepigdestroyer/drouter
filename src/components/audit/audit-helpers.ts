@@ -8,7 +8,7 @@ import type {
   DeepAttestationBundle,
   ModelEnclaveAttestation,
 } from "@/lib/tinfoil/deep-inspect";
-import type { HardwareManifest, NodeRecord, QuorumTicket } from "@/lib/types";
+import type { HardwareManifest, NodeRecord } from "@/lib/types";
 
 export interface VerifiableClaimRecord {
   id: string;
@@ -40,21 +40,18 @@ export interface TransparencyEntryView {
   approvedAt: number;
   reviewWindowDays: number;
   emergency: boolean;
-  builderSignatures: {
-    builderId: string;
-    publicKey: string;
-    signature: string;
-  }[];
-  reviewerSignatures: {
-    reviewerId: string;
-    publicKey: string;
-    signature: string;
-  }[];
+}
+
+export interface VerifierSubmissionSummaryView {
+  verifierFingerprint: string;
+  epochHourSec: number;
+  overallOk: boolean;
+  evidenceHash: string;
+  leafIndex: number;
+  leafHash: string;
 }
 
 export interface TransparencyResponse {
-  quorumSimulated?: boolean;
-  simulated?: boolean;
   operatorPublicKey?: string;
   signedTreeHead?: SignedTreeHead;
   anchorExplorerUrl?: string | null;
@@ -68,24 +65,19 @@ export interface TransparencyResponse {
   };
   consistencyProof?: ConsistencyProof;
   releaseConsistencyProof?: ConsistencyProof;
-  log: {
+  distinctVerifierCount?: number;
+  totalSubmissions?: number;
+  recentSubmissions?: VerifierSubmissionSummaryView[];
+  verifications?: {
+    distinctVerifierCount: number;
+    totalSubmissions: number;
+    recentSubmissions: VerifierSubmissionSummaryView[];
+  };
+  log?: {
     root: string;
     entries: TransparencyEntryView[];
   };
-  proofs: InclusionProof[];
-  verifierSet: {
-    threshold: number;
-    total: number;
-    quorumSimulated?: boolean;
-    operatorPublicKey?: string;
-    verifiers: {
-      id: string;
-      name: string;
-      publicKey: string;
-      simulated?: boolean;
-    }[];
-  };
-  tickets: Record<string, QuorumTicket & { quorumSimulated?: boolean }>;
+  proofs?: InclusionProof[];
 }
 
 export interface RampEvaluationView {
@@ -95,48 +87,61 @@ export interface RampEvaluationView {
   dualIdentityDetected: boolean;
   weightBps: number;
   phase: "canary-only" | "linear-ramp" | "steady" | "suspended";
+  releaseTag?: string;
+  lastChangeKind?: string;
   detail: string;
-}
-
-export interface CanarySessionView {
-  sessionId: string;
-  honeytoken: string;
-  decoyKind: string;
-  salt: string;
-  commitment: string;
-  promptPreview: string;
 }
 
 export interface RecordedClaimEventView {
   id: string;
-  kind: string;
+  kind?: string;
   nodeId: string;
-  timestamp: number;
-  slashUsdc: number;
-  bountyUsdc: number;
-  compensationPoolUsdc: number;
-  summary: string;
-  detail: unknown;
+  timestamp?: number;
+  epochHourSec?: number;
+  reasons?: string[];
+  slashUsdc?: number;
+  bountyUsdc?: number;
+  compensationPoolUsdc?: number;
+  summary?: string;
+  detail?: unknown;
   evidenceHash?: string;
   txHash?: string | null;
   explorerUrl?: string | null;
   onChain?: boolean;
-  simulated?: boolean;
+}
+
+export interface MonitoredEnclaveView {
+  nodeId: string;
+  nodeKind: "tinfoil";
+  role: "router" | "model";
+  repo: string;
+  releaseTag: string;
+  releaseDigest: string;
+  measurement: string;
+  enclaveHost: string;
+  ok: boolean;
+  attestationChainOk: boolean;
+  measurementMatchesRelease: boolean;
+  modelProvenanceOk: boolean;
+  epochHourSec: number;
 }
 
 export interface AccountabilityResponse {
-  manifests: HardwareManifest[];
+  mongoConfigured?: boolean;
+  hasRun?: boolean;
+  statusMessage?: string;
+  enclaves?: MonitoredEnclaveView[];
+  failures?: RecordedClaimEventView[];
+  manifests?: HardwareManifest[];
   rampStates: Record<string, RampEvaluationView>;
-  activeCanaries: Record<string, CanarySessionView>;
-  recentClaims: RecordedClaimEventView[];
-  forbiddenPrefix: string;
+  recentClaims?: RecordedClaimEventView[];
+  forbiddenPrefix?: string;
   registrySource?: "arc" | "fallback";
   registryNodes?: NodeRecord[];
   minStakeUsdc?: string;
   txHash?: string | null;
   explorerUrl?: string | null;
   onChain?: boolean;
-  simulated?: boolean;
 }
 
 export interface AuditorRunView {
@@ -174,7 +179,6 @@ export interface AuditorResponse {
   statusMessage: string;
   latestRun: AuditorRunView | null;
   history: AuditorRunView[];
-  simulated?: boolean;
 }
 
 export function shortHex(value: unknown, lead = 10, tail = 6): string {
@@ -332,7 +336,9 @@ export function buildVerifiableClaims(params: {
       secondaryLabel: `testnet.arcscan.app/address/${shortHex(contractAddr, 10, 6)}`,
       liveRecordBadge: latestTx
         ? `tx ${shortHex(latestTx, 8, 6)}`
-        : `chain 5042002 (${acc?.registryNodes?.length ?? 4} nodes)`,
+        : `chain 5042002 (${
+            acc?.registryNodes?.filter((n) => n.kind === "tinfoil").length || 1
+          } active)`,
       liveSource: Boolean(acc?.onChain),
     },
   ];
@@ -378,7 +384,7 @@ export function buildPlainTrustPoints(params: {
       stepNumber: "3",
       title: "Every check is written in a public receipt book",
       description:
-        "When we check a server or catch a rule-breaker in practice mode, we write a permanent receipt into a public receipt book that nobody can secretly erase.",
+        "Whenever we run a seal check on the servers, we write a permanent receipt into a public receipt book that nobody can secretly erase.",
       badge: params.accountability?.onChain
         ? "Live public receipt book"
         : "Public receipt book",

@@ -105,6 +105,9 @@ describe("ThreatMatrix scenarios, villains, and defense test links", () => {
       expect(combinedText).not.toContain("50% reporter bounty");
       expect(combinedText).not.toContain("50% slash bounty");
       expect(combinedText).not.toContain("dRouter");
+      expect(combinedText).not.toContain("sim-1");
+      expect(combinedText).not.toContain("SIM_HARDWARE_SEED");
+      expect(combinedText).not.toContain("Simulated");
     }
   });
 });
@@ -190,7 +193,6 @@ describe("buildVerifiableClaims and buildPlainTrustPoints live record links", ()
       accountability: {
         manifests: [],
         rampStates: {},
-        activeCanaries: {},
         recentClaims: [],
         forbiddenPrefix: "aa".repeat(32),
         onChain: true,
@@ -285,12 +287,23 @@ describe("buildVerifiableClaims and buildPlainTrustPoints live record links", ()
       // No em dashes anywhere in file
       expect(source).not.toContain("\u2014");
 
-      // Strip <TechDetails ...>...</TechDetails> blocks and HONEST_LIMITS / THREAT_SCENARIOS raw definitions
-      const jsxStart = source.indexOf("return (");
-      expect(jsxStart).toBeGreaterThan(0);
-      const jsxSection = source
-        .slice(jsxStart)
-        .replace(/<TechDetails[\s\S]*?<\/TechDetails>/g, "")
+      // No simulated or practice UI references
+      expect(source).not.toMatch(/\bsim-[123]\b/);
+      expect(source).not.toMatch(/\bquorumSimulated\b/);
+      expect(source).not.toMatch(/\bPractice\b/);
+
+      // Strip <TechDetails ...>...</TechDetails> blocks first, then inspect top-level component JSX
+      const withoutTechDetails = source.replace(
+        /<TechDetails[\s\S]*?<\/TechDetails>/g,
+        "",
+      );
+      const jsxMatches = Array.from(
+        withoutTechDetails.matchAll(/\n  return \([\s\S]*?\n  \);/g),
+      );
+      expect(jsxMatches.length).toBeGreaterThan(0);
+      const jsxSection = jsxMatches
+        .map((m) => m[0])
+        .join("\n")
         // strip JSX tags and attribute values/identifiers, leaving rendered text nodes
         .replace(/<[^>]+>/g, " ")
         .replace(/\{[^}]*\}/g, " ");

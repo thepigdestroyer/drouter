@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { InkButton } from "@/components/ink/ink-button";
 import { TechDetails } from "@/components/ink/tech-details";
 import {
   CATALOG_VERIFIED_ON,
@@ -79,9 +80,9 @@ export function ProviderCatalogClient({
             {CONFIDENTIAL_PROVIDERS.length})
           </h2>
           <p className="max-w-[68ch] text-sm text-ink-2 leading-relaxed">
-            We check eight providers that run AI inside sealed computers. Only
-            providers whose seal and software blueprint can be checked end to
-            end are marked as passed.
+            We check {CONFIDENTIAL_PROVIDERS.length} providers that run AI
+            inside sealed computers. Only providers whose seal and software
+            blueprint can be checked end to end are marked as passed.
           </p>
         </div>
       </div>
@@ -121,22 +122,94 @@ export function ProviderCatalogClient({
         </div>
 
         {(modelQuery || requireE2ee || requirePqc) && (
-          <button
-            type="button"
+          <InkButton
+            variant="ghost"
             onClick={() => {
               setModelQuery("");
               setRequireE2ee(false);
               setRequirePqc(false);
             }}
-            className="ep-btn-ghost text-xs py-1 px-2.5 cursor-pointer"
+            className="text-xs py-1 px-2.5 cursor-pointer"
           >
             Reset filters
-          </button>
+          </InkButton>
         )}
       </div>
 
-      {/* Simplified Provider Table (Plain columns) */}
-      <div className="ep-card overflow-x-auto">
+      {/* Mobile stacked card list (sm:hidden) */}
+      <div className="space-y-3 sm:hidden">
+        {filteredProviders.map((provider) => {
+          const live = liveStatusById[provider.id];
+          const seal = plainSealSummary(provider, live);
+          return (
+            <div key={provider.id} className="ep-card p-4 space-y-3">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <div className="font-serif text-base font-medium text-ink">
+                    {plainProviderName(provider)}
+                  </div>
+                  <div className="mt-0.5 font-mono text-[11px] text-ink-3">
+                    From {provider.inputUsdPerM}
+                  </div>
+                </div>
+                <div className="flex flex-col items-end gap-1">
+                  <span className={seal.pass ? "ep-pass" : "ep-muted-chip"}>
+                    {seal.badge}
+                  </span>
+                  {provider.statusInDrouter === "live-integrated" && (
+                    <span className="ep-pass">Used in deRoute</span>
+                  )}
+                </div>
+              </div>
+
+              <div className="text-[11px] text-ink-3">{seal.liveLine}</div>
+
+              <div className="space-y-1">
+                <div className="ep-label">How your chat is locked</div>
+                <p className="text-xs leading-relaxed text-ink-2">
+                  {plainProtectionSummary(provider)}
+                </p>
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="ep-label">AI brains</div>
+                <div className="flex flex-wrap gap-1">
+                  {provider.frontierModels.map((model) => (
+                    <span
+                      key={model}
+                      className="rounded border border-rule bg-paper-2 px-1.5 py-0.5 font-mono text-[11px] text-ink-2"
+                    >
+                      {plainModelLabel(model)}
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex items-center gap-4 pt-2 border-t border-rule font-mono text-xs">
+                <a
+                  href={provider.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="ep-link"
+                >
+                  Website -&gt;
+                </a>
+                <a
+                  href={provider.docsUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="ep-link"
+                >
+                  Docs -&gt;
+                </a>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Desktop 5-column Provider Table (hidden sm:block) */}
+      <div className="hidden sm:block ep-card overflow-x-auto">
         <table className="w-full text-left text-xs border-collapse">
           <thead>
             <tr className="border-b border-rule bg-paper-2 text-ink-3 font-mono text-[11px] uppercase">

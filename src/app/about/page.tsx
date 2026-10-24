@@ -1,7 +1,7 @@
-import Link from "next/link";
 import { connection } from "next/server";
 import { Suspense } from "react";
 import { AuthPill } from "@/components/auth-pill";
+import { InkButton } from "@/components/ink/ink-button";
 import { InkReveal } from "@/components/ink/ink-reveal";
 import { TechDetails } from "@/components/ink/tech-details";
 import { SpecimenFooter, SpecimenHeader } from "@/components/specimen-chrome";
@@ -26,7 +26,7 @@ export const HONEST_LIMITS = [
     title:
       "FHE Tier C is a real small CKKS linear classifier, not a frontier LLM",
     detail:
-      "Live Tier C (node-seal 7.0.0 / Microsoft SEAL 4.1.2 WASM at /api/ashi) executes a real CKKS homomorphic linear computation (4x128 matrix-vector dot products plus encrypted squared L2 norm over a 128-dimensional embedding vector, N=4096, 128-bit security) where the server never sees plaintext or the secret key. Frontier 3T MoE FHE numbers remain an explicitly labelled analytical simulation.",
+      "Live Tier C (node-seal 7.0.0 / Microsoft SEAL 4.1.2 WASM at /api/ashi) executes a real CKKS homomorphic linear computation (4x128 matrix-vector dot products plus encrypted squared L2 norm over a 128-dimensional embedding vector, N=4096, 128-bit security) where the server never sees plaintext or the secret key.",
   },
   {
     plainTitle: "The code runner is a clean temporary room, not a sealed chip",
@@ -54,12 +54,12 @@ export const HONEST_LIMITS = [
       "Tinfoil's router runs a safeguards acceptable-use classifier sidecar (gpt-oss-safeguard-120b with kimi-k3 review) that reports policy violations to https://api.tinfoil.sh, plus a usage reporter.",
   },
   {
-    plainTitle: "Three servers in our list are for practice only",
+    plainTitle: "Device sign-in sync knows this website exists",
     plainSummary:
-      "Servers named sim-1, sim-2, and sim-3 are practice servers built so you can test what happens when a server misbehaves. Your real chats go to Tinfoil.",
-    title: "Simulated test nodes (sim-1, sim-2, sim-3)",
+      "When you sign in with your fingerprint, face, or device, deRoute never learns who you are, but Apple or Google sync knows that your device saved a login for this site.",
+    title: "WebAuthn PRF passkey sync metadata visibility",
     detail:
-      "Nodes sim-1, sim-2, and sim-3 are simulated software nodes derived from SIM_HARDWARE_SEED to test client verification and failure handling. They are not real hardware enclaves.",
+      "Passkey credentials use WebAuthn PRF with attestation='none' and a random 32-byte user handle so our server stores nothing and never learns your identity. However, your OS passkey provider (iCloud Keychain or Google Password Manager) can observe the relying party domain (rpId) when syncing your passkey end-to-end encrypted.",
   },
   {
     plainTitle: "Hardware seals are strong, not magic",
@@ -146,15 +146,15 @@ export default function AboutArchitecturePage() {
             </div>
 
             <div className="flex flex-wrap items-center gap-3 pt-1">
-              <Link href="/app" className="ep-btn-accent">
+              <InkButton href="/app" variant="accent">
                 Open chat
-              </Link>
-              <Link href="/explain" className="ep-btn-ghost">
+              </InkButton>
+              <InkButton href="/explain" variant="ghost">
                 How it works
-              </Link>
-              <Link href="/audit" className="ep-btn-ghost">
+              </InkButton>
+              <InkButton href="/audit" variant="ghost">
                 See the proof
-              </Link>
+              </InkButton>
             </div>
           </section>
         </InkReveal>
