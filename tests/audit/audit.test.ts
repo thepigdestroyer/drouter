@@ -15,7 +15,7 @@ import {
 import { HONEST_LIMITS } from "@/app/about/page";
 import type { DeepAttestationBundle } from "@/lib/tinfoil/deep-inspect";
 
-const REPO_ROOT = path.resolve(__dirname, "../../..");
+const REPO_ROOT = path.resolve(__dirname, "../..");
 
 const BANNED_JARGON_PATTERNS = [
   /\battestation\b/i,
