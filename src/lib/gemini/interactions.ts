@@ -15,6 +15,7 @@
 
 import { GoogleGenAI } from "@google/genai";
 import { estimateTokens } from "@/lib/privacy/padding";
+import { canonicalJson } from "@/lib/transparency/log";
 
 export const GEMINI_4_ARGON_MODEL_ID = "gemini-4-argon" as const;
 
@@ -474,8 +475,137 @@ export const ARGON_CONFIDENTIAL_TOOLS: readonly ArgonInteractionToolDeclaration[
 
 const OPAQUE_HANDLE_REGEX = /^(?:\$INPUT|\$RESULT_(?:[1-9]|[1-5]\d|6[0-4]))$/;
 const FIXED_SHA256_HEX_REGEX = /^0x[0-9a-f]{64}$/;
-const SAFE_CALL_ID_REGEX =
-  /^(?:call|tc|inter)-(?:[1-9]\d{0,2}|turn-[1-9]\d{0,1}|[a-z_]{2,40}|[1-9]-[a-z_]{2,40}|argon-turn-[1-9])$/;
+export const SAFE_CALL_ID_REGEX =
+  /^(?:call|tc|inter)-(?:[1-9]\d{0,2}|turn-[1-9]\d{0,1}|argon-turn-[1-9]|(?:[1-9]-)?(?:scrub_and_symmetry_mask|verify_two_hop_enclave_and_quorum|search_atlas_hybrid_kb|invoke_attested_enclave|anchor_arc_settlement_with_human_gate)|[1-9]-[1-9]\d{0,1})$/;
+
+export const MAX_REDACTION_COUNT_PER_KIND = 5;
+export const MAX_TOKEN_BUCKET = 1_048_576;
+
+export const ALLOWED_REDACTION_COUNT_KEYS: ReadonlySet<string> = new Set<string>([
+  "SECRET",
+  "EMAIL",
+  "PHONE",
+  "IP",
+  "ACCT",
+  "ENTITY",
+  "NAME",
+  "DIGITS",
+  "ENTROPY",
+  "URL",
+  "ADDRESS",
+  "DATE",
+  "CUSTOM",
+  "SYMMETRY",
+  "ATTESTED_PII",
+  "TOTAL",
+]);
+
+export const ALLOWED_VERIFICATION_KEYS: ReadonlySet<string> = new Set<string>([
+  "mechanicalRedactionPassed",
+  "attestedPiiFilterVerified",
+  "bucketAligned4096",
+  "routerSevSnpVerified",
+  "enclaveTdxGpuVerified",
+  "hpkeKeyBound",
+  "sigstoreManifestVerified",
+  "arcRegistryVerified",
+]);
+
+export const ALLOWED_HASH_KEYS: ReadonlySet<string> = new Set<string>([
+  "contentSha256",
+  "routerDigestHex",
+  "enclaveMeasurementHex",
+  "topDocSha256",
+  "outputSha256",
+  "receiptSha256",
+]);
+
+export const ALLOWED_NUMERIC_KEYS: ReadonlySet<string> = new Set<string>([
+  "inputTokenEstimate",
+  "max_output_tokens",
+  "max_context_tokens",
+  "max_tokens",
+  "bucketQuantumBytes",
+  "bucketBytes",
+  "redactionCount",
+  "mechanicalRedactionCount",
+  "attestedRedactionCount",
+  "plaintextLeakCount",
+  "checksPassed",
+  "checksTotal",
+  "totalDocs",
+  "matchingReceiptsCount",
+  "outputTokenEstimate",
+  ...ALLOWED_REDACTION_COUNT_KEYS,
+]);
+
+export const ALLOWED_BOOLEAN_KEYS: ReadonlySet<string> = new Set<string>([
+  "background",
+  "store",
+  "humanApproved",
+  "passed",
+  "selfHealed",
+  "attested",
+  "requiresHumanApproval",
+  "stateChangedOnChain",
+  "applyAttestedFilter",
+  ...ALLOWED_VERIFICATION_KEYS,
+]);
+
+export const ALLOWED_ARRAY_KEYS: ReadonlySet<string> = new Set<string>([
+  "input",
+  "tools",
+  "allowedTools",
+  "required",
+  "enum",
+  "messages",
+  "tool_calls",
+]);
+
+const ALLOWED_STRING_ARRAY_KEYS: ReadonlySet<string> = new Set<string>([
+  "allowedTools",
+  "required",
+  "enum",
+]);
+
+const ALLOWED_JSON_STRING_KEYS: ReadonlySet<string> = new Set<string>([
+  "text",
+  "content",
+  "result",
+]);
+
+const ALLOWED_INTERACTION_STATUSES: ReadonlySet<string> = new Set<string>([
+  "completed",
+  "in_progress",
+  "requires_action",
+  "failed",
+  "cancelled",
+]);
+
+export const LOOKUP_TOPICS = [
+  "provider:tinfoil",
+  "provider:phala-redpill",
+  "provider:near-ai-cloud",
+  "provider:venice-ai",
+  "provider:prem-ai",
+  "provider:ppq-ai",
+  "provider:confidential-ai",
+  "provider:chutes-bittensor",
+  "provider:privatemode-cosmian",
+  "provider:nanogpt",
+  "hardware:intel-tdx",
+  "hardware:amd-sev-snp",
+  "hardware:nvidia-cc",
+  "attack:memory-bus",
+  "attack:side-channel",
+  "attack:voltage-glitching",
+  "crypto:hpke",
+  "crypto:blind-signatures",
+  "crypto:pqc-ml-kem",
+  "policy:data-retention",
+  "policy:sigstore-rekor",
+  "policy:arc-settlement",
+] as const;
 
 const ALLOWED_STATIC_SCHEMA_DESCRIPTIONS = new Set<string>([
   SPLIT_KNOWLEDGE_SYSTEM_INSTRUCTION,
@@ -548,6 +678,9 @@ export const ALLOWED_CONTENT_FREE_ENUMS: ReadonlySet<string> = new Set<string>([
   "tinfoil",
   ...ALLOWED_ATLAS_TOPICS,
   ...ALLOWED_ATLAS_CATEGORIES,
+  ...LOOKUP_TOPICS,
+  "allowed",
+  "denied",
   "anchor_receipt",
   "ok",
   "verified",
@@ -573,6 +706,7 @@ export const ALLOWED_CONTENT_FREE_KEYS: ReadonlySet<string> = new Set<string>([
   "model",
   "thinking_level",
   "background",
+  "store",
   "max_output_tokens",
   "max_context_tokens",
   "implicit_caching",
@@ -695,19 +829,11 @@ export const ALLOWED_CONTENT_FREE_KEYS: ReadonlySet<string> = new Set<string>([
   "receiptSha256",
 ]);
 
-function hasSmuggledAsciiInHex(hexWithoutPrefix: string): boolean {
-  // Reject 64-digit decimal number strings disguised with a 0x prefix
-  if (/^\d{64}$/.test(hexWithoutPrefix)) {
-    return true;
-  }
-  // Reject trivial repeating sequences (e.g., 0000000000000000 or 1234123412341234)
-  if (/^([0-9a-f]{1,4})\1{15,}$/.test(hexWithoutPrefix)) {
-    return true;
-  }
+function hasAsciiRunOrCount(byteValues: readonly number[]): boolean {
   let consecutivePrintableAscii = 0;
   let totalPrintableLettersOrSpaces = 0;
-  for (let i = 0; i < hexWithoutPrefix.length; i += 2) {
-    const byteVal = parseInt(hexWithoutPrefix.slice(i, i + 2), 16);
+  for (let i = 0; i < byteValues.length; i++) {
+    const byteVal = byteValues[i];
     if (byteVal >= 0x20 && byteVal <= 0x7e) {
       consecutivePrintableAscii += 1;
       if (
@@ -725,6 +851,66 @@ function hasSmuggledAsciiInHex(hexWithoutPrefix: string): boolean {
     }
   }
   return totalPrintableLettersOrSpaces >= 18;
+}
+
+function hasSmuggledAsciiInHex(hexWithoutPrefix: string): boolean {
+  // Reject 64-digit decimal number strings disguised with a 0x prefix
+  if (/^\d{64}$/.test(hexWithoutPrefix)) {
+    return true;
+  }
+  // Reject trivial repeating sequences (e.g., 0000000000000000 or 1234123412341234)
+  if (/^([0-9a-f]{1,4})\1{15,}$/.test(hexWithoutPrefix)) {
+    return true;
+  }
+  const bytes: number[] = [];
+  const freq = new Map<number, number>();
+  let maxFreq = 0;
+  for (let i = 0; i < hexWithoutPrefix.length; i += 2) {
+    const byteVal = parseInt(hexWithoutPrefix.slice(i, i + 2), 16);
+    bytes.push(byteVal);
+    const count = (freq.get(byteVal) ?? 0) + 1;
+    freq.set(byteVal, count);
+    if (count > maxFreq) {
+      maxFreq = count;
+    }
+  }
+  if (freq.size < 12 || maxFreq >= 6) {
+    return true;
+  }
+  if (hasAsciiRunOrCount(bytes)) {
+    return true;
+  }
+  const strippedNulls = bytes.filter((b) => b !== 0x00 && b !== 0xff);
+  if (hasAsciiRunOrCount(strippedNulls)) {
+    return true;
+  }
+  let consecutiveHighBitText = 0;
+  let totalHighBitLettersOrSpaces = 0;
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    const low7 = b & 0x7f;
+    const isLetterOrSpace =
+      low7 === 0x20 ||
+      (low7 >= 0x41 && low7 <= 0x5a) ||
+      (low7 >= 0x61 && low7 <= 0x7a);
+    const isDigitOrCommonPunct =
+      (low7 >= 0x30 && low7 <= 0x39) ||
+      low7 === 0x2d ||
+      low7 === 0x5f ||
+      low7 === 0x2e;
+    if ((b & 0x80) !== 0 && (isLetterOrSpace || isDigitOrCommonPunct)) {
+      consecutiveHighBitText += 1;
+      if (isLetterOrSpace) {
+        totalHighBitLettersOrSpaces += 1;
+      }
+      if (consecutiveHighBitText >= 8) {
+        return true;
+      }
+    } else {
+      consecutiveHighBitText = 0;
+    }
+  }
+  return totalHighBitLettersOrSpaces >= 16;
 }
 
 const ALLOWED_REQUIRED_PARAM_NAMES = new Set<string>([
@@ -748,6 +934,9 @@ export function isContentFreeString(value: string, keyContext?: string): boolean
     return true;
   }
   if (FIXED_SHA256_HEX_REGEX.test(value)) {
+    if (!keyContext || !ALLOWED_HASH_KEYS.has(keyContext)) {
+      return false;
+    }
     return !hasSmuggledAsciiInHex(value.slice(2));
   }
   if (
@@ -775,50 +964,105 @@ export function isContentFreeString(value: string, keyContext?: string): boolean
   return ALLOWED_CONTENT_FREE_ENUMS.has(value);
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.prototype.toString.call(value) !== "[object Object]"
+  ) {
+    return false;
+  }
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
 /**
  * Egress firewall (D1): recursively inspects any outbound value before it leaves
  * for Google Gemini. Rejects any string not in the strict allowlist of opaque
- * handles (`$INPUT`, `$RESULT_<n>`), verified 32-byte lowercase SHA-256 hex hashes,
- * or allowlisted enum literals, and rejects any unallowlisted object keys or JSON-smuggled content.
+ * handles (`$INPUT`, `$RESULT_<n>`), verified 32-byte lowercase SHA-256 hex hashes
+ * under allowlisted hash keys, or allowlisted enum literals, and rejects any
+ * unallowlisted object keys, numbers, arrays, or JSON-smuggled content.
  */
 export function assertContentFree(
   value: unknown,
   path = "$",
   keyContext?: string,
+  depth = 0,
+  insideJsonString = false,
 ): void {
+  if (depth > 8) {
+    throw new ContentFreeEgressError("<max_depth_exceeded>", path);
+  }
+  if (depth === 0) {
+    if (!isPlainObject(value)) {
+      throw new ContentFreeEgressError(String(value), path);
+    }
+  }
   if (value === null || value === undefined) {
-    return;
+    throw new ContentFreeEgressError(String(value), path);
   }
   const valueType = typeof value;
   if (valueType === "boolean") {
+    if (!keyContext || !ALLOWED_BOOLEAN_KEYS.has(keyContext)) {
+      throw new ContentFreeEgressError(String(value), path);
+    }
     return;
   }
   if (valueType === "number") {
-    if (!Number.isFinite(value as number)) {
+    const num = value as number;
+    if (
+      !keyContext ||
+      !ALLOWED_NUMERIC_KEYS.has(keyContext) ||
+      !Number.isInteger(num) ||
+      Object.is(num, -0) ||
+      num < 0 ||
+      num > MAX_TOKEN_BUCKET
+    ) {
+      throw new ContentFreeEgressError(String(value), path);
+    }
+    if (
+      ALLOWED_REDACTION_COUNT_KEYS.has(keyContext) &&
+      num > MAX_REDACTION_COUNT_PER_KIND
+    ) {
       throw new ContentFreeEgressError(String(value), path);
     }
     return;
   }
   if (valueType === "string") {
     const str = value as string;
-    const trimmed = str.trim();
-    if (trimmed.length === 0) {
+    if (str.length === 0 || str.trim().length === 0) {
       throw new ContentFreeEgressError("<empty_string>", path);
     }
-    if (
-      (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
-      (trimmed.startsWith("[") && trimmed.endsWith("]"))
-    ) {
+    if (str.startsWith("{") || str.startsWith("[")) {
+      if (
+        insideJsonString ||
+        !keyContext ||
+        !ALLOWED_JSON_STRING_KEYS.has(keyContext) ||
+        !str.startsWith("{") ||
+        !str.endsWith("}")
+      ) {
+        throw new ContentFreeEgressError(str, path);
+      }
       let parsed: unknown;
       try {
-        parsed = JSON.parse(trimmed);
+        parsed = JSON.parse(str);
       } catch {
         throw new ContentFreeEgressError(str, path);
       }
-      if (!parsed || typeof parsed !== "object") {
+      if (!isPlainObject(parsed)) {
         throw new ContentFreeEgressError(str, path);
       }
-      assertContentFree(parsed, `${path}(json)`);
+      let canonical: string;
+      try {
+        canonical = canonicalJson(parsed);
+      } catch {
+        throw new ContentFreeEgressError(str, path);
+      }
+      if (canonical !== str) {
+        throw new ContentFreeEgressError(str, path);
+      }
+      assertContentFree(parsed, `${path}(json)`, undefined, depth + 1, true);
       return;
     }
     if (!isContentFreeString(str, keyContext)) {
@@ -827,27 +1071,67 @@ export function assertContentFree(
     return;
   }
   if (Array.isArray(value)) {
+    if (
+      !keyContext ||
+      !ALLOWED_ARRAY_KEYS.has(keyContext) ||
+      value.length > 32
+    ) {
+      throw new ContentFreeEgressError("<disallowed_array>", path);
+    }
+    const expectsStringElements = ALLOWED_STRING_ARRAY_KEYS.has(keyContext);
     for (let i = 0; i < value.length; i++) {
-      assertContentFree(value[i], `${path}[${i}]`, keyContext);
+      const item = value[i];
+      if (expectsStringElements) {
+        if (typeof item !== "string") {
+          throw new ContentFreeEgressError(String(item), `${path}[${i}]`);
+        }
+      } else if (!isPlainObject(item)) {
+        throw new ContentFreeEgressError(String(item), `${path}[${i}]`);
+      }
+      assertContentFree(
+        item,
+        `${path}[${i}]`,
+        keyContext,
+        depth + 1,
+        insideJsonString,
+      );
     }
     return;
   }
-  if (
-    valueType === "object" &&
-    Object.prototype.toString.call(value) === "[object Object]"
-  ) {
-    const obj = value as Record<string, unknown>;
-    if (Object.getOwnPropertySymbols(obj).length > 0) {
+  if (isPlainObject(value)) {
+    if (Object.getOwnPropertySymbols(value).length > 0) {
       throw new ContentFreeEgressError("<symbol_property>", path);
     }
-    if (typeof (obj as { toJSON?: unknown }).toJSON === "function") {
+    if (typeof (value as { toJSON?: unknown }).toJSON === "function") {
       throw new ContentFreeEgressError("<custom_toJSON>", path);
     }
-    for (const [k, v] of Object.entries(obj)) {
-      if (!ALLOWED_CONTENT_FREE_KEYS.has(k)) {
+    const ownKeys = Object.getOwnPropertyNames(value);
+    if (ownKeys.length > 64) {
+      throw new ContentFreeEgressError("<too_many_keys>", path);
+    }
+    for (const k of ownKeys) {
+      if (
+        k === "__proto__" ||
+        k === "constructor" ||
+        k === "prototype" ||
+        !ALLOWED_CONTENT_FREE_KEYS.has(k)
+      ) {
         throw new ContentFreeEgressError(k, `${path}.${k}`);
       }
-      assertContentFree(v, `${path}.${k}`, k);
+      const desc = Object.getOwnPropertyDescriptor(value, k);
+      if (!desc || !("value" in desc) || desc.enumerable !== true) {
+        throw new ContentFreeEgressError(k, `${path}.${k}`);
+      }
+      if (desc.value === undefined) {
+        continue;
+      }
+      assertContentFree(
+        desc.value,
+        `${path}.${k}`,
+        k,
+        depth + 1,
+        insideJsonString,
+      );
     }
     return;
   }
@@ -1381,18 +1665,24 @@ export function buildTaskDescriptor(params: {
 }): TaskDescriptor {
   const taskKind: TaskKind =
     params.taskKind ?? classifyTaskKind(params.rawTextForClassification ?? "");
-  const inputTokenEstimate = Math.max(
-    1,
-    Math.trunc(
-      params.inputTokenEstimate ??
-        estimateTokens(params.rawTextForClassification ?? "task"),
+  const inputTokenEstimate = Math.min(
+    MAX_TOKEN_BUCKET,
+    Math.max(
+      1,
+      Math.trunc(
+        params.inputTokenEstimate ??
+          estimateTokens(params.rawTextForClassification ?? "task"),
+      ),
     ),
   );
 
   const sanitizedRedactionCounts: Record<string, number> = {};
   for (const [k, v] of Object.entries(params.redactionCounts ?? { TOTAL: 0 })) {
-    if (ALLOWED_CONTENT_FREE_KEYS.has(k) && typeof v === "number" && Number.isFinite(v)) {
-      sanitizedRedactionCounts[k] = Math.max(0, Math.trunc(v));
+    if (ALLOWED_REDACTION_COUNT_KEYS.has(k) && typeof v === "number" && Number.isFinite(v)) {
+      sanitizedRedactionCounts[k] = Math.min(
+        MAX_REDACTION_COUNT_PER_KIND,
+        Math.max(0, Math.trunc(v)),
+      );
     }
   }
   if (Object.keys(sanitizedRedactionCounts).length === 0) {
@@ -1403,7 +1693,7 @@ export function buildTaskDescriptor(params: {
   for (const [k, v] of Object.entries(
     params.verification ?? { mechanicalRedactionPassed: true },
   )) {
-    if (ALLOWED_CONTENT_FREE_KEYS.has(k) && typeof v === "boolean") {
+    if (ALLOWED_VERIFICATION_KEYS.has(k) && typeof v === "boolean") {
       sanitizedVerification[k] = v;
     }
   }
@@ -1411,8 +1701,9 @@ export function buildTaskDescriptor(params: {
     sanitizedVerification.mechanicalRedactionPassed = true;
   }
 
-  const allowedTools = (params.allowedTools ?? ALLOWED_PLANNER_TOOLS).filter((t) =>
-    (ALLOWED_PLANNER_TOOLS as readonly string[]).includes(t),
+  const requestedTools = params.allowedTools ?? ALLOWED_PLANNER_TOOLS;
+  const allowedTools = ALLOWED_PLANNER_TOOLS.filter((t) =>
+    (requestedTools as readonly string[]).includes(t),
   );
 
   const descriptor: TaskDescriptor = {
@@ -1476,7 +1767,7 @@ export function buildInteractionsCreatePayload(params: {
     input: [
       {
         role: "user",
-        content: JSON.stringify(descriptor),
+        content: canonicalJson(descriptor),
       },
     ],
     tools: ARGON_CONFIDENTIAL_TOOLS,
@@ -1576,7 +1867,10 @@ export interface LiveGeminiCallResult {
 
 export interface GenAIInteractionsClientLike {
   interactions: {
-    create(params: Record<string, unknown>): Promise<{
+    create(
+      params: Record<string, unknown>,
+      options?: Record<string, unknown>,
+    ): Promise<{
       id?: string;
       status?: string;
       output_text?: string;
@@ -1755,6 +2049,7 @@ export async function callGeminiInteractionsEndpoint(params: {
     const createRequest: Record<string, unknown> = {
       model: params.payload.model,
       background: params.payload.background,
+      store: false,
       system_instruction: params.payload.system_instruction,
       generation_config: {
         thinking_level: params.payload.thinking_level,
@@ -1772,11 +2067,18 @@ export async function callGeminiInteractionsEndpoint(params: {
     assertOutboundPrivacyInvariant(createRequest, sensitiveOriginals);
     assertContentFree(createRequest, "$.createRequest");
 
+    const createAbortController = new AbortController();
+    const createRequestOptions = {
+      timeout_ms: wallClockBudgetMs,
+      retries: { strategy: "none" },
+      fetch_options: { signal: createAbortController.signal },
+    };
+
     let interaction = await withWallClockBudget(
-      client.interactions.create(createRequest),
+      client.interactions.create(createRequest, createRequestOptions),
       startedAt,
       wallClockBudgetMs,
-    );
+    ).finally(() => createAbortController.abort());
 
     if (typeof interaction.usage?.total_input_tokens === "number") {
       totalInputTokens += interaction.usage.total_input_tokens;
@@ -1815,14 +2117,16 @@ export async function callGeminiInteractionsEndpoint(params: {
         assertContentFree(resultObj, `$.toolResult(${name})`);
 
         const safeCallId =
-          typeof call.id === "string" && SAFE_CALL_ID_REGEX.test(call.id)
+          typeof call.id === "string" &&
+          SAFE_CALL_ID_REGEX.test(call.id) &&
+          !/\d{4,}/.test(call.id)
             ? call.id
             : `call-${turn + 1}-${idx + 1}`;
         const resultStep: Record<string, unknown> = {
           type: "function_result",
           call_id: safeCallId,
           name,
-          result: JSON.stringify(resultObj),
+          result: canonicalJson(resultObj),
         };
         assertOutboundPrivacyInvariant(resultStep, sensitiveOriginals);
         assertContentFree(resultStep, `$.functionResult(${name})`);
@@ -1830,13 +2134,16 @@ export async function callGeminiInteractionsEndpoint(params: {
       }
 
       const safePrevId =
-        typeof interaction.id === "string" && SAFE_CALL_ID_REGEX.test(interaction.id)
+        typeof interaction.id === "string" &&
+        SAFE_CALL_ID_REGEX.test(interaction.id) &&
+        !/\d{4,}/.test(interaction.id)
           ? interaction.id
           : `inter-argon-turn-${turn + 1}`;
 
       const followUpRequest: Record<string, unknown> = {
         model: params.payload.model,
         background: params.payload.background,
+        store: false,
         previous_interaction_id: safePrevId,
         generation_config: {
           thinking_level: params.payload.thinking_level,
@@ -1849,11 +2156,18 @@ export async function callGeminiInteractionsEndpoint(params: {
       assertOutboundPrivacyInvariant(followUpRequest, sensitiveOriginals);
       assertContentFree(followUpRequest, `$.followUpRequest(${turn + 1})`);
 
+      const followUpAbortController = new AbortController();
+      const followUpOptions = {
+        timeout_ms: Math.max(10, wallClockBudgetMs - (Date.now() - startedAt)),
+        retries: { strategy: "none" },
+        fetch_options: { signal: followUpAbortController.signal },
+      };
+
       interaction = await withWallClockBudget(
-        client.interactions.create(followUpRequest),
+        client.interactions.create(followUpRequest, followUpOptions),
         startedAt,
         wallClockBudgetMs,
-      );
+      ).finally(() => followUpAbortController.abort());
 
       if (typeof interaction.usage?.total_input_tokens === "number") {
         totalInputTokens += interaction.usage.total_input_tokens;
@@ -1882,13 +2196,24 @@ export async function callGeminiInteractionsEndpoint(params: {
     }
 
     const safeTelemetrySummary = sanitizeUntrustedModelOutput(rawOutputText);
+    const safeInteractionId =
+      typeof interaction.id === "string" &&
+      SAFE_CALL_ID_REGEX.test(interaction.id) &&
+      !/\d{4,}/.test(interaction.id)
+        ? interaction.id
+        : undefined;
+    const safeInteractionStatus =
+      typeof interaction.status === "string" &&
+      ALLOWED_INTERACTION_STATUSES.has(interaction.status)
+        ? interaction.status
+        : "completed";
 
     return {
       attemptedLiveCall: true,
       liveEndpointReached: true,
       sdkMethod: "client.interactions.create",
-      interactionId: interaction.id,
-      interactionStatus: interaction.status ?? "completed",
+      interactionId: safeInteractionId,
+      interactionStatus: safeInteractionStatus,
       toolCallsExecuted,
       liveSummaryText:
         safeTelemetrySummary ||

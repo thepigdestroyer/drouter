@@ -395,7 +395,7 @@ export function setCorpusDbForTests(db) {
   testDbOverride = db;
 }
 
-async function getMongoDb() {
+export async function getMongoDb() {
   if (testDbOverride !== undefined) {
     return testDbOverride;
   }

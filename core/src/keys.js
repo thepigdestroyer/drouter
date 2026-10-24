@@ -3,10 +3,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
+import { canonicalJson, sha256Hex } from "./canonical.js";
 
 export const DEFAULT_TINFOIL_KEYS_DIR = "/run/tinfoil/keys";
 
 export const ATTESTED_KEY_IDS = ["egress-signing", "tree-signing"];
+
+export const VALID_KEY_SOURCES = ["tinfoil", "boot"];
 
 /**
  * RFC 8410 SubjectPublicKeyInfo (SPKI) DER prefix for Ed25519 (12 bytes / 24 hex chars).
@@ -44,74 +47,131 @@ export function spkiHexToRawPublicKeyHex(spkiHex) {
 }
 
 /**
- * Loads an attested Ed25519 key pair mounted by Tinfoil at
- * `/run/tinfoil/keys/<keyId>/private_key.pem` (PKCS#8 PEM) and `public_key.pem` (SPKI PEM).
- * If the enclave mount is not present (e.g. local unit test environment), generates
- * an ephemeral Ed25519 key pair at boot and marks `source: "ephemeral-boot"`.
+ * Validates and returns the explicit platform-neutral key source (`"tinfoil"` or `"boot"`).
+ * Refuses to start when `CORE_KEY_SOURCE` is missing or set to an unknown value.
  */
-export function loadAttestedKeyPair(keyId, keysDir = process.env.TINFOIL_KEYS_DIR || DEFAULT_TINFOIL_KEYS_DIR) {
+export function resolveKeySource(explicitSource = process.env.CORE_KEY_SOURCE) {
+  const candidate = typeof explicitSource === "string" ? explicitSource.trim() : "";
+  if (candidate !== "tinfoil" && candidate !== "boot") {
+    throw new Error(
+      `Invalid or missing CORE_KEY_SOURCE '${String(explicitSource ?? "")}': must be explicitly set to 'tinfoil' or 'boot'.`,
+    );
+  }
+  return candidate;
+}
+
+function attachNonEnumerableSecretKey(target, secretKey) {
+  Object.defineProperty(target, "secretKey", {
+    value: secretKey,
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  });
+  return target;
+}
+
+/**
+ * Loads or generates an Ed25519 key pair according to explicit `CORE_KEY_SOURCE`:
+ * - `CORE_KEY_SOURCE=tinfoil`: loads the attested key pair mounted by Tinfoil at
+ *   `/run/tinfoil/keys/<keyId>/private_key.pem` (RFC 8410 PKCS#8 PEM) and `public_key.pem` (SPKI PEM).
+ *   Fails closed if either file is missing or malformed (never falls back to ephemeral keys).
+ * - `CORE_KEY_SOURCE=boot`: generates a fresh Ed25519 key pair in memory at boot (never written to disk).
+ */
+export function loadAttestedKeyPair(keyId, optionsOrKeysDir, explicitKeySource) {
   if (!ATTESTED_KEY_IDS.includes(keyId)) {
     throw new Error(`Unsupported attested key id: ${keyId}`);
   }
 
-  const keyFolder = path.join(keysDir, keyId);
-  const privPemPath = path.join(keyFolder, "private_key.pem");
-  const pubPemPath = path.join(keyFolder, "public_key.pem");
+  let keysDir;
+  let keySource = explicitKeySource;
+  if (typeof optionsOrKeysDir === "string") {
+    keysDir = optionsOrKeysDir;
+  } else if (optionsOrKeysDir && typeof optionsOrKeysDir === "object") {
+    keysDir = optionsOrKeysDir.keysDir;
+    if (optionsOrKeysDir.keySource !== undefined) {
+      keySource = optionsOrKeysDir.keySource;
+    }
+  }
 
-  if (fs.existsSync(privPemPath)) {
+  const resolvedSource = resolveKeySource(
+    keySource !== undefined ? keySource : process.env.CORE_KEY_SOURCE,
+  );
+
+  if (resolvedSource === "tinfoil") {
+    const baseDir = keysDir || process.env.TINFOIL_KEYS_DIR || DEFAULT_TINFOIL_KEYS_DIR;
+    const keyFolder = path.join(baseDir, keyId);
+    const privPemPath = path.join(keyFolder, "private_key.pem");
+    const pubPemPath = path.join(keyFolder, "public_key.pem");
+
+    if (!fs.existsSync(privPemPath) || !fs.existsSync(pubPemPath)) {
+      throw new Error(
+        `Missing attested Ed25519 key PEM files for '${keyId}' in ${keyFolder} (CORE_KEY_SOURCE=tinfoil).`,
+      );
+    }
+
     const privPem = fs.readFileSync(privPemPath, "utf8");
     const privKeyObj = crypto.createPrivateKey({ key: privPem, format: "pem" });
     const pkcs8Der = privKeyObj.export({ type: "pkcs8", format: "der" });
-    if (pkcs8Der.length < 32) {
-      throw new Error(`Invalid PKCS#8 Ed25519 private key in ${privPemPath}`);
+    const expectedPrefix = Buffer.from(ED25519_PKCS8_PREFIX_HEX, "hex");
+    if (
+      privKeyObj.asymmetricKeyType !== "ed25519" ||
+      pkcs8Der.length !== 48 ||
+      !pkcs8Der.subarray(0, 16).equals(expectedPrefix)
+    ) {
+      throw new Error(`Invalid RFC 8410 PKCS#8 Ed25519 private key in ${privPemPath}`);
     }
-    const secretKey = new Uint8Array(pkcs8Der.subarray(pkcs8Der.length - 32));
+    const secretKey = new Uint8Array(pkcs8Der.subarray(16, 48));
     const derivedPub = ed25519.getPublicKey(secretKey);
     const publicKeyHex = bytesToHex(derivedPub).toLowerCase();
 
-    let spkiHex = rawPublicKeyToSpkiHex(derivedPub);
-    if (fs.existsSync(pubPemPath)) {
-      const pubPem = fs.readFileSync(pubPemPath, "utf8");
-      const pubKeyObj = crypto.createPublicKey({ key: pubPem, format: "pem" });
-      const spkiDer = pubKeyObj.export({ type: "spki", format: "der" });
-      const candidateSpkiHex = bytesToHex(new Uint8Array(spkiDer)).toLowerCase();
-      const rawFromSpki = spkiHexToRawPublicKeyHex(candidateSpkiHex);
-      if (rawFromSpki !== publicKeyHex) {
-        throw new Error(`Public key mismatch between private_key.pem and public_key.pem for ${keyId}`);
-      }
-      spkiHex = candidateSpkiHex;
+    const pubPem = fs.readFileSync(pubPemPath, "utf8");
+    const pubKeyObj = crypto.createPublicKey({ key: pubPem, format: "pem" });
+    if (pubKeyObj.asymmetricKeyType !== "ed25519") {
+      throw new Error(`Invalid Ed25519 public key type in ${pubPemPath}`);
+    }
+    const spkiDer = pubKeyObj.export({ type: "spki", format: "der" });
+    const spkiHex = bytesToHex(new Uint8Array(spkiDer)).toLowerCase();
+    const rawFromSpki = spkiHexToRawPublicKeyHex(spkiHex);
+    if (rawFromSpki !== publicKeyHex) {
+      throw new Error(`Public key mismatch between private_key.pem and public_key.pem for ${keyId}`);
     }
 
-    return {
-      id: keyId,
-      algorithm: "ed25519",
-      format: "https://tinfoil.sh/key/spki/v1",
+    return attachNonEnumerableSecretKey(
+      {
+        id: keyId,
+        algorithm: "ed25519",
+        format: "https://tinfoil.sh/key/spki/v1",
+        publicKey: derivedPub,
+        publicKeyHex,
+        rawHex: publicKeyHex,
+        spkiHex,
+        source: "attested-mount",
+        keySource: "tinfoil",
+      },
       secretKey,
-      publicKey: derivedPub,
-      publicKeyHex,
-      rawHex: publicKeyHex,
-      spkiHex,
-      source: "attested-mount",
-    };
+    );
   }
 
-  // Outside the Tinfoil enclave (e.g. unit tests or local dev), generate a fresh in-memory key pair.
+  // CORE_KEY_SOURCE=boot: generate Ed25519 key pair in memory at boot (never written to disk)
   const secretKey = new Uint8Array(crypto.randomBytes(32));
   const publicKey = ed25519.getPublicKey(secretKey);
   const publicKeyHex = bytesToHex(publicKey).toLowerCase();
   const spkiHex = rawPublicKeyToSpkiHex(publicKey);
 
-  return {
-    id: keyId,
-    algorithm: "ed25519",
-    format: "https://tinfoil.sh/key/spki/v1",
+  return attachNonEnumerableSecretKey(
+    {
+      id: keyId,
+      algorithm: "ed25519",
+      format: "https://tinfoil.sh/key/spki/v1",
+      publicKey,
+      publicKeyHex,
+      rawHex: publicKeyHex,
+      spkiHex,
+      source: "ephemeral-boot",
+      keySource: "boot",
+    },
     secretKey,
-    publicKey,
-    publicKeyHex,
-    rawHex: publicKeyHex,
-    spkiHex,
-    source: "ephemeral-boot",
-  };
+  );
 }
 
 /**
@@ -146,17 +206,41 @@ export function writeTestAttestedKeyPemFiles(baseDir, keyId, seedHex) {
 
 let cachedKeyRing = null;
 
-export function getKeyRing(keysDir) {
-  if (!cachedKeyRing || keysDir !== undefined) {
-    const egressSigning = loadAttestedKeyPair("egress-signing", keysDir);
-    const treeSigning = loadAttestedKeyPair("tree-signing", keysDir);
+export function getKeyRing(optionsOrKeysDir) {
+  let keysDir;
+  let keySource;
+  if (typeof optionsOrKeysDir === "string") {
+    keysDir = optionsOrKeysDir;
+  } else if (optionsOrKeysDir && typeof optionsOrKeysDir === "object") {
+    keysDir = optionsOrKeysDir.keysDir;
+    keySource = optionsOrKeysDir.keySource;
+  }
+
+  const effectiveSource = resolveKeySource(
+    keySource !== undefined ? keySource : process.env.CORE_KEY_SOURCE,
+  );
+
+  if (
+    !cachedKeyRing ||
+    optionsOrKeysDir !== undefined ||
+    cachedKeyRing.keySource !== effectiveSource
+  ) {
+    const egressSigning = loadAttestedKeyPair("egress-signing", {
+      keysDir,
+      keySource: effectiveSource,
+    });
+    const treeSigning = loadAttestedKeyPair("tree-signing", {
+      keysDir,
+      keySource: effectiveSource,
+    });
     const ring = {
+      keySource: effectiveSource,
       "egress-signing": egressSigning,
       "tree-signing": treeSigning,
       egressSigning,
       treeSigning,
     };
-    if (keysDir === undefined) {
+    if (optionsOrKeysDir === undefined) {
       cachedKeyRing = ring;
     }
     return ring;
@@ -164,10 +248,10 @@ export function getKeyRing(keysDir) {
   return cachedKeyRing;
 }
 
-export function resetKeyRingForTests(keysDir) {
+export function resetKeyRingForTests(optionsOrKeysDir) {
   cachedKeyRing = null;
-  if (keysDir !== undefined) {
-    cachedKeyRing = getKeyRing(keysDir);
+  if (optionsOrKeysDir !== undefined) {
+    cachedKeyRing = getKeyRing(optionsOrKeysDir);
   }
   return cachedKeyRing;
 }
@@ -184,15 +268,40 @@ function serializePublicKeyEntry(kp) {
   };
 }
 
+/**
+ * Computes `sha256(canonicalJson({ egress, tree }))` over the 64-hex Ed25519 public keys
+ * so a platform attestation (Google Confidential Space token nonce, or a TDX quote report_data) can bind them.
+ */
+export function computePublicKeysBindingSha256(ring = getKeyRing()) {
+  const egress = ring["egress-signing"].publicKeyHex;
+  const tree = ring["tree-signing"].publicKeyHex;
+  return sha256Hex(canonicalJson({ egress, tree }));
+}
+
 export function getPublicKeysResponse(ring = getKeyRing()) {
   const egress = serializePublicKeyEntry(ring["egress-signing"]);
   const tree = serializePublicKeyEntry(ring["tree-signing"]);
+  const keysDigest = sha256Hex(
+    canonicalJson({
+      egress: egress.publicKeyHex,
+      tree: tree.publicKeyHex,
+    }),
+  );
   return {
     ok: true,
+    keySource: ring.keySource ?? ring["egress-signing"].keySource,
+    keysDigest,
+    publicKeysSha256: keysDigest,
+    bindingSha256: keysDigest,
+    rawPublicKeysSha256: keysDigest,
     keys: {
       "egress-signing": egress,
       "tree-signing": tree,
+      egress: egress.publicKeyHex,
+      tree: tree.publicKeyHex,
     },
+    egress,
+    tree,
     egressSigning: egress,
     treeSigning: tree,
   };

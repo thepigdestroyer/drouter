@@ -6,6 +6,8 @@
  * Ported from `src/lib/gemini/interactions.ts` for `deroute-core` (no cross-boundary imports).
  */
 
+import { canonicalJson } from "./canonical.js";
+
 export const GEMINI_4_ARGON_MODEL_ID = "gemini-4-argon";
 export const DATA_SENT_TO_GOOGLE = "content-free task descriptor only";
 
@@ -290,8 +292,71 @@ export class PlannerBudgetExceededError extends Error {
 
 const OPAQUE_HANDLE_REGEX = /^(?:\$INPUT|\$RESULT_(?:[1-9]|[1-5]\d|6[0-4]))$/;
 const FIXED_SHA256_HEX_REGEX = /^0x[0-9a-f]{64}$/;
-const SAFE_CALL_ID_REGEX =
-  /^(?:call|tc|inter)-(?:[1-9]\d{0,2}|turn-[1-9]\d{0,1}|[a-z_]{2,40}|[1-9]-[a-z_]{2,40}|argon-turn-[1-9])$/;
+export const SAFE_CALL_ID_REGEX =
+  /^(?:call|tc|inter)-(?:[1-9]\d{0,2}|turn-[1-9]\d{0,1}|argon-turn-[1-9]|(?:[1-9]-)?(?:scrub_and_symmetry_mask|verify_two_hop_enclave_and_quorum|search_atlas_hybrid_kb|invoke_attested_enclave|anchor_arc_settlement_with_human_gate)|[1-9]-[1-9]\d{0,1})$/;
+
+export const ALLOWED_HASH_KEYS = new Set([
+  "contentSha256",
+  "routerDigestHex",
+  "enclaveMeasurementHex",
+  "topDocSha256",
+  "outputSha256",
+  "receiptSha256",
+]);
+
+export const ALLOWED_NUMERIC_KEYS = new Set([
+  "inputTokenEstimate",
+  "max_output_tokens",
+  "max_context_tokens",
+  "max_tokens",
+  "bucketQuantumBytes",
+  "bucketBytes",
+  "redactionCount",
+  "mechanicalRedactionCount",
+  "attestedRedactionCount",
+  "plaintextLeakCount",
+  "checksPassed",
+  "checksTotal",
+  "totalDocs",
+  "matchingReceiptsCount",
+  "outputTokenEstimate",
+  ...ALLOWED_REDACTION_COUNT_KEYS,
+]);
+
+export const ALLOWED_BOOLEAN_KEYS = new Set([
+  "background",
+  "store",
+  "humanApproved",
+  "passed",
+  "selfHealed",
+  "attested",
+  "requiresHumanApproval",
+  "stateChangedOnChain",
+  "applyAttestedFilter",
+  ...ALLOWED_VERIFICATION_KEYS,
+]);
+
+export const ALLOWED_ARRAY_KEYS = new Set([
+  "input",
+  "tools",
+  "allowedTools",
+  "required",
+  "enum",
+  "messages",
+  "tool_calls",
+]);
+
+const ALLOWED_STRING_ARRAY_KEYS = new Set([
+  "allowedTools",
+  "required",
+  "enum",
+]);
+
+const ALLOWED_JSON_STRING_KEYS = new Set([
+  "text",
+  "content",
+  "result",
+]);
 
 const ALLOWED_STATIC_SCHEMA_DESCRIPTIONS = new Set([
   SPLIT_KNOWLEDGE_SYSTEM_INSTRUCTION,
@@ -390,6 +455,7 @@ export const ALLOWED_CONTENT_FREE_KEYS = new Set([
   "model",
   "thinking_level",
   "background",
+  "store",
   "max_output_tokens",
   "max_context_tokens",
   "implicit_caching",
@@ -503,17 +569,11 @@ const ALLOWED_REQUIRED_PARAM_NAMES = new Set([
   "humanApproved",
 ]);
 
-function hasSmuggledAsciiInHex(hexWithoutPrefix) {
-  if (/^\d{64}$/.test(hexWithoutPrefix)) {
-    return true;
-  }
-  if (/^([0-9a-f]{1,4})\1{15,}$/.test(hexWithoutPrefix)) {
-    return true;
-  }
+function hasAsciiRunOrCount(byteValues) {
   let consecutivePrintableAscii = 0;
   let totalPrintableLettersOrSpaces = 0;
-  for (let i = 0; i < hexWithoutPrefix.length; i += 2) {
-    const byteVal = parseInt(hexWithoutPrefix.slice(i, i + 2), 16);
+  for (let i = 0; i < byteValues.length; i++) {
+    const byteVal = byteValues[i];
     if (byteVal >= 0x20 && byteVal <= 0x7e) {
       consecutivePrintableAscii += 1;
       if (
@@ -533,6 +593,64 @@ function hasSmuggledAsciiInHex(hexWithoutPrefix) {
   return totalPrintableLettersOrSpaces >= 18;
 }
 
+function hasSmuggledAsciiInHex(hexWithoutPrefix) {
+  if (/^\d{64}$/.test(hexWithoutPrefix)) {
+    return true;
+  }
+  if (/^([0-9a-f]{1,4})\1{15,}$/.test(hexWithoutPrefix)) {
+    return true;
+  }
+  const bytes = [];
+  const freq = new Map();
+  let maxFreq = 0;
+  for (let i = 0; i < hexWithoutPrefix.length; i += 2) {
+    const byteVal = parseInt(hexWithoutPrefix.slice(i, i + 2), 16);
+    bytes.push(byteVal);
+    const count = (freq.get(byteVal) ?? 0) + 1;
+    freq.set(byteVal, count);
+    if (count > maxFreq) {
+      maxFreq = count;
+    }
+  }
+  if (freq.size < 12 || maxFreq >= 6) {
+    return true;
+  }
+  if (hasAsciiRunOrCount(bytes)) {
+    return true;
+  }
+  const strippedNulls = bytes.filter((b) => b !== 0x00 && b !== 0xff);
+  if (hasAsciiRunOrCount(strippedNulls)) {
+    return true;
+  }
+  let consecutiveHighBitText = 0;
+  let totalHighBitLettersOrSpaces = 0;
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    const low7 = b & 0x7f;
+    const isLetterOrSpace =
+      low7 === 0x20 ||
+      (low7 >= 0x41 && low7 <= 0x5a) ||
+      (low7 >= 0x61 && low7 <= 0x7a);
+    const isDigitOrCommonPunct =
+      (low7 >= 0x30 && low7 <= 0x39) ||
+      low7 === 0x2d ||
+      low7 === 0x5f ||
+      low7 === 0x2e;
+    if ((b & 0x80) !== 0 && (isLetterOrSpace || isDigitOrCommonPunct)) {
+      consecutiveHighBitText += 1;
+      if (isLetterOrSpace) {
+        totalHighBitLettersOrSpaces += 1;
+      }
+      if (consecutiveHighBitText >= 8) {
+        return true;
+      }
+    } else {
+      consecutiveHighBitText = 0;
+    }
+  }
+  return totalHighBitLettersOrSpaces >= 16;
+}
+
 export function isContentFreeString(value, keyContext) {
   if (typeof value !== "string" || value.length === 0) {
     return false;
@@ -541,6 +659,9 @@ export function isContentFreeString(value, keyContext) {
     return true;
   }
   if (FIXED_SHA256_HEX_REGEX.test(value)) {
+    if (!keyContext || !ALLOWED_HASH_KEYS.has(keyContext)) {
+      return false;
+    }
     return !hasSmuggledAsciiInHex(value.slice(2));
   }
   if (keyContext === "required" && ALLOWED_REQUIRED_PARAM_NAMES.has(value)) {
@@ -565,45 +686,103 @@ export function isContentFreeString(value, keyContext) {
   return ALLOWED_CONTENT_FREE_ENUMS.has(value);
 }
 
+function isPlainObject(value) {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.prototype.toString.call(value) !== "[object Object]"
+  ) {
+    return false;
+  }
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
 /**
  * Egress firewall (D1): recursively inspects any outbound value before it leaves
  * for Google Gemini. Rejects any string not in the strict allowlist of opaque
- * handles (`$INPUT`, `$RESULT_<n>`), verified 32-byte lowercase SHA-256 hex hashes,
- * or allowlisted enum literals, and rejects any unallowlisted object keys or JSON-smuggled content.
+ * handles (`$INPUT`, `$RESULT_<n>`), verified 32-byte lowercase SHA-256 hex hashes
+ * under allowlisted hash keys, or allowlisted enum literals, and rejects any
+ * unallowlisted object keys, numbers, arrays, or JSON-smuggled content.
  */
-export function assertContentFree(value, path = "$", keyContext) {
+export function assertContentFree(
+  value,
+  path = "$",
+  keyContext,
+  depth = 0,
+  insideJsonString = false,
+) {
+  if (depth > 8) {
+    throw new ContentFreeEgressError("<max_depth_exceeded>", path);
+  }
+  if (depth === 0) {
+    if (!isPlainObject(value)) {
+      throw new ContentFreeEgressError(String(value), path);
+    }
+  }
   if (value === null || value === undefined) {
-    return;
+    throw new ContentFreeEgressError(String(value), path);
   }
   const valueType = typeof value;
   if (valueType === "boolean") {
+    if (!keyContext || !ALLOWED_BOOLEAN_KEYS.has(keyContext)) {
+      throw new ContentFreeEgressError(String(value), path);
+    }
     return;
   }
   if (valueType === "number") {
-    if (!Number.isFinite(value)) {
+    if (
+      !keyContext ||
+      !ALLOWED_NUMERIC_KEYS.has(keyContext) ||
+      !Number.isInteger(value) ||
+      Object.is(value, -0) ||
+      value < 0 ||
+      value > MAX_TOKEN_BUCKET
+    ) {
+      throw new ContentFreeEgressError(String(value), path);
+    }
+    if (
+      ALLOWED_REDACTION_COUNT_KEYS.has(keyContext) &&
+      value > MAX_REDACTION_COUNT_PER_KIND
+    ) {
       throw new ContentFreeEgressError(String(value), path);
     }
     return;
   }
   if (valueType === "string") {
-    const trimmed = value.trim();
-    if (trimmed.length === 0) {
+    if (value.length === 0 || value.trim().length === 0) {
       throw new ContentFreeEgressError("<empty_string>", path);
     }
-    if (
-      (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
-      (trimmed.startsWith("[") && trimmed.endsWith("]"))
-    ) {
+    if (value.startsWith("{") || value.startsWith("[")) {
+      if (
+        insideJsonString ||
+        !keyContext ||
+        !ALLOWED_JSON_STRING_KEYS.has(keyContext) ||
+        !value.startsWith("{") ||
+        !value.endsWith("}")
+      ) {
+        throw new ContentFreeEgressError(value, path);
+      }
       let parsed;
       try {
-        parsed = JSON.parse(trimmed);
+        parsed = JSON.parse(value);
       } catch {
         throw new ContentFreeEgressError(value, path);
       }
-      if (!parsed || typeof parsed !== "object") {
+      if (!isPlainObject(parsed)) {
         throw new ContentFreeEgressError(value, path);
       }
-      assertContentFree(parsed, `${path}(json)`);
+      let canonical;
+      try {
+        canonical = canonicalJson(parsed);
+      } catch {
+        throw new ContentFreeEgressError(value, path);
+      }
+      if (canonical !== value) {
+        throw new ContentFreeEgressError(value, path);
+      }
+      assertContentFree(parsed, `${path}(json)`, undefined, depth + 1, true);
       return;
     }
     if (!isContentFreeString(value, keyContext)) {
@@ -612,26 +791,67 @@ export function assertContentFree(value, path = "$", keyContext) {
     return;
   }
   if (Array.isArray(value)) {
+    if (
+      !keyContext ||
+      !ALLOWED_ARRAY_KEYS.has(keyContext) ||
+      value.length > 32
+    ) {
+      throw new ContentFreeEgressError("<disallowed_array>", path);
+    }
+    const expectsStringElements = ALLOWED_STRING_ARRAY_KEYS.has(keyContext);
     for (let i = 0; i < value.length; i++) {
-      assertContentFree(value[i], `${path}[${i}]`, keyContext);
+      const item = value[i];
+      if (expectsStringElements) {
+        if (typeof item !== "string") {
+          throw new ContentFreeEgressError(String(item), `${path}[${i}]`);
+        }
+      } else if (!isPlainObject(item)) {
+        throw new ContentFreeEgressError(String(item), `${path}[${i}]`);
+      }
+      assertContentFree(
+        item,
+        `${path}[${i}]`,
+        keyContext,
+        depth + 1,
+        insideJsonString,
+      );
     }
     return;
   }
-  if (
-    valueType === "object" &&
-    Object.prototype.toString.call(value) === "[object Object]"
-  ) {
+  if (isPlainObject(value)) {
     if (Object.getOwnPropertySymbols(value).length > 0) {
       throw new ContentFreeEgressError("<symbol_property>", path);
     }
     if (typeof value.toJSON === "function") {
       throw new ContentFreeEgressError("<custom_toJSON>", path);
     }
-    for (const [k, v] of Object.entries(value)) {
-      if (!ALLOWED_CONTENT_FREE_KEYS.has(k)) {
+    const ownKeys = Object.getOwnPropertyNames(value);
+    if (ownKeys.length > 64) {
+      throw new ContentFreeEgressError("<too_many_keys>", path);
+    }
+    for (const k of ownKeys) {
+      if (
+        k === "__proto__" ||
+        k === "constructor" ||
+        k === "prototype" ||
+        !ALLOWED_CONTENT_FREE_KEYS.has(k)
+      ) {
         throw new ContentFreeEgressError(k, `${path}.${k}`);
       }
-      assertContentFree(v, `${path}.${k}`, k);
+      const desc = Object.getOwnPropertyDescriptor(value, k);
+      if (!desc || !("value" in desc) || desc.enumerable !== true) {
+        throw new ContentFreeEgressError(k, `${path}.${k}`);
+      }
+      if (desc.value === undefined) {
+        continue;
+      }
+      assertContentFree(
+        desc.value,
+        `${path}.${k}`,
+        k,
+        depth + 1,
+        insideJsonString,
+      );
     }
     return;
   }
@@ -694,7 +914,7 @@ export function bucketTaskDescriptor(raw) {
   }
 
   const allowedTools = Array.isArray(raw.allowedTools)
-    ? Array.from(new Set(raw.allowedTools.filter((t) => ALLOWED_PLANNER_TOOLS.includes(t))))
+    ? ALLOWED_PLANNER_TOOLS.filter((t) => raw.allowedTools.includes(t))
     : [...ALLOWED_PLANNER_TOOLS];
 
   return {
@@ -705,6 +925,10 @@ export function bucketTaskDescriptor(raw) {
     verification,
     allowedTools: allowedTools.length > 0 ? allowedTools : [...ALLOWED_PLANNER_TOOLS],
   };
+}
+
+function previewToken(v) {
+  return String(v).replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 32);
 }
 
 const REQUIRED_DESCRIPTOR_KEYS = [
@@ -729,12 +953,7 @@ const ALLOWED_DESCRIPTOR_KEY_SET = new Set(REQUIRED_DESCRIPTOR_KEYS);
  * - Passes `assertContentFree`
  */
 export function validateTaskDescriptor(input) {
-  if (
-    !input ||
-    typeof input !== "object" ||
-    Array.isArray(input) ||
-    Object.prototype.toString.call(input) !== "[object Object]"
-  ) {
+  if (!isPlainObject(input)) {
     return {
       valid: false,
       errors: ["Request body must be a non-null plain JSON object."],
@@ -743,23 +962,22 @@ export function validateTaskDescriptor(input) {
 
   // Unwrap `{ taskDescriptor: { ... } }` if that is the only key on the outer object.
   let candidate = input;
-  const outerKeys = Object.keys(input);
+  const outerKeys = Object.getOwnPropertyNames(input);
   if (outerKeys.includes("taskDescriptor")) {
     if (outerKeys.length !== 1) {
       return {
         valid: false,
         errors: [
-          `Unexpected outer fields alongside 'taskDescriptor': ${outerKeys.filter((k) => k !== "taskDescriptor").join(", ")}.`,
+          `Unexpected outer fields alongside 'taskDescriptor': ${outerKeys
+            .filter((k) => k !== "taskDescriptor")
+            .slice(0, 8)
+            .map(previewToken)
+            .join(", ")}.`,
         ],
       };
     }
     candidate = input.taskDescriptor;
-    if (
-      !candidate ||
-      typeof candidate !== "object" ||
-      Array.isArray(candidate) ||
-      Object.prototype.toString.call(candidate) !== "[object Object]"
-    ) {
+    if (!isPlainObject(candidate)) {
       return {
         valid: false,
         errors: ["'taskDescriptor' must be a non-null plain JSON object."],
@@ -768,11 +986,11 @@ export function validateTaskDescriptor(input) {
   }
 
   const errors = [];
-  const candidateKeys = Object.keys(candidate);
+  const candidateKeys = Object.getOwnPropertyNames(candidate);
 
   for (const key of candidateKeys) {
     if (!ALLOWED_DESCRIPTOR_KEY_SET.has(key)) {
-      errors.push(`Unexpected field '${key}' on TaskDescriptor.`);
+      errors.push(`Unexpected field '${previewToken(key)}' on TaskDescriptor.`);
     }
   }
   for (const reqKey of REQUIRED_DESCRIPTOR_KEYS) {
@@ -783,28 +1001,23 @@ export function validateTaskDescriptor(input) {
 
   if (!VALID_TASK_KINDS.includes(candidate.taskKind)) {
     errors.push(
-      `Invalid taskKind '${String(candidate.taskKind)}'. Must be one of: ${VALID_TASK_KINDS.join(", ")}.`,
+      `Invalid taskKind '${previewToken(candidate.taskKind)}'. Must be one of: ${VALID_TASK_KINDS.join(", ")}.`,
     );
   }
 
   if (candidate.inputHandle !== "$INPUT") {
     errors.push(
-      `Invalid inputHandle '${String(candidate.inputHandle)}'. Must be the literal handle '$INPUT'.`,
+      `Invalid inputHandle '${previewToken(candidate.inputHandle)}'. Must be the literal handle '$INPUT'.`,
     );
   }
 
   if (!isPowerOfTwo(candidate.inputTokenEstimate)) {
     errors.push(
-      `Invalid inputTokenEstimate '${String(candidate.inputTokenEstimate)}'. Must be a power-of-two integer bucket between 1 and ${MAX_TOKEN_BUCKET}.`,
+      `Invalid inputTokenEstimate '${previewToken(candidate.inputTokenEstimate)}'. Must be a power-of-two integer bucket between 1 and ${MAX_TOKEN_BUCKET}.`,
     );
   }
 
-  if (
-    !candidate.redactionCounts ||
-    typeof candidate.redactionCounts !== "object" ||
-    Array.isArray(candidate.redactionCounts) ||
-    Object.prototype.toString.call(candidate.redactionCounts) !== "[object Object]"
-  ) {
+  if (!isPlainObject(candidate.redactionCounts)) {
     errors.push("'redactionCounts' must be a non-null plain object.");
   } else {
     const rcEntries = Object.entries(candidate.redactionCounts);
@@ -813,7 +1026,7 @@ export function validateTaskDescriptor(input) {
     }
     for (const [k, v] of rcEntries) {
       if (!ALLOWED_REDACTION_COUNT_KEYS.has(k)) {
-        errors.push(`Invalid redactionCounts key '${k}'.`);
+        errors.push(`Invalid redactionCounts key '${previewToken(k)}'.`);
       }
       if (
         typeof v !== "number" ||
@@ -822,18 +1035,13 @@ export function validateTaskDescriptor(input) {
         v > MAX_REDACTION_COUNT_PER_KIND
       ) {
         errors.push(
-          `Invalid redactionCounts['${k}'] = ${String(v)}. Must be an integer capped in 0..${MAX_REDACTION_COUNT_PER_KIND}.`,
+          `Invalid redactionCounts['${previewToken(k)}'] = ${previewToken(v)}. Must be an integer capped in 0..${MAX_REDACTION_COUNT_PER_KIND}.`,
         );
       }
     }
   }
 
-  if (
-    !candidate.verification ||
-    typeof candidate.verification !== "object" ||
-    Array.isArray(candidate.verification) ||
-    Object.prototype.toString.call(candidate.verification) !== "[object Object]"
-  ) {
+  if (!isPlainObject(candidate.verification)) {
     errors.push("'verification' must be a non-null plain object.");
   } else {
     const verEntries = Object.entries(candidate.verification);
@@ -842,10 +1050,10 @@ export function validateTaskDescriptor(input) {
     }
     for (const [k, v] of verEntries) {
       if (!ALLOWED_VERIFICATION_KEYS.has(k)) {
-        errors.push(`Invalid verification key '${k}'.`);
+        errors.push(`Invalid verification key '${previewToken(k)}'.`);
       }
       if (typeof v !== "boolean") {
-        errors.push(`Invalid verification['${k}']: must be a boolean.`);
+        errors.push(`Invalid verification['${previewToken(k)}']: must be a boolean.`);
       }
     }
   }
@@ -856,9 +1064,9 @@ export function validateTaskDescriptor(input) {
     const seen = new Set();
     for (const tool of candidate.allowedTools) {
       if (typeof tool !== "string" || !ALLOWED_PLANNER_TOOLS.includes(tool)) {
-        errors.push(`Invalid tool '${String(tool)}' in allowedTools.`);
+        errors.push(`Invalid tool '${previewToken(tool)}' in allowedTools.`);
       } else if (seen.has(tool)) {
-        errors.push(`Duplicate tool '${tool}' in allowedTools.`);
+        errors.push(`Duplicate tool '${previewToken(tool)}' in allowedTools.`);
       } else {
         seen.add(tool);
       }
@@ -886,7 +1094,7 @@ export function validateTaskDescriptor(input) {
       inputTokenEstimate: candidate.inputTokenEstimate,
       redactionCounts: { ...candidate.redactionCounts },
       verification: { ...candidate.verification },
-      allowedTools: [...candidate.allowedTools],
+      allowedTools: ALLOWED_PLANNER_TOOLS.filter((t) => candidate.allowedTools.includes(t)),
     },
   };
 }

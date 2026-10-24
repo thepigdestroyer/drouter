@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import http from "node:http";
 import { pathToFileURL } from "node:url";
 import { getWholeKnowledgeCorpus } from "./corpus.js";
@@ -10,7 +11,10 @@ import {
 } from "./firewall.js";
 import { getKeyRing, getPublicKeysResponse } from "./keys.js";
 import { planWithGemini } from "./planner.js";
-import { signTreeHeadWithAttestedKey } from "./receipts.js";
+import {
+  TreeHeadStateVerificationError,
+  verifyAndSignTreeHead,
+} from "./receipts.js";
 
 export const ALLOWED_CORS_ORIGINS = new Set([
   "https://drouter-demo.vercel.app",
@@ -58,13 +62,83 @@ class PayloadTooLargeError extends Error {
   }
 }
 
+/**
+ * Scans a syntactically valid RFC 8259 JSON string and throws `SyntaxError`
+ * if any JSON object contains duplicate keys (including Unicode-escaped equivalents).
+ */
+export function assertNoDuplicateJsonKeys(jsonText) {
+  const stack = [];
+  let i = 0;
+  const len = jsonText.length;
+
+  while (i < len) {
+    const ch = jsonText[i];
+    if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") {
+      i += 1;
+      continue;
+    }
+    if (ch === "{") {
+      stack.push({ type: "object", keys: new Set() });
+      i += 1;
+      continue;
+    }
+    if (ch === "[") {
+      stack.push({ type: "array" });
+      i += 1;
+      continue;
+    }
+    if (ch === "}" || ch === "]") {
+      stack.pop();
+      i += 1;
+      continue;
+    }
+    if (ch === '"') {
+      const start = i;
+      i += 1;
+      while (i < len) {
+        const c = jsonText[i];
+        if (c === "\\") {
+          i += 2;
+          continue;
+        }
+        if (c === '"') {
+          i += 1;
+          break;
+        }
+        i += 1;
+      }
+      const rawStringLiteral = jsonText.slice(start, i);
+      let j = i;
+      while (
+        j < len &&
+        (jsonText[j] === " " ||
+          jsonText[j] === "\t" ||
+          jsonText[j] === "\n" ||
+          jsonText[j] === "\r")
+      ) {
+        j += 1;
+      }
+      const top = stack[stack.length - 1];
+      if (top && top.type === "object" && jsonText[j] === ":") {
+        const decodedKey = JSON.parse(rawStringLiteral);
+        if (top.keys.has(decodedKey)) {
+          throw new SyntaxError(`Duplicate JSON object key: ${decodedKey}`);
+        }
+        top.keys.add(decodedKey);
+      }
+      continue;
+    }
+    i += 1;
+  }
+}
+
 function readBoundedJsonBody(req, maxBytes = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     const contentLengthHeader = req.headers["content-length"];
     if (contentLengthHeader !== undefined) {
       const declaredLen = Number(contentLengthHeader);
-      if (!Number.isFinite(declaredLen) || declaredLen > maxBytes) {
-        req.resume();
+      if (!Number.isFinite(declaredLen) || declaredLen < 0 || declaredLen > maxBytes) {
+        req.pause?.();
         reject(new PayloadTooLargeError(maxBytes));
         return;
       }
@@ -79,7 +153,7 @@ function readBoundedJsonBody(req, maxBytes = MAX_BODY_BYTES) {
       totalBytes += chunk.length;
       if (totalBytes > maxBytes) {
         aborted = true;
-        req.resume();
+        req.pause?.();
         reject(new PayloadTooLargeError(maxBytes));
         return;
       }
@@ -102,12 +176,41 @@ function readBoundedJsonBody(req, maxBytes = MAX_BODY_BYTES) {
       try {
         const text = Buffer.concat(chunks).toString("utf8");
         const parsed = JSON.parse(text);
+        assertNoDuplicateJsonKeys(text);
         resolve(parsed);
       } catch {
         reject(new SyntaxError("Malformed JSON request body."));
       }
     });
   });
+}
+
+/**
+ * Constant-time Bearer token check against `CORE_OPERATOR_TOKEN`.
+ * Always fails closed when `CORE_OPERATOR_TOKEN` is unset or empty.
+ */
+export function verifyOperatorBearer(
+  req,
+  expectedSecret = process.env.CORE_OPERATOR_TOKEN,
+) {
+  if (typeof expectedSecret !== "string" || expectedSecret.length === 0) {
+    return false;
+  }
+  const auth =
+    typeof req?.headers?.authorization === "string"
+      ? req.headers.authorization
+      : "";
+  if (!auth.startsWith("Bearer ")) {
+    return false;
+  }
+  const candidate = auth.slice(7);
+  if (candidate.length === 0) {
+    return false;
+  }
+  const candDigest = crypto.createHash("sha256").update(candidate, "utf8").digest();
+  const expDigest = crypto.createHash("sha256").update(expectedSecret, "utf8").digest();
+  const digestsMatch = crypto.timingSafeEqual(candDigest, expDigest);
+  return digestsMatch && candidate.length === expectedSecret.length;
 }
 
 const ALLOWED_PATHS = new Set([
@@ -169,7 +272,12 @@ export async function handleCoreRequest(req, res, deps = {}) {
     return;
   }
 
-  const keyRing = deps.keyRing ?? getKeyRing();
+  const keyRing =
+    deps.keyRing ??
+    getKeyRing({
+      keySource: deps.keySource,
+      keysDir: deps.keysDir,
+    });
 
   if (pathname === "/health") {
     if (method !== "GET") {
@@ -187,6 +295,7 @@ export async function handleCoreRequest(req, res, deps = {}) {
         ok: true,
         service: "deroute-core",
         version: "1.0.0",
+        keySource: keyRing.keySource ?? keyRing["egress-signing"].keySource,
         enclaveKeys: {
           egressSigning: keyRing["egress-signing"].source,
           treeSigning: keyRing["tree-signing"].source,
@@ -251,11 +360,12 @@ export async function handleCoreRequest(req, res, deps = {}) {
       body = await readBoundedJsonBody(req);
     } catch (err) {
       if (err instanceof PayloadTooLargeError) {
+        res.once("finish", () => req.destroy());
         sendJson(
           res,
           413,
           { ok: false, error: "payload_too_large", message: err.message },
-          cors.headers,
+          { ...cors.headers, Connection: "close" },
         );
         return;
       }
@@ -362,16 +472,35 @@ export async function handleCoreRequest(req, res, deps = {}) {
       sendJson(res, 400, { ok: false, error: "query_parameters_forbidden" }, cors.headers);
       return;
     }
+    const expectedToken =
+      deps.operatorToken !== undefined
+        ? deps.operatorToken
+        : process.env.CORE_OPERATOR_TOKEN;
+    if (!verifyOperatorBearer(req, expectedToken)) {
+      sendJson(
+        res,
+        401,
+        {
+          ok: false,
+          error: "unauthorized",
+          message: "Valid CORE_OPERATOR_TOKEN Bearer authentication is required.",
+        },
+        cors.headers,
+      );
+      return;
+    }
+
     let body;
     try {
       body = await readBoundedJsonBody(req);
     } catch (err) {
       if (err instanceof PayloadTooLargeError) {
+        res.once("finish", () => req.destroy());
         sendJson(
           res,
           413,
           { ok: false, error: "payload_too_large", message: err.message },
-          cors.headers,
+          { ...cors.headers, Connection: "close" },
         );
         return;
       }
@@ -385,7 +514,10 @@ export async function handleCoreRequest(req, res, deps = {}) {
     }
 
     try {
-      const signed = signTreeHeadWithAttestedKey(body, keyRing["tree-signing"]);
+      const signed = await verifyAndSignTreeHead(body, {
+        keyPair: keyRing["tree-signing"],
+        db: deps.db,
+      });
       sendJson(
         res,
         200,
@@ -420,6 +552,19 @@ export async function handleCoreRequest(req, res, deps = {}) {
         );
         return;
       }
+      if (err instanceof TreeHeadStateVerificationError) {
+        sendJson(
+          res,
+          422,
+          {
+            ok: false,
+            error: "tree_head_state_mismatch",
+            message: err.message,
+          },
+          cors.headers,
+        );
+        return;
+      }
       sendJson(
         res,
         500,
@@ -436,8 +581,20 @@ export async function handleCoreRequest(req, res, deps = {}) {
 }
 
 export function createCoreServer(deps = {}) {
-  return http.createServer((req, res) => {
-    handleCoreRequest(req, res, deps).catch(() => {
+  // Eagerly resolve keyRing at boot/creation so missing or unknown CORE_KEY_SOURCE refuses to start.
+  const resolvedKeyRing =
+    deps.keyRing ??
+    getKeyRing({
+      keySource: deps.keySource,
+      keysDir: deps.keysDir,
+    });
+  const serverDeps = {
+    ...deps,
+    keyRing: resolvedKeyRing,
+  };
+
+  const server = http.createServer((req, res) => {
+    handleCoreRequest(req, res, serverDeps).catch(() => {
       if (!res.headersSent) {
         sendJson(res, 500, { ok: false, error: "internal_error" });
       } else {
@@ -445,6 +602,13 @@ export function createCoreServer(deps = {}) {
       }
     });
   });
+
+  server.headersTimeout = 10_000;
+  server.requestTimeout = 25_000;
+  server.keepAliveTimeout = 5_000;
+  server.timeout = 30_000;
+
+  return server;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -12,6 +12,7 @@ import {
   MAX_PLANNER_WALL_CLOCK_MS,
   PlannerBudgetExceededError,
   PrivacyInvariantViolationError,
+  SAFE_CALL_ID_REGEX,
   sanitizeUntrustedModelOutput,
   SPLIT_KNOWLEDGE_SYSTEM_INSTRUCTION,
   TaskDescriptorValidationError,
@@ -19,6 +20,14 @@ import {
 } from "./firewall.js";
 import { getKeyRing } from "./keys.js";
 import { signGeminiEgressReceipt } from "./receipts.js";
+
+const ALLOWED_INTERACTION_STATUSES = new Set([
+  "completed",
+  "in_progress",
+  "requires_action",
+  "failed",
+  "cancelled",
+]);
 
 async function withWallClockBudget(promise, startedAtMs, budgetMs) {
   const elapsed = Date.now() - startedAtMs;
@@ -56,6 +65,7 @@ export function buildGeminiInteractionsRequest(descriptor) {
   const createRequest = {
     model: GEMINI_4_ARGON_MODEL_ID,
     background: true,
+    store: false,
     system_instruction: SPLIT_KNOWLEDGE_SYSTEM_INSTRUCTION,
     generation_config: {
       thinking_level: "medium",
@@ -126,16 +136,23 @@ export async function planWithGemini({
   );
 
   const startedAt = Date.now();
+  const abortController = new AbortController();
 
   try {
     // Re-assert content-free firewall immediately prior to network transmission.
     assertContentFree(createRequest, "$.createRequest");
 
+    const requestOptions = {
+      timeout_ms: effectiveBudgetMs,
+      retries: { strategy: "none" },
+      fetch_options: { signal: abortController.signal },
+    };
+
     const interaction = await withWallClockBudget(
-      client.interactions.create(createRequest),
+      client.interactions.create(createRequest, requestOptions),
       startedAt,
       effectiveBudgetMs,
-    );
+    ).finally(() => abortController.abort());
 
     const rawSteps = Array.isArray(interaction?.steps) ? interaction.steps : [];
     const fnCalls = rawSteps.filter(
@@ -155,9 +172,15 @@ export async function planWithGemini({
         call.arguments ?? {},
         validatedDescriptor.allowedTools,
       );
+      const safeCallId =
+        typeof call.id === "string" &&
+        SAFE_CALL_ID_REGEX.test(call.id) &&
+        !/\d{4,}/.test(call.id)
+          ? call.id
+          : `call-${idx + 1}`;
       validatedSteps.push({
         step: idx + 1,
-        id: typeof call.id === "string" && call.id.length <= 64 ? call.id : `call-${idx + 1}`,
+        id: safeCallId,
         tool: toolName,
         arguments: sanitizedArgs,
       });
@@ -183,13 +206,25 @@ export async function planWithGemini({
       sanitizeUntrustedModelOutput(rawOutputText) ||
       `Gemini 4 Argon control-plane plan verified (${validatedSteps.length} tool call(s) over content-free handles).`;
 
+    const safeInteractionId =
+      typeof interaction?.id === "string" &&
+      SAFE_CALL_ID_REGEX.test(interaction.id) &&
+      !/\d{4,}/.test(interaction.id)
+        ? interaction.id
+        : undefined;
+    const safeStatus =
+      typeof interaction?.status === "string" &&
+      ALLOWED_INTERACTION_STATUSES.has(interaction.status)
+        ? interaction.status
+        : "completed";
+
     return {
       ok: true,
       statusCode: 200,
       planner: GEMINI_4_ARGON_MODEL_ID,
       model: GEMINI_4_ARGON_MODEL_ID,
-      interactionId: typeof interaction?.id === "string" ? interaction.id : undefined,
-      status: typeof interaction?.status === "string" ? interaction.status : "completed",
+      interactionId: safeInteractionId,
+      status: safeStatus,
       dataSentToGoogle: DATA_SENT_TO_GOOGLE,
       egressFirewallVerified: true,
       plan: {

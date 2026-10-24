@@ -281,6 +281,146 @@ describe("Gemini 4 Argon Config Contract, TaskDescriptor & Content-Free Egress F
     expect(() => assertContentFree("$RESULT_1_secret")).toThrow(
       ContentFreeEgressError,
     );
+
+    // 6. CRITICAL-2 Bypass 1: Duplicate-key, whitespace, Unicode-escape, non-canonical key order, and array smuggling in JSON strings
+    expect(() =>
+      assertContentFree({
+        text: '{"taskKind":"Patient Jane Doe SSN 123-45-6789","taskKind":"analyze"}',
+      }),
+    ).toThrow(ContentFreeEgressError);
+    expect(() =>
+      assertContentFree({
+        text: '{  "taskKind": "analyze" }',
+      }),
+    ).toThrow(ContentFreeEgressError);
+    expect(() =>
+      assertContentFree({
+        text: '{"\\u0074askKind":"analyze"}',
+      }),
+    ).toThrow(ContentFreeEgressError);
+    expect(() =>
+      assertContentFree({
+        text: '{"taskKind":"analyze","inputHandle":"$INPUT"}',
+      }),
+    ).toThrow(ContentFreeEgressError);
+    expect(() =>
+      assertContentFree({
+        text: '["ok"]',
+      }),
+    ).toThrow(ContentFreeEgressError);
+
+    // 7. CRITICAL-2 Bypass 2: UTF-16LE / null-interleaved ASCII hex, high-bit ASCII hex, and 0x hashes under non-hash keys
+    const utf16leSmuggled = `0x${Buffer.from(
+      "Patient Jane Doe",
+      "utf16le",
+    ).toString("hex")}`;
+    expect(utf16leSmuggled).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(() =>
+      assertContentFree({ contentSha256: utf16leSmuggled }),
+    ).toThrow(ContentFreeEgressError);
+
+    const highBitSmuggled = `0x${Buffer.from(
+      Array.from(
+        Buffer.from("Patient Jane Doe SSN 123-45-6789", "utf8"),
+        (b) => b | 0x80,
+      ),
+    ).toString("hex")}`;
+    expect(highBitSmuggled).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(() =>
+      assertContentFree({ contentSha256: highBitSmuggled }),
+    ).toThrow(ContentFreeEgressError);
+
+    expect(() =>
+      assertContentFree({
+        text: "0x9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      }),
+    ).toThrow(ContentFreeEgressError);
+    expect(() =>
+      assertContentFree({
+        content:
+          "0x9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      }),
+    ).toThrow(ContentFreeEgressError);
+
+    // 8. CRITICAL-2 Bypass 3: Arbitrary snake_case English text in SAFE_CALL_ID_REGEX
+    expect(() =>
+      assertContentFree({
+        id: "call-patient_jane_doe_has_hiv_and_diabetes",
+      }),
+    ).toThrow(ContentFreeEgressError);
+    expect(() =>
+      assertContentFree({
+        call_id: "tc-leaked_secret_diagnosis",
+      }),
+    ).toThrow(ContentFreeEgressError);
+    expect(() =>
+      assertContentFree({
+        previous_interaction_id: "inter-bad_patient_record",
+      }),
+    ).toThrow(ContentFreeEgressError);
+
+    // 9. CRITICAL-2 Bypass 4: Numbers encoding text, floats, negative zero, large integers, and numbers under non-numeric keys
+    expect(() =>
+      assertContentFree({
+        content: [80, 97, 116, 105, 101, 110, 116],
+      }),
+    ).toThrow(ContentFreeEgressError);
+    expect(() => assertContentFree({ content: 80 })).toThrow(
+      ContentFreeEgressError,
+    );
+    expect(() =>
+      assertContentFree({ inputTokenEstimate: 79559981709933 }),
+    ).toThrow(ContentFreeEgressError);
+    expect(() =>
+      assertContentFree({ inputTokenEstimate: 0.48656111 }),
+    ).toThrow(ContentFreeEgressError);
+    expect(() => assertContentFree({ inputTokenEstimate: -0 })).toThrow(
+      ContentFreeEgressError,
+    );
+    expect(() => assertContentFree({ EMAIL: 6 })).toThrow(
+      ContentFreeEgressError,
+    );
+
+    // 10. CRITICAL-2 Bypass 5: Nested arrays, boolean/number arrays, depth cap, non-plain prototypes, and non-enumerable properties
+    expect(() =>
+      assertContentFree({ input: [[{ type: "text", text: "ok" }]] }),
+    ).toThrow(ContentFreeEgressError);
+    expect(() =>
+      assertContentFree({ input: [true, false, true] }),
+    ).toThrow(ContentFreeEgressError);
+    expect(() =>
+      assertContentFree({ allowedTools: [1, 2, 3] }),
+    ).toThrow(ContentFreeEgressError);
+    expect(() => assertContentFree({ content: ["ok"] })).toThrow(
+      ContentFreeEgressError,
+    );
+    expect(() =>
+      assertContentFree({
+        allowedTools: new Array(33).fill("scrub_and_symmetry_mask"),
+      }),
+    ).toThrow(ContentFreeEgressError);
+
+    const protoObj = Object.create({ taskKind: "analyze" }) as Record<
+      string,
+      unknown
+    >;
+    protoObj.status = "ok";
+    expect(() => assertContentFree(protoObj)).toThrow(ContentFreeEgressError);
+
+    const nonEnumObj: Record<string, unknown> = { status: "ok" };
+    Object.defineProperty(nonEnumObj, "text", {
+      value: "Patient Jane Doe",
+      enumerable: false,
+    });
+    expect(() => assertContentFree(nonEnumObj)).toThrow(
+      ContentFreeEgressError,
+    );
+
+    let deepObj: Record<string, unknown> = { status: "ok" };
+    for (let i = 0; i < 10; i++) {
+      deepObj = { result: deepObj };
+    }
+    expect(() => assertContentFree(deepObj)).toThrow(ContentFreeEgressError);
   });
 
   it("enforces strict tool allowlist and JSON argument schemas via validateToolCallArguments and assertValidToolCall", () => {

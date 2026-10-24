@@ -1,11 +1,14 @@
 import { ed25519 } from "@noble/curves/ed25519.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 import { canonicalJson, coarsenEpochSecToHour, sha256Hex } from "./canonical.js";
+import { getMongoDb } from "./corpus.js";
 import { assertContentFree } from "./firewall.js";
 import { getKeyRing } from "./keys.js";
 
 export const GEMINI_EGRESS_RECEIPT_KIND = "gemini-egress";
 export const STH_DOMAIN = "drouter/transparency/sth/v1";
+export const TRANSPARENCY_COLLECTION_NAME = "transparency_log";
 
 /**
  * Builds the canonical signing bytes for a Gemini egress receipt:
@@ -35,14 +38,14 @@ export function signGeminiEgressReceipt(
   assertContentFree(outboundRequest, "$.outboundGeminiRequest");
 
   const canonicalRequest = canonicalJson(outboundRequest);
-  const sha256 = sha256Hex(canonicalRequest);
+  const sha256Digest = sha256Hex(canonicalRequest);
   const epochHourSec = coarsenEpochSecToHour(timestampSec);
-  const signingBytes = geminiEgressSigningPayload({ sha256, epochHourSec });
+  const signingBytes = geminiEgressSigningPayload({ sha256: sha256Digest, epochHourSec });
   const signature = bytesToHex(ed25519.sign(signingBytes, keyPair.secretKey)).toLowerCase();
 
   return {
     canonicalRequest,
-    sha256,
+    sha256: sha256Digest,
     epochHourSec,
     kind: GEMINI_EGRESS_RECEIPT_KIND,
     signature,
@@ -135,6 +138,178 @@ export function verifyGeminiEgressReceipt(receipt, expectedPublicKeyHex) {
   }
 }
 
+function concatBytes(...arrays) {
+  const total = arrays.reduce((acc, a) => acc + a.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const a of arrays) {
+    out.set(a, offset);
+    offset += a.length;
+  }
+  return out;
+}
+
+/** RFC 6962 raw byte leaf hash: sha256(0x00 || rawLeafBytes) */
+export function computeRawLeafHash(rawLeafBytes) {
+  return sha256(concatBytes(Uint8Array.of(0x00), rawLeafBytes));
+}
+
+/** RFC 6962 leaf hash: sha256(0x00 || utf8ToBytes(canonicalJson(entry))) */
+export function computeLeafHash(entry) {
+  if (entry instanceof Uint8Array) {
+    return computeRawLeafHash(entry);
+  }
+  const payload = utf8ToBytes(canonicalJson(entry));
+  return computeRawLeafHash(payload);
+}
+
+/** RFC 6962 internal node hash: sha256(0x01 || left || right) */
+export function computeNodeHash(left, right) {
+  return sha256(concatBytes(Uint8Array.of(0x01), left, right));
+}
+
+function largestPowerOfTwoLessThan(n) {
+  let k = 1;
+  while (k * 2 < n) {
+    k *= 2;
+  }
+  return k;
+}
+
+/**
+ * RFC 6962 Merkle tree root computation matching `src/lib/transparency/log.ts`.
+ */
+export function computeMerkleRootFromLeaves(leaves) {
+  if (leaves.length === 0) {
+    return sha256(new Uint8Array(0));
+  }
+  if (leaves.length === 1) {
+    return leaves[0];
+  }
+  const k = largestPowerOfTwoLessThan(leaves.length);
+  const left = computeMerkleRootFromLeaves(leaves.slice(0, k));
+  const right = computeMerkleRootFromLeaves(leaves.slice(k));
+  return computeNodeHash(left, right);
+}
+
+/**
+ * Canonical leaf event builder matching `createVerificationLogEvent` in `src/lib/transparency/log.ts`.
+ */
+export function createVerificationLogEvent(params) {
+  const epochHourSec = coarsenEpochSecToHour(
+    params.timestampSec ?? params.epochHourSec ?? Math.floor(Date.now() / 1000),
+  );
+  const kind =
+    params.kind === "release_approval"
+      ? "release_approval"
+      : params.kind === "independent_verification"
+        ? "independent_verification"
+        : "verification_event";
+  const core = {
+    index: params.index,
+    kind,
+    nodeId: String(params.nodeId ?? "tinfoil-router").slice(0, 80),
+    nodeKind: "tinfoil",
+    ok: Boolean(params.ok),
+    measurement: String(params.measurement ?? "").slice(0, 256),
+    evidenceHash: String(params.evidenceHash ?? "").slice(0, 128),
+    ...(typeof params.releaseDigest === "string" && params.releaseDigest
+      ? { releaseDigest: String(params.releaseDigest).slice(0, 128) }
+      : {}),
+    ...(typeof params.enclaveHost === "string" && params.enclaveHost
+      ? { enclaveHost: String(params.enclaveHost).slice(0, 128) }
+      : {}),
+    ...(typeof params.verifierFingerprint === "string" && params.verifierFingerprint
+      ? { verifierFingerprint: String(params.verifierFingerprint).slice(0, 64) }
+      : {}),
+    epochHourSec,
+  };
+  const leafHash = bytesToHex(computeLeafHash(core)).toLowerCase();
+  return {
+    ...core,
+    leafHash,
+  };
+}
+
+export class TreeHeadStateVerificationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "TreeHeadStateVerificationError";
+  }
+}
+
+function isSimulatedLeafRecord(raw) {
+  if (!raw || typeof raw !== "object") return true;
+  if (raw.nodeKind === "sim") return true;
+  if (typeof raw.nodeId === "string" && raw.nodeId.trim().toLowerCase().startsWith("sim-")) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Recomputes the RFC 6962 Merkle root from `drouter.transparency_log` in MongoDB
+ * and verifies that the submitted `(treeSize, rootHash)` matches before signing.
+ */
+export async function verifyTreeHeadAgainstLog({ treeSize, rootHash, db }) {
+  const database = db !== undefined ? db : await getMongoDb();
+  if (!database || typeof database.collection !== "function") {
+    throw new TreeHeadStateVerificationError(
+      "Transparency log database is unavailable; refusing to sign unverified tree head.",
+    );
+  }
+
+  const col = database.collection(TRANSPARENCY_COLLECTION_NAME);
+  const queryCursor = col.find({ docType: "leaf" }, { projection: { _id: 0 } });
+  const rawDocs =
+    typeof queryCursor.sort === "function"
+      ? await queryCursor.sort({ index: 1 }).toArray()
+      : await queryCursor.toArray();
+
+  if (!Array.isArray(rawDocs)) {
+    throw new TreeHeadStateVerificationError("Failed to read leaves from transparency_log.");
+  }
+
+  const realDocs = rawDocs.filter((d) => !isSimulatedLeafRecord(d));
+  if (realDocs.length !== treeSize) {
+    throw new TreeHeadStateVerificationError(
+      `Submitted treeSize (${treeSize}) does not match transparency_log leaf count (${realDocs.length}).`,
+    );
+  }
+
+  const leafBytes = [];
+  for (let idx = 0; idx < realDocs.length; idx++) {
+    const raw = realDocs[idx];
+    const sanitized = createVerificationLogEvent({
+      ...raw,
+      index: idx,
+      timestampSec: raw.epochHourSec ?? raw.timestampSec,
+    });
+    if (
+      typeof raw.leafHash === "string" &&
+      raw.leafHash.toLowerCase() !== sanitized.leafHash.toLowerCase()
+    ) {
+      throw new TreeHeadStateVerificationError(
+        `Transparency log leaf #${idx} stored leafHash does not match recomputed RFC 6962 leaf hash.`,
+      );
+    }
+    leafBytes.push(hexToBytes(sanitized.leafHash));
+  }
+
+  const computedRootHash = bytesToHex(computeMerkleRootFromLeaves(leafBytes)).toLowerCase();
+  if (computedRootHash !== String(rootHash).toLowerCase()) {
+    throw new TreeHeadStateVerificationError(
+      `Submitted rootHash (${String(rootHash).slice(0, 16)}...) does not match recomputed RFC 6962 Merkle root (${computedRootHash.slice(0, 16)}...).`,
+    );
+  }
+
+  return {
+    verified: true,
+    treeSize: realDocs.length,
+    rootHash: computedRootHash,
+  };
+}
+
 /**
  * Exact canonical tree-head signing payload from `src/lib/transparency/log.ts`.
  */
@@ -174,9 +349,9 @@ export function validateTreeHeadInput(input) {
   }
 
   const errors = [];
-  for (const k of Object.keys(input)) {
+  for (const k of Object.getOwnPropertyNames(input)) {
     if (!ALLOWED_TREE_HEAD_KEYS.has(k)) {
-      errors.push(`Unexpected field '${k}' in tree head request.`);
+      errors.push(`Unexpected field '${String(k).slice(0, 32)}' in tree head request.`);
     }
   }
 
@@ -268,6 +443,31 @@ export function signTreeHeadWithAttestedKey(
     anchorTx: th.anchorTx,
     anchoredAtSec: th.anchoredAtSec,
   };
+}
+
+/**
+ * Validates input, recomputes the RFC 6962 Merkle root from `drouter.transparency_log` in MongoDB,
+ * verifies `(treeSize, rootHash)` matches, and signs with the attested `tree-signing` key.
+ */
+export async function verifyAndSignTreeHead(
+  input,
+  { keyPair = getKeyRing()["tree-signing"], db } = {},
+) {
+  const validation = validateTreeHeadInput(input);
+  if (!validation.valid || !validation.treeHead) {
+    const err = new Error(`INVALID_TREE_HEAD: ${validation.errors.join("; ")}`);
+    err.name = "TreeHeadValidationError";
+    err.errors = validation.errors;
+    throw err;
+  }
+
+  await verifyTreeHeadAgainstLog({
+    treeSize: validation.treeHead.treeSize,
+    rootHash: validation.treeHead.rootHash,
+    db,
+  });
+
+  return signTreeHeadWithAttestedKey(validation.treeHead, keyPair);
 }
 
 /**

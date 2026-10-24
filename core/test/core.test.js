@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { canonicalJson, coarsenEpochSecToHour, sha256Hex } from "../src/canonical.js";
 import { EMBEDDING_DIMENSIONS, getWholeKnowledgeCorpus } from "../src/corpus.js";
 import {
@@ -16,16 +17,22 @@ import {
   validateTaskDescriptor,
 } from "../src/firewall.js";
 import {
+  computePublicKeysBindingSha256,
   ED25519_SPKI_PREFIX_HEX,
   getKeyRing,
   getPublicKeysResponse,
+  loadAttestedKeyPair,
   resetKeyRingForTests,
   spkiHexToRawPublicKeyHex,
   writeTestAttestedKeyPemFiles,
 } from "../src/keys.js";
 import {
+  computeMerkleRootFromLeaves,
+  createVerificationLogEvent,
   signGeminiEgressReceipt,
   signTreeHeadWithAttestedKey,
+  TreeHeadStateVerificationError,
+  verifyAndSignTreeHead,
   verifyGeminiEgressReceipt,
   verifySignedTreeHead,
 } from "../src/receipts.js";
@@ -51,7 +58,41 @@ function makeValidDescriptor(overrides = {}) {
   };
 }
 
-test("TaskDescriptor validator accepts valid bucketed descriptor and rejects unbucketed or free-text fields", () => {
+function makeMockTransparencyDb(leaves) {
+  return {
+    collection(name) {
+      if (name === "transparency_log") {
+        return {
+          find() {
+            return {
+              sort() {
+                return {
+                  async toArray() {
+                    return leaves.map((l) => ({ ...l, docType: "leaf" }));
+                  },
+                };
+              },
+              async toArray() {
+                return leaves.map((l) => ({ ...l, docType: "leaf" }));
+              },
+            };
+          },
+        };
+      }
+      return {
+        find() {
+          return {
+            async toArray() {
+              return [];
+            },
+          };
+        },
+      };
+    },
+  };
+}
+
+test("TaskDescriptor validator accepts valid bucketed descriptor, canonicalizes allowedTools, truncates error previews, and rejects unbucketed or free-text fields", () => {
   const valid = validateTaskDescriptor(makeValidDescriptor());
   assert.equal(valid.valid, true);
   assert.equal(valid.errors.length, 0);
@@ -61,6 +102,28 @@ test("TaskDescriptor validator accepts valid bucketed descriptor and rejects unb
   // Also accepts wrapped { taskDescriptor }
   const wrapped = validateTaskDescriptor({ taskDescriptor: makeValidDescriptor() });
   assert.equal(wrapped.valid, true);
+
+  // MINOR-1: Permuted allowedTools are normalized to canonical ALLOWED_PLANNER_TOOLS order
+  const reversedTools = [...ALLOWED_PLANNER_TOOLS].reverse();
+  const canonicalized = validateTaskDescriptor(
+    makeValidDescriptor({ allowedTools: reversedTools }),
+  );
+  assert.equal(canonicalized.valid, true);
+  assert.deepEqual(canonicalized.descriptor.allowedTools, [...ALLOWED_PLANNER_TOOLS]);
+
+  const bucketedPermuted = bucketTaskDescriptor({
+    taskKind: "summarize",
+    inputTokenEstimate: 1300,
+    redactionCounts: { EMAIL: 19, SECRET: 8, TOTAL: 27 },
+    verification: { mechanicalRedactionPassed: true },
+    allowedTools: reversedTools,
+  });
+  assert.equal(bucketedPermuted.inputTokenEstimate, 2048);
+  assert.equal(bucketedPermuted.redactionCounts.EMAIL, 5);
+  assert.equal(bucketedPermuted.redactionCounts.SECRET, 5);
+  assert.equal(bucketedPermuted.redactionCounts.TOTAL, 5);
+  assert.deepEqual(bucketedPermuted.allowedTools, [...ALLOWED_PLANNER_TOOLS]);
+  assert.equal(validateTaskDescriptor(bucketedPermuted).valid, true);
 
   // Rejects non-power-of-two inputTokenEstimate
   const nonBucketed = validateTaskDescriptor(
@@ -76,11 +139,14 @@ test("TaskDescriptor validator accepts valid bucketed descriptor and rejects unb
   assert.equal(uncappedCounts.valid, false);
   assert.ok(uncappedCounts.errors.some((e) => e.includes("0..5")));
 
-  // Rejects wrong inputHandle
+  // Rejects wrong inputHandle and truncates/strips control chars in error messages (MINOR-2)
+  const longBadHandle = "patient\u0000Alice\u0007Smith_" + "X".repeat(120);
   const badHandle = validateTaskDescriptor(
-    makeValidDescriptor({ inputHandle: "patient Alice Smith" }),
+    makeValidDescriptor({ inputHandle: longBadHandle }),
   );
   assert.equal(badHandle.valid, false);
+  assert.ok(!badHandle.errors[0].includes("\u0000"));
+  assert.ok(!badHandle.errors[0].includes("X".repeat(50)));
 
   // Rejects unexpected extra fields
   const extraField = validateTaskDescriptor(
@@ -88,23 +154,10 @@ test("TaskDescriptor validator accepts valid bucketed descriptor and rejects unb
   );
   assert.equal(extraField.valid, false);
   assert.ok(extraField.errors.some((e) => e.includes("scrubbedPrompt")));
-
-  // bucketTaskDescriptor rounds up tokens to power of two and caps redactionCounts at 5
-  const bucketed = bucketTaskDescriptor({
-    taskKind: "summarize",
-    inputTokenEstimate: 1300,
-    redactionCounts: { EMAIL: 19, SECRET: 8, TOTAL: 27 },
-    verification: { mechanicalRedactionPassed: true },
-  });
-  assert.equal(bucketed.inputTokenEstimate, 2048);
-  assert.equal(bucketed.redactionCounts.EMAIL, 5);
-  assert.equal(bucketed.redactionCounts.SECRET, 5);
-  assert.equal(bucketed.redactionCounts.TOTAL, 5);
-  assert.equal(validateTaskDescriptor(bucketed).valid, true);
 });
 
-test("assertContentFree allows handles, LOOKUP_TOPICS, and real SHA-256 digests, and blocks all free text or smuggled ASCII", () => {
-  // Valid payload with handles, enums, and closed lookup vocabulary
+test("assertContentFree blocks all 5 CRITICAL-2 bypasses as well as free text and unallowlisted keys", () => {
+  // Valid payload with handles, enums, numbers under allowlisted numeric keys, and SHA-256 digest under allowlisted hash key
   assert.doesNotThrow(() => {
     assertContentFree({
       taskDescriptor: makeValidDescriptor(),
@@ -112,6 +165,9 @@ test("assertContentFree allows handles, LOOKUP_TOPICS, and real SHA-256 digests,
       resultHandle: "$RESULT_1",
       contentSha256: "0x9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
       status: "allowed",
+      id: "call-1",
+      call_id: "call-1-scrub_and_symmetry_mask",
+      previous_interaction_id: "inter-argon-turn-1",
     });
   });
 
@@ -123,35 +179,236 @@ test("assertContentFree allows handles, LOOKUP_TOPICS, and real SHA-256 digests,
 
   // Rejects JSON-smuggled free text inside a string
   assert.throws(
-    () => assertContentFree({ text: JSON.stringify({ content: "leaked user prompt" }) }),
+    () => assertContentFree({ text: canonicalJson({ content: "leaked user prompt" }) }),
     ContentFreeEgressError,
   );
 
-  // Rejects ASCII-smuggled hex disguised as 0x SHA-256 hash
-  const smuggledHex =
+  // BYPASS 1: Duplicate-key, whitespace, Unicode-escape, non-canonical key order, and array smuggling in JSON strings
+  assert.throws(
+    () =>
+      assertContentFree({
+        text: '{"taskKind":"Patient Jane Doe SSN 123-45-6789","taskKind":"analyze"}',
+      }),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () =>
+      assertContentFree({
+        text: '{  "taskKind": "analyze" }',
+      }),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () =>
+      assertContentFree({
+        text: '{"\\u0074askKind":"analyze"}',
+      }),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () =>
+      assertContentFree({
+        // Non-sorted keys (taskKind before inputHandle)
+        text: '{"taskKind":"analyze","inputHandle":"$INPUT"}',
+      }),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () =>
+      assertContentFree({
+        text: '["ok"]',
+      }),
+    ContentFreeEgressError,
+  );
+  // Nested JSON-in-JSON string is rejected even if inner JSON is canonical
+  assert.throws(
+    () =>
+      assertContentFree({
+        text: canonicalJson({
+          text: canonicalJson({ taskKind: "analyze" }),
+        }),
+      }),
+    ContentFreeEgressError,
+  );
+
+  // BYPASS 2: UTF-16LE, UTF-16BE, high-bit ASCII hex smuggling, and 0x hashes under non-hash keys
+  const utf8HexSmuggled =
     "0x" + Buffer.from("Patient Jane Doe SSN 123-45-6789", "utf8").toString("hex");
-  assert.equal(smuggledHex.length, 66);
+  assert.equal(utf8HexSmuggled.length, 66);
   assert.throws(
-    () => assertContentFree({ contentSha256: smuggledHex }),
+    () => assertContentFree({ contentSha256: utf8HexSmuggled }),
     ContentFreeEgressError,
   );
 
-  // Rejects unallowlisted object key
+  const utf16leSmuggled =
+    "0x" + Buffer.from("Patient Jane Doe", "utf16le").toString("hex");
+  assert.equal(utf16leSmuggled.length, 66);
   assert.throws(
-    () => assertContentFree({ userPrompt: "$INPUT" }),
+    () => assertContentFree({ contentSha256: utf16leSmuggled }),
     ContentFreeEgressError,
   );
+
+  const highBitSmuggled =
+    "0x" +
+    Buffer.from(
+       Array.from(Buffer.from("Patient Jane Doe SSN 123-45-6789", "utf8"), (b) => b | 0x80),
+    ).toString("hex");
+  assert.equal(highBitSmuggled.length, 66);
+  assert.throws(
+    () => assertContentFree({ contentSha256: highBitSmuggled }),
+    ContentFreeEgressError,
+  );
+
+  // Genuine SHA-256 hash rejected under non-hash keys (text, content, status)
+  assert.throws(
+    () =>
+      assertContentFree({
+        text: "0x9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      }),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () =>
+      assertContentFree({
+        content: "0x9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      }),
+    ContentFreeEgressError,
+  );
+
+  // BYPASS 3: Arbitrary snake_case English text in SAFE_CALL_ID_REGEX
+  assert.throws(
+    () => assertContentFree({ id: "call-patient_jane_doe_has_hiv_and_diabetes" }),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () => assertContentFree({ call_id: "tc-leaked_secret_diagnosis" }),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () => assertContentFree({ previous_interaction_id: "inter-bad_patient_record" }),
+    ContentFreeEgressError,
+  );
+
+  // BYPASS 4: Numbers encoding text, floats, negative zero, large integers, and numbers under non-numeric keys
+  assert.throws(
+    () => assertContentFree({ content: [80, 97, 116, 105, 101, 110, 116] }),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () => assertContentFree({ content: 80 }),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () => assertContentFree({ inputTokenEstimate: 79559981709933 }),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () => assertContentFree({ inputTokenEstimate: 0.48656111 }),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () => assertContentFree({ inputTokenEstimate: -0 }),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () => assertContentFree({ EMAIL: 6 }),
+    ContentFreeEgressError,
+  );
+
+  // BYPASS 5: Nested arrays, boolean/number arrays, unallowlisted array keys, depth cap, non-plain prototypes, and non-enumerable properties
+  assert.throws(
+    () => assertContentFree({ input: [[{ type: "text", text: "ok" }]] }),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () => assertContentFree({ input: [true, false, true] }),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () => assertContentFree({ allowedTools: [1, 2, 3] }),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () => assertContentFree({ content: ["ok"] }),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () =>
+      assertContentFree({
+        allowedTools: new Array(33).fill("scrub_and_symmetry_mask"),
+      }),
+    ContentFreeEgressError,
+  );
+
+  // Root primitives / arrays rejected
+  assert.throws(() => assertContentFree("ok"), ContentFreeEgressError);
+  assert.throws(() => assertContentFree(1024), ContentFreeEgressError);
+  assert.throws(() => assertContentFree(true), ContentFreeEgressError);
+  assert.throws(() => assertContentFree(["ok"]), ContentFreeEgressError);
+
+  // Non-plain prototype rejected
+  const protoObj = Object.create({ taskKind: "analyze" });
+  protoObj.status = "ok";
+  assert.throws(() => assertContentFree(protoObj), ContentFreeEgressError);
+
+  // Non-enumerable property rejected via Object.getOwnPropertyNames
+  const nonEnumObj = { status: "ok" };
+  Object.defineProperty(nonEnumObj, "text", {
+    value: "Patient Jane Doe",
+    enumerable: false,
+  });
+  assert.throws(() => assertContentFree(nonEnumObj), ContentFreeEgressError);
+
+  // Own __proto__ property rejected
+  const ownProtoObj = JSON.parse('{"status":"ok","__proto__":{"text":"leaked"}}');
+  assert.throws(() => assertContentFree(ownProtoObj), ContentFreeEgressError);
+
+  // Depth > 8 rejected
+  let deep = { status: "ok" };
+  for (let i = 0; i < 10; i++) {
+    deep = { result: deep };
+  }
+  assert.throws(() => assertContentFree(deep), ContentFreeEgressError);
 });
 
-test("Attested Ed25519 keys load from PKCS#8 and SPKI PEM files and sign/verify egress receipts and tree heads", () => {
+test("Explicit CORE_KEY_SOURCE supports 'tinfoil' and 'boot', refuses missing/unknown values, and protects secretKey", async () => {
+  const prevSource = process.env.CORE_KEY_SOURCE;
+  const prevDir = process.env.TINFOIL_KEYS_DIR;
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "deroute-core-keys-"));
+
   try {
+    // 1. Missing or unknown CORE_KEY_SOURCE refuses to start
+    delete process.env.CORE_KEY_SOURCE;
+    resetKeyRingForTests();
+    assert.throws(
+      () => getKeyRing(),
+      /Invalid or missing CORE_KEY_SOURCE/,
+    );
+    assert.throws(
+      () => createCoreServer({ db: null }),
+      /Invalid or missing CORE_KEY_SOURCE/,
+    );
+    process.env.CORE_KEY_SOURCE = "unknown-platform";
+    assert.throws(
+      () => getKeyRing(),
+      /Invalid or missing CORE_KEY_SOURCE/,
+    );
+
+    // 2. CORE_KEY_SOURCE=tinfoil refuses to start when PEM files are missing (no silent fallback)
+    process.env.CORE_KEY_SOURCE = "tinfoil";
+    assert.throws(
+      () => resetKeyRingForTests(tmpDir),
+      /Missing attested Ed25519 key PEM files/,
+    );
+
+    // 3. CORE_KEY_SOURCE=tinfoil loads valid RFC 8410 PKCS#8 and SPKI PEM files
     const egressSeed = "11".repeat(32);
     const treeSeed = "22".repeat(32);
     writeTestAttestedKeyPemFiles(tmpDir, "egress-signing", egressSeed);
     writeTestAttestedKeyPemFiles(tmpDir, "tree-signing", treeSeed);
 
-    const ring = resetKeyRingForTests(tmpDir);
+    const ring = resetKeyRingForTests({ keysDir: tmpDir, keySource: "tinfoil" });
+    assert.equal(ring.keySource, "tinfoil");
     assert.equal(ring["egress-signing"].source, "attested-mount");
     assert.equal(ring["tree-signing"].source, "attested-mount");
     assert.ok(ring["egress-signing"].spkiHex.startsWith(ED25519_SPKI_PREFIX_HEX));
@@ -159,22 +416,56 @@ test("Attested Ed25519 keys load from PKCS#8 and SPKI PEM files and sign/verify 
       spkiHexToRawPublicKeyHex(ring["egress-signing"].spkiHex),
       ring["egress-signing"].publicKeyHex,
     );
+    // secretKey is non-enumerable
+    assert.equal(Object.keys(ring["egress-signing"]).includes("secretKey"), false);
+    assert.equal(JSON.stringify(ring["egress-signing"]).includes("secretKey"), false);
+    assert.equal(ring["egress-signing"].secretKey.length, 32);
 
-    const pubResponse = getPublicKeysResponse(ring);
+    // Rejects corrupted PKCS#8 prefix
+    const badDir = fs.mkdtempSync(path.join(os.tmpdir(), "deroute-bad-keys-"));
+    try {
+      const { privateKey, publicKey } = fs;
+      void privateKey;
+      void publicKey;
+      writeTestAttestedKeyPemFiles(badDir, "egress-signing", egressSeed);
+      // Overwrite private_key.pem with public_key.pem content
+      fs.copyFileSync(
+        path.join(badDir, "egress-signing", "public_key.pem"),
+        path.join(badDir, "egress-signing", "private_key.pem"),
+      );
+      assert.throws(
+        () => loadAttestedKeyPair("egress-signing", { keysDir: badDir, keySource: "tinfoil" }),
+      );
+    } finally {
+      fs.rmSync(badDir, { recursive: true, force: true });
+    }
+
+    // 4. CORE_KEY_SOURCE=boot generates in-memory keys and exposes sha256(canonical {egress, tree}) on GET /keys
+    const bootRing = resetKeyRingForTests({ keySource: "boot" });
+    assert.equal(bootRing.keySource, "boot");
+    assert.equal(bootRing["egress-signing"].source, "ephemeral-boot");
+    assert.equal(bootRing["tree-signing"].source, "ephemeral-boot");
+    assert.equal(Object.keys(bootRing["egress-signing"]).includes("secretKey"), false);
+
+    const pubResponse = getPublicKeysResponse(bootRing);
     assert.equal(pubResponse.ok, true);
-    assert.equal(
-      pubResponse.keys["egress-signing"].publicKeyHex,
-      ring["egress-signing"].publicKeyHex,
+    assert.equal(pubResponse.keySource, "boot");
+    const expectedBindingHash = sha256Hex(
+      canonicalJson({
+        egress: pubResponse.egress.publicKeyHex,
+        tree: pubResponse.tree.publicKeyHex,
+      }),
     );
-    assert.equal(
-      pubResponse.keys["tree-signing"].spkiHex,
-      ring["tree-signing"].spkiHex,
-    );
+    assert.equal(pubResponse.keysDigest, expectedBindingHash);
+    assert.equal(pubResponse.publicKeysSha256, expectedBindingHash);
+    assert.equal(pubResponse.bindingSha256, expectedBindingHash);
+    assert.equal(computePublicKeysBindingSha256(bootRing), expectedBindingHash);
 
-    // Sign and verify a Gemini egress receipt
+    // Sign and verify a Gemini egress receipt with attested ring
     const outboundGeminiPayload = {
       model: "gemini-4-argon",
       background: true,
+      store: false,
       generation_config: {
         thinking_level: "medium",
         max_output_tokens: 131072,
@@ -195,9 +486,7 @@ test("Attested Ed25519 keys load from PKCS#8 and SPKI PEM files and sign/verify 
     assert.equal(receipt.epochHourSec, 1792886400);
     assert.equal(receipt.publicKey, ring["egress-signing"].publicKeyHex);
     assert.equal(receipt.sha256, sha256Hex(receipt.canonicalRequest));
-
-    const verified = verifyGeminiEgressReceipt(receipt, ring["egress-signing"].publicKeyHex);
-    assert.equal(verified.ok, true);
+    assert.equal(verifyGeminiEgressReceipt(receipt, ring["egress-signing"].publicKeyHex).ok, true);
 
     // Tampered canonicalRequest fails verification
     const tampered = {
@@ -206,20 +495,70 @@ test("Attested Ed25519 keys load from PKCS#8 and SPKI PEM files and sign/verify 
     };
     assert.equal(verifyGeminiEgressReceipt(tampered).ok, false);
 
-    // Sign and verify a transparency tree head with tree-signing key
-    const sth = signTreeHeadWithAttestedKey(
+    // Sign and verify a transparency tree head against MongoDB transparency_log
+    const leaves = [
+      createVerificationLogEvent({
+        index: 0,
+        kind: "verification_event",
+        nodeId: "tinfoil-router",
+        ok: true,
+        measurement: "9134838da8aa4e17",
+        evidenceHash: "5233a27f1468f474",
+        timestampSec: 1792886400,
+      }),
+      createVerificationLogEvent({
+        index: 1,
+        kind: "verification_event",
+        nodeId: "kimi-k3",
+        ok: true,
+        measurement: "69c029108ac795b7",
+        evidenceHash: "41068e0738e14ee7",
+        timestampSec: 1792886400,
+      }),
+    ];
+    const expectedRoot = bytesToHex(
+      computeMerkleRootFromLeaves(leaves.map((l) => hexToBytes(l.leafHash))),
+    ).toLowerCase();
+    const mockDb = makeMockTransparencyDb(leaves);
+
+    const sth = await verifyAndSignTreeHead(
       {
-        treeSize: 16,
-        rootHash: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        treeSize: 2,
+        rootHash: expectedRoot,
         timestampSec: 1792886400,
       },
-      ring["tree-signing"],
+      {
+        keyPair: ring["tree-signing"],
+        db: mockDb,
+      },
     );
     assert.equal(sth.operatorPublicKey, ring["tree-signing"].publicKeyHex);
-    const sthVerified = verifySignedTreeHead(sth, ring["tree-signing"].publicKeyHex);
-    assert.equal(sthVerified.ok, true);
+    assert.equal(verifySignedTreeHead(sth, ring["tree-signing"].publicKeyHex).ok, true);
+
+    // Mismatched rootHash is rejected before signing
+    await assert.rejects(
+      () =>
+        verifyAndSignTreeHead(
+          {
+            treeSize: 2,
+            rootHash: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            timestampSec: 1792886400,
+          },
+          { keyPair: ring["tree-signing"], db: mockDb },
+        ),
+      TreeHeadStateVerificationError,
+    );
   } finally {
-    resetKeyRingForTests();
+    if (prevSource === undefined) {
+      delete process.env.CORE_KEY_SOURCE;
+    } else {
+      process.env.CORE_KEY_SOURCE = prevSource;
+    }
+    if (prevDir === undefined) {
+      delete process.env.TINFOIL_KEYS_DIR;
+    } else {
+      process.env.TINFOIL_KEYS_DIR = prevDir;
+    }
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
@@ -253,10 +592,15 @@ test("Whole-library knowledge corpus returns deterministic 16-doc shape with ver
   }
 });
 
-test("HTTP server enforces CORS, query-param prohibition, body size limits, and endpoints", async () => {
+test("HTTP server enforces CORS, timeouts, duplicate-key rejection, bearer auth + RFC 6962 log verification on sign-tree-head, and Gemini request options", async () => {
+  let capturedCreateRequest = null;
+  let capturedCreateOptions = null;
+
   const mockedGenaiClient = {
     interactions: {
-      async create(req) {
+      async create(req, options) {
+        capturedCreateRequest = req;
+        capturedCreateOptions = options;
         assertContentFree(req, "$.mockedGeminiReceived");
         return {
           id: "inter-1",
@@ -274,7 +618,7 @@ test("HTTP server enforces CORS, query-param prohibition, body size limits, and 
             },
             {
               type: "function_call",
-              id: "call-2",
+              id: "call-untrusted_free_text_id_that_gets_sanitized",
               name: "invoke_attested_enclave",
               arguments: {
                 inputHandle: "$INPUT",
@@ -288,10 +632,35 @@ test("HTTP server enforces CORS, query-param prohibition, body size limits, and 
     },
   };
 
+  const leaves = [
+    createVerificationLogEvent({
+      index: 0,
+      kind: "verification_event",
+      nodeId: "tinfoil-router",
+      ok: true,
+      measurement: "9134838da8aa4e17",
+      evidenceHash: "5233a27f1468f474",
+      timestampSec: 1792886400,
+    }),
+  ];
+  const validMerkleRoot = bytesToHex(
+    computeMerkleRootFromLeaves(leaves.map((l) => hexToBytes(l.leafHash))),
+  ).toLowerCase();
+  const mockDb = makeMockTransparencyDb(leaves);
+  const testOperatorToken = "operator-secret-token-2026";
+
   const server = createCoreServer({
-    db: null,
+    keySource: "boot",
+    db: mockDb,
+    operatorToken: testOperatorToken,
     timestampSec: 1792886400,
   });
+
+  // Verify HTTP server timeouts (IMPORTANT-3)
+  assert.equal(server.headersTimeout, 10_000);
+  assert.equal(server.requestTimeout, 25_000);
+  assert.equal(server.keepAliveTimeout, 5_000);
+  assert.equal(server.timeout, 30_000);
 
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
@@ -310,6 +679,7 @@ test("HTTP server enforces CORS, query-param prohibition, body size limits, and 
     const healthJson = await healthRes.json();
     assert.equal(healthJson.ok, true);
     assert.equal(healthJson.service, "deroute-core");
+    assert.equal(healthJson.keySource, "boot");
 
     // 2. Disallowed CORS origin returns 403
     const badCorsRes = await fetch(`${baseUrl}/health`, {
@@ -318,7 +688,7 @@ test("HTTP server enforces CORS, query-param prohibition, body size limits, and 
     assert.equal(badCorsRes.status, 403);
     assert.equal(badCorsRes.headers.get("access-control-allow-origin"), null);
 
-    // 3. GET /keys
+    // 3. GET /keys returns public keys and canonical sha256 binding digest
     const keysRes = await fetch(`${baseUrl}/keys`, {
       headers: { Origin: "http://localhost:3000" },
     });
@@ -329,6 +699,15 @@ test("HTTP server enforces CORS, query-param prohibition, body size limits, and 
     assert.match(keysJson.keys["egress-signing"].spkiHex, /^[0-9a-f]{88}$/);
     assert.match(keysJson.keys["tree-signing"].publicKeyHex, /^[0-9a-f]{64}$/);
     assert.match(keysJson.keys["tree-signing"].spkiHex, /^[0-9a-f]{88}$/);
+    assert.equal(
+      keysJson.publicKeysSha256,
+      sha256Hex(
+        canonicalJson({
+          egress: keysJson.egress.publicKeyHex,
+          tree: keysJson.tree.publicKeyHex,
+        }),
+      ),
+    );
 
     // 4. GET /knowledge/corpus rejects query parameters and serves identical whole corpus without them
     const badCorpusQuery = await fetch(`${baseUrl}/knowledge/corpus?topic=tdx`);
@@ -340,7 +719,17 @@ test("HTTP server enforces CORS, query-param prohibition, body size limits, and 
     assert.equal(corpusJson.totalDocs, 16);
     assert.match(corpusJson.contentSha256, /^0x[0-9a-f]{64}$/);
 
-    // 5. POST /agent/plan without GEMINI_API_KEY returns 503 planner: "unavailable" + valid signed egressReceipt
+    // 5. Duplicate JSON keys in raw HTTP request body are rejected with 400
+    const dupKeyBody =
+      '{"taskKind":"Patient Secret","taskKind":"analyze","inputHandle":"$INPUT","inputTokenEstimate":1024,"redactionCounts":{"TOTAL":1},"verification":{"mechanicalRedactionPassed":true},"allowedTools":["scrub_and_symmetry_mask"]}';
+    const dupKeyRes = await fetch(`${baseUrl}/agent/plan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: dupKeyBody,
+    });
+    assert.equal(dupKeyRes.status, 400);
+
+    // 6. POST /agent/plan without GEMINI_API_KEY returns 503 planner: "unavailable" + valid signed egressReceipt
     const prevKey = process.env.GEMINI_API_KEY;
     delete process.env.GEMINI_API_KEY;
     try {
@@ -364,24 +753,71 @@ test("HTTP server enforces CORS, query-param prohibition, body size limits, and 
       if (prevKey !== undefined) process.env.GEMINI_API_KEY = prevKey;
     }
 
-    // 6. POST /transparency/sign-tree-head signs valid tree head and rejects malformed one
-    const badSthRes = await fetch(`${baseUrl}/transparency/sign-tree-head`, {
+    // 7. POST /transparency/sign-tree-head rejects unauthenticated or wrong Bearer token (401)
+    const noAuthSthRes = await fetch(`${baseUrl}/transparency/sign-tree-head`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        treeSize: 5,
+        treeSize: 1,
+        rootHash: validMerkleRoot,
+        timestampSec: 1792886400,
+      }),
+    });
+    assert.equal(noAuthSthRes.status, 401);
+
+    const wrongAuthSthRes = await fetch(`${baseUrl}/transparency/sign-tree-head`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer wrong-token",
+      },
+      body: JSON.stringify({
+        treeSize: 1,
+        rootHash: validMerkleRoot,
+        timestampSec: 1792886400,
+      }),
+    });
+    assert.equal(wrongAuthSthRes.status, 401);
+
+    // 8. POST /transparency/sign-tree-head with valid Bearer token rejects forged rootHash (422) and malformed timestamp (400)
+    const forgedRootRes = await fetch(`${baseUrl}/transparency/sign-tree-head`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${testOperatorToken}`,
+      },
+      body: JSON.stringify({
+        treeSize: 1,
         rootHash: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        timestampSec: 1792886400,
+      }),
+    });
+    assert.equal(forgedRootRes.status, 422);
+
+    const badSthRes = await fetch(`${baseUrl}/transparency/sign-tree-head`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${testOperatorToken}`,
+      },
+      body: JSON.stringify({
+        treeSize: 1,
+        rootHash: validMerkleRoot,
         timestampSec: 12345, // not divisible by 3600
       }),
     });
     assert.equal(badSthRes.status, 400);
 
+    // 9. POST /transparency/sign-tree-head with valid Bearer token AND matching RFC 6962 Merkle root signs tree head
     const sthRes = await fetch(`${baseUrl}/transparency/sign-tree-head`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${testOperatorToken}`,
+      },
       body: JSON.stringify({
-        treeSize: 5,
-        rootHash: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        treeSize: 1,
+        rootHash: validMerkleRoot,
         timestampSec: coarsenEpochSecToHour(1792886400),
       }),
     });
@@ -393,7 +829,7 @@ test("HTTP server enforces CORS, query-param prohibition, body size limits, and 
       true,
     );
 
-    // 7. Oversized POST body returns 413
+    // 10. Oversized POST body returns 413 with Connection: close
     const hugeBody = JSON.stringify({ pad: "x".repeat(MAX_BODY_BYTES + 1024) });
     const hugeRes = await fetch(`${baseUrl}/agent/plan`, {
       method: "POST",
@@ -407,6 +843,7 @@ test("HTTP server enforces CORS, query-param prohibition, body size limits, and 
 
   // Test POST /agent/plan with mocked Gemini Interactions client
   const serverWithGemini = createCoreServer({
+    keySource: "boot",
     db: null,
     genaiClient: mockedGenaiClient,
     timestampSec: 1792886400,
@@ -416,6 +853,9 @@ test("HTTP server enforces CORS, query-param prohibition, body size limits, and 
   const baseUrl2 = `http://127.0.0.1:${addr2.port}`;
 
   try {
+    const keysRes2 = await fetch(`${baseUrl2}/keys`);
+    const keysJson2 = await keysRes2.json();
+
     const planRes = await fetch(`${baseUrl2}/agent/plan`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -427,10 +867,18 @@ test("HTTP server enforces CORS, query-param prohibition, body size limits, and 
     assert.equal(planJson.planner, "gemini-4-argon");
     assert.equal(planJson.plan.steps.length, 2);
     assert.equal(planJson.plan.steps[0].tool, "scrub_and_symmetry_mask");
+    assert.equal(planJson.plan.steps[0].id, "call-1");
+    // Invalid snake_case call.id from model was sanitized to fallback "call-2"
+    assert.equal(planJson.plan.steps[1].id, "call-2");
+    // Verify store: false and requestOptions were sent to client.interactions.create
+    assert.equal(capturedCreateRequest.store, false);
+    assert.equal(capturedCreateOptions.retries.strategy, "none");
+    assert.equal(typeof capturedCreateOptions.timeout_ms, "number");
+    assert.ok(capturedCreateOptions.fetch_options.signal instanceof AbortSignal);
     assert.equal(
       verifyGeminiEgressReceipt(
         planJson.egressReceipt,
-        getKeyRing()["egress-signing"].publicKeyHex,
+        keysJson2.keys["egress-signing"].publicKeyHex,
       ).ok,
       true,
     );
@@ -449,7 +897,7 @@ test("HTTP server enforces CORS, query-param prohibition, body size limits, and 
   );
 });
 
-test("HTTP server returns 422 on untrusted model tool policy violation, 204 on OPTIONS preflight, and 404/405 on invalid routes/methods", async () => {
+test("HTTP server returns 422 on untrusted model tool policy violation, fails closed when CORE_OPERATOR_TOKEN is unset, 204 on OPTIONS preflight, and 404/405 on invalid routes/methods", async () => {
   const maliciousGenaiClient = {
     interactions: {
       async create() {
@@ -472,7 +920,9 @@ test("HTTP server returns 422 on untrusted model tool policy violation, 204 on O
   };
 
   const server = createCoreServer({
+    keySource: "boot",
     db: null,
+    operatorToken: "",
     genaiClient: maliciousGenaiClient,
     timestampSec: 1792886400,
   });
@@ -490,6 +940,21 @@ test("HTTP server returns 422 on untrusted model tool policy violation, 204 on O
     const badToolJson = await badToolRes.json();
     assert.equal(badToolJson.ok, false);
     assert.equal(badToolJson.error, "tool_policy_violation");
+
+    // Sign-tree-head fails closed (401) when CORE_OPERATOR_TOKEN is unset/empty even if Authorization header is sent
+    const unsetTokenRes = await fetch(`${baseUrl}/transparency/sign-tree-head`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer any-token",
+      },
+      body: JSON.stringify({
+        treeSize: 0,
+        rootHash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        timestampSec: 1792886400,
+      }),
+    });
+    assert.equal(unsetTokenRes.status, 401);
 
     // OPTIONS preflight from allowed origin returns 204
     const preflightRes = await fetch(`${baseUrl}/agent/plan`, {
@@ -513,4 +978,3 @@ test("HTTP server returns 422 on untrusted model tool policy violation, 204 on O
     await new Promise((resolve) => server.close(resolve));
   }
 });
-
