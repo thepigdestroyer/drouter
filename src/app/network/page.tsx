@@ -8,9 +8,14 @@ import { TechDetails } from "@/components/ink/tech-details";
 import { SpecimenFooter, SpecimenHeader } from "@/components/specimen-chrome";
 import { GET as getRegistryRoute } from "@/app/api/registry/route";
 import { GET as getTransparencyRoute } from "@/app/api/transparency/route";
-import { ARC_CHAIN_ID, ARC_EXPLORER, nodeKeyFor } from "@/lib/arc/registry";
+import {
+  ARC_CHAIN_ID,
+  ARC_EXPLORER,
+  nodeKeyFor,
+  type EnrichedNodeRecord,
+} from "@/lib/arc/registry";
 import { recentActivity } from "@/lib/db";
-import type { Hex, NodeRecord } from "@/lib/types";
+import type { Hex } from "@/lib/types";
 import type {
   ConsistencyProof,
   InclusionProof,
@@ -42,11 +47,15 @@ function whenHour(value: unknown): string {
   return `${coarsened.toISOString().replace("T", " ").slice(0, 13)}:00 UTC`;
 }
 
+interface RegistryNodeView extends EnrichedNodeRecord {
+  enclaveHostCount?: number;
+}
+
 interface RegistryApiPayload {
   source: "arc" | "fallback";
   onChain?: boolean;
   address?: Hex;
-  nodes: NodeRecord[];
+  nodes: RegistryNodeView[];
   chainId?: number;
   explorer?: string;
 }
@@ -94,44 +103,69 @@ async function WhoRunsDeRouteSection() {
         {/* Real sealed computers (Tinfoil) */}
         <div className="space-y-3">
           <h3 className="font-serif text-lg font-medium text-ink">
-            Sealed computers (Tinfoil)
+            Sealed computers (Tinfoil) ({realNodes.length})
           </h3>
           <div className="grid grid-cols-1 gap-4">
-            {realNodes.map((n) => (
-              <div
-                key={n.id}
-                className="ep-card p-5 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"
-              >
-                <div className="space-y-2 max-w-[60ch]">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-serif text-lg font-medium text-ink">
-                      {plainNodeName(n.name)}
-                    </span>
-                    <span className="ep-pass">Sealed computer</span>
+            {realNodes.map((n) => {
+              const hostCount =
+                n.enclaveHostCount ??
+                n.healthyHosts ??
+                n.verifiedHosts ??
+                n.configuredHosts ??
+                n.enclaveHosts?.length ??
+                1;
+              return (
+                <div
+                  key={n.id}
+                  className="ep-card p-5 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <div className="space-y-2 max-w-[60ch]">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-serif text-lg font-medium text-ink">
+                        {plainNodeName(n.name)}
+                      </span>
+                      <span className="ep-pass">Sealed computer</span>
+                      {n.releaseTag && (
+                        <span className="ep-muted-chip">
+                          Release {n.releaseTag}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-sm text-ink-2 leading-relaxed">
+                      Answers your live chats inside a hardware-locked computer
+                      whose seal your browser checks before sending a single
+                      word.
+                    </p>
                   </div>
-                  <p className="text-sm text-ink-2 leading-relaxed">
-                    Answers your live chats inside a hardware-locked computer
-                    whose seal your browser checks before sending a single word.
-                  </p>
-                </div>
 
-                <div className="flex flex-col sm:items-end gap-1.5 text-xs font-mono text-ink-2 shrink-0">
-                  <div>
-                    Status:{" "}
-                    <span className="text-ink font-medium">
-                      {n.status === "active" ? "Active and sealed" : "Paused"}
-                    </span>
-                  </div>
-                  <div>Region: {n.region.toUpperCase()}</div>
-                  <div>
-                    Last seal check:{" "}
-                    {n.lastVerifiedAt
-                      ? whenHour(new Date(n.lastVerifiedAt * 1000))
-                      : "Checked on connect"}
+                  <div className="flex flex-col sm:items-end gap-1.5 text-xs font-mono text-ink-2 shrink-0">
+                    <div>
+                      Status:{" "}
+                      <span className="text-ink font-medium">
+                        {n.status === "active" ? "Active and sealed" : "Paused"}
+                      </span>
+                    </div>
+                    <div>
+                      Active computers:{" "}
+                      <span className="text-ink font-medium">
+                        {hostCount} sealed{" "}
+                        {hostCount === 1 ? "computer" : "computers"}
+                      </span>
+                    </div>
+                    {n.releaseTag && (
+                      <div>Software version: {n.releaseTag}</div>
+                    )}
+                    <div>Region: {n.region.toUpperCase()}</div>
+                    <div>
+                      Last seal check:{" "}
+                      {n.lastVerifiedAt
+                        ? whenHour(new Date(n.lastVerifiedAt * 1000))
+                        : "Checked on connect"}
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
 
@@ -267,7 +301,10 @@ async function PublicReceiptBookSection() {
             <div className="space-y-0.5">
               <div className="ep-label">Latest entry</div>
               <h3 className="font-serif text-lg font-medium text-ink">
-                Seal check on Tinfoil sealed computer
+                Seal check on{" "}
+                {latestEvent
+                  ? plainNodeName(latestEvent.nodeId)
+                  : "Tinfoil sealed computer"}
               </h3>
             </div>
             <span className="ep-pass">
@@ -276,7 +313,7 @@ async function PublicReceiptBookSection() {
             </span>
           </div>
 
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3 text-sm">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4 text-sm">
             <div className="ep-inset p-3.5 space-y-1">
               <div className="ep-label">Recorded hour</div>
               <div className="font-mono text-ink font-medium">
@@ -293,6 +330,21 @@ async function PublicReceiptBookSection() {
                     ? "Seal check passed"
                     : "Seal check failed"
                   : "Seal check passed"}
+              </div>
+            </div>
+            <div className="ep-inset p-3.5 space-y-1">
+              <div className="ep-label">Independent checks</div>
+              <div className="text-ink font-medium">
+                {transparency.distinctVerifierCount ?? 0}{" "}
+                {(transparency.distinctVerifierCount ?? 0) === 1
+                  ? "person has"
+                  : "people have"}{" "}
+                independently checked deRoute (
+                {transparency.totalSubmissions ?? 0} signed{" "}
+                {(transparency.totalSubmissions ?? 0) === 1
+                  ? "check"
+                  : "checks"}
+                )
               </div>
             </div>
             <div className="ep-inset p-3.5 space-y-1">
@@ -444,7 +496,11 @@ async function PublicReceiptBookSection() {
                 {transparency.distinctVerifierCount ?? 0} verifiers,{" "}
                 {transparency.totalSubmissions ?? 0} submissions)
               </div>
-              {recentSubmissions.length > 0 ? (
+              <div className="ep-inset p-3 font-mono text-ink-2">
+                Run <code>node scripts/drouter-cli.mjs verify --submit</code> to
+                sign and submit an independent C1-C7 verification claim.
+              </div>
+              {recentSubmissions.length > 0 && (
                 <div className="ep-card overflow-x-auto">
                   <table className="w-full text-left text-xs border-collapse">
                     <thead>
@@ -495,11 +551,6 @@ async function PublicReceiptBookSection() {
                       ))}
                     </tbody>
                   </table>
-                </div>
-              ) : (
-                <div className="ep-inset p-3 font-mono text-ink-2">
-                  Run node scripts/drouter-cli.mjs verify --submit to sign and
-                  submit an independent C1-C7 verification claim.
                 </div>
               )}
             </div>

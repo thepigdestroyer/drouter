@@ -32,7 +32,6 @@ interface CreditsResponse {
   n: string;
   e: string;
   denominations: number[];
-  issuerAddress?: string;
   chainId?: number;
   usdcPerCredit?: string;
   stats: {
@@ -175,9 +174,7 @@ export default function AuditLabPage() {
   }, [transparency]);
 
   const realRampStates = useMemo(() => {
-    return Object.values(accountability?.rampStates ?? {}).filter(
-      (r) => !r.nodeId.startsWith("sim-"),
-    );
+    return Object.values(accountability?.rampStates ?? {});
   }, [accountability]);
 
   const runLiveSealVerification = async () => {
@@ -263,7 +260,6 @@ export default function AuditLabPage() {
       const rootHex =
         transparency?.signedTreeHead?.rootHash ??
         transparency?.verificationLog?.root ??
-        transparency?.log?.root ??
         "";
       if (!rootHex) return;
 
@@ -358,10 +354,7 @@ export default function AuditLabPage() {
   };
 
   const latestClaimWithTx = useMemo(() => {
-    const claims = [
-      ...(accountability?.failures ?? []),
-      ...(accountability?.recentClaims ?? []),
-    ].filter((c) => !c.nodeId.startsWith("sim-"));
+    const claims = accountability?.failures ?? [];
     return claims.find((c) => Boolean(c.txHash)) ?? claims[0] ?? null;
   }, [accountability]);
 
@@ -449,23 +442,100 @@ export default function AuditLabPage() {
                   ))}
                 </div>
 
-                {/* Secret shopper summary in plain words */}
-                <div className="ep-inset p-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="space-y-0.5">
-                    <div className="font-serif text-base font-medium text-ink">
-                      Secret shopper check on the AI brain
+                {/* Hourly monitoring, independent verifications, and secret shopper summaries in plain words */}
+                <div className="space-y-3">
+                  {/* 1. Hourly monitoring of the real sealed computers */}
+                  <div className="ep-inset p-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="space-y-0.5">
+                      <div className="font-serif text-base font-medium text-ink">
+                        Checked every hour: {accountability?.latestRun
+                          ? `${accountability.latestRun.passedEnclaves} of ${accountability.latestRun.totalEnclaves} sealed computers`
+                          : `${accountability?.enclaves?.length || accountability?.registryNodes?.length || 6} sealed computers`}
+                      </div>
+                      <p className="text-sm text-ink-2">
+                        {accountability?.latestRun
+                          ? `Latest hourly run (${formatUnixSec(accountability.latestRun.epochHourSec)} UTC): checked ${accountability.latestRun.totalEnclaves} sealed computers, ${accountability.latestRun.failedEnclaves === 0 ? "all intact" : `${accountability.latestRun.failedEnclaves} failed`}, and ${accountability.latestRun.releaseChangesCount ?? 0} software release change(s).`
+                          : "Every hour we check the factory seal and software release on the router and all 5 AI brain computers, and record any failure in the public receipt book."}
+                      </p>
+                      {(accountability?.failures ?? []).length > 0 && (
+                        <div className="pt-1 flex flex-wrap items-center gap-2 text-xs">
+                          <span className="ep-fail">
+                            {(accountability?.failures ?? []).length} failure(s) recorded
+                          </span>
+                          {latestClaimWithTx?.explorerUrl && (
+                            <a
+                              href={latestClaimWithTx.explorerUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="ep-link font-mono"
+                            >
+                              Open public receipt -&gt;
+                            </a>
+                          )}
+                        </div>
+                      )}
                     </div>
-                    <p className="text-sm text-ink-2">
-                      We also send surprise test questions to make sure the
-                      sealed computer is still running the real AI brain and not
-                      a cheaper substitute.
-                    </p>
+                    <span
+                      className={
+                        accountability?.latestRun && !accountability.latestRun.ok
+                          ? "ep-fail shrink-0"
+                          : "ep-pass shrink-0"
+                      }
+                    >
+                      {accountability?.latestRun
+                        ? accountability.latestRun.ok
+                          ? `${accountability.latestRun.passedEnclaves} of ${accountability.latestRun.totalEnclaves} intact`
+                          : `${accountability.latestRun.failedEnclaves} failure(s) found`
+                        : `${accountability?.registryNodes?.length || 6} sealed computers active`}
+                    </span>
                   </div>
-                  <span className="ep-pass shrink-0">
-                    {auditor?.latestRun
-                      ? `${auditor.latestRun.passedCount} of ${auditor.latestRun.probesCount} test questions passed`
-                      : "Secret shopper ready"}
-                  </span>
+
+                  {/* 2. Independent verifications */}
+                  <div className="ep-inset p-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="space-y-0.5">
+                      <div className="font-serif text-base font-medium text-ink">
+                        {transparency?.distinctVerifierCount ?? 0}{" "}
+                        {(transparency?.distinctVerifierCount ?? 0) === 1
+                          ? "person has"
+                          : "people have"}{" "}
+                        independently checked deRoute
+                      </div>
+                      <p className="text-sm text-ink-2">
+                        Anyone can run their own seal check from their computer
+                        and add their signed result to the public receipt book (
+                        {transparency?.totalSubmissions ?? 0} signed{" "}
+                        {(transparency?.totalSubmissions ?? 0) === 1
+                          ? "check"
+                          : "checks"}{" "}
+                        recorded so far).
+                      </p>
+                    </div>
+                    <span className="ep-pass shrink-0">
+                      {transparency?.totalSubmissions ?? 0} signed{" "}
+                      {(transparency?.totalSubmissions ?? 0) === 1
+                        ? "check"
+                        : "checks"}
+                    </span>
+                  </div>
+
+                  {/* 3. Secret shopper summary in plain words */}
+                  <div className="ep-inset p-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="space-y-0.5">
+                      <div className="font-serif text-base font-medium text-ink">
+                        Secret shopper check on the AI brain
+                      </div>
+                      <p className="text-sm text-ink-2">
+                        We also send surprise test questions to make sure the
+                        sealed computer is still running the real AI brain and
+                        not a cheaper substitute.
+                      </p>
+                    </div>
+                    <span className="ep-pass shrink-0">
+                      {auditor?.latestRun
+                        ? `${auditor.latestRun.passedCount} of ${auditor.latestRun.probesCount} test questions passed`
+                        : "Secret shopper ready"}
+                    </span>
+                  </div>
                 </div>
 
                 {/* Technical details for all 5 external verifiable claims + sidecar disclosure + auditor */}
@@ -859,10 +929,65 @@ export default function AuditLabPage() {
                                 submission(s)
                               </div>
                               <div className="text-ink-3 text-[11px]">
-                                {sthVerification?.detail ??
-                                  "RFC 6962 sha256(0x00 || leaf) and sha256(0x01 || L || R)"}
+                                CLI:{" "}
+                                <code>
+                                  node scripts/drouter-cli.mjs verify --submit
+                                </code>
                               </div>
                             </div>
+                          </div>
+
+                          {/* Recent Independent Verifier Submissions */}
+                          <div className="space-y-2">
+                            <div className="ep-label">
+                              Recent independent CLI submissions (
+                              {transparency.recentSubmissions?.length ?? 0})
+                            </div>
+                            {transparency.recentSubmissions &&
+                            transparency.recentSubmissions.length > 0 ? (
+                              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 font-mono">
+                                {transparency.recentSubmissions.map((sub) => (
+                                  <div
+                                    key={`${sub.verifierFingerprint}-${sub.leafIndex}`}
+                                    className="ep-inset p-2.5 space-y-1 text-[11px] text-ink-2"
+                                  >
+                                    <div className="flex items-center justify-between gap-1">
+                                      <span className="text-ink font-medium">
+                                        #{sub.leafIndex}{" "}
+                                        {shortHex(
+                                          sub.verifierFingerprint,
+                                          10,
+                                          6,
+                                        )}
+                                      </span>
+                                      <span
+                                        className={
+                                          sub.overallOk ? "ep-pass" : "ep-fail"
+                                        }
+                                      >
+                                        {sub.overallOk ? "Pass" : "Fail"}
+                                      </span>
+                                    </div>
+                                    <div className="break-all">
+                                      Evidence:{" "}
+                                      {shortHex(sub.evidenceHash, 12, 8)}
+                                    </div>
+                                    <div>
+                                      Hour: {formatUnixSec(sub.epochHourSec)}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <div className="ep-inset p-2.5 font-mono text-[11px] text-ink-2">
+                                Run{" "}
+                                <code>
+                                  node scripts/drouter-cli.mjs verify --submit
+                                </code>{" "}
+                                to sign and submit an independent C1-C7
+                                verification claim.
+                              </div>
+                            )}
                           </div>
 
                           <div className="space-y-2">
@@ -922,6 +1047,176 @@ export default function AuditLabPage() {
                         <p className="text-ink-3">
                           Loading transparency log root and inclusion proofs...
                         </p>
+                      )}
+                    </div>
+
+                    {/* Continuous Hourly Enclave Monitor (/api/accountability) */}
+                    <div className="ep-card p-4 space-y-4">
+                      <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-rule pb-3">
+                        <div>
+                          <div className="ep-label">
+                            Continuous enclave monitor (/api/accountability)
+                          </div>
+                          <h3 className="font-serif text-base text-ink">
+                            Hourly enclave verification, release changes, and
+                            recorded failures
+                          </h3>
+                        </div>
+                        <span
+                          className={
+                            accountability?.latestRun
+                              ? accountability.latestRun.ok
+                                ? "ep-pass"
+                                : "ep-fail"
+                              : "ep-muted-chip"
+                          }
+                        >
+                          {accountability?.latestRun
+                            ? `${accountability.latestRun.passedEnclaves}/${accountability.latestRun.totalEnclaves} enclaves verified`
+                            : "Awaiting monitor run"}
+                        </span>
+                      </div>
+
+                      <p className="text-ink-2 font-mono text-[11px]">
+                        {accountability?.statusMessage ??
+                          "Checking continuous monitor history..."}
+                      </p>
+
+                      {accountability?.latestRun && (
+                        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 font-mono">
+                          <div className="ep-inset p-2.5">
+                            <div className="ep-label">Latest run ID</div>
+                            <div className="text-ink font-medium break-all">
+                              {accountability.latestRun.runId}
+                            </div>
+                          </div>
+                          <div className="ep-inset p-2.5">
+                            <div className="ep-label">Hour bucket (UTC)</div>
+                            <div className="text-ink font-medium">
+                              {formatUnixSec(
+                                accountability.latestRun.epochHourSec,
+                              )}
+                            </div>
+                          </div>
+                          <div className="ep-inset p-2.5">
+                            <div className="ep-label">Enclaves passed</div>
+                            <div className="text-ink font-medium">
+                              {accountability.latestRun.passedEnclaves} /{" "}
+                              {accountability.latestRun.totalEnclaves}
+                            </div>
+                          </div>
+                          <div className="ep-inset p-2.5">
+                            <div className="ep-label">Release changes</div>
+                            <div className="text-ink font-medium">
+                              {accountability.latestRun.releaseChangesCount}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {(accountability?.enclaves ?? []).length > 0 && (
+                        <div className="space-y-2">
+                          <div className="ep-label">
+                            Monitored enclaves (
+                            {(accountability?.enclaves ?? []).length})
+                          </div>
+                          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 font-mono text-[11px]">
+                            {(accountability?.enclaves ?? []).map((enc) => (
+                              <div
+                                key={`${enc.nodeId}-${enc.epochHourSec}`}
+                                className="ep-inset p-2.5 space-y-1 text-ink-2"
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-ink font-medium">
+                                    {enc.nodeId} ({enc.releaseTag})
+                                  </span>
+                                  <span
+                                    className={enc.ok ? "ep-pass" : "ep-fail"}
+                                  >
+                                    {enc.ok ? "Verified" : "Failed"}
+                                  </span>
+                                </div>
+                                <div className="break-all">
+                                  Host: {enc.enclaveHost}
+                                </div>
+                                <div className="break-all">
+                                  Measurement:{" "}
+                                  {shortHex(enc.measurement, 12, 8)}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {(accountability?.releaseChanges ?? []).length > 0 && (
+                        <div className="space-y-2">
+                          <div className="ep-label">
+                            Release and host changes (
+                            {(accountability?.releaseChanges ?? []).length})
+                          </div>
+                          <div className="space-y-1.5 font-mono text-[11px]">
+                            {(accountability?.releaseChanges ?? []).map(
+                              (rc, idx) => (
+                                <div
+                                  key={`${rc.nodeId}-${rc.currentTag}-${idx}`}
+                                  className="ep-inset p-2.5 text-ink-2"
+                                >
+                                  <span className="text-ink font-medium">
+                                    {rc.nodeId}
+                                  </span>{" "}
+                                  ({rc.kind}): {rc.previousTag ?? "none"} -&gt;{" "}
+                                  {rc.currentTag} | {rc.detail}
+                                </div>
+                              ),
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      {(accountability?.failures ?? []).length > 0 && (
+                        <div className="space-y-2">
+                          <div className="ep-label">
+                            Recorded verification failures (
+                            {(accountability?.failures ?? []).length})
+                          </div>
+                          <div className="space-y-1.5 font-mono text-[11px]">
+                            {(accountability?.failures ?? []).map((f) => (
+                              <div
+                                key={f.id}
+                                className="ep-inset p-2.5 space-y-1 text-ink-2"
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="text-ink font-medium">
+                                    {f.nodeId} ({f.releaseTag ?? "n/a"})
+                                  </span>
+                                  <span className="ep-fail">Failure</span>
+                                </div>
+                                <div>
+                                  Reasons:{" "}
+                                  {(f.reasons ?? []).join(", ") || "n/a"}
+                                </div>
+                                {f.evidenceHash && (
+                                  <div className="break-all">
+                                    Evidence: {shortHex(f.evidenceHash, 14, 10)}
+                                  </div>
+                                )}
+                                {f.explorerUrl && (
+                                  <div>
+                                    <a
+                                      href={f.explorerUrl}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="ep-link"
+                                    >
+                                      Arc receipt -&gt;
+                                    </a>
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
                       )}
                     </div>
 

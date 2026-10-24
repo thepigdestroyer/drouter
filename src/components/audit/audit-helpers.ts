@@ -3,12 +3,15 @@ import type {
   InclusionProof,
   SignedTreeHead,
   VerificationLogEvent,
+  VerifierCheckStatus,
+  VerifierModelClaim,
+  VerifierRouterClaim,
 } from "@/lib/transparency/log";
 import type {
   DeepAttestationBundle,
   ModelEnclaveAttestation,
 } from "@/lib/tinfoil/deep-inspect";
-import type { HardwareManifest, NodeRecord } from "@/lib/types";
+import type { Hex, NodeRecord } from "@/lib/types";
 
 export interface VerifiableClaimRecord {
   id: string;
@@ -32,20 +35,13 @@ export interface PlainTrustPoint {
   buttonLabel: string;
 }
 
-export interface TransparencyEntryView {
-  index: number;
-  imageId: string;
-  version: string;
-  measurement: string;
-  approvedAt: number;
-  reviewWindowDays: number;
-  emergency: boolean;
-}
-
 export interface VerifierSubmissionSummaryView {
   verifierFingerprint: string;
   epochHourSec: number;
   overallOk: boolean;
+  checks?: VerifierCheckStatus[];
+  router?: VerifierRouterClaim;
+  models?: VerifierModelClaim[];
   evidenceHash: string;
   leafIndex: number;
   leafHash: string;
@@ -64,7 +60,6 @@ export interface TransparencyResponse {
     consistencyProof: ConsistencyProof;
   };
   consistencyProof?: ConsistencyProof;
-  releaseConsistencyProof?: ConsistencyProof;
   distinctVerifierCount?: number;
   totalSubmissions?: number;
   recentSubmissions?: VerifierSubmissionSummaryView[];
@@ -73,11 +68,6 @@ export interface TransparencyResponse {
     totalSubmissions: number;
     recentSubmissions: VerifierSubmissionSummaryView[];
   };
-  log?: {
-    root: string;
-    entries: TransparencyEntryView[];
-  };
-  proofs?: InclusionProof[];
 }
 
 export interface RampEvaluationView {
@@ -94,20 +84,31 @@ export interface RampEvaluationView {
 
 export interface RecordedClaimEventView {
   id: string;
-  kind?: string;
   nodeId: string;
-  timestamp?: number;
   epochHourSec?: number;
   reasons?: string[];
-  slashUsdc?: number;
-  bountyUsdc?: number;
-  compensationPoolUsdc?: number;
-  summary?: string;
-  detail?: unknown;
-  evidenceHash?: string;
-  txHash?: string | null;
+  measurement?: string;
+  releaseTag?: string;
+  evidenceHash?: Hex | string;
+  txHash?: Hex | string | null;
   explorerUrl?: string | null;
   onChain?: boolean;
+}
+
+export interface ReleaseChangeView {
+  nodeId: string;
+  changed: boolean;
+  unannounced: boolean;
+  kind: string;
+  previousTag: string | null;
+  currentTag: string;
+  previousMeasurement: string | null;
+  currentMeasurement: string;
+  previousHosts: string[];
+  currentHosts: string[];
+  hostCodeTags: Record<string, string>;
+  detail: string;
+  epochHourSec?: number;
 }
 
 export interface MonitoredEnclaveView {
@@ -119,23 +120,65 @@ export interface MonitoredEnclaveView {
   releaseDigest: string;
   measurement: string;
   enclaveHost: string;
+  configuredHosts?: number;
+  verifiedHosts?: number;
+  healthyHosts?: number;
+  unverifiedHosts?: number;
   ok: boolean;
   attestationChainOk: boolean;
   measurementMatchesRelease: boolean;
   modelProvenanceOk: boolean;
+  auditorOk?: boolean;
+  failureReasons?: string[];
+  evidenceHash?: Hex | string;
+  arcFailureTxHash?: Hex | string | null;
+  arcExplorerUrl?: string | null;
   epochHourSec: number;
+}
+
+export interface MonitorRunView {
+  runId: string;
+  epochHourSec: number;
+  at: string;
+  ok: boolean;
+  routerHost: string;
+  routerReleaseTag: string;
+  routerReleaseDigest: string;
+  routerRttMs: number | null;
+  totalEnclaves: number;
+  passedEnclaves: number;
+  failedEnclaves: number;
+  releaseChangesCount: number;
+  enclaves: MonitoredEnclaveView[];
+  releaseChanges: ReleaseChangeView[];
+  failures: RecordedClaimEventView[];
+  transparencyRoot: string;
+  transparencyTreeSize: number;
+  anchorTx: string | null;
+  anchoredAtSec: number | null;
 }
 
 export interface AccountabilityResponse {
   mongoConfigured?: boolean;
   hasRun?: boolean;
   statusMessage?: string;
+  latestRun?: MonitorRunView | null;
+  history?: MonitorRunView[];
   enclaves?: MonitoredEnclaveView[];
+  releaseChanges?: ReleaseChangeView[];
   failures?: RecordedClaimEventView[];
-  manifests?: HardwareManifest[];
+  auditor?: {
+    hasRun: boolean;
+    statusMessage: string;
+    latestRun: AuditorRunView | null;
+  };
+  signedTreeHead?: SignedTreeHead;
   rampStates: Record<string, RampEvaluationView>;
-  recentClaims?: RecordedClaimEventView[];
-  forbiddenPrefix?: string;
+  routerLatency?: {
+    rttMs: number | null;
+    host: string;
+    measuredAt: string;
+  };
   registrySource?: "arc" | "fallback";
   registryNodes?: NodeRecord[];
   minStakeUsdc?: string;

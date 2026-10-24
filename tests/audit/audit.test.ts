@@ -191,10 +191,7 @@ describe("buildVerifiableClaims and buildPlainTrustPoints live record links", ()
     const claims = buildVerifiableClaims({
       matrix: sampleMatrix,
       accountability: {
-        manifests: [],
         rampStates: {},
-        recentClaims: [],
-        forbiddenPrefix: "aa".repeat(32),
         onChain: true,
         txHash: `0x${"ab".repeat(32)}`,
         explorerUrl: `https://explorer.testnet.arc.io/tx/0x${"ab".repeat(32)}`,
@@ -288,7 +285,7 @@ describe("buildVerifiableClaims and buildPlainTrustPoints live record links", ()
       expect(source).not.toContain("\u2014");
 
       // No simulated or practice UI references
-      expect(source).not.toMatch(/\bsim-[123]\b/);
+      expect(source).not.toMatch(/\bsim-/);
       expect(source).not.toMatch(/\bquorumSimulated\b/);
       expect(source).not.toMatch(/\bPractice\b/);
 

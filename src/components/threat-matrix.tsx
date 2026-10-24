@@ -66,10 +66,10 @@ export const THREAT_VILLAINS: VillainScenario[] = [
     label: "A hacker with a probe",
     shortTag: "Physical wiretap",
     whatTheyTry:
-      "They walk into the data center and clip a wire onto the memory chips or try to steal the computer's secret signing key in a lab.",
+      "They walk into the data center and clip a wire onto the memory chips or try to reboot or change a server without telling anyone.",
     whatStopsThem:
-      "The computer scrambles its memory in hardware with a fresh lock on every step, and if a signing key is ever stolen, anyone can prove the break-in and flag that server in the public receipt book.",
-    scenarioIds: ["ddr5-interposer", "lab-key-extraction"],
+      "The computer scrambles its memory in hardware with a fresh lock on every step, and our hourly monitor checks every sealed computer and writes any unannounced change or failure into the public receipt book.",
+    scenarioIds: ["ddr5-interposer", "continuous-enclave-monitor"],
   },
   {
     id: "fake-server",
@@ -383,7 +383,7 @@ export const THREAT_SCENARIOS: ThreatScenario[] = [
       "Tree heads are signed by the operator Ed25519 key and anchored on Circle Arc Testnet so split views or history rewrites are detectable.",
   },
   {
-    id: "lab-key-extraction",
+    id: "continuous-enclave-monitor",
     index: "07",
     specimenCode: "CONTINUOUS-MONITOR",
     vectorCategory: "Continuous monitoring and on-chain failure logging",
