@@ -2,6 +2,14 @@
 
 import React, { useState } from "react";
 
+export interface ThreatDefenseTestRef {
+  filePath: string;
+  testName: string;
+  githubUrl: string;
+  codePath?: string;
+  codeUrl?: string;
+}
+
 export interface ThreatScenario {
   id: string;
   index: string;
@@ -14,6 +22,7 @@ export interface ThreatScenario {
   defenseSummary: string;
   plainExplanation: string;
   controls: string[];
+  defenseTests: ThreatDefenseTestRef[];
   telemetryProof: {
     metricLabel: string;
     metricValue: string;
@@ -21,6 +30,15 @@ export interface ThreatScenario {
     rawArtifact: string;
   };
   residualNote: string;
+  simulated?: boolean;
+}
+
+export const GITHUB_BLOB_BASE =
+  "https://github.com/thepigdestroyer/drouter/blob/main";
+
+export function githubBlobUrl(repoRelativePath: string): string {
+  const clean = repoRelativePath.replace(/^\/+/, "");
+  return `${GITHUB_BLOB_BASE}/${clean}`;
 }
 
 export const THREAT_SCENARIOS: ThreatScenario[] = [
@@ -44,12 +62,30 @@ export const THREAT_SCENARIOS: ThreatScenario[] = [
       "Local PII and secret scrubbing",
       "4,096-byte bucket padding",
     ],
+    defenseTests: [
+      {
+        filePath: "tests/privacy/privacy.test.ts",
+        testName:
+          "pads and unpads payloads across exact bucket boundaries (0B, 1B, 4091B, 4092B, 4093B, 1MB) without leaking length inside the bucket",
+        githubUrl: githubBlobUrl("tests/privacy/privacy.test.ts"),
+        codePath: "src/lib/privacy/padding.ts",
+        codeUrl: githubBlobUrl("src/lib/privacy/padding.ts"),
+      },
+      {
+        filePath: "tests/tinfoil/tinfoil.test.ts",
+        testName:
+          "padJsonPayloadToBucket pads a 180-byte JSON payload to 4,096 B and a 5,000-byte payload to 8,192 B while preserving JSON.parse equivalence",
+        githubUrl: githubBlobUrl("tests/tinfoil/tinfoil.test.ts"),
+        codePath: "src/lib/relay.ts",
+        codeUrl: githubBlobUrl("src/lib/relay.ts"),
+      },
+    ],
     telemetryProof: {
-      metricLabel: "Relay payload visibility",
-      metricValue: "0 bytes plaintext (bucket-padded)",
+      metricLabel: "Relay payload framing",
+      metricValue: "Padded to 4,096-byte power-of-two buckets before encryption",
       verificationTag: "HPKE-SEAL-OK",
       rawArtifact:
-        "aad=drouter/v1/chat | bucket=4096B | cipher=AES-256-GCM",
+        "aad=drouter/v1/chat | min_bucket=4096B | cipher=AES-256-GCM",
     },
     residualNote:
       "The relay sees connection timing and bucket size tier only, never prompt text.",
@@ -74,12 +110,30 @@ export const THREAT_SCENARIOS: ThreatScenario[] = [
       "NVIDIA GPU HBM custody",
       "Fresh random nonces on bounce buffers",
     ],
+    defenseTests: [
+      {
+        filePath: "tests/custody/custody.test.ts",
+        testName:
+          "verifies real cryptographic primitives and explicitly labels runMemoryBusAndPopAudit as mode='model'",
+        githubUrl: githubBlobUrl("tests/custody/custody.test.ts"),
+        codePath: "src/lib/custody/index.ts",
+        codeUrl: githubBlobUrl("src/lib/custody/index.ts"),
+      },
+      {
+        filePath: "tests/tinfoil/tinfoil.test.ts",
+        testName:
+          "verifyModelEnclaveStatus passes when hosts are verified and GPUs are in CC mode, and fails on unverified hosts or 0 GPUs",
+        githubUrl: githubBlobUrl("tests/tinfoil/tinfoil.test.ts"),
+        codePath: "src/lib/tinfoil/deep-inspect.ts",
+        codeUrl: githubBlobUrl("src/lib/tinfoil/deep-inspect.ts"),
+      },
+    ],
     telemetryProof: {
-      metricLabel: "Host bus ciphertext entropy",
-      metricValue: "7.99 bits/byte (0 repeated 16B blocks)",
+      metricLabel: "Host bus audit invariant (V1)",
+      metricValue: "0 plaintext matches and 0 repeated 16-byte blocks across turns",
       verificationTag: "V1-BUS-AUDIT-PASS",
       rawArtifact:
-        "bus_audit=V1 | repeated_16b_blocks=0 | shannon_entropy=7.99",
+        "bus_audit=V1 | plaintext_matches=0 | repeated_16b_blocks=0",
     },
     residualNote:
       "A physical RAM probe captures only randomized ciphertext with no repeated blocks.",
@@ -104,12 +158,30 @@ export const THREAT_SCENARIOS: ThreatScenario[] = [
       "Guest policy check (debug disabled)",
       "Sigstore Rekor transparency log match",
     ],
+    defenseTests: [
+      {
+        filePath: "tests/tinfoil/tinfoil.test.ts",
+        testName:
+          "decodeSnpReportBytes accurately parses a 1,184-byte binary SNP report",
+        githubUrl: githubBlobUrl("tests/tinfoil/tinfoil.test.ts"),
+        codePath: "src/lib/tinfoil/deep-inspect.ts",
+        codeUrl: githubBlobUrl("src/lib/tinfoil/deep-inspect.ts"),
+      },
+      {
+        filePath: "tests/monitor/monitor.test.ts",
+        testName:
+          "refuses to forward prompts when enclave attestation verification fails",
+        githubUrl: githubBlobUrl("tests/monitor/monitor.test.ts"),
+        codePath: "scripts/drouter-proxy.mjs",
+        codeUrl: githubBlobUrl("scripts/drouter-proxy.mjs"),
+      },
+    ],
     telemetryProof: {
       metricLabel: "Pre-key handshake gate",
-      metricValue: "Aborted at 0 bytes sent on mismatch",
+      metricValue: "Connection aborted before key exchange on quote or digest mismatch",
       verificationTag: "QUOTE-AND-REKOR-OK",
       rawArtifact:
-        "policy.debug=0 | hardware_sig=VERIFIED | rekor_log=MATCHED",
+        "policy.debugAllowed=false | hardware_sig=VERIFIED | rekor_log=MATCHED",
     },
     residualNote:
       "Any mismatch in the container digest or hardware policy stops key exchange.",
@@ -123,26 +195,44 @@ export const THREAT_SCENARIOS: ThreatScenario[] = [
     attackerGoal:
       "Charge for a frontier model while serving answers from a smaller or heavily quantized model.",
     whatAttackerSees:
-      "Boot measurement mismatch if the container image changes, plus statistical canary failure under audit.",
-    neutralizingLayer: "Measured container digest + canary prompts",
+      "Boot measurement mismatch if the container image changes, plus sequential probability ratio test (SPRT) failure under canary audit.",
+    neutralizingLayer: "Measured container digest + SPRT canary audit",
     defenseSummary:
-      "The model serving container is pinned in the attestation measurement, and canary prompts test response quality.",
+      "The model serving container and weight package are pinned in the attestation measurement, and canary prompts test response quality.",
     plainExplanation:
-      "The enclave measurement pins the container image and model configuration, and simulated mystery-shopper probes check for statistical drift.",
+      "The enclave measurement pins the container image and model weight package (mpk), and mystery-shopper canary probes score exact answers, JSON structure, echoed model ID, and token counts under Wald's SPRT.",
     controls: [
-      "Measured container rootfs digest",
-      "Simulated mystery-shopper canary probes",
-      "Sequential probability ratio check",
+      "Measured container rootfs digest and weight mpk",
+      "Mystery-shopper canary probes (5 deterministic signals)",
+      "Wald Sequential Probability Ratio Test (SPRT)",
+    ],
+    defenseTests: [
+      {
+        filePath: "tests/auditor/auditor.test.ts",
+        testName:
+          "scores canary responses with exact-answer, JSON format, model echo, token counts, and latency signals",
+        githubUrl: githubBlobUrl("tests/auditor/auditor.test.ts"),
+        codePath: "src/lib/auditor/canary.ts",
+        codeUrl: githubBlobUrl("src/lib/auditor/canary.ts"),
+      },
+      {
+        filePath: "tests/tinfoil/tinfoil.test.ts",
+        testName:
+          "parseDeploymentConfigYaml extracts weightRepoCommit, weightMpkHash, containerImageDigest, and ccGpuFlagsVerified from Kimi K3 YAML",
+        githubUrl: githubBlobUrl("tests/tinfoil/tinfoil.test.ts"),
+        codePath: "src/lib/tinfoil/deep-inspect.ts",
+        codeUrl: githubBlobUrl("src/lib/tinfoil/deep-inspect.ts"),
+      },
     ],
     telemetryProof: {
-      metricLabel: "Model image and canary check",
-      metricValue: "Measurement matched + canary accepted",
+      metricLabel: "Model image and SPRT canary check",
+      metricValue: "Pinned container digest + SPRT bounds (p0=0.90, p1=0.45)",
       verificationTag: "IMAGE-PINNED",
       rawArtifact:
-        "image_digest=PINNED | canary_audit=PASS",
+        "image_digest=PINNED | sprt_alpha=0.001 | sprt_beta=0.01",
     },
     residualNote:
-      "Changing the container image alters the hardware measurement reported at boot.",
+      "Changing the container image or weight package alters the hardware measurement reported at boot.",
   },
   {
     id: "subpoena-post-session",
@@ -164,9 +254,27 @@ export const THREAT_SCENARIOS: ThreatScenario[] = [
       "Client-held freeze key (AES-256-GCM)",
       "Server rejects plaintext freeze uploads",
     ],
+    defenseTests: [
+      {
+        filePath: "tests/freeze/freeze.test.ts",
+        testName:
+          "server store rejects any payload containing freezeSecretHex, plaintext messages, prompts, or IP metadata, and caps blob size",
+        githubUrl: githubBlobUrl("tests/freeze/freeze.test.ts"),
+        codePath: "src/lib/freeze/store.ts",
+        codeUrl: githubBlobUrl("src/lib/freeze/store.ts"),
+      },
+      {
+        filePath: "tests/custody/custody.test.ts",
+        testName:
+          "overwrites internal key/counter/derived Uint8Array buffers with 0x00 and throws after zeroize()",
+        githubUrl: githubBlobUrl("tests/custody/custody.test.ts"),
+        codePath: "src/lib/custody/index.ts",
+        codeUrl: githubBlobUrl("src/lib/custody/index.ts"),
+      },
+    ],
     telemetryProof: {
-      metricLabel: "Retained server plaintext",
-      metricValue: "0 bytes stored on dRouter server",
+      metricLabel: "Server freeze store schema",
+      metricValue: "Rejects freezeSecretHex and plaintext messages on upload",
       verificationTag: "CIPHERTEXT-ONLY",
       rawArtifact:
         "session_key=ZEROED | freeze_store=AES_256_GCM_CIPHERTEXT_ONLY",
@@ -184,25 +292,44 @@ export const THREAT_SCENARIOS: ThreatScenario[] = [
       "Bribe 3 verifiers into signing a routing ticket for an unverified server.",
     whatAttackerSees:
       "Quorum check rejects tickets with fewer than 5 of 7 signatures, and the client still checks the raw hardware quote.",
-    neutralizingLayer: "5-of-7 quorum + direct quote verification",
+    neutralizingLayer: "5-of-7 quorum (Simulated) + quote check",
     defenseSummary:
-      "Routing tickets require at least 5 of 7 verifier signatures, and the client independently verifies the hardware quote.",
+      "Routing tickets require at least 5 of 7 verifier signatures (Simulated), and the client independently verifies the hardware quote.",
     plainExplanation:
-      "Admitting a node to the simulated routing table requires 5 of 7 independent verifier signatures, and direct hardware quote verification provides a second check.",
+      "Admitting a node to the simulated routing table requires 5 of 7 verifier signatures, and direct hardware quote verification provides an independent check.",
     controls: [
-      "5-of-7 Ed25519 verifier quorum threshold",
-      "Independent hardware quote verification",
-      "Arc Testnet registry anchor",
+      "5-of-7 Ed25519 verifier quorum threshold (Simulated)",
+      "RFC 6962 Merkle transparency log inclusion proof",
+      "Direct hardware quote verification",
+    ],
+    defenseTests: [
+      {
+        filePath: "tests/transparency/transparency.test.ts",
+        testName:
+          "passes with 5-of-7 signatures and fails with 4-of-7, forged signature, or suspended status",
+        githubUrl: githubBlobUrl("tests/transparency/transparency.test.ts"),
+        codePath: "src/lib/transparency/quorum.ts",
+        codeUrl: githubBlobUrl("src/lib/transparency/quorum.ts"),
+      },
+      {
+        filePath: "tests/transparency/transparency.test.ts",
+        testName:
+          "verifies Merkle inclusion proof and consistency proof for each approved release entry",
+        githubUrl: githubBlobUrl("tests/transparency/transparency.test.ts"),
+        codePath: "src/lib/transparency/log.ts",
+        codeUrl: githubBlobUrl("src/lib/transparency/log.ts"),
+      },
     ],
     telemetryProof: {
       metricLabel: "Quorum threshold check",
-      metricValue: "3/7 rejected (requires 5/7)",
+      metricValue: "Requires >= 5 of 7 valid Ed25519 signatures (Simulated)",
       verificationTag: "QUORUM-ENFORCED",
       rawArtifact:
-        "quorum_sigs=3/7 (REJECTED) | threshold=5/7",
+        "quorum_sigs_min=5/7 | status=full | weight_gt=0",
     },
     residualNote:
-      "Simulated quorum tickets are verified in our transparency and accountability modules.",
+      "Quorum verifier keys are derived deterministically in local simulation; tree heads are signed by the operator key.",
+    simulated: true,
   },
   {
     id: "lab-key-extraction",
@@ -213,26 +340,43 @@ export const THREAT_SCENARIOS: ThreatScenario[] = [
     attackerGoal:
       "Extract a node's attestation key to sign fake reports and impersonate an honest enclave.",
     whatAttackerSees:
-      "Anyone with the extracted key can sign a forbidden prefix to claim a 50% slash bounty against the node's stake (Simulated).",
-    neutralizingLayer: "Forbidden-prefix key bounty (Simulated)",
+      "Anyone with the extracted key can sign a forbidden prefix to prove key extraction and trigger an on-chain verification failure record.",
+    neutralizingLayer: "Forbidden-prefix key proof + Arc registry",
     defenseSummary:
-      "Honest enclaves never sign the forbidden prefix F, so any signature over F proves key extraction and slashes the node.",
+      "Honest enclaves never sign the forbidden prefix F, so any signature over F proves key extraction and flags the node on Circle Arc Testnet.",
     plainExplanation:
-      "In our accountability simulation, honest enclaves refuse to sign REPORT_DATA starting with F = sha256('drouter/forbidden-report-data/v1'). Signing F serves as a cryptographic proof of key compromise.",
+      "Honest enclaves refuse to sign REPORT_DATA starting with F = sha256('drouter/forbidden-report-data/v1'). A valid P-384 signature over F proves key compromise and records the evidence hash on the Circle Arc Testnet DRouterRegistry contract.",
     controls: [
-      "Forbidden report_data prefix F",
-      "50% key-compromise bounty simulation",
-      "Canary honeytoken commitment simulation",
+      "Forbidden report_data prefix F check",
+      "P-384 ECDSA compromise proof verification",
+      "On-chain evidence anchor on Circle Arc Testnet",
+    ],
+    defenseTests: [
+      {
+        filePath: "tests/sim/snp.test.ts",
+        testName: "refuses to sign REPORT_DATA with the forbidden prefix",
+        githubUrl: githubBlobUrl("tests/sim/snp.test.ts"),
+        codePath: "src/lib/sim/snp.ts",
+        codeUrl: githubBlobUrl("src/lib/sim/snp.ts"),
+      },
+      {
+        filePath: "tests/accountability/accountability.test.ts",
+        testName:
+          "accepts a validly signed forbidden-prefix attestation report and uses contract stake without fabricated percentage splits",
+        githubUrl: githubBlobUrl("tests/accountability/accountability.test.ts"),
+        codePath: "src/lib/accountability/bounty.ts",
+        codeUrl: githubBlobUrl("src/lib/accountability/bounty.ts"),
+      },
     ],
     telemetryProof: {
       metricLabel: "Compromised key penalty",
-      metricValue: "100% stake slash (50% reporter bounty, Simulated)",
-      verificationTag: "BOUNTY-TRAP-SIM",
+      metricValue: "Full registered stake (0.01 USDC) eligible for slash on DRouterRegistry",
+      verificationTag: "BOUNTY-TRAP-VERIFIED",
       rawArtifact:
-        "F=sha256('drouter/forbidden-report-data/v1') | slash=100% | mode=SIMULATED",
+        "F=sha256('drouter/forbidden-report-data/v1') | contract=DRouterRegistry",
     },
     residualNote:
-      "Slashing and bounty claims are simulated against sim-1, sim-2, and sim-3.",
+      "Fault injection uses simulated nodes sim-1, sim-2, and sim-3, while evidence hashes are recorded on Circle Arc Testnet.",
   },
 ];
 
@@ -318,17 +462,17 @@ export function ThreatMatrix({
           return (
             <div key={scenario.id} className="py-4 first:pt-0 last:pb-0 space-y-3">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                <div className="space-y-1 max-w-[70ch]">
+                <div className="space-y-1 max-w-[70ch] min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="ep-label">
                       {scenario.index}. {scenario.vectorCategory}
                     </span>
                     <span className="ep-pass">{scenario.neutralizingLayer}</span>
                   </div>
-                  <h3 className="font-serif text-base sm:text-lg font-medium text-ink">
+                  <h3 className="font-serif text-base sm:text-lg font-medium text-ink break-words">
                     {scenario.attackTitle}
                   </h3>
-                  <p className="text-sm text-ink-2">
+                  <p className="text-sm text-ink-2 break-words">
                     {scenario.defenseSummary}
                   </p>
                 </div>
@@ -368,6 +512,50 @@ export function ThreatMatrix({
                         {scenario.plainExplanation}
                       </p>
                     </div>
+                  </div>
+
+                  <div className="border-t border-rule pt-2.5 space-y-1.5">
+                    <div className="ep-label">
+                      Defending checks and tests in repository
+                    </div>
+                    <ul className="space-y-1.5 text-xs">
+                      {scenario.defenseTests.map((t) => (
+                        <li
+                          key={`${t.filePath}:${t.testName}`}
+                          className="flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-1 bg-paper p-2 rounded border border-rule"
+                        >
+                          <div className="space-y-0.5 min-w-0">
+                            <div className="font-mono text-[11px] text-ink">
+                              it(&quot;{t.testName}&quot;)
+                            </div>
+                            <div className="font-mono text-[11px] text-ink-3 break-all">
+                              {t.filePath}
+                              {t.codePath ? ` -> ${t.codePath}` : ""}
+                            </div>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-3 shrink-0 font-mono text-[11px]">
+                            <a
+                              href={t.githubUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="ep-link"
+                            >
+                              {t.filePath} -&gt;
+                            </a>
+                            {t.codePath && t.codeUrl && (
+                              <a
+                                href={t.codeUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="ep-link"
+                              >
+                                {t.codePath} -&gt;
+                              </a>
+                            )}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
                   </div>
 
                   <details className="text-xs text-ink-3 border-t border-rule pt-2.5">
