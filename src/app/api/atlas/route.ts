@@ -32,6 +32,8 @@ export async function GET(request: Request) {
 
   return NextResponse.json({
     query: search.query,
+    embeddingModel: search.embeddingModel,
+    embeddingDimensions: search.embeddingDimensions,
     engines: search.engines,
     results: search.results,
     matchingReceipts: search.matchingReceipts,
@@ -120,6 +122,8 @@ export async function POST(request: Request) {
         title,
         summary,
         category,
+        sourceUrl: typeof body.sourceUrl === "string" ? body.sourceUrl : undefined,
+        retrievedAt: typeof body.retrievedAt === "string" ? body.retrievedAt : undefined,
         tags,
         metadata:
           typeof body.metadata === "object" && body.metadata !== null
@@ -170,6 +174,8 @@ export async function POST(request: Request) {
 
   return NextResponse.json({
     query: search.query,
+    embeddingModel: search.embeddingModel,
+    embeddingDimensions: search.embeddingDimensions,
     engines: search.engines,
     results: search.results,
     matchingReceipts: search.matchingReceipts,

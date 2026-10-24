@@ -7,10 +7,16 @@ import {
   embedDocumentText,
   embedDocumentTextWithProvider,
   EMBEDDING_DIMENSIONS,
+  seedLiveEmbeddingCache,
+  type EmbeddingResult,
 } from "./embeddings";
 import {
   ATLAS_SEED_DOCS,
-  buildEmbeddedIntelligenceDoc,
+  buildEmbeddedIntelligenceDocWithProvider,
+  composeIntelligenceDocText,
+  CORPUS_RETRIEVED_AT_UTC,
+  embedSeedCorpusWithProvider,
+  RAW_ATLAS_SEED_INPUTS,
   type AtlasDocCategory,
   type EnclaveIntelligenceDoc,
 } from "./knowledge-base";
@@ -53,7 +59,7 @@ export interface AgentVerificationReceiptDoc {
   summary: string;
   embedding: number[];
   embeddingModel: string;
-  embeddingDimensions: 128;
+  embeddingDimensions: number;
 }
 
 export interface HybridSearchResultItem {
@@ -61,6 +67,8 @@ export interface HybridSearchResultItem {
   title: string;
   category: AtlasDocCategory;
   summary: string;
+  sourceUrl: string;
+  retrievedAt: string;
   tags: string[];
   metadata: Record<string, unknown>;
   vectorScore: number;
@@ -76,7 +84,7 @@ export interface HybridSearchResponse {
   query: string;
   categoryFilter: string | null;
   embeddingModel: string;
-  embeddingDimensions: 128;
+  embeddingDimensions: number;
   executionMode: "atlas-hybrid-rrf" | "local-hybrid-rrf";
   engines: AtlasSearchEngines;
   nativeVectorHits: number;
@@ -130,6 +138,7 @@ export interface AtlasStreamAnalyticsResponse {
     name: string;
     type: string;
     status: string;
+    numDimensions?: number;
   }>;
   anomalyAlerts: Array<{
     alertId: string;
@@ -145,7 +154,12 @@ const globalForAtlas = globalThis as unknown as {
   __drouterAtlasSeeded?: boolean;
   __drouterRuntimeDocs?: Map<string, EnclaveIntelligenceDoc>;
   __drouterRuntimeReceipts?: Map<string, AgentVerificationReceiptDoc>;
+  __drouterTestAtlasDb?: Db | null;
 };
+
+export function setAtlasDbForTests(db: Db | null | undefined): void {
+  globalForAtlas.__drouterTestAtlasDb = db;
+}
 
 function getRuntimeDocsMap(): Map<string, EnclaveIntelligenceDoc> {
   if (!globalForAtlas.__drouterRuntimeDocs) {
@@ -177,10 +191,15 @@ export function coarsenIsoToUtcHour(input?: string | Date): string {
 
 /**
  * Resolves `MONGODB_URI` from `process.env` or `.env.local` if available.
+ * In unit test environments (`VITEST` or `NODE_ENV=test`), never reads `.env.local`
+ * from disk so unit tests stay isolated from live network connections unless explicitly mocked.
  */
 export function resolveMongoUri(): string | null {
-  if (process.env.MONGODB_URI) {
-    return process.env.MONGODB_URI;
+  if (process.env.MONGODB_URI?.trim()) {
+    return process.env.MONGODB_URI.trim();
+  }
+  if (process.env.VITEST || process.env.NODE_ENV === "test") {
+    return null;
   }
   try {
     const envPath = join(process.cwd(), ".env.local");
@@ -190,7 +209,10 @@ export function resolveMongoUri(): string | null {
         const trimmed = line.trim();
         if (trimmed.startsWith("MONGODB_URI=")) {
           let val = trimmed.slice("MONGODB_URI=".length).trim();
-          if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+          if (
+            (val.startsWith('"') && val.endsWith('"')) ||
+            (val.startsWith("'") && val.endsWith("'"))
+          ) {
             val = val.slice(1, -1);
           }
           if (val) {
@@ -207,6 +229,9 @@ export function resolveMongoUri(): string | null {
 }
 
 export async function getAtlasDb(): Promise<Db | null> {
+  if (globalForAtlas.__drouterTestAtlasDb !== undefined) {
+    return globalForAtlas.__drouterTestAtlasDb;
+  }
   const uri = resolveMongoUri();
   if (!uri) return null;
   try {
@@ -224,8 +249,9 @@ export async function getAtlasDb(): Promise<Db | null> {
 }
 
 /**
- * Ensures the 16 curated `ATLAS_SEED_DOCS` and both Atlas Search & Vector Search
- * indexes exist on the `enclave_intelligence` collection.
+ * Ensures the 16 curated seed documents and both Atlas Search & Vector Search
+ * indexes (`numDimensions: 768`) exist on the `enclave_intelligence` collection.
+ * Preserves existing 768-dim `nomic-embed-text` vectors already stored in Atlas.
  */
 export async function ensureAtlasSeededAndIndexed(db?: Db | null): Promise<{
   seededCount: number;
@@ -238,22 +264,81 @@ export async function ensureAtlasSeededAndIndexed(db?: Db | null): Promise<{
 
   const col: Collection<EnclaveIntelligenceDoc> = database.collection(ATLAS_COLLECTION_NAME);
   const runtimeMap = getRuntimeDocsMap();
-  const docsToSeed = Array.from(runtimeMap.values());
 
   if (!globalForAtlas.__drouterAtlasSeeded) {
     try {
       await col.createIndex({ docId: 1 }, { unique: true });
       await col.createIndex({ category: 1 });
-      const ops = docsToSeed.map((doc) => ({
-        updateOne: {
-          filter: { docId: doc.docId },
-          update: { $set: doc },
-          upsert: true,
-        },
-      }));
-      if (ops.length > 0) {
-        await col.bulkWrite(ops, { ordered: false });
+
+      const existingDocs = await col
+        .find({}, { projection: { _id: 0 } })
+        .toArray()
+        .catch(() => []);
+      const existingById = new Map<string, EnclaveIntelligenceDoc>();
+      for (const doc of existingDocs) {
+        if (doc.docId) {
+          existingById.set(doc.docId, doc);
+          if (
+            Array.isArray(doc.embedding) &&
+            doc.embedding.length === EMBEDDING_DIMENSIONS &&
+            typeof doc.embeddingModel === "string" &&
+            doc.embeddingModel.includes("nomic-embed-text") &&
+            typeof doc.sourceUrl === "string" &&
+            doc.sourceUrl.length > 0
+          ) {
+            runtimeMap.set(doc.docId, doc);
+            const composite = composeIntelligenceDocText({
+              title: doc.title,
+              category: doc.category,
+              summary: doc.summary,
+              sourceUrl: doc.sourceUrl,
+              tags: doc.tags ?? [],
+              metadata: doc.metadata ?? {},
+            });
+            seedLiveEmbeddingCache(composite, {
+              vector: doc.embedding,
+              model: doc.embeddingModel,
+              dimensions: EMBEDDING_DIMENSIONS,
+              isLiveModel: true,
+              attestedEnclave: true,
+            });
+          }
+        }
       }
+
+      const missingInputs = RAW_ATLAS_SEED_INPUTS.filter((raw) => {
+        const ex = existingById.get(raw.docId);
+        if (!ex) return true;
+        const hasValidVec =
+          Array.isArray(ex.embedding) &&
+          ex.embedding.length === EMBEDDING_DIMENSIONS &&
+          typeof ex.embeddingModel === "string" &&
+          ex.embeddingModel.includes("nomic-embed-text");
+        const hasSource =
+          typeof ex.sourceUrl === "string" &&
+          ex.sourceUrl === raw.sourceUrl &&
+          typeof ex.retrievedAt === "string" &&
+          ex.retrievedAt.length > 0;
+        return !hasValidVec || !hasSource || ex.summary !== raw.summary;
+      });
+
+      if (missingInputs.length > 0) {
+        const newlyEmbedded = await embedSeedCorpusWithProvider(missingInputs);
+        for (const doc of newlyEmbedded) {
+          runtimeMap.set(doc.docId, doc);
+        }
+        const ops = newlyEmbedded.map((doc) => ({
+          updateOne: {
+            filter: { docId: doc.docId },
+            update: { $set: doc },
+            upsert: true,
+          },
+        }));
+        if (ops.length > 0) {
+          await col.bulkWrite(ops, { ordered: false });
+        }
+      }
+
       globalForAtlas.__drouterAtlasSeeded = true;
     } catch {
       // Ignore transient write errors
@@ -262,7 +347,7 @@ export async function ensureAtlasSeededAndIndexed(db?: Db | null): Promise<{
 
   const indexesCreated: string[] = [];
 
-  // 1. Create Atlas Search full-text index (`drouter_text_search`)
+  // 1. Ensure Atlas Search full-text index (`drouter_text_search`)
   try {
     await col.createSearchIndex({
       name: ATLAS_TEXT_INDEX_NAME,
@@ -281,35 +366,50 @@ export async function ensureAtlasSeededAndIndexed(db?: Db | null): Promise<{
     });
     indexesCreated.push(ATLAS_TEXT_INDEX_NAME);
   } catch {
-    // Already exists on Atlas M0
+    // Already exists on Atlas
   }
 
-  // 2. Create Atlas Vector Search index (`drouter_vector_index`, 128 dims, cosine)
+  // 2. Ensure Atlas Vector Search index (`drouter_vector_index`, 768 dims, cosine)
+  const vectorDefinition = {
+    fields: [
+      {
+        type: "vector",
+        path: "embedding",
+        numDimensions: EMBEDDING_DIMENSIONS,
+        similarity: "cosine",
+      },
+      {
+        type: "filter",
+        path: "category",
+      },
+    ],
+  };
+
   try {
     await col.createSearchIndex({
       name: ATLAS_VECTOR_INDEX_NAME,
       type: "vectorSearch",
-      definition: {
-        fields: [
-          {
-            type: "vector",
-            path: "embedding",
-            numDimensions: EMBEDDING_DIMENSIONS,
-            similarity: "cosine",
-          },
-          {
-            type: "filter",
-            path: "category",
-          },
-        ],
-      },
+      definition: vectorDefinition,
     });
     indexesCreated.push(ATLAS_VECTOR_INDEX_NAME);
   } catch {
-    // Already exists on Atlas M0
+    // Already exists; if dimensions differ, updateSearchIndex
+    try {
+      const existingIdx = await col.listSearchIndexes(ATLAS_VECTOR_INDEX_NAME).toArray();
+      const first = existingIdx[0] as
+        | { latestDefinition?: { fields?: Array<{ numDimensions?: number }> } }
+        | undefined;
+      const currentDims = first?.latestDefinition?.fields?.[0]?.numDimensions;
+      if (currentDims !== undefined && currentDims !== EMBEDDING_DIMENSIONS) {
+        await col.updateSearchIndex(ATLAS_VECTOR_INDEX_NAME, vectorDefinition);
+        indexesCreated.push(ATLAS_VECTOR_INDEX_NAME);
+      }
+    } catch {
+      // Ignore index update error during read path
+    }
   }
 
-  return { seededCount: docsToSeed.length, indexesCreated };
+  return { seededCount: runtimeMap.size, indexesCreated };
 }
 
 /**
@@ -333,7 +433,6 @@ export function computeBm25TextScore(doc: EnclaveIntelligenceDoc, query: string)
 
   let score = 0;
 
-  // Exact phrase bonus
   if (titleLower.includes(qNorm)) score += 6.0;
   if (summaryLower.includes(qNorm)) score += 3.5;
 
@@ -389,7 +488,6 @@ export async function recordAgentVerificationReceipt(input: {
   signerPublicKeyHex: string;
   rawPromptMustNotBePassed?: never;
 }): Promise<{ storedInAtlas: boolean; receipt: AgentVerificationReceiptDoc }> {
-  // Enforce privacy invariant: scrub summary and ensure no PII or secrets can ever be persisted
   const scrubber = createSessionScrubber();
   const rawSummary =
     `Agent verification receipt ${input.receiptId} (mode=${input.mode}, orchestrator=${input.primaryModel}): ` +
@@ -420,7 +518,7 @@ export async function recordAgentVerificationReceipt(input: {
     summary: scrubbedSummary,
     embedding: embedded.vector,
     embeddingModel: embedded.model,
-    embeddingDimensions: EMBEDDING_DIMENSIONS,
+    embeddingDimensions: embedded.dimensions,
   };
 
   getRuntimeReceiptsMap().set(receipt.receiptId, receipt);
@@ -451,6 +549,7 @@ export async function recordAgentVerificationReceipt(input: {
 export async function searchAgentVerificationReceipts(
   query: string,
   limit = 5,
+  precomputedQueryEmbedding?: EmbeddingResult,
 ): Promise<AgentVerificationReceiptDoc[]> {
   const runtimeReceipts = getRuntimeReceiptsMap();
   const database = await getAtlasDb();
@@ -475,12 +574,24 @@ export async function searchAgentVerificationReceipts(
   const allReceipts = Array.from(runtimeReceipts.values());
   if (allReceipts.length === 0) return [];
 
-  const qEmb = embedDocumentText(query || "verification receipt");
+  const qText = (query || "verification receipt").trim();
+  const qEmb = precomputedQueryEmbedding ?? embedDocumentText(qText);
+  const qFallbackVec = qEmb.isLiveModel ? embedDocumentText(qText).vector : qEmb.vector;
+
   const scored = allReceipts.map((r) => {
-    const sim = Array.isArray(r.embedding) && r.embedding.length === EMBEDDING_DIMENSIONS
-      ? cosineSimilarity(qEmb.vector, r.embedding)
-      : 0;
-    const textMatch = r.summary.toLowerCase().includes((query || "").toLowerCase().trim()) ? 0.5 : 0;
+    let sim = 0;
+    if (Array.isArray(r.embedding) && r.embedding.length === EMBEDDING_DIMENSIONS) {
+      const receiptIsLive =
+        typeof r.embeddingModel === "string" && r.embeddingModel.includes("nomic-embed-text");
+      if (qEmb.isLiveModel && receiptIsLive) {
+        sim = cosineSimilarity(qEmb.vector, r.embedding);
+      } else if (!qEmb.isLiveModel && !receiptIsLive) {
+        sim = cosineSimilarity(qFallbackVec, r.embedding);
+      } else {
+        sim = cosineSimilarity(qFallbackVec, embedDocumentText(r.summary).vector);
+      }
+    }
+    const textMatch = r.summary.toLowerCase().includes(qText.toLowerCase()) ? 0.5 : 0;
     return { receipt: r, score: sim + textMatch };
   });
   scored.sort((a, b) => b.score - a.score);
@@ -489,7 +600,7 @@ export async function searchAgentVerificationReceipts(
 
 /**
  * Runs MongoDB Atlas Hybrid Search combining:
- * 1. Native `$vectorSearch` (128-dim cosine similarity on `drouter_vector_index`)
+ * 1. Native `$vectorSearch` (768-dim cosine similarity on `drouter_vector_index`)
  * 2. Native `$search` (Lucene full-text BM25 search on `drouter_text_search`)
  * 3. Native `$rankFusion` on MongoDB 8.0+ (`score = 1 / (60 + vectorRank) + 1 / (60 + textRank)`),
  *    with deterministic application-side RRF fallback if Atlas is unreachable.
@@ -508,7 +619,7 @@ export async function runAtlasHybridSearch(
     opts?.category && opts.category !== "all" ? opts.category.trim().toLowerCase() : null;
   const limit = Math.max(1, Math.min(opts?.limit ?? 10, 50));
 
-  // 1. Compute 128-dim query vector (Voyage AI live API if VOYAGE_API_KEY is set, else local-hashed-128 stand-in)
+  // 1. Compute 768-dim query vector via attested Tinfoil `nomic-embed-text` enclave (with fallback)
   const queryEmbedding = await embedDocumentTextWithProvider(effectiveQuery);
 
   const vectorSearchStage: Record<string, unknown> = {
@@ -606,6 +717,8 @@ export async function runAtlasHybridSearch(
                 title: 1,
                 category: 1,
                 summary: 1,
+                sourceUrl: 1,
+                retrievedAt: 1,
                 tags: 1,
                 metadata: 1,
                 embedding: 1,
@@ -706,10 +819,39 @@ export async function runAtlasHybridSearch(
     candidateDocs = candidateDocs.filter((d) => d.category.toLowerCase() === categoryFilter);
   }
 
-  // 2. Score documents (combining native Atlas scores with exact cosine/BM25 for any newly ingested docs)
+  const fallbackQueryVec = queryEmbedding.isLiveModel
+    ? null
+    : queryEmbedding.vector;
+
+  // 2. Score documents (combining native Atlas scores with exact same-space cosine/BM25)
   const scored = candidateDocs.map((doc) => {
-    const exactCosine = cosineSimilarity(queryEmbedding.vector, doc.embedding);
-    const nativeVec = nativeVectorScores.get(doc.docId);
+    const docIsLive =
+      typeof doc.embeddingModel === "string" &&
+      doc.embeddingModel.includes("nomic-embed-text") &&
+      Array.isArray(doc.embedding) &&
+      doc.embedding.length === EMBEDDING_DIMENSIONS;
+
+    let exactCosine: number;
+    if (queryEmbedding.isLiveModel && docIsLive) {
+      exactCosine = cosineSimilarity(queryEmbedding.vector, doc.embedding);
+    } else if (!queryEmbedding.isLiveModel && !docIsLive && doc.embedding.length === EMBEDDING_DIMENSIONS) {
+      exactCosine = cosineSimilarity(fallbackQueryVec!, doc.embedding);
+    } else {
+      const qLocal = fallbackQueryVec ?? embedDocumentText(effectiveQuery).vector;
+      const dLocal = embedDocumentText(
+        composeIntelligenceDocText({
+          title: doc.title,
+          category: doc.category,
+          summary: doc.summary,
+          sourceUrl: doc.sourceUrl,
+          tags: doc.tags ?? [],
+          metadata: doc.metadata ?? {},
+        }),
+      ).vector;
+      exactCosine = cosineSimilarity(qLocal, dLocal);
+    }
+
+    const nativeVec = queryEmbedding.isLiveModel ? nativeVectorScores.get(doc.docId) : undefined;
     const vectorScore = Number(
       (nativeVec !== undefined ? Math.max(exactCosine, nativeVec) : exactCosine).toFixed(6),
     );
@@ -748,21 +890,35 @@ export async function runAtlasHybridSearch(
     const vectorRank = vectorRankMap.get(doc.docId) ?? scored.length;
     const textRank = textRankMap.get(doc.docId) ?? scored.length;
     const rrfScore = Number((1 / (60 + vectorRank) + 1 / (60 + textRank)).toFixed(6));
+    const sourceUrl =
+      doc.sourceUrl ||
+      (typeof doc.metadata?.sourceUrl === "string" ? doc.metadata.sourceUrl : "") ||
+      "https://docs.tinfoil.sh/verification/attestation-architecture";
+    const retrievedAt =
+      doc.retrievedAt ||
+      (typeof doc.metadata?.retrievedAt === "string" ? doc.metadata.retrievedAt : "") ||
+      CORPUS_RETRIEVED_AT_UTC;
 
     return {
       docId: doc.docId,
       title: doc.title,
       category: doc.category,
       summary: doc.summary,
+      sourceUrl,
+      retrievedAt,
       tags: doc.tags,
-      metadata: doc.metadata,
+      metadata: {
+        ...doc.metadata,
+        sourceUrl,
+        retrievedAt,
+      },
       vectorScore,
       textScore,
       vectorRank,
       textRank,
       rrfScore,
       embeddingModel: queryEmbedding.model,
-      embeddingDimensions: doc.embeddingDimensions,
+      embeddingDimensions: doc.embeddingDimensions || EMBEDDING_DIMENSIONS,
     };
   });
 
@@ -773,7 +929,11 @@ export async function runAtlasHybridSearch(
     return combinedB - combinedA;
   });
 
-  const matchingReceipts = await searchAgentVerificationReceipts(effectiveQuery, 5);
+  const matchingReceipts = await searchAgentVerificationReceipts(
+    effectiveQuery,
+    5,
+    queryEmbedding,
+  );
 
   const engines: AtlasSearchEngines = {
     vectorSearch: nativeVectorHits > 0 ? "atlas" : "app-fallback",
@@ -807,14 +967,17 @@ export async function runAtlasHybridSearch(
 }
 
 /**
- * Ingests a new document with size-cap and no-prompt/no-PII validation, embeds it,
- * and persists it to MongoDB Atlas `enclave_intelligence`.
+ * Ingests a new document with size-cap and no-prompt/no-PII validation, embeds it
+ * via Tinfoil's attested `nomic-embed-text` enclave (with fallback), and persists it
+ * to MongoDB Atlas `enclave_intelligence`.
  */
 export async function ingestAtlasDocument(input: {
   docId?: string;
   title: string;
   summary: string;
   category: AtlasDocCategory;
+  sourceUrl?: string;
+  retrievedAt?: string;
   tags?: string[];
   metadata?: Record<string, unknown>;
   [key: string]: unknown;
@@ -842,7 +1005,6 @@ export async function ingestAtlasDocument(input: {
     throw new Error("Document summary exceeds maximum length of 4000 characters.");
   }
 
-  // Scrub any accidental secrets or PII before embedding or storing
   const scrubber = createSessionScrubber();
   const safeTitle = scrubber.scrub(cleanTitle).scrubbed;
   const safeSummary = scrubber.scrub(cleanSummary).scrubbed;
@@ -853,17 +1015,30 @@ export async function ingestAtlasDocument(input: {
     .replace(/^-+|-+$/g, "")
     .slice(0, 48);
   const docId = input.docId?.trim() || `custom-${slug || "doc"}-${Date.now().toString(36)}`;
+  const sourceUrl =
+    (typeof input.sourceUrl === "string" && input.sourceUrl.trim()) ||
+    (typeof input.metadata?.sourceUrl === "string" && input.metadata.sourceUrl.trim()) ||
+    "https://docs.tinfoil.sh/verification/attestation-architecture";
+  const retrievedAt =
+    (typeof input.retrievedAt === "string" && input.retrievedAt.trim()) ||
+    new Date().toISOString().slice(0, 10);
 
-  const embeddedDoc = buildEmbeddedIntelligenceDoc({
+  const embeddedDoc = await buildEmbeddedIntelligenceDocWithProvider({
     docId,
     title: safeTitle,
     category: (input.category || "advisory").trim().toLowerCase(),
     summary: safeSummary,
+    sourceUrl,
+    retrievedAt,
     tags:
       Array.isArray(input.tags) && input.tags.length > 0
         ? input.tags.slice(0, 20)
         : [input.category || "custom"],
-    metadata: input.metadata ?? { ingestedVia: "atlas-api-ingest" },
+    metadata: {
+      ...(input.metadata ?? { ingestedVia: "atlas-api-ingest" }),
+      sourceUrl,
+      retrievedAt,
+    },
   });
   embeddedDoc.updatedAt = coarsenIsoToUtcHour();
 
@@ -894,8 +1069,7 @@ export async function ingestAtlasDocument(input: {
 
 /**
  * Multi-Collection `$facet` and `$group` Aggregation Pipeline on Atlas M0:
- * Note: Atlas M0 does not support Atlas Stream Processing workspaces; this function runs
- * standard MongoDB `$facet` and `$group` aggregations across `enclave_intelligence`,
+ * Runs standard MongoDB `$facet` and `$group` aggregations across `enclave_intelligence`,
  * `agent_verification_receipts`, `verifications`, `receipts`, `relay_totals`,
  * `credit_nullifiers`, and `frozen_blobs`.
  */
@@ -907,7 +1081,9 @@ export async function runAtlasStreamAnalytics(): Promise<AtlasStreamAnalyticsRes
   for (const d of runtimeDocs) {
     fallbackCategoryCounts.set(d.category, (fallbackCategoryCounts.get(d.category) ?? 0) + 1);
   }
-  let categoryBreakdown = Array.from(fallbackCategoryCounts.entries()).map(([category, count]) => ({
+  let categoryBreakdown: AtlasStreamAnalyticsResponse["categoryBreakdown"] = Array.from(
+    fallbackCategoryCounts.entries(),
+  ).map(([category, count]) => ({
     category,
     count,
     avgEmbeddingDims: EMBEDDING_DIMENSIONS,
@@ -925,9 +1101,19 @@ export async function runAtlasStreamAnalytics(): Promise<AtlasStreamAnalyticsRes
   let creditNullifiers = 0;
   let frozenBlobs = 0;
   let totalIntelligenceDocs = runtimeDocs.length;
-  const searchIndexes: Array<{ name: string; type: string; status: string }> = [
+  const searchIndexes: Array<{
+    name: string;
+    type: string;
+    status: string;
+    numDimensions?: number;
+  }> = [
     { name: ATLAS_TEXT_INDEX_NAME, type: "search", status: "READY" },
-    { name: ATLAS_VECTOR_INDEX_NAME, type: "vectorSearch", status: "READY" },
+    {
+      name: ATLAS_VECTOR_INDEX_NAME,
+      type: "vectorSearch",
+      status: "READY",
+      numDimensions: EMBEDDING_DIMENSIONS,
+    },
   ];
 
   if (database) {
@@ -1017,7 +1203,7 @@ export async function runAtlasStreamAnalytics(): Promise<AtlasStreamAnalyticsRes
         categoryBreakdown = facetDoc.byCategory.map((b) => ({
           category: String(b._id ?? "unknown"),
           count: Number(b.count ?? 0),
-          avgEmbeddingDims: EMBEDDING_DIMENSIONS,
+          avgEmbeddingDims: Math.round(Number(b.avgEmbeddingDims ?? EMBEDDING_DIMENSIONS)),
         }));
       }
       if (facetDoc?.totalCount?.[0]?.total) {
@@ -1045,11 +1231,18 @@ export async function runAtlasStreamAnalytics(): Promise<AtlasStreamAnalyticsRes
       if (Array.isArray(liveIndexes) && liveIndexes.length > 0) {
         searchIndexes.length = 0;
         for (const idx of liveIndexes) {
-          const rec = idx as { name?: string; type?: string; status?: string };
+          const rec = idx as {
+            name?: string;
+            type?: string;
+            status?: string;
+            latestDefinition?: { fields?: Array<{ numDimensions?: number }> };
+          };
+          const dims = rec.latestDefinition?.fields?.[0]?.numDimensions;
           searchIndexes.push({
             name: rec.name ?? "unknown",
             type: rec.type ?? "search",
             status: rec.status ?? "READY",
+            ...(typeof dims === "number" ? { numDimensions: dims } : {}),
           });
         }
       }
@@ -1065,17 +1258,16 @@ export async function runAtlasStreamAnalytics(): Promise<AtlasStreamAnalyticsRes
 
   const anomalyAlerts: AtlasStreamAnalyticsResponse["anomalyAlerts"] = [
     {
-      alertId: "AGG-TEE-FAIL-GUARD",
+      alertId: "AGG-ENCLAVE-EMBEDDINGS",
       severity: "INFO",
-      subsystem: "Two-Hop GPU Custody (Spec §2.3)",
-      message:
-        "DDR5 memory-bus interposer mitigation active: monotonic AES-256-GCM counters verified with 0 repeated 16-byte blocks across offloaded KV-cache pages.",
+      subsystem: "Tinfoil Attested Enclave Embeddings (nomic-embed-text)",
+      message: `${totalIntelligenceDocs} sourced documents indexed with ${EMBEDDING_DIMENSIONS}-dimensional vectors on drouter_vector_index.`,
     },
     {
       alertId: "AGG-HYBRID-RANKFUSION",
       severity: "INFO",
       subsystem: "Atlas Hybrid Search ($rankFusion + $vectorSearch + $search)",
-      message: `${totalIntelligenceDocs} enclave intelligence documents and ${agentVerificationReceiptsCount} agent verification receipt(s) indexed on MongoDB 8.0.34.`,
+      message: `${totalIntelligenceDocs} enclave intelligence documents and ${agentVerificationReceiptsCount} agent verification receipt(s) indexed on MongoDB 8.0.`,
     },
   ];
 

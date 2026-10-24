@@ -1,31 +1,44 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import type { Db } from "mongodb";
 import {
-  ATLAS_COLLECTION_NAME,
-  ATLAS_RECEIPTS_COLLECTION_NAME,
   ATLAS_SEED_DOCS,
+  clearEmbeddingCacheForTests,
   coarsenIsoToUtcHour,
+  CORPUS_RETRIEVED_AT_UTC,
   cosineSimilarity,
   EMBEDDING_DIMENSIONS,
+  embedBatchWithProvider,
   embedDocumentText,
-  getAtlasDb,
+  embedDocumentTextWithProvider,
   ingestAtlasDocument,
   LOCAL_STANDIN_EMBEDDING_MODEL,
   recordAgentVerificationReceipt,
   runAtlasHybridSearch,
   runAtlasStreamAnalytics,
   searchAgentVerificationReceipts,
+  setAtlasDbForTests,
+  setTinfoilEmbeddingHandlerForTests,
+  TINFOIL_ATTESTED_EMBEDDING_MODEL,
 } from "@/lib/atlas";
 import { POST as atlasPost } from "@/app/api/atlas/route";
 
-describe("MongoDB Atlas Developer Data Platform Showcase", () => {
-  it("produces 128-dim unit-normalized vectors (L2 norm ≈ 1.0), names local stand-in honestly, and separates semantic clusters", () => {
+afterEach(() => {
+  setTinfoilEmbeddingHandlerForTests(null);
+  setAtlasDbForTests(undefined);
+  clearEmbeddingCacheForTests();
+});
+
+describe("MongoDB Atlas Enclave Intelligence & Hybrid Search", () => {
+  it("produces 768-dim unit-normalized fallback vectors when Tinfoil is unreachable and separates semantic clusters", () => {
     const embA = embedDocumentText("DDR5 memory bus interposer probe");
     const embB = embedDocumentText("TEE.fail DDR5 Riser Attack");
     const embUnrelated = embedDocumentText("Shamir 3-of-5 secret sharing RSA blind credit nullifier");
 
-    expect(embA.dimensions).toBe(EMBEDDING_DIMENSIONS);
-    expect(embA.vector).toHaveLength(128);
+    expect(EMBEDDING_DIMENSIONS).toBe(768);
+    expect(embA.dimensions).toBe(768);
+    expect(embA.vector).toHaveLength(768);
     expect(embA.model).toBe(LOCAL_STANDIN_EMBEDDING_MODEL);
+    expect(embA.isLiveModel).toBe(false);
 
     const l2NormA = Math.sqrt(embA.vector.reduce((acc, v) => acc + v * v, 0));
     const l2NormB = Math.sqrt(embB.vector.reduce((acc, v) => acc + v * v, 0));
@@ -40,7 +53,39 @@ describe("MongoDB Atlas Developer Data Platform Showcase", () => {
     expect(relatedSim - unrelatedSim).toBeGreaterThan(0.4);
   });
 
-  it("curates all 16 seed documents (10 providers, 4 hardware advisories, 2 architecture specs) with 128-d embeddings", () => {
+  it("embeds batches and queries through Tinfoil's attested nomic-embed-text enclave (mocked network) and caches results", async () => {
+    let callCount = 0;
+    setTinfoilEmbeddingHandlerForTests(async (texts) => {
+      callCount += 1;
+      return {
+        vectors: texts.map((t) => embedDocumentText(t).vector),
+        model: TINFOIL_ATTESTED_EMBEDDING_MODEL,
+        enclaveHost: "router-0.tinfoil.sh",
+      };
+    });
+
+    const batch = await embedBatchWithProvider([
+      "AMD SEV-SNP router and Intel TDX model enclave",
+      "TEE.fail DDR5 memory bus interposer",
+    ]);
+    expect(callCount).toBe(1);
+    expect(batch).toHaveLength(2);
+    expect(batch[0].model).toBe(TINFOIL_ATTESTED_EMBEDDING_MODEL);
+    expect(batch[0].dimensions).toBe(768);
+    expect(batch[0].isLiveModel).toBe(true);
+    expect(batch[0].attestedEnclave).toBe(true);
+    expect(batch[0].vector).toHaveLength(768);
+
+    // Second call for an already-embedded string hits in-memory cache without network
+    const cachedSingle = await embedDocumentTextWithProvider(
+      "AMD SEV-SNP router and Intel TDX model enclave",
+    );
+    expect(callCount).toBe(1);
+    expect(cachedSingle.model).toBe(TINFOIL_ATTESTED_EMBEDDING_MODEL);
+    expect(cachedSingle.isLiveModel).toBe(true);
+  });
+
+  it("curates all 16 real, sourced seed documents with verified sourceUrl, retrievedAt UTC date, and zero fabricated advisories", () => {
     expect(ATLAS_SEED_DOCS).toHaveLength(16);
 
     const providers = ATLAS_SEED_DOCS.filter((d) => d.category === "provider");
@@ -52,35 +97,118 @@ describe("MongoDB Atlas Developer Data Platform Showcase", () => {
     expect(architecture).toHaveLength(2);
 
     for (const doc of ATLAS_SEED_DOCS) {
-      expect(doc.embedding).toHaveLength(128);
+      expect(doc.embedding).toHaveLength(768);
+      expect(doc.embeddingDimensions).toBe(768);
+      expect(doc.sourceUrl).toMatch(/^https:\/\//);
+      expect(doc.retrievedAt).toBe(CORPUS_RETRIEVED_AT_UTC);
+      expect(doc.metadata.sourceUrl).toBe(doc.sourceUrl);
+      expect(doc.metadata.retrievedAt).toBe(CORPUS_RETRIEVED_AT_UTC);
+      expect(JSON.stringify(doc)).not.toContain("DROUTER-ADV-");
+      expect(doc.summary).not.toMatch(/[\u2013\u2014]/);
+
       const norm = Math.sqrt(doc.embedding.reduce((acc, v) => acc + v * v, 0));
       expect(norm).toBeCloseTo(1.0, 5);
     }
   });
 
-  it("ranks 'Kimi K3 8x GPU confidential enclave' and 'TEE.fail DDR5 memory bus' accurately using Reciprocal Rank Fusion and reports engines", async () => {
-    const kimiSearch = await runAtlasHybridSearch("Kimi K3 8x GPU confidential enclave");
-    expect(kimiSearch.results.length).toBeGreaterThan(0);
-    expect(kimiSearch.engines).toBeDefined();
-    expect(["atlas", "app-fallback"]).toContain(kimiSearch.engines.vectorSearch);
-    expect(["atlas", "app-fallback"]).toContain(kimiSearch.engines.textSearch);
-    expect(["$rankFusion", "app-rrf"]).toContain(kimiSearch.engines.fusion);
-    expect(kimiSearch.engines.embedding).toContain("local-hashed-128");
+  it("ranks queries accurately using Reciprocal Rank Fusion and reports engines truthfully in both attested-enclave and fallback modes", async () => {
+    // 1. Fallback mode when Tinfoil is unreachable in unit test env
+    const fallbackSearch = await runAtlasHybridSearch("Kimi K3 8x GPU confidential enclave");
+    expect(fallbackSearch.results.length).toBeGreaterThan(0);
+    expect(fallbackSearch.engines.vectorSearch).toBe("app-fallback");
+    expect(fallbackSearch.engines.textSearch).toBe("app-fallback");
+    expect(fallbackSearch.engines.fusion).toBe("app-rrf");
+    expect(fallbackSearch.engines.embedding).toBe(LOCAL_STANDIN_EMBEDDING_MODEL);
 
-    const topKimi = kimiSearch.results[0];
+    const topKimi = fallbackSearch.results[0];
     expect(topKimi.docId).toBe("provider-tinfoil");
-    expect(topKimi.vectorRank).toBeGreaterThanOrEqual(1);
-    expect(topKimi.textRank).toBeGreaterThanOrEqual(1);
+    expect(topKimi.sourceUrl).toBe("https://confidentialinference.net/providers/tinfoil");
+    expect(topKimi.retrievedAt).toBe(CORPUS_RETRIEVED_AT_UTC);
     const expectedKimiRrf = Number(
       (1 / (60 + topKimi.vectorRank) + 1 / (60 + topKimi.textRank)).toFixed(6),
     );
     expect(topKimi.rrfScore).toBeCloseTo(expectedKimiRrf, 5);
 
+    // 2. Mocked attested Tinfoil embedding + mocked Atlas native $rankFusion/$vectorSearch/$search
+    setTinfoilEmbeddingHandlerForTests(async (texts) => ({
+      vectors: texts.map((t) => embedDocumentText(t).vector),
+      model: TINFOIL_ATTESTED_EMBEDDING_MODEL,
+      enclaveHost: "router-0.tinfoil.sh",
+    }));
+
+    const teeFailDoc = ATLAS_SEED_DOCS.find((d) => d.docId === "advisory-tee-fail-ddr5")!;
+    const mockCol = {
+      createIndex: async () => "ok",
+      createSearchIndex: async () => "ok",
+      listSearchIndexes: () => ({
+        toArray: async () => [
+          { name: "drouter_text_search", type: "search", status: "READY" },
+          {
+            name: "drouter_vector_index",
+            type: "vectorSearch",
+            status: "READY",
+            latestDefinition: { fields: [{ numDimensions: 768 }] },
+          },
+        ],
+      }),
+      find: () => ({
+        toArray: async () =>
+          ATLAS_SEED_DOCS.map((d) => ({
+            ...d,
+            embeddingModel: TINFOIL_ATTESTED_EMBEDDING_MODEL,
+          })),
+        sort: () => ({
+          limit: () => ({
+            toArray: async () => [],
+          }),
+        }),
+      }),
+      bulkWrite: async () => ({ upsertedCount: 0, modifiedCount: 0 }),
+      aggregate: (pipeline: Array<Record<string, unknown>>) => ({
+        toArray: async () => {
+          const firstStage = pipeline[0] ?? {};
+          if ("$rankFusion" in firstStage) {
+            return [
+              {
+                ...teeFailDoc,
+                embeddingModel: TINFOIL_ATTESTED_EMBEDDING_MODEL,
+                scoreDetails: {
+                  value: 2 / 61,
+                  details: [
+                    { inputPipelineName: "vectorPipeline", rank: 1, value: 0.96 },
+                    { inputPipelineName: "textPipeline", rank: 1, value: 8.4 },
+                  ],
+                },
+              },
+            ];
+          }
+          if ("$vectorSearch" in firstStage) {
+            return [{ docId: teeFailDoc.docId, score: 0.96 }];
+          }
+          if ("$search" in firstStage) {
+            return [{ docId: teeFailDoc.docId, score: 8.4 }];
+          }
+          return [];
+        },
+      }),
+    };
+
+    setAtlasDbForTests({
+      collection: () => mockCol,
+    } as unknown as Db);
+
     const teeFailSearch = await runAtlasHybridSearch("TEE.fail DDR5 memory bus");
-    expect(teeFailSearch.results.length).toBeGreaterThan(0);
+    expect(teeFailSearch.executionMode).toBe("atlas-hybrid-rrf");
+    expect(teeFailSearch.engines).toEqual({
+      vectorSearch: "atlas",
+      textSearch: "atlas",
+      fusion: "$rankFusion",
+      embedding: TINFOIL_ATTESTED_EMBEDDING_MODEL,
+    });
 
     const topTeeFail = teeFailSearch.results[0];
     expect(topTeeFail.docId).toBe("advisory-tee-fail-ddr5");
+    expect(topTeeFail.sourceUrl).toBe("https://tee.fail/");
     expect(topTeeFail.vectorRank).toBe(1);
     expect(topTeeFail.textRank).toBe(1);
     expect(topTeeFail.rrfScore).toBeCloseTo(2 / 61, 5);
@@ -112,7 +240,8 @@ describe("MongoDB Atlas Developer Data Platform Showcase", () => {
     });
 
     expect(recorded.receipt.coarsenedAt).toBe("2026-10-24T16:00:00.000Z");
-    expect(recorded.receipt.embedding).toHaveLength(128);
+    expect(recorded.receipt.embedding).toHaveLength(768);
+    expect(recorded.receipt.embeddingDimensions).toBe(768);
 
     const foundReceipts = await searchAgentVerificationReceipts("kimi-k3-inf14", 5);
     expect(foundReceipts.some((r) => r.receiptId === "argon-run-test-receipt-01")).toBe(true);
@@ -121,14 +250,6 @@ describe("MongoDB Atlas Developer Data Platform Showcase", () => {
     expect(
       hybridWithReceipts.matchingReceipts.some((r) => r.receiptId === "argon-run-test-receipt-01"),
     ).toBe(true);
-
-    const db = await getAtlasDb();
-    if (db) {
-      await db
-        .collection(ATLAS_RECEIPTS_COLLECTION_NAME)
-        .deleteOne({ receiptId: "argon-run-test-receipt-01" })
-        .catch(() => null);
-    }
   });
 
   it("gates HTTP POST ingest with ATLAS_INGEST_TOKEN, caps document size, and rejects prompts", async () => {
@@ -188,17 +309,30 @@ describe("MongoDB Atlas Developer Data Platform Showcase", () => {
     }
   });
 
-  it("supports embedding on ingest and multi-collection $facet aggregation", async () => {
+  it("supports 768-d embedding on ingest with PII scrubbing and multi-collection $facet aggregation", async () => {
+    setTinfoilEmbeddingHandlerForTests(async (texts) => ({
+      vectors: texts.map((t) => embedDocumentText(t).vector),
+      model: TINFOIL_ATTESTED_EMBEDDING_MODEL,
+      enclaveHost: "router-0.tinfoil.sh",
+    }));
+
     const ingested = await ingestAtlasDocument({
       docId: "advisory-custom-cxl-probe",
       title: "CXL 3.0 SEV-TIO Fabric Link Replay Test",
       summary:
-        "Evaluates CXL 3.0 IDE link encryption counters between AMD Turin SEV-SNP host and NVIDIA B200 HBM3e confidential memory.",
+        "Evaluates CXL 3.0 IDE link encryption counters between AMD Turin SEV-SNP host and NVIDIA B200 HBM3e confidential memory. Contact security@example.com for details.",
       category: "advisory",
+      sourceUrl: "https://www.amd.com/en/developer/sev.html",
+      retrievedAt: CORPUS_RETRIEVED_AT_UTC,
       tags: ["cxl 3.0", "sev-tio", "b200", "ide"],
     });
 
-    expect(ingested.document.embedding).toHaveLength(128);
+    expect(ingested.document.embedding).toHaveLength(768);
+    expect(ingested.document.embeddingDimensions).toBe(768);
+    expect(ingested.document.embeddingModel).toBe(TINFOIL_ATTESTED_EMBEDDING_MODEL);
+    expect(ingested.document.sourceUrl).toBe("https://www.amd.com/en/developer/sev.html");
+    expect(ingested.document.retrievedAt).toBe(CORPUS_RETRIEVED_AT_UTC);
+    expect(ingested.document.summary).not.toContain("security@example.com");
 
     const searchAfterIngest = await runAtlasHybridSearch("CXL 3.0 SEV-TIO Fabric Link Replay", {
       category: "advisory",
@@ -212,13 +346,5 @@ describe("MongoDB Atlas Developer Data Platform Showcase", () => {
     expect(analytics.categoryBreakdown.length).toBeGreaterThanOrEqual(3);
     expect(analytics.searchIndexes.length).toBeGreaterThanOrEqual(2);
     expect(analytics.pipelineStagesExecuted).toContain("$facet");
-
-    const db = await getAtlasDb();
-    if (db) {
-      await db
-        .collection(ATLAS_COLLECTION_NAME)
-        .deleteOne({ docId: "advisory-custom-cxl-probe" })
-        .catch(() => null);
-    }
   });
 });

@@ -1,5 +1,5 @@
 import { connection } from "next/server";
-import { logReceipt, logVerification, mongoConfigured, recentActivity } from "@/lib/db";
+import { coarsenToHour, logReceipt, logVerification, mongoConfigured, recentActivity } from "@/lib/db";
 import {
   BodyTooLargeError,
   InvalidJsonBodyError,
@@ -11,6 +11,22 @@ import {
 const HEX = /^(0x)?[0-9a-fA-F]{1,256}$/;
 const CHECK_STATUS = new Set(["pass", "fail", "skip"]);
 const MAX_LOG_BODY_BYTES = 16_384; // 16 KB
+const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
+const IPV4_RE = /\b(?:\d{1,3}\.){3}\d{1,3}\b/;
+const FORBIDDEN_BODY_KEYS = [
+  "prompt",
+  "prompts",
+  "completion",
+  "completions",
+  "messages",
+  "message",
+  "ip",
+  "clientIp",
+  "userAgent",
+  "user_agent",
+  "email",
+  "headers",
+];
 
 const getLimiter = createTokenBucketLimiter({
   name: "log-get",
@@ -31,9 +47,13 @@ const postGlobalLimiter = createGlobalBucketLimiter({
 });
 
 function str(value: unknown, max = 200): string | null {
-  return typeof value === "string" && value.length > 0 && value.length <= max && !value.includes("\0")
-    ? value
-    : null;
+  if (typeof value !== "string" || value.length === 0 || value.length > max || value.includes("\0")) {
+    return null;
+  }
+  if (EMAIL_RE.test(value) || IPV4_RE.test(value)) {
+    return null;
+  }
+  return value;
 }
 
 /** Public transparency log: recent verifications, receipts and relay totals. */
@@ -48,7 +68,7 @@ export async function GET(request?: Request) {
 
 /**
  * Accepts only whitelisted, non-sensitive fields. Anything else in the body is dropped, so this
- * endpoint cannot be used to store prompts or outputs.
+ * endpoint cannot be used to store prompts, outputs, IPs, user agents, or emails.
  */
 export async function POST(request: Request) {
   const limited = postIpLimiter.check(request);
@@ -71,6 +91,15 @@ export async function POST(request: Request) {
     );
   }
 
+  for (const forbidden of FORBIDDEN_BODY_KEYS) {
+    if (forbidden in body) {
+      return Response.json(
+        { error: `Transparency log rejects sensitive field '${forbidden}'` },
+        { status: 400 },
+      );
+    }
+  }
+
   const globalCheck = postGlobalLimiter.consume(1);
   if (!globalCheck.allowed) {
     return Response.json(
@@ -82,6 +111,8 @@ export async function POST(request: Request) {
   if (process.env.DROUTER_STUB_UPSTREAM === "1" || !mongoConfigured()) {
     return Response.json({ stored: false, reason: "MongoDB not configured" });
   }
+
+  const coarsenedNow = coarsenToHour(new Date());
 
   if (body.type === "verification") {
     const nodeId = str(body.nodeId, 80);
@@ -110,7 +141,7 @@ export async function POST(request: Request) {
       evidenceHash,
       releaseDigest: str(body.releaseDigest, 100) ?? undefined,
       enclaveHost: str(body.enclaveHost, 100) ?? undefined,
-      at: new Date(),
+      at: coarsenedNow,
     });
     return Response.json({ stored });
   }
@@ -127,7 +158,7 @@ export async function POST(request: Request) {
       receiptHash,
       signatureVerified: body.signatureVerified === true,
       anchorTx: anchorTx && HEX.test(anchorTx) ? anchorTx : null,
-      at: new Date(),
+      at: coarsenedNow,
     });
     return Response.json({ stored });
   }

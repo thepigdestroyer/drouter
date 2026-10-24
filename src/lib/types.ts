@@ -106,3 +106,13 @@ export interface ScrubResult {
   scrubbed: string;
   replacements: { placeholder: string; kind: string }[];
 }
+
+/** Browser-safe stub when server-only @vercel/sandbox is aliased in client bundles. */
+export const Sandbox: {
+  create: (...args: unknown[]) => Promise<never>;
+} = {
+  async create() {
+    throw new Error("@vercel/sandbox is server-only");
+  },
+};
+
