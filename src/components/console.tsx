@@ -38,7 +38,7 @@ import {
   exportSessionProof,
   type ExportedSessionProof,
 } from "@/components/console/proof-exporter";
-import { NodeBadge, ReceiptView } from "@/components/trust-panel";
+import { ReceiptView } from "@/components/trust-panel";
 import { PrivacyBar } from "@/components/privacy-bar";
 import { FreezeDrawer } from "@/components/freeze-drawer";
 import {
@@ -47,6 +47,7 @@ import {
 } from "@/components/visual-trust-dashboard";
 import { RecordInspectorModal } from "@/components/record-inspector-modal";
 import { TerminalModal } from "@/components/terminal-modal";
+import { TechDetails } from "@/components/ink/tech-details";
 
 type Phase = "idle" | "verifying" | "ready" | "streaming" | "closed" | "error";
 
@@ -55,6 +56,80 @@ interface AnchorResult {
   verificationTx: string | null;
   anchorUrl: string | null;
   verificationUrl: string | null;
+}
+
+export interface FriendlyModelDescriptor {
+  id: string;
+  name: string;
+  summary: string;
+}
+
+export const FRIENDLY_MODELS: Record<string, FriendlyModelDescriptor> = {
+  "kimi-k3": {
+    id: "kimi-k3",
+    name: "Kimi K3",
+    summary: "Great for writing, planning, and deep thinking.",
+  },
+  "glm-5-3": {
+    id: "glm-5-3",
+    name: "GLM 5.3",
+    summary: "Balanced everyday helper for questions and drafts.",
+  },
+  "deepseek-v4-1-flash": {
+    id: "deepseek-v4-1-flash",
+    name: "DeepSeek Flash",
+    summary: "Quick replies for short questions and summaries.",
+  },
+  "gpt-oss-120b": {
+    id: "gpt-oss-120b",
+    name: "Open GPT",
+    summary: "Clear, general-purpose open assistant.",
+  },
+  "llama3-3-70b": {
+    id: "llama3-3-70b",
+    name: "Llama 3.3",
+    summary: "Reliable open model for everyday tasks.",
+  },
+};
+
+export function describeModel(modelId: string): FriendlyModelDescriptor {
+  return (
+    FRIENDLY_MODELS[modelId] ?? {
+      id: modelId,
+      name: modelId,
+      summary: "Private AI assistant running on a sealed computer.",
+    }
+  );
+}
+
+export function formatHiddenDetailsSummary(count: number): string {
+  if (count <= 0) return "0 personal details hidden";
+  return `${count} personal detail${count === 1 ? "" : "s"} hidden`;
+}
+
+function FlowingInkTypingIndicator() {
+  return (
+    <div
+      className="inline-flex items-center gap-2 py-1 text-xs text-ink-2"
+      data-testid="flowing-ink-indicator"
+    >
+      <span
+        className="inline-flex items-center gap-1"
+        aria-hidden="true"
+      >
+        <span className="h-2 w-2 rounded-full bg-ink motion-safe:animate-pulse" />
+        <span
+          className="h-2.5 w-3.5 rounded-full bg-ink-2 motion-safe:animate-pulse"
+          style={{ animationDelay: "160ms" }}
+        />
+        <span
+          className="h-2 w-2 rounded-full bg-ink-3 motion-safe:animate-pulse"
+          style={{ animationDelay: "320ms" }}
+        />
+      </span>
+      <span>Writing reply...</span>
+    </div>
+  );
 }
 
 export function Console() {
@@ -106,7 +181,7 @@ export function Console() {
       .then((r) => r.json())
       .then(setRegistry)
       .catch(() => {
-        setError("Could not load the node registry from /api/registry.");
+        setError("Could not load the server list right now.");
         setPhase("error");
       });
     return unsub;
@@ -175,7 +250,7 @@ export function Console() {
       if (!registry) return;
       const chosen = pickNode(registry.nodes, targetKind);
       if (!chosen) {
-        setError(`No active ${targetKind} node found in the registry.`);
+        setError("No available server was found in the directory.");
         setSession(null);
         setPhase("error");
         return;
@@ -347,7 +422,7 @@ export function Console() {
       }
       setPhase("ready");
     } catch (e) {
-      const msg = (e as Error).message || "Failed to stream response from node.";
+      const msg = (e as Error).message || "Could not get a reply right now.";
       setError(msg);
       if (!wireReply) {
         // Recoverable error: restore user prompt to input if no reply tokens arrived
@@ -390,7 +465,7 @@ export function Console() {
     const activeNode = session?.node ?? node;
     const activeEvidence = session?.evidence ?? lastEvidence;
     if (!activeNode || checks.length === 0) {
-      setError("Verify hardware first before exporting a forensic proof bundle.");
+      setError("Run the seal check first before exporting a proof receipt.");
       return;
     }
     try {
@@ -477,6 +552,7 @@ export function Console() {
   const activeEvidence = session?.evidence ?? lastEvidence;
   const activeDeepBundle = session?.deepBundle ?? lastDeepBundle;
   const canExportProof = Boolean(node && checks.length > 0);
+  const currentModelInfo = describeModel(model);
 
   return (
     <div className="flex flex-col gap-5">
@@ -512,15 +588,15 @@ export function Console() {
         />
       )}
 
-      {/* Chat Card */}
+      {/* Main Conversation Card */}
       <div className="ep-card flex flex-col overflow-hidden">
-        {/* Top bar: Model picker, Node mode, Re-verify, Export proof */}
+        {/* Top bar: Mode toggle, Friendly model picker, Seal check & End chat */}
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-rule bg-paper-2 px-4 py-3">
           <div className="flex flex-wrap items-center gap-3">
             <div
               className="inline-flex rounded border border-rule-2 bg-paper p-0.5 text-xs"
               role="group"
-              aria-label="Enclave mode"
+              aria-label="Connection mode"
             >
               {(["tinfoil", "sim"] as const).map((k) => (
                 <button
@@ -534,15 +610,15 @@ export function Console() {
                       : "text-ink-2 hover:text-ink"
                   }`}
                 >
-                  {k === "tinfoil" ? "Real enclave" : "Simulated"}
+                  {k === "tinfoil" ? "Sealed computer" : "Practice mode"}
                 </button>
               ))}
             </div>
 
             {kind === "tinfoil" ? (
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <label htmlFor="console-model-select" className="ep-label">
-                  Model
+                  Assistant
                 </label>
                 <select
                   id="console-model-select"
@@ -551,30 +627,27 @@ export function Console() {
                   disabled={phase === "streaming"}
                   className="ep-input w-auto py-1 text-xs font-medium"
                 >
-                  {TINFOIL_MODELS.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.label}
-                    </option>
-                  ))}
+                  {TINFOIL_MODELS.map((m) => {
+                    const info = describeModel(m.id);
+                    return (
+                      <option key={m.id} value={m.id}>
+                        {info.name}
+                      </option>
+                    );
+                  })}
                 </select>
+                <span className="text-xs text-ink-2">
+                  {currentModelInfo.summary}
+                </span>
               </div>
             ) : (
-              <span className="font-mono text-xs text-ink-2">
-                Model: sim-echo-1 (Simulated in software)
+              <span className="text-xs text-ink-2">
+                Practice assistant (instant echo replies for testing)
               </span>
             )}
           </div>
 
           <div className="flex flex-wrap items-center gap-2 text-xs">
-            {node && (
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-xs text-ink-2">
-                  {node.name}
-                </span>
-                <NodeBadge node={node} />
-              </div>
-            )}
-
             <button
               type="button"
               onClick={() => void connect()}
@@ -584,20 +657,10 @@ export function Console() {
               className="ep-btn-ghost px-2.5 py-1 text-xs"
             >
               {phase === "verifying"
-                ? "Verifying..."
+                ? "Checking seal..."
                 : session
-                  ? "Re-verify"
-                  : "Verify hardware"}
-            </button>
-
-            <button
-              type="button"
-              onClick={handleExportProof}
-              disabled={!canExportProof}
-              className="ep-btn-ghost px-2.5 py-1 text-xs disabled:opacity-45"
-              title="Export signed forensic proof (.drouter-proof.json)"
-            >
-              Export proof
+                  ? "Check seal again"
+                  : "Check seal"}
             </button>
 
             {session && (
@@ -606,9 +669,9 @@ export function Console() {
                 onClick={() => void pop()}
                 disabled={phase === "streaming"}
                 className="ep-btn-ghost px-2.5 py-1 text-xs"
-                title="Close session and clear keys from browser memory"
+                title="Close chat and clear keys from browser memory"
               >
-                End session
+                End chat
               </button>
             )}
           </div>
@@ -616,58 +679,74 @@ export function Console() {
 
         {kind === "sim" && (
           <div className="border-b border-rule bg-paper-2 px-4 py-2 text-xs text-ink-2">
-            <strong className="font-medium text-ink">Simulated mode:</strong>{" "}
-            Connected to software simulation ({node?.name ?? "sim node"}).
-            Hardware roots are derived from{" "}
-            <code className="font-mono">SIM_HARDWARE_SEED</code> and replies come
-            from a fixed echo template. Switch to{" "}
-            <strong className="font-medium text-ink">Real enclave</strong> to
-            query Tinfoil confidential GPUs.
+            <strong className="font-medium text-ink">Practice mode:</strong>{" "}
+            You are connected to a software practice server. Your messages stay
+            in this practice sandbox and do not use a real sealed computer.
+            Switch to{" "}
+            <strong className="font-medium text-ink">Sealed computer</strong>{" "}
+            anytime for real private AI replies.
           </div>
         )}
 
         {/* Message thread */}
         <div
           ref={scrollRef}
-          className="min-h-[18rem] max-h-[28rem] flex-1 space-y-4 overflow-y-auto p-4 sm:p-6"
+          className="min-h-[20rem] max-h-[30rem] flex-1 space-y-4 overflow-y-auto p-4 sm:p-6"
         >
           {messages.length === 0 ? (
-            <div className="mx-auto max-w-[60ch] py-8 text-center">
-              <p className="text-sm text-ink-2">
+            <div className="mx-auto max-w-[58ch] py-8 text-center">
+              <h3 className="ep-display text-xl text-ink sm:text-2xl">
                 {phase === "verifying"
-                  ? "Checking enclave hardware before opening your encrypted session..."
+                  ? "Checking the seal on your private computer..."
                   : phase === "error" || hasFailedCheck
-                    ? `Not verified. ${
-                        error ||
-                        "Hardware attestation failed. Sending is blocked until verification passes."
-                      }`
+                    ? "Not safe to send right now"
                     : session
-                      ? "Session verified and encrypted. Type a prompt below. If you include an email like dana.reyes@example.com or a secret like sk-demo123456, your browser replaces it with a placeholder before encryption."
-                      : "Click Verify hardware above to establish an attested session."}
+                      ? "Say hello. Your personal details stay on your device."
+                      : "Check the seal above to start chatting."}
+              </h3>
+              <p className="mt-2 text-sm text-ink-2">
+                {phase === "verifying"
+                  ? "This only takes a moment. We make sure no one in the middle can read your messages."
+                  : phase === "error" || hasFailedCheck
+                    ? "We paused sending because the seal check did not pass. Click Retry above to try again."
+                    : session
+                      ? "If you type an email like dana.reyes@example.com or a secret key, your browser hides it automatically before your message leaves your device, then puts it back in the reply."
+                      : "Click Check seal above to open your private chat."}
               </p>
               {session && canSend && (
-                <div className="mt-4 flex flex-wrap justify-center gap-2">
+                <div className="mt-5 flex flex-wrap justify-center gap-2">
                   <button
                     type="button"
                     onClick={() =>
                       setInput(
-                        "Draft a short note to Dana Reyes at dana.reyes@example.com about rotating key sk-prod987654.",
+                        "Write a polite reply to Dana Reyes at dana.reyes@example.com about rescheduling our Friday call.",
                       )
                     }
-                    className="ep-btn-ghost px-3 py-1 text-xs"
+                    className="ep-btn-ghost px-3 py-1.5 text-xs"
                   >
-                    Try PII scrubbing example
+                    Draft an email with hidden names
                   </button>
                   <button
                     type="button"
                     onClick={() =>
                       setInput(
-                        "Explain in two plain sentences how AMD SEV-SNP protects memory from the host OS.",
+                        "Summarize this note for my doctor and keep my phone number 415-555-0199 private.",
                       )
                     }
-                    className="ep-btn-ghost px-3 py-1 text-xs"
+                    className="ep-btn-ghost px-3 py-1.5 text-xs"
                   >
-                    Ask about hardware memory encryption
+                    Summarize a private note
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setInput(
+                        "Give me three simple dinner ideas I can cook in 20 minutes.",
+                      )
+                    }
+                    className="ep-btn-ghost px-3 py-1.5 text-xs"
+                  >
+                    Ask an everyday question
                   </button>
                 </div>
               )}
@@ -683,53 +762,69 @@ export function Console() {
                 <div
                   className={
                     m.role === "user"
-                      ? "ep-inset max-w-[85%] whitespace-pre-wrap px-3.5 py-2.5 text-sm text-ink"
-                      : "max-w-[70ch] whitespace-pre-wrap border-l-2 border-ink pl-4 py-1 text-sm text-ink"
+                      ? "max-w-[85%] rounded-2xl rounded-br-sm border border-ink bg-paper-2 px-4 py-3 text-sm text-ink whitespace-pre-wrap"
+                      : "max-w-[75ch] rounded-2xl rounded-bl-sm border border-ink bg-paper px-4 py-3 text-sm text-ink whitespace-pre-wrap"
                   }
                 >
                   <div className="ep-label mb-1">
                     {m.role === "user"
                       ? kind === "sim"
-                        ? "You (AEAD sealed · Simulated)"
-                        : "You (HPKE sealed)"
+                        ? "You (Practice mode)"
+                        : "You"
                       : kind === "sim"
-                        ? "sim-echo-1 (Simulated)"
-                        : model}
+                        ? "Practice assistant"
+                        : currentModelInfo.name}
                   </div>
                   <div>
-                    {m.content || (phase === "streaming" ? "Thinking..." : "")}
+                    {m.content ? (
+                      m.content
+                    ) : phase === "streaming" ? (
+                      <FlowingInkTypingIndicator />
+                    ) : (
+                      ""
+                    )}
                   </div>
                 </div>
 
                 {m.role === "user" && m.privacyReport && (
                   <div
-                    className="mt-1 flex flex-wrap items-center justify-end gap-2 font-mono text-[11px] text-ink-3"
+                    className="mt-1.5 flex flex-col items-end gap-1 text-xs text-ink-3"
                     data-testid="message-privacy-badge"
                   >
                     <span>
-                      Redactions: {m.privacyReport.redactions.length}
-                      {m.privacyReport.redactions.length > 0
-                        ? ` (${m.privacyReport.redactions
-                            .map((r) => r.placeholder)
-                            .join(", ")})`
-                        : ""}
+                      {formatHiddenDetailsSummary(
+                        m.privacyReport.redactions.length,
+                      )}
                     </span>
-                    <span>·</span>
-                    <span>
-                      Bucket:{" "}
-                      {m.privacyReport.bucketBytes.toLocaleString("en-US")} B
-                    </span>
-                    <span>·</span>
-                    <span>
-                      Risk: {m.privacyReport.riskBefore}/100 -&gt;{" "}
-                      {m.privacyReport.riskAfter}/100
-                    </span>
-                    <span>·</span>
-                    <span>
-                      {m.privacyReport.creditAttached
-                        ? "x-drouter-credit attached"
-                        : "free tier (no credit attached)"}
-                    </span>
+                    <TechDetails label="Show technical details">
+                      <div className="ep-inset mt-1 max-w-[60ch] p-2.5 text-left font-mono text-[11px] text-ink-2 space-y-1">
+                        <div>
+                          Hidden items: {m.privacyReport.redactions.length}
+                          {m.privacyReport.redactions.length > 0
+                            ? ` (${m.privacyReport.redactions
+                                .map((r) => `${r.placeholder}:${r.kind}`)
+                                .join(", ")})`
+                            : ""}
+                        </div>
+                        <div>
+                          Padded size:{" "}
+                          {m.privacyReport.bucketBytes.toLocaleString("en-US")}{" "}
+                          B · Risk score: {m.privacyReport.riskBefore}/100 -&gt;{" "}
+                          {m.privacyReport.riskAfter}/100
+                        </div>
+                        <div>
+                          Anonymous token:{" "}
+                          {m.privacyReport.creditAttached
+                            ? "x-drouter-credit attached"
+                            : "not attached (standard limit)"}
+                        </div>
+                        {m.privacyReport.outboundPreview && (
+                          <div className="border-t border-rule pt-1 text-ink">
+                            Sent text: {m.privacyReport.outboundPreview}
+                          </div>
+                        )}
+                      </div>
+                    </TechDetails>
                   </div>
                 )}
               </div>
@@ -737,9 +832,9 @@ export function Console() {
           )}
         </div>
 
-        {/* Input form */}
+        {/* Big friendly input form */}
         <form
-          className="flex gap-2 border-t border-rule bg-paper-2 p-3 sm:p-4"
+          className="flex items-end gap-2.5 border-t border-rule bg-paper-2 p-3 sm:p-4"
           onSubmit={(e) => {
             e.preventDefault();
             void send();
@@ -748,26 +843,33 @@ export function Console() {
           <label htmlFor="console-prompt-input" className="sr-only">
             Message
           </label>
-          <input
+          <textarea
             id="console-prompt-input"
+            rows={2}
             value={input}
             onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void send();
+              }
+            }}
             disabled={!canSend}
             placeholder={
               canSend
-                ? "Write your prompt (scrubbed locally, then encrypted to enclave)..."
+                ? "Type a message... (personal details are hidden automatically before sending)"
                 : phase === "verifying"
-                  ? "Verifying enclave hardware..."
+                  ? "Checking the seal on the computer..."
                   : phase === "error" || hasFailedCheck
-                    ? "Not verified: hardware attestation failed (sending blocked)"
-                    : "Verify hardware first to unlock input"
+                    ? "Not safe to send right now (seal check did not pass)"
+                    : "Check the seal first to unlock the chat"
             }
-            className="ep-input min-w-0 flex-1"
+            className="ep-input min-h-[3.25rem] min-w-0 flex-1 resize-y py-2.5 text-sm sm:text-base"
           />
           <button
             type="submit"
             disabled={!canSend || !input.trim()}
-            className="ep-btn px-5"
+            className="ep-btn h-[3.25rem] px-6 text-sm font-medium"
           >
             Send
           </button>
@@ -782,7 +884,7 @@ export function Console() {
         />
       )}
 
-      {/* Plain-language Privacy Summary, Freeze/Resume, and Disclosures */}
+      {/* Plain-language Privacy Summary, Pause/Lock, and Technical Disclosures */}
       <div className="ep-card space-y-4 p-4 sm:p-5">
         <PrivacyBar
           scrubEnabled={scrubEnabled}

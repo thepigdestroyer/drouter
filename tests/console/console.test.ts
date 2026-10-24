@@ -16,6 +16,12 @@ import {
 } from "@/components/console/send-pipeline";
 import { exportSessionProof } from "@/components/console/proof-exporter";
 import {
+  describeModel,
+  formatHiddenDetailsSummary,
+  FRIENDLY_MODELS,
+} from "@/components/console";
+import { friendlyFailureReason } from "@/components/visual-trust-dashboard";
+import {
   openSession,
   registryAndQuorumCheck,
   type RegistryResponse,
@@ -147,6 +153,87 @@ describe("console send pipeline (I1 + I2 + I3)", () => {
     expect(preview.prepared.outboundText).toContain("color");
     expect(preview.prepared.report.styleChanges).toBeGreaterThanOrEqual(1);
     expect(storedCreditBalance()).toBe(1);
+  });
+});
+
+describe("plain-language console helpers and jargon-free defaults", () => {
+  const BANNED_JARGON = [
+    "attestation",
+    "attested",
+    "enclave",
+    "TEE",
+    "SEV-SNP",
+    "SNP",
+    "TDX",
+    "HPKE",
+    "RFC",
+    "Merkle",
+    "nullifier",
+    "RSA",
+    "quorum",
+    "Sigstore",
+    "Rekor",
+    "VCEK",
+    "CKKS",
+    "FHE",
+    "homomorphic",
+    "dm-verity",
+    "measurement",
+    "ciphertext",
+    "hash",
+    "digest",
+    "ECDSA",
+    "X25519",
+    "PII",
+    "OHTTP",
+    "SPRT",
+    "Arc testnet",
+    "relay hop",
+    "bucket bytes",
+  ];
+
+  it("formats hidden details summary in plain words", () => {
+    expect(formatHiddenDetailsSummary(0)).toBe("0 personal details hidden");
+    expect(formatHiddenDetailsSummary(1)).toBe("1 personal detail hidden");
+    expect(formatHiddenDetailsSummary(2)).toBe("2 personal details hidden");
+  });
+
+  it("describes every model in plain words without banned jargon", () => {
+    for (const model of Object.values(FRIENDLY_MODELS)) {
+      const combined = `${model.name} ${model.summary}`;
+      for (const word of BANNED_JARGON) {
+        expect(combined.toLowerCase()).not.toContain(word.toLowerCase());
+      }
+    }
+    const fallback = describeModel("custom-model");
+    expect(fallback.summary).toContain("sealed computer");
+  });
+
+  it("produces plain-language failure reasons free of banned jargon", () => {
+    const reasons = [
+      friendlyFailureReason("Could not load registry", []),
+      friendlyFailureReason(null, [
+        { id: "C1", label: "Hardware", status: "fail", detail: "bad VCEK" },
+      ]),
+      friendlyFailureReason(null, [
+        { id: "C2", label: "Software", status: "fail", detail: "bad digest" },
+      ]),
+      friendlyFailureReason(null, [
+        { id: "C3", label: "Key", status: "fail", detail: "bad HPKE" },
+      ]),
+      friendlyFailureReason(null, [
+        { id: "C5", label: "GPU", status: "fail", detail: "bad GPU" },
+      ]),
+      friendlyFailureReason(null, [
+        { id: "C6", label: "Registry", status: "fail", detail: "suspended" },
+      ]),
+    ];
+
+    for (const text of reasons) {
+      for (const word of BANNED_JARGON) {
+        expect(text.toLowerCase()).not.toContain(word.toLowerCase());
+      }
+    }
   });
 });
 

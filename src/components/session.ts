@@ -612,10 +612,12 @@ export async function openSession(
     checks,
     evidence,
     evidenceHash: hashHex(sim.evidence),
-    send: wrapSendWithCreditAndChecks(checks, (history) => {
+    send: wrapSendWithCreditAndChecks(checks, async function* (history) {
       const lastMsg = history[history.length - 1];
       const text = lastMsg ? (lastMsg.wireContent ?? lastMsg.content) : "";
-      return sim.send(text);
+      for await (const chunk of sim.send(text)) {
+        yield chunk.replace(/\bSimulated enclave\b/g, "Practice server");
+      }
     }),
     close: () => sim.close(),
   };

@@ -1,13 +1,14 @@
 "use client";
 
 import type { CheckResult, NodeRecord, PopReceipt } from "@/lib/types";
+import { TechDetails } from "@/components/ink/tech-details";
 
 const DEFAULT_CHECK_LABELS: Record<string, string> = {
   C1: "Hardware signature chain",
   C2: "Approved open-source release",
   C3: "Session key bound to hardware",
   C4: "Running code matches release",
-  C5: "Router-attested confidential GPUs",
+  C5: "Router-verified confidential GPUs",
   C6: "Registry admission",
   C7: "Pinned model and disk image",
 };
@@ -114,7 +115,7 @@ export function NodeBadge({ node }: { node: NodeRecord }) {
   const real = node.kind === "tinfoil";
   return (
     <span className={real ? "ep-pass" : "ep-muted-chip"}>
-      {real ? "Real enclave" : "Simulated"}
+      {real ? "Sealed computer" : "Practice mode"}
     </span>
   );
 }
@@ -137,9 +138,9 @@ export function ReceiptView({
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-medium text-ink">
-            Session closed and ephemeral keys cleared
+            Chat closed and temporary keys cleared from your browser
           </span>
-          {isSim && <span className="ep-muted-chip">Simulated node</span>}
+          {isSim && <span className="ep-muted-chip">Practice mode</span>}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className={receipt.verified ? "ep-pass" : "ep-fail"}>
@@ -156,16 +157,20 @@ export function ReceiptView({
           )}
         </div>
       </div>
-      <EvidenceTable
-        evidence={{
-          "Session hash": receipt.sessionIdHash || "Unavailable",
-          Time: Number.isFinite(receipt.time)
-            ? new Date(receipt.time * 1000).toISOString()
-            : "Unavailable",
-          Measurement: receipt.measurement || "Unavailable",
-          "Signed by": receipt.signerPublicKey || "Unavailable",
-        }}
-      />
+      <div className="mt-2">
+        <TechDetails label="Show technical details">
+          <EvidenceTable
+            evidence={{
+              "Session hash": receipt.sessionIdHash || "Unavailable",
+              Time: Number.isFinite(receipt.time)
+                ? new Date(receipt.time * 1000).toISOString()
+                : "Unavailable",
+              Measurement: receipt.measurement || "Unavailable",
+              "Signed by": receipt.signerPublicKey || "Unavailable",
+            }}
+          />
+        </TechDetails>
+      </div>
       {anchorUrl && (
         <a
           className="ep-link mt-2 inline-block text-xs"
@@ -173,7 +178,7 @@ export function ReceiptView({
           target="_blank"
           rel="noreferrer"
         >
-          View receipt on Arc testnet explorer
+          View receipt in the public receipt book
         </a>
       )}
     </div>

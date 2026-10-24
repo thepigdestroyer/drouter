@@ -10,6 +10,7 @@ import {
   type ForensicProofVerificationResult,
 } from "@/lib/forensics";
 import { getCurrentVaultSession } from "@/lib/auth/vault";
+import { TechDetails } from "@/components/ink/tech-details";
 
 export interface ExportedSessionProof {
   bundle: ForensicProofBundle;
@@ -79,14 +80,14 @@ export function ForensicProofCard({
     <div className="ep-card space-y-3 p-4 text-xs text-ink">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="ep-label">Forensic Proof Bundle</span>
+          <span className="ep-label">deRoute Proof Receipt</span>
           {verification.valid ? (
-            <span className="ep-pass">Offline verified (C1-C7 + Ed25519)</span>
+            <span className="ep-pass">Verified on your device</span>
           ) : (
-            <span className="ep-fail">Verification incomplete</span>
+            <span className="ep-fail">Check incomplete</span>
           )}
           {bundle.nodeKind === "sim" && (
-            <span className="ep-muted-chip">Simulated node</span>
+            <span className="ep-muted-chip">Practice mode</span>
           )}
         </div>
 
@@ -96,14 +97,14 @@ export function ForensicProofCard({
             onClick={onRedownload}
             className="ep-btn-ghost px-2.5 py-1 text-xs"
           >
-            Download {filename}
+            Download proof file
           </button>
           <button
             type="button"
             onClick={() => void handleCopyJson()}
             className="ep-btn-ghost px-2.5 py-1 text-xs"
           >
-            {copiedJson ? "Copied JSON" : "Copy JSON"}
+            {copiedJson ? "Copied proof" : "Copy proof"}
           </button>
           <button
             type="button"
@@ -115,53 +116,71 @@ export function ForensicProofCard({
         </div>
       </div>
 
+      <p className="text-xs text-ink-2">
+        This receipt proves that your browser checked the seal on the computer
+        before sending your messages. You can keep it or share it with anyone to
+        verify offline.
+      </p>
+
       {!verification.valid && verification.reasons.length > 0 && (
         <div className="rounded border border-accent bg-accent-soft px-3 py-2 text-xs text-accent">
           {verification.reasons.join(" · ")}
         </div>
       )}
 
-      <dl className="divide-y divide-rule border-t border-b border-rule text-xs">
-        <div className="grid grid-cols-1 gap-1 py-1.5 sm:grid-cols-[11rem_1fr] sm:gap-3">
-          <dt className="font-mono text-[11px] uppercase tracking-wider text-ink-3">
-            Bundle SHA-256
-          </dt>
-          <dd className="ep-mono">{bundle.bundleDigestHex}</dd>
-        </div>
-        <div className="grid grid-cols-1 gap-1 py-1.5 sm:grid-cols-[11rem_1fr] sm:gap-3">
-          <dt className="font-mono text-[11px] uppercase tracking-wider text-ink-3">
-            Client Ed25519 key
-          </dt>
-          <dd className="ep-mono">
-            {bundle.clientPublicKeyHex}{" "}
-            {verification.originVerified
-              ? "(bound to unlocked passphrase vault)"
-              : "(ephemeral session key)"}
-          </dd>
-        </div>
-        <div className="grid grid-cols-1 gap-1 py-1.5 sm:grid-cols-[11rem_1fr] sm:gap-3">
-          <dt className="font-mono text-[11px] uppercase tracking-wider text-ink-3">
-            Client signature
-          </dt>
-          <dd className="ep-mono">{bundle.clientSignatureHex}</dd>
-        </div>
-      </dl>
+      <TechDetails label="Show technical details">
+        <div className="mt-2 space-y-3">
+          <dl className="divide-y divide-rule border-t border-b border-rule text-xs">
+            <div className="grid grid-cols-1 gap-1 py-1.5 sm:grid-cols-[11rem_1fr] sm:gap-3">
+              <dt className="font-mono text-[11px] uppercase tracking-wider text-ink-3">
+                File name
+              </dt>
+              <dd className="ep-mono">{filename}</dd>
+            </div>
+            <div className="grid grid-cols-1 gap-1 py-1.5 sm:grid-cols-[11rem_1fr] sm:gap-3">
+              <dt className="font-mono text-[11px] uppercase tracking-wider text-ink-3">
+                Bundle SHA-256
+              </dt>
+              <dd className="ep-mono">{bundle.bundleDigestHex}</dd>
+            </div>
+            <div className="grid grid-cols-1 gap-1 py-1.5 sm:grid-cols-[11rem_1fr] sm:gap-3">
+              <dt className="font-mono text-[11px] uppercase tracking-wider text-ink-3">
+                Client Ed25519 key
+              </dt>
+              <dd className="ep-mono">
+                {bundle.clientPublicKeyHex}{" "}
+                {verification.originVerified
+                  ? "(bound to your unlocked account)"
+                  : "(temporary session key)"}
+              </dd>
+            </div>
+            <div className="grid grid-cols-1 gap-1 py-1.5 sm:grid-cols-[11rem_1fr] sm:gap-3">
+              <dt className="font-mono text-[11px] uppercase tracking-wider text-ink-3">
+                Client signature
+              </dt>
+              <dd className="ep-mono">{bundle.clientSignatureHex}</dd>
+            </div>
+          </dl>
 
-      <div className="ep-inset p-2.5 space-y-1.5">
-        <div className="flex items-center justify-between gap-2">
-          <span className="ep-label">Standalone Node.js offline verifier</span>
-          <button
-            type="button"
-            onClick={() => void handleCopyCmd()}
-            className="ep-btn-ghost px-2 py-0.5 text-[11px]"
-          >
-            {copiedCmd ? "Copied command" : "Copy command"}
-          </button>
+          <div className="ep-inset p-2.5 space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="ep-label">
+                Standalone Node.js offline verifier
+              </span>
+              <button
+                type="button"
+                onClick={() => void handleCopyCmd()}
+                className="ep-btn-ghost px-2 py-0.5 text-[11px]"
+              >
+                {copiedCmd ? "Copied command" : "Copy command"}
+              </button>
+            </div>
+            <pre className="ep-mono overflow-x-auto whitespace-pre-wrap text-[11px]">
+              {bundle.cliVerifyOneLiner}
+            </pre>
+          </div>
         </div>
-        <pre className="ep-mono overflow-x-auto whitespace-pre-wrap text-[11px]">
-          {bundle.cliVerifyOneLiner}
-        </pre>
-      </div>
+      </TechDetails>
     </div>
   );
 }
