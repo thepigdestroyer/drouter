@@ -1,4 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { GET as getTiers } from "@/app/api/tiers/route";
+import {
+  buildMeasuredTiersCatalog,
+  GEMINI_4_ARGON_MAX_CONTEXT_TOKENS,
+  KIMI_K3_ENCLAVE_MAX_CONTEXT_TOKENS,
+} from "@/lib/tiers/catalog";
 import {
   applyOperatorShareCaps,
   evaluateCanaryRealismAuc,
@@ -271,6 +277,74 @@ describe("Subsystem 11: Platform Tiers (B / A+), Operator Share Caps, Economics 
       const failEval = evaluateCanaryRealismAuc(separable);
       expect(failEval.auc).toBe(1.0);
       expect(failEval.v8Passed).toBe(false);
+    });
+  });
+
+  describe("Tiers Catalog & GET /api/tiers Ground Truth (Kimi K3 262,144 Context & Real SEAL FHE Tier C)", () => {
+    it("sources Kimi K3 max context at 262,144 tokens, removes invented tok/s numbers, and measures live Tier C SEAL FHE latency", async () => {
+      const catalog = await buildMeasuredTiersCatalog({
+        cryptoVerifyLatencyMs: {
+          tierBTdxQuoteVerifyMs: 1.25,
+          tierAPlusSpdmVerifyMs: 4.5,
+        },
+      });
+
+      expect(catalog.kimiK3MaxContextTokens).toBe(262_144);
+      expect(catalog.gemini4ArgonMaxContextTokens).toBe(1_000_000);
+      expect(KIMI_K3_ENCLAVE_MAX_CONTEXT_TOKENS).toBe(262_144);
+      expect(GEMINI_4_ARGON_MAX_CONTEXT_TOKENS).toBe(1_000_000);
+
+      const tierA = catalog.entries.find((e) => e.tier === "Tier A");
+      const tierAPlus = catalog.entries.find((e) => e.tier === "Tier A+");
+      const tierB = catalog.entries.find((e) => e.tier === "Tier B");
+      const tierC = catalog.entries.find((e) => e.tier === "Tier C");
+
+      expect(tierA?.maxContextTokens).toBe(262_144);
+      expect(tierAPlus?.maxContextTokens).toBe(262_144);
+      expect(tierB?.maxContextTokens).toBe(262_144);
+      // Invented LLM throughput numbers removed
+      expect(tierA?.throughputTokPerSec).toBeNull();
+      expect(tierAPlus?.throughputTokPerSec).toBeNull();
+      expect(tierB?.throughputTokPerSec).toBeNull();
+
+      // Tier C uses live node-seal WASM measurement
+      expect(tierC?.maxContextTokens).toBe(128);
+      expect(tierC?.measuredEvalLatencyMs).toBeGreaterThan(0);
+      expect(tierC?.throughputOpsPerSec).toBeGreaterThan(0);
+      expect(catalog.liveFheMeasurement.serverSawPlaintext).toBe(false);
+      expect(catalog.liveFheMeasurement.verification.maxScoreAbsError!).toBeLessThan(1e-2);
+    });
+
+    it("returns full measured catalog and Tier C SEAL round-trip in GET /api/tiers", async () => {
+      const res = await getTiers();
+      expect(res.status).toBe(200);
+      const json = (await res.json()) as {
+        parameters: { kimiK3MaxContextTokens: number };
+        tiers: {
+          tierA: { maxContextTokens: number };
+          tierB: { measuredVerifyLatencyMs: number; maxContextTokens: number };
+          tierAPlus: { measuredVerifyLatencyMs: number; maxContextTokens: number };
+          tierC: {
+            scopeDisclosure: string;
+            liveFheMeasurement: {
+              serverSawPlaintext: boolean;
+              verification: { maxScoreAbsError: number };
+            };
+          };
+        };
+        catalog: Array<{ tier: string; maxContextTokens: number }>;
+      };
+
+      expect(json.parameters.kimiK3MaxContextTokens).toBe(262_144);
+      expect(json.tiers.tierA.maxContextTokens).toBe(262_144);
+      expect(json.tiers.tierB.maxContextTokens).toBe(262_144);
+      expect(json.tiers.tierB.measuredVerifyLatencyMs).toBeGreaterThan(0);
+      expect(json.tiers.tierAPlus.measuredVerifyLatencyMs).toBeGreaterThan(0);
+      expect(json.tiers.tierC.liveFheMeasurement.serverSawPlaintext).toBe(false);
+      expect(
+        json.tiers.tierC.liveFheMeasurement.verification.maxScoreAbsError,
+      ).toBeLessThan(1e-2);
+      expect(json.catalog).toHaveLength(4);
     });
   });
 });

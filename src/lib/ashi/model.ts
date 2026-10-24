@@ -322,12 +322,19 @@ export interface AshiProfileEvaluation {
 }
 
 export interface AshiTierCEvaluation {
+  isAnalyticalSimulation: true;
+  simulationDisclosure: string;
   stateGb: number;
   fullKvCacheTbAt1M: number;
+  fullKvCacheGbAt256K: number;
+  kimiK3MaxContextTokens: 262_144;
   lazyMoeKeySwitchReduction: string;
   bootstrapsPerPass: number;
   profiles: AshiProfileEvaluation[];
 }
+
+export const ASHI_FRONTIER_SIMULATION_DISCLOSURE =
+  "Simulated analytical model: Frontier 3T MoE FHE numbers (N=2^17 CKKS with bootstrapping) are analytical projections; live Tier C in src/lib/ashi/fhe.ts executes a real small CKKS linear classifier (N=4096, 128-d embedding dot products + squared norm) with node-seal 7.0.0." as const;
 
 export function evaluateAshiTierC(
   overrides?: Partial<{ alpha: number; contextTokens: number }>
@@ -343,6 +350,9 @@ export function evaluateAshiTierC(
   );
   const fullKvCacheTbAt1M = Number(
     ((contextTokens * model.layers * 576 * 48) / 1e12).toFixed(2)
+  );
+  const fullKvCacheGbAt256K = Number(
+    ((262_144 * model.layers * 576 * 48) / 1e9).toFixed(2)
   );
   const bootstrapsPerPass = Math.ceil(
     (model.layers * model.levelsPerLayer) / crypto.levelsPerBts
@@ -389,8 +399,12 @@ export function evaluateAshiTierC(
   });
 
   return {
+    isAnalyticalSimulation: true,
+    simulationDisclosure: ASHI_FRONTIER_SIMULATION_DISCLOSURE,
     stateGb,
     fullKvCacheTbAt1M,
+    fullKvCacheGbAt256K,
+    kimiK3MaxContextTokens: 262_144,
     lazyMoeKeySwitchReduction: "~200x fewer key switches (1.45M wide intermediate -> d=7168 narrow relinearization)",
     bootstrapsPerPass,
     profiles,

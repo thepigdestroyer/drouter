@@ -1,11 +1,34 @@
 import { NextRequest, NextResponse, connection } from "next/server";
+import {
+  FHE_SCOPE_DISCLOSURE,
+  getPublicScoringMatrix,
+  runLiveFheLinearRoundTrip,
+  serverEvaluateEncryptedLinearScores,
+  type FheEncryptedRequestPayload,
+} from "@/lib/ashi/fhe";
 import { evaluateAshiTierC } from "@/lib/ashi/model";
-import { createTokenBucketLimiter } from "@/lib/ratelimit";
+import {
+  BodyTooLargeError,
+  InvalidJsonBodyError,
+  createTokenBucketLimiter,
+  readBoundedJson,
+} from "@/lib/ratelimit";
+import {
+  buildMeasuredTiersCatalog,
+  KIMI_K3_ENCLAVE_MAX_CONTEXT_TOKENS,
+  type SourcedTierCatalogEntry,
+} from "@/lib/tiers/catalog";
 
-const ashiLimiter = createTokenBucketLimiter({
+const ashiGetLimiter = createTokenBucketLimiter({
   name: "ashi-get",
   capacity: 120,
   refillPerSec: 4,
+});
+
+const ashiPostLimiter = createTokenBucketLimiter({
+  name: "ashi-post",
+  capacity: 40,
+  refillPerSec: 1,
 });
 
 export interface PlatformTierComparisonEntry {
@@ -15,90 +38,176 @@ export interface PlatformTierComparisonEntry {
   trustBoundary: string;
   physicalInterposerResistant: boolean;
   routingPrivacy: string;
-  throughputTokPerSec: number;
-  usdPerMillionOutputTokens: number;
+  throughputTokPerSec: number | null;
+  usdPerMillionOutputTokens: number | null;
   maxContextTokens: number;
+  maxContextSource: string;
+  measuredEvalLatencyMs: number | null;
+  throughputOpsPerSec: number | null;
+  metricsSource: string;
   sessionStateFootprint: string;
 }
 
-export async function GET(request: NextRequest) {
-  await connection();
+function toComparisonEntry(
+  entry: SourcedTierCatalogEntry,
+): PlatformTierComparisonEntry {
+  return {
+    tier: entry.tier,
+    name: entry.name,
+    architecture: entry.architecture,
+    trustBoundary: entry.trustBoundary,
+    physicalInterposerResistant: entry.physicalInterposerResistant,
+    routingPrivacy: entry.routingPrivacy,
+    throughputTokPerSec: entry.throughputTokPerSec,
+    usdPerMillionOutputTokens: entry.usdPerMillionOutputTokens,
+    maxContextTokens: entry.maxContextTokens,
+    maxContextSource: entry.maxContextSource,
+    measuredEvalLatencyMs: entry.measuredEvalLatencyMs,
+    throughputOpsPerSec: entry.throughputOpsPerSec,
+    metricsSource: entry.metricsSource,
+    sessionStateFootprint: entry.sessionStateFootprint,
+  };
+}
+
+export async function GET(request?: NextRequest) {
+  try {
+    await connection();
+  } catch {
+    // Allow direct handler invocation in unit tests outside Next.js request AsyncLocalStorage
+  }
   if (request) {
-    const limited = ashiLimiter.check(request);
+    const limited = ashiGetLimiter.check(request);
     if (limited) return limited;
   }
 
-  const alphaParam = request.nextUrl.searchParams.get("alpha");
+  const alphaParam = request?.nextUrl?.searchParams.get("alpha") ?? null;
   const parsedAlpha = alphaParam !== null ? Number(alphaParam) : 0.95;
   const alpha =
     Number.isFinite(parsedAlpha) && parsedAlpha > 0 && parsedAlpha < 1
       ? parsedAlpha
       : 0.95;
 
-  const evaluation = evaluateAshiTierC({ alpha });
-  const floorProfile =
-    evaluation.profiles.find((p) => p.name.includes("floor")) ??
-    evaluation.profiles[1];
-  const asicProfile =
-    evaluation.profiles.find((p) => p.name.includes("ASIC")) ??
-    evaluation.profiles[2];
+  // 1. Run a real measured CKKS homomorphic linear classification round trip via node-seal WASM
+  const liveFhe = await runLiveFheLinearRoundTrip();
+  const catalog = await buildMeasuredTiersCatalog({
+    fheMeasurement: liveFhe,
+  });
 
-  const tierComparison: PlatformTierComparisonEntry[] = [
-    {
-      tier: "Tier A",
-      name: "Nested Enclave (Default Confidential Tier)",
-      architecture: "Outer CVM + Nested Attested Enclave + Blinded I/O",
-      trustBoundary: "CPU + GPU TEE silicon & attested firmware",
-      physicalInterposerResistant: false,
-      routingPrivacy: "Protected inside enclave; bus exposed to physical interposer",
-      throughputTokPerSec: 85,
-      usdPerMillionOutputTokens: 18,
-      maxContextTokens: 1_000_000,
-      sessionStateFootprint: "~288 GB plaintext KV cache @ 1M tokens",
-    },
-    {
-      tier: "Tier A+",
-      name: "TEE-IO + Soldered RAM (Hardware-Hardened Confidential Tier)",
-      architecture: "PCIe IDE/TDISP TEE-IO + On-package HBM3e / Soldered LPDDR5X",
-      trustBoundary: "Die-to-die encrypted link + potted/soldered memory package",
-      physicalInterposerResistant: true,
-      routingPrivacy: "Protected against passive bus interposers inside TEE boundary",
-      throughputTokPerSec: 82,
-      usdPerMillionOutputTokens: 24,
-      maxContextTokens: 1_000_000,
-      sessionStateFootprint: "~288 GB encrypted-in-package KV cache @ 1M tokens",
-    },
-    {
-      tier: "Tier B",
-      name: "Intel TDX Opt-In (Standard CVM Tier)",
-      architecture: "Single-layer Intel TDX + NVIDIA H100/B200 CC Mode",
-      trustBoundary: "Host VMM excluded; standard DIMM/PCIe topology",
-      physicalInterposerResistant: false,
-      routingPrivacy: "Standard TEE memory encryption; vulnerable to physical DIMM probing",
-      throughputTokPerSec: 95,
-      usdPerMillionOutputTokens: 14,
-      maxContextTokens: 1_000_000,
-      sessionStateFootprint: "~288 GB CVM KV cache @ 1M tokens",
-    },
-    {
-      tier: "Tier C",
-      name: "ASHI Cryptographic FHE Tier (Zero Silicon Trust)",
-      architecture:
-        "Pipelined Speculative Homomorphic Verification (PSHV) + CSEM + LT-MoE + RRC (CKKS N=2^17)",
-      trustBoundary: "Client holds secret key; zero server hardware or enclave trust",
-      physicalInterposerResistant: true,
-      routingPrivacy:
-        "Information-theoretic / RLWE 128-bit oblivious all-expert evaluation",
-      throughputTokPerSec: floorProfile.committedTokPerSec,
-      usdPerMillionOutputTokens: floorProfile.usdPerMillionOutputTokens,
-      maxContextTokens: 1_000_000,
-      sessionStateFootprint: `${evaluation.stateGb} GB constant encrypted state (vs ${evaluation.fullKvCacheTbAt1M} TB full KV @ 1M, ASIC $${asicProfile.usdPerMillionOutputTokens}/1M tok @ ${asicProfile.committedTokPerSec} tok/s)`,
-    },
-  ];
+  // 2. Keep the analytical frontier FHE model explicitly labelled as a simulation
+  const evaluation = evaluateAshiTierC({ alpha });
+
+  const tierComparison: PlatformTierComparisonEntry[] =
+    catalog.entries.map(toComparisonEntry);
+
+  const publicMatrix = getPublicScoringMatrix();
 
   return NextResponse.json({
     alpha,
+    fheScopeDisclosure: FHE_SCOPE_DISCLOSURE,
+    liveFhe,
+    publicScoringMatrix: {
+      dimensions: publicMatrix.dimensions,
+      numClasses: publicMatrix.numClasses,
+      blockStride: publicMatrix.blockStride,
+      matrixDigestSha256: publicMatrix.matrixDigestSha256,
+      classes: publicMatrix.classes.map((c) => ({
+        id: c.id,
+        label: c.label,
+        description: c.description,
+        bias: c.bias,
+      })),
+    },
     ...evaluation,
+    kimiK3MaxContextTokens: KIMI_K3_ENCLAVE_MAX_CONTEXT_TOKENS,
     tierComparison,
   });
+}
+
+/**
+ * POST /api/ashi
+ * Zero-plaintext FHE evaluation endpoint:
+ * - Accepts ONLY `ciphertextBase64`, `relinKeysBase64`, `galoisKeysBase64` (and optional `publicKeyBase64`).
+ * - Rejects any request containing `secretKey`, `secretKeyBase64`, `plaintext`, `text`, or `prompt`
+ *   so the server NEVER sees plaintext or secret keys.
+ * - Computes homomorphic 4x128 linear classification dot products (`W * Enc(x) + b`) and
+ *   homomorphic squared L2 norm (`sum(x_i^2)`) using `node-seal` 7.0.0 WASM and returns the encrypted result ciphertexts.
+ */
+export async function POST(request: Request) {
+  const limited = ashiPostLimiter.check(request);
+  if (limited) return limited;
+
+  try {
+    // Galois keys + relin keys + ciphertext in zstd base64 are ~1.6 MB total; cap body at 4 MB.
+    const body = await readBoundedJson<Record<string, unknown>>(
+      request,
+      4 * 1024 * 1024,
+    );
+
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return NextResponse.json(
+        { error: "FHE request body must be a JSON object" },
+        { status: 400 },
+      );
+    }
+
+    // Strict zero-plaintext / zero-secret-key enforcement on the server
+    const forbiddenFields = [
+      "secretKey",
+      "secretKeyBase64",
+      "plaintext",
+      "text",
+      "prompt",
+      "vector128",
+    ] as const;
+    for (const field of forbiddenFields) {
+      if (body[field] !== undefined) {
+        return NextResponse.json(
+          {
+            error: `Privacy violation rejected: server FHE endpoint must never receive "${field}". Encrypt locally on the client and send only ciphertextBase64, relinKeysBase64, and galoisKeysBase64.`,
+          },
+          { status: 400 },
+        );
+      }
+    }
+
+    const payload: FheEncryptedRequestPayload = {
+      ciphertextBase64:
+        typeof body.ciphertextBase64 === "string" ? body.ciphertextBase64 : "",
+      publicKeyBase64:
+        typeof body.publicKeyBase64 === "string"
+          ? body.publicKeyBase64
+          : undefined,
+      relinKeysBase64:
+        typeof body.relinKeysBase64 === "string" ? body.relinKeysBase64 : "",
+      galoisKeysBase64:
+        typeof body.galoisKeysBase64 === "string" ? body.galoisKeysBase64 : "",
+    };
+
+    if (
+      !payload.ciphertextBase64 ||
+      !payload.relinKeysBase64 ||
+      !payload.galoisKeysBase64
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "Missing required FHE fields: ciphertextBase64, relinKeysBase64, and galoisKeysBase64 are required.",
+        },
+        { status: 400 },
+      );
+    }
+
+    const evaluation = await serverEvaluateEncryptedLinearScores(payload);
+    return NextResponse.json(evaluation, { status: 200 });
+  } catch (err) {
+    if (err instanceof BodyTooLargeError) {
+      return NextResponse.json({ error: err.message }, { status: 413 });
+    }
+    if (err instanceof InvalidJsonBodyError) {
+      return NextResponse.json({ error: err.message }, { status: 400 });
+    }
+    const message =
+      err instanceof Error ? err.message : "FHE homomorphic evaluation failed";
+    return NextResponse.json({ error: message }, { status: 400 });
+  }
 }
