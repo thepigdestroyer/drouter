@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { connection, NextResponse } from "next/server";
 import {
   ingestAtlasDocument,
@@ -7,6 +8,8 @@ import {
 } from "@/lib/atlas";
 
 const ATLAS_FEATURES_USED = [
+  "D3 Mechanical Redaction Filter (mechanicalRedact)",
+  "D4 Attested Enclave Second Pass (attestedPiiFilter)",
   "Atlas Search ($search)",
   "Atlas Vector Search ($vectorSearch)",
   "Hybrid Search ($rankFusion / RRF)",
@@ -14,8 +17,38 @@ const ATLAS_FEATURES_USED = [
   "Agent Verification Receipts Store",
 ] as const;
 
+const FORBIDDEN_POST_INGEST_KEYS = [
+  "prompt",
+  "rawPrompt",
+  "taskPrompt",
+  "userText",
+  "userQuery",
+  "queryText",
+  "message",
+  "messages",
+  "chat",
+  "conversation",
+  "transcript",
+  "completion",
+  "output",
+  "input",
+] as const;
+
+function safeTokenCompare(a: string, b: string): boolean {
+  const bufA = Buffer.from(a, "utf8");
+  const bufB = Buffer.from(b, "utf8");
+  if (bufA.byteLength !== bufB.byteLength || bufA.byteLength === 0) {
+    return false;
+  }
+  return timingSafeEqual(bufA, bufB);
+}
+
 export async function GET(request: Request) {
-  await connection();
+  try {
+    await connection();
+  } catch {
+    // Allow direct invocation in unit tests outside Next.js AsyncLocalStorage request store
+  }
 
   const url = new URL(request.url);
   const q =
@@ -34,7 +67,12 @@ export async function GET(request: Request) {
     query: search.query,
     embeddingModel: search.embeddingModel,
     embeddingDimensions: search.embeddingDimensions,
+    embeddingFallbackUsed: search.embeddingFallbackUsed,
     engines: search.engines,
+    redaction: search.redaction,
+    redactionCounts: search.redactionCounts,
+    totalRedactions: search.totalRedactions,
+    filterRan: search.filterRan,
     results: search.results,
     matchingReceipts: search.matchingReceipts,
     search,
@@ -67,7 +105,7 @@ export async function POST(request: Request) {
 
   if (body.action === "ingest") {
     const expectedToken = process.env.ATLAS_INGEST_TOKEN?.trim();
-    if (!expectedToken) {
+    if (!expectedToken || expectedToken.length < 16) {
       return NextResponse.json(
         {
           error:
@@ -84,18 +122,20 @@ export async function POST(request: Request) {
         ?.replace(/^Bearer\s+/i, "")
         .trim();
 
-    if (!headerToken || headerToken !== expectedToken) {
+    if (!headerToken || !safeTokenCompare(headerToken, expectedToken)) {
       return NextResponse.json(
         { error: "Unauthorized: valid X-Atlas-Ingest-Token header is required for ingest." },
         { status: 401 },
       );
     }
 
-    if ("prompt" in body || "rawPrompt" in body || "taskPrompt" in body) {
-      return NextResponse.json(
-        { error: "Prompts are never stored in MongoDB Atlas." },
-        { status: 400 },
-      );
+    for (const forbiddenKey of FORBIDDEN_POST_INGEST_KEYS) {
+      if (forbiddenKey in body) {
+        return NextResponse.json(
+          { error: "Prompts are never stored in MongoDB Atlas." },
+          { status: 400 },
+        );
+      }
     }
 
     const title = typeof body.title === "string" ? body.title.trim() : "";
@@ -140,7 +180,7 @@ export async function POST(request: Request) {
     const followUpQuery =
       typeof body.query === "string" && body.query.trim().length > 0
         ? body.query.trim()
-        : `${title} ${tags.join(" ")}`.trim();
+        : `${ingested.document.title} ${ingested.document.tags.join(" ")}`.trim();
 
     const [search, analytics] = await Promise.all([
       runAtlasHybridSearch(followUpQuery),
@@ -149,9 +189,17 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       ingested: ingested.document,
+      ingestRedaction: ingested.redaction,
       storedInAtlas: ingested.storedInAtlas,
       query: search.query,
+      embeddingModel: search.embeddingModel,
+      embeddingDimensions: search.embeddingDimensions,
+      embeddingFallbackUsed: search.embeddingFallbackUsed,
       engines: search.engines,
+      redaction: search.redaction,
+      redactionCounts: search.redactionCounts,
+      totalRedactions: search.totalRedactions,
+      filterRan: search.filterRan,
       results: search.results,
       matchingReceipts: search.matchingReceipts,
       search,
@@ -166,9 +214,12 @@ export async function POST(request: Request) {
       : "AMD SEV-SNP 8x GPU confidential mode TEE.fail mitigation";
   const category = typeof body.category === "string" ? body.category.trim() : undefined;
   const limit = typeof body.limit === "number" && body.limit > 0 ? body.limit : 10;
+  const customTerms = Array.isArray(body.customTerms)
+    ? body.customTerms.filter((t): t is string => typeof t === "string" && t.trim().length > 0)
+    : undefined;
 
   const [search, analytics] = await Promise.all([
-    runAtlasHybridSearch(query, { category, limit }),
+    runAtlasHybridSearch(query, { category, limit, customTerms }),
     runAtlasStreamAnalytics(),
   ]);
 
@@ -176,7 +227,12 @@ export async function POST(request: Request) {
     query: search.query,
     embeddingModel: search.embeddingModel,
     embeddingDimensions: search.embeddingDimensions,
+    embeddingFallbackUsed: search.embeddingFallbackUsed,
     engines: search.engines,
+    redaction: search.redaction,
+    redactionCounts: search.redactionCounts,
+    totalRedactions: search.totalRedactions,
+    filterRan: search.filterRan,
     results: search.results,
     matchingReceipts: search.matchingReceipts,
     search,

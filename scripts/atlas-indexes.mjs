@@ -914,33 +914,82 @@ async function main() {
     const col = db.collection(COLLECTION_NAME);
     const receiptsCol = db.collection(RECEIPTS_COLLECTION_NAME);
 
-    // 1. Read any existing receipts so we can batch-embed seed docs + receipts in a single Tinfoil request
-    const existingReceipts = await receiptsCol.find({}).toArray().catch(() => []);
-    const seedComposites = RAW_SEED_DOCS.map((doc) =>
-      [
-        doc.title,
-        doc.category,
-        doc.summary,
-        doc.sourceUrl,
-        doc.tags.join(" "),
-        JSON.stringify(doc.metadata),
-      ].join(" "),
-    );
-    const receiptSummaries = existingReceipts.map(
-      (r) => r.summary || `Agent verification receipt ${r.receiptId}`,
-    );
+    // 0. Purge any legacy simulated receipts from agent_verification_receipts
+    const removedSim = await receiptsCol.deleteMany({ mode: "simulated" }).catch(() => ({ deletedCount: 0 }));
+    if (removedSim.deletedCount > 0) {
+      console.log(
+        `[atlas-indexes] Removed ${removedSim.deletedCount} simulated receipt(s) from ${dbName}.${RECEIPTS_COLLECTION_NAME}.`,
+      );
+    }
 
-    const allTexts = [...seedComposites, ...receiptSummaries];
-    const allEmbeddings = await embedTextsBatch(allTexts);
+    // 1. Read existing seed docs and live receipts so we only embed items missing 768-d attested vectors
+    const existingSeedDocs = await col.find({}).toArray().catch(() => []);
+    const existingSeedById = new Map(existingSeedDocs.map((d) => [d.docId, d]));
+    const existingReceipts = await receiptsCol.find({ mode: "live" }).toArray().catch(() => []);
+
+    const textsToEmbed = [];
+    const seedMissingIndices = [];
+    const receiptMissingIndices = [];
+
+    RAW_SEED_DOCS.forEach((doc, idx) => {
+      const ex = existingSeedById.get(doc.docId);
+      const hasLiveVec =
+        ex &&
+        Array.isArray(ex.embedding) &&
+        ex.embedding.length === EMBEDDING_DIMENSIONS &&
+        typeof ex.embeddingModel === "string" &&
+        ex.embeddingModel.includes("nomic-embed-text") &&
+        ex.summary === doc.summary &&
+        ex.sourceUrl === doc.sourceUrl;
+      if (!hasLiveVec) {
+        seedMissingIndices.push(idx);
+        textsToEmbed.push(
+          [
+            doc.title,
+            doc.category,
+            doc.summary,
+            doc.sourceUrl,
+            doc.tags.join(" "),
+            JSON.stringify(doc.metadata),
+          ].join(" "),
+        );
+      }
+    });
+
+    existingReceipts.forEach((r, idx) => {
+      const hasLiveVec =
+        Array.isArray(r.embedding) &&
+        r.embedding.length === EMBEDDING_DIMENSIONS &&
+        typeof r.embeddingModel === "string" &&
+        r.embeddingModel.includes("nomic-embed-text");
+      if (!hasLiveVec) {
+        receiptMissingIndices.push(idx);
+        textsToEmbed.push(r.summary || `Agent verification receipt ${r.receiptId}`);
+      }
+    });
+
+    const newlyEmbedded = textsToEmbed.length > 0 ? await embedTextsBatch(textsToEmbed) : [];
+    const newSeedEmbeddings = new Map();
+    seedMissingIndices.forEach((docIdx, batchIdx) => {
+      newSeedEmbeddings.set(docIdx, newlyEmbedded[batchIdx]);
+    });
+    const newReceiptEmbeddings = new Map();
+    receiptMissingIndices.forEach((rIdx, offsetIdx) => {
+      newReceiptEmbeddings.set(rIdx, newlyEmbedded[seedMissingIndices.length + offsetIdx]);
+    });
 
     const coarsenedUpdatedAt = coarsenIsoToUtcHour();
     const embeddedDocs = RAW_SEED_DOCS.map((doc, idx) => {
-      const emb = allEmbeddings[idx];
+      const ex = existingSeedById.get(doc.docId);
+      const freshEmb = newSeedEmbeddings.get(idx);
+      const vector = freshEmb ? freshEmb.vector : ex.embedding;
+      const model = freshEmb ? freshEmb.model : ex.embeddingModel;
+      const dimensions = freshEmb ? freshEmb.dimensions : ex.embeddingDimensions;
       return {
         ...doc,
-        embedding: emb.vector,
-        embeddingModel: emb.model,
-        embeddingDimensions: emb.dimensions,
+        embedding: vector,
+        embeddingModel: model,
+        embeddingDimensions: dimensions,
         updatedAt: coarsenedUpdatedAt,
       };
     });
@@ -968,10 +1017,11 @@ async function main() {
       `[atlas-indexes] Seeded ${embeddedDocs.length} sourced docs (${EMBEDDING_DIMENSIONS}-d vectors, model="${embeddedDocs[0]?.embeddingModel}") into ${dbName}.${COLLECTION_NAME} (upserted: ${bulkResult.upsertedCount}, modified: ${bulkResult.modifiedCount}, total in collection: ${totalCount}).`,
     );
 
-    // Update existing receipts with 768-d embeddings from the same batch
-    if (existingReceipts.length > 0) {
-      const receiptOps = existingReceipts.map((r, idx) => {
-        const emb = allEmbeddings[RAW_SEED_DOCS.length + idx];
+    // Update any live receipts that needed new 768-d embeddings
+    if (receiptMissingIndices.length > 0) {
+      const receiptOps = receiptMissingIndices.map((rIdx) => {
+        const r = existingReceipts[rIdx];
+        const emb = newReceiptEmbeddings.get(rIdx);
         return {
           updateOne: {
             filter: { receiptId: r.receiptId },
@@ -988,7 +1038,7 @@ async function main() {
       });
       await receiptsCol.bulkWrite(receiptOps, { ordered: false });
       console.log(
-        `[atlas-indexes] Updated ${existingReceipts.length} existing receipt(s) in ${dbName}.${RECEIPTS_COLLECTION_NAME} with ${EMBEDDING_DIMENSIONS}-d vectors.`,
+        `[atlas-indexes] Updated ${receiptMissingIndices.length} live receipt(s) in ${dbName}.${RECEIPTS_COLLECTION_NAME} with ${EMBEDDING_DIMENSIONS}-d vectors.`,
       );
     }
 

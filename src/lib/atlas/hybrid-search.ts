@@ -1,5 +1,4 @@
 import { MongoClient, type Collection, type Db } from "mongodb";
-import { createSessionScrubber } from "@/lib/privacy/scrubber";
 import {
   cosineSimilarity,
   embedDocumentText,
@@ -18,6 +17,11 @@ import {
   type AtlasDocCategory,
   type EnclaveIntelligenceDoc,
 } from "./knowledge-base";
+import {
+  redactForAtlasBoundary,
+  stripRedactionPlaceholdersForScoring,
+  type AtlasQueryRedactionReport,
+} from "./privacy-filter";
 
 export const ATLAS_COLLECTION_NAME = "enclave_intelligence";
 export const ATLAS_RECEIPTS_COLLECTION_NAME = "agent_verification_receipts";
@@ -29,6 +33,8 @@ export interface HybridSearchOptions {
   category?: string;
   limit?: number;
   includeReceiptsInResults?: boolean;
+  customTerms?: string[];
+  skipAttestedPass?: boolean;
 }
 
 export interface AtlasSearchEngines {
@@ -41,7 +47,7 @@ export interface AtlasSearchEngines {
 export interface AgentVerificationReceiptDoc {
   receiptId: string;
   coarsenedAt: string;
-  mode: "live" | "simulated";
+  mode: "live";
   primaryModel: string;
   enclaveModel: string;
   routerHost: string;
@@ -83,8 +89,13 @@ export interface HybridSearchResponse {
   categoryFilter: string | null;
   embeddingModel: string;
   embeddingDimensions: number;
+  embeddingFallbackUsed: boolean;
   executionMode: "atlas-hybrid-rrf" | "local-hybrid-rrf";
   engines: AtlasSearchEngines;
+  redaction: AtlasQueryRedactionReport;
+  redactionCounts: Record<string, number>;
+  totalRedactions: number;
+  filterRan: "mechanical+attested" | "mechanical-only";
   nativeVectorHits: number;
   nativeTextHits: number;
   totalCorpusDocs: number;
@@ -157,6 +168,16 @@ const globalForAtlas = globalThis as unknown as {
 
 export function setAtlasDbForTests(db: Db | null | undefined): void {
   globalForAtlas.__drouterTestAtlasDb = db;
+}
+
+export function clearAtlasRuntimeStateForTests(): void {
+  globalForAtlas.__drouterRuntimeReceipts?.clear();
+  if (globalForAtlas.__drouterRuntimeDocs) {
+    globalForAtlas.__drouterRuntimeDocs.clear();
+    for (const doc of ATLAS_SEED_DOCS) {
+      globalForAtlas.__drouterRuntimeDocs.set(doc.docId, doc);
+    }
+  }
 }
 
 function getRuntimeDocsMap(): Map<string, EnclaveIntelligenceDoc> {
@@ -307,6 +328,12 @@ export async function ensureAtlasSeededAndIndexed(db?: Db | null): Promise<{
         }
       }
 
+      // Remove any legacy simulated receipts from agent_verification_receipts
+      const receiptsCol = database.collection(ATLAS_RECEIPTS_COLLECTION_NAME);
+      if (typeof receiptsCol.deleteMany === "function") {
+        await receiptsCol.deleteMany({ mode: "simulated" }).catch(() => {});
+      }
+
       globalForAtlas.__drouterAtlasSeeded = true;
     } catch {
       // Ignore transient write errors
@@ -384,7 +411,8 @@ export async function ensureAtlasSeededAndIndexed(db?: Db | null): Promise<{
  * Computes field-weighted BM25-style lexical relevance score for a document against a query.
  */
 export function computeBm25TextScore(doc: EnclaveIntelligenceDoc, query: string): number {
-  const qNorm = query.toLowerCase().trim();
+  const withoutPlaceholders = stripRedactionPlaceholdersForScoring(query || "");
+  const qNorm = withoutPlaceholders.toLowerCase().trim();
   if (!qNorm) return 0;
 
   const rawTokens = qNorm
@@ -434,14 +462,65 @@ interface RankFusionDocResult extends EnclaveIntelligenceDoc {
   };
 }
 
+const FORBIDDEN_USER_TEXT_KEYS = [
+  "prompt",
+  "rawPrompt",
+  "taskPrompt",
+  "userText",
+  "userQuery",
+  "queryText",
+  "message",
+  "messages",
+  "chat",
+  "conversation",
+  "transcript",
+  "completion",
+  "output",
+  "input",
+] as const;
+
+const ALLOWED_INGEST_CATEGORIES = new Set<string>(["provider", "advisory", "architecture"]);
+
+function assertNoUserTextFields(obj: Record<string, unknown>): void {
+  for (const key of FORBIDDEN_USER_TEXT_KEYS) {
+    if (key in obj) {
+      throw new Error(`Prompts must never be stored in MongoDB Atlas (forbidden field: ${key}).`);
+    }
+  }
+}
+
+function sanitizeSourceUrl(rawUrl: string | undefined): string {
+  const candidate = (rawUrl || "").trim();
+  if (!candidate) {
+    return "https://docs.tinfoil.sh/verification/attestation-architecture";
+  }
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol !== "https:") {
+      throw new Error("Only https:// source URLs are permitted in MongoDB Atlas.");
+    }
+    parsed.username = "";
+    parsed.password = "";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("https://")) {
+      throw err;
+    }
+    return "https://docs.tinfoil.sh/verification/attestation-architecture";
+  }
+}
+
 /**
- * Persists a non-PII, prompt-free agent verification receipt with a coarsened UTC-hour
+ * Persists a non-PII, prompt-free live agent verification receipt with a coarsened UTC-hour
  * timestamp into MongoDB Atlas `agent_verification_receipts` and the runtime receipt map.
+ * Rejects simulated receipts so only live verification receipts are stored.
  */
 export async function recordAgentVerificationReceipt(input: {
   receiptId: string;
   timestampIso?: string;
-  mode: "live" | "simulated";
+  mode?: "live" | "simulated";
   primaryModel: string;
   enclaveModel: string;
   routerHost: string;
@@ -455,29 +534,46 @@ export async function recordAgentVerificationReceipt(input: {
   ed25519SignatureHex: string;
   signerPublicKeyHex: string;
   rawPromptMustNotBePassed?: never;
-}): Promise<{ storedInAtlas: boolean; receipt: AgentVerificationReceiptDoc }> {
-  const scrubber = createSessionScrubber();
+  [key: string]: unknown;
+}): Promise<{
+  storedInAtlas: boolean;
+  receipt: AgentVerificationReceiptDoc;
+  redaction: AtlasQueryRedactionReport;
+}> {
+  assertNoUserTextFields(input);
+  if (input.mode === "simulated") {
+    throw new Error(
+      "Simulated agent verification receipts must not be stored in MongoDB Atlas.",
+    );
+  }
+
+  // Receipt summary is constructed purely from system identifiers, booleans, and a 64-bit hash prefix;
+  // pass through mechanicalRedact (D3) + attestedPiiFilter (D4) before leaving the enclave boundary.
+  const idRedacted = await redactForAtlasBoundary(input.receiptId || "receipt");
+  const safeReceiptId = idRedacted.text;
   const rawSummary =
-    `Agent verification receipt ${input.receiptId} (mode=${input.mode}, orchestrator=${input.primaryModel}): ` +
+    `Agent verification receipt ${safeReceiptId} (mode=live, orchestrator=${input.primaryModel}): ` +
     `router=${input.routerHost} -> enclave=${input.enclaveHost} (${input.enclaveModel}), ` +
-    `overallPassed=${input.overallPassed}, faultInjected=${input.faultInjected}, selfHealed=${input.selfHealed}, ` +
-    `humanGate=${input.humanGateState}, digest=0x${input.forensicProofDigestHex.slice(0, 16)}.`;
-  const scrubbedSummary = scrubber.scrub(rawSummary).scrubbed;
+    `overallPassed=${Boolean(input.overallPassed)}, faultInjected=${Boolean(input.faultInjected)}, selfHealed=${Boolean(input.selfHealed)}, ` +
+    `humanGate=${input.humanGateState}, digest=0x${(input.forensicProofDigestHex || "").slice(0, 16)}.`;
+
+  const redactedSummaryResult = await redactForAtlasBoundary(rawSummary);
+  const scrubbedSummary = redactedSummaryResult.text;
 
   const coarsenedAt = coarsenIsoToUtcHour(input.timestampIso);
   const embedded = await embedDocumentTextWithProvider(scrubbedSummary);
 
   const receipt: AgentVerificationReceiptDoc = {
-    receiptId: input.receiptId,
+    receiptId: safeReceiptId,
     coarsenedAt,
-    mode: input.mode,
+    mode: "live",
     primaryModel: input.primaryModel,
     enclaveModel: input.enclaveModel,
     routerHost: input.routerHost,
     enclaveHost: input.enclaveHost,
-    overallPassed: input.overallPassed,
-    faultInjected: input.faultInjected,
-    selfHealed: input.selfHealed,
+    overallPassed: Boolean(input.overallPassed),
+    faultInjected: Boolean(input.faultInjected),
+    selfHealed: Boolean(input.selfHealed),
     humanGateState: input.humanGateState,
     checksSummary: input.checksSummary.map((c) => ({ id: c.id, passed: Boolean(c.passed) })),
     forensicProofDigestHex: input.forensicProofDigestHex,
@@ -508,16 +604,22 @@ export async function recordAgentVerificationReceipt(input: {
     }
   }
 
-  return { storedInAtlas, receipt };
+  return {
+    storedInAtlas,
+    receipt,
+    redaction: redactedSummaryResult.redaction,
+  };
 }
 
 /**
- * Searches past agent verification receipts stored in MongoDB Atlas `agent_verification_receipts`.
+ * Searches past live agent verification receipts stored in MongoDB Atlas `agent_verification_receipts`.
+ * Redacts the query via D3/D4 if not already redacted and excludes any legacy simulated receipts.
  */
 export async function searchAgentVerificationReceipts(
   query: string,
   limit = 5,
   precomputedQueryEmbedding?: EmbeddingResult,
+  alreadyRedacted = false,
 ): Promise<AgentVerificationReceiptDoc[]> {
   const runtimeReceipts = getRuntimeReceiptsMap();
   const database = await getAtlasDb();
@@ -525,12 +627,12 @@ export async function searchAgentVerificationReceipts(
     try {
       const col = database.collection<AgentVerificationReceiptDoc>(ATLAS_RECEIPTS_COLLECTION_NAME);
       const docs = await col
-        .find({}, { projection: { _id: 0 } })
+        .find({ mode: "live" }, { projection: { _id: 0 } })
         .sort({ coarsenedAt: -1 })
         .limit(25)
         .toArray();
       for (const d of docs) {
-        if (d.receiptId) {
+        if (d.receiptId && (d as { mode?: string }).mode !== "simulated") {
           runtimeReceipts.set(d.receiptId, d);
         }
       }
@@ -539,12 +641,19 @@ export async function searchAgentVerificationReceipts(
     }
   }
 
-  const allReceipts = Array.from(runtimeReceipts.values());
+  const allReceipts = Array.from(runtimeReceipts.values()).filter(
+    (r) => (r as { mode?: string }).mode !== "simulated",
+  );
   if (allReceipts.length === 0) return [];
 
-  const qText = (query || "verification receipt").trim();
-  const qEmb = precomputedQueryEmbedding ?? embedDocumentText(qText);
-  const qFallbackVec = qEmb.isLiveModel ? embedDocumentText(qText).vector : qEmb.vector;
+  const rawQuery = (query || "verification receipt").trim();
+  const redactedQuery = alreadyRedacted
+    ? rawQuery
+    : (await redactForAtlasBoundary(rawQuery)).text;
+  const scoringQuery = stripRedactionPlaceholdersForScoring(redactedQuery);
+
+  const qEmb = precomputedQueryEmbedding ?? embedDocumentText(scoringQuery);
+  const qFallbackVec = qEmb.isLiveModel ? embedDocumentText(scoringQuery).vector : qEmb.vector;
 
   const scored = allReceipts.map((r) => {
     let sim = 0;
@@ -559,7 +668,7 @@ export async function searchAgentVerificationReceipts(
         sim = cosineSimilarity(qFallbackVec, embedDocumentText(r.summary).vector);
       }
     }
-    const textMatch = r.summary.toLowerCase().includes(qText.toLowerCase()) ? 0.5 : 0;
+    const textMatch = r.summary.toLowerCase().includes(scoringQuery.toLowerCase()) ? 0.5 : 0;
     return { receipt: r, score: sim + textMatch };
   });
   scored.sort((a, b) => b.score - a.score);
@@ -568,18 +677,20 @@ export async function searchAgentVerificationReceipts(
 
 /**
  * Runs MongoDB Atlas Hybrid Search combining:
+ * 0. D3 (`mechanicalRedact`) + server-side D4 (`attestedPiiFilter`) before any query leaves
+ *    the enclave boundary for MongoDB Atlas (never storing or logging query text)
  * 1. Native `$vectorSearch` (768-dim cosine similarity on `drouter_vector_index`)
  * 2. Native `$search` (Lucene full-text BM25 search on `drouter_text_search`)
  * 3. Native `$rankFusion` on MongoDB 8.0+ (`score = 1 / (60 + vectorRank) + 1 / (60 + textRank)`),
  *    with deterministic application-side RRF fallback if Atlas is unreachable.
- * Also searches past verification receipts in `agent_verification_receipts`.
+ * Also searches past live verification receipts in `agent_verification_receipts`.
  */
 export async function runAtlasHybridSearch(
   query: string,
   opts?: HybridSearchOptions,
 ): Promise<HybridSearchResponse> {
   const startedAt = Date.now();
-  const effectiveQuery =
+  const rawInputQuery =
     query && query.trim().length > 0
       ? query.trim()
       : "AMD SEV-SNP 8x GPU confidential mode TEE.fail mitigation";
@@ -587,8 +698,17 @@ export async function runAtlasHybridSearch(
     opts?.category && opts.category !== "all" ? opts.category.trim().toLowerCase() : null;
   const limit = Math.max(1, Math.min(opts?.limit ?? 10, 50));
 
-  // 1. Compute 768-dim query vector via attested Tinfoil `nomic-embed-text` enclave (with fallback)
-  const queryEmbedding = await embedDocumentTextWithProvider(effectiveQuery);
+  // 0. Pass query through D3 (`mechanicalRedact`) first and D4 (`attestedPiiFilter`) when available
+  // before anything leaves the enclave boundary for MongoDB Atlas. Never log or store raw query text.
+  const redacted = await redactForAtlasBoundary(rawInputQuery, {
+    customTerms: opts?.customTerms,
+    skipAttestedPass: opts?.skipAttestedPass,
+  });
+  const effectiveQuery = redacted.text.trim() || "[REDACTED]";
+  const scoringQuery = stripRedactionPlaceholdersForScoring(effectiveQuery);
+
+  // 1. Compute 768-dim query vector via attested Tinfoil `nomic-embed-text` enclave (with labelled fallback)
+  const queryEmbedding = await embedDocumentTextWithProvider(scoringQuery);
 
   const vectorSearchStage: Record<string, unknown> = {
     $vectorSearch: {
@@ -901,6 +1021,7 @@ export async function runAtlasHybridSearch(
     effectiveQuery,
     5,
     queryEmbedding,
+    true,
   );
 
   const engines: AtlasSearchEngines = {
@@ -917,8 +1038,13 @@ export async function runAtlasHybridSearch(
     categoryFilter,
     embeddingModel: queryEmbedding.model,
     embeddingDimensions: EMBEDDING_DIMENSIONS,
+    embeddingFallbackUsed: !queryEmbedding.isLiveModel,
     executionMode,
     engines,
+    redaction: redacted.redaction,
+    redactionCounts: redacted.redaction.countsByKind,
+    totalRedactions: redacted.redaction.totalRedactions,
+    filterRan: redacted.redaction.filterRan,
     nativeVectorHits,
     nativeTextHits,
     totalCorpusDocs: candidateDocs.length,
@@ -934,10 +1060,42 @@ export async function runAtlasHybridSearch(
   };
 }
 
+async function redactMetadataRecord(
+  meta: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(meta)) {
+    if (FORBIDDEN_USER_TEXT_KEYS.includes(k as (typeof FORBIDDEN_USER_TEXT_KEYS)[number])) {
+      throw new Error(`Prompts must never be stored in MongoDB Atlas (forbidden metadata field: ${k}).`);
+    }
+    if (typeof v === "string") {
+      if (k === "sourceUrl" || k === "docsUrl" || k === "url") {
+        out[k] = sanitizeSourceUrl(v);
+      } else {
+        out[k] = (await redactForAtlasBoundary(v)).text;
+      }
+    } else if (Array.isArray(v)) {
+      const redactedArr: unknown[] = [];
+      for (const item of v.slice(0, 20)) {
+        if (typeof item === "string") {
+          redactedArr.push((await redactForAtlasBoundary(item)).text);
+        } else if (typeof item === "number" || typeof item === "boolean") {
+          redactedArr.push(item);
+        }
+      }
+      out[k] = redactedArr;
+    } else if (typeof v === "number" || typeof v === "boolean") {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
 /**
- * Ingests a new document with size-cap and no-prompt/no-PII validation, embeds it
- * via Tinfoil's attested `nomic-embed-text` enclave (with fallback), and persists it
- * to MongoDB Atlas `enclave_intelligence`.
+ * Ingests a new curated intelligence document with size-cap, category allowlist,
+ * no-prompt/no-user-text enforcement, and D3 (`mechanicalRedact`) + D4 (`attestedPiiFilter`)
+ * redaction before embedding via Tinfoil's attested `nomic-embed-text` enclave and
+ * persisting to MongoDB Atlas `enclave_intelligence`.
  */
 export async function ingestAtlasDocument(input: {
   docId?: string;
@@ -952,10 +1110,9 @@ export async function ingestAtlasDocument(input: {
 }): Promise<{
   storedInAtlas: boolean;
   document: EnclaveIntelligenceDoc;
+  redaction: AtlasQueryRedactionReport;
 }> {
-  if ("prompt" in input || "rawPrompt" in input || "taskPrompt" in input) {
-    throw new Error("Prompts must never be stored in MongoDB Atlas.");
-  }
+  assertNoUserTextFields(input);
 
   const serializedBytes = new TextEncoder().encode(JSON.stringify(input)).byteLength;
   if (serializedBytes > MAX_INGEST_DOCUMENT_BYTES) {
@@ -964,8 +1121,18 @@ export async function ingestAtlasDocument(input: {
     );
   }
 
+  const normalizedCategory = (input.category || "advisory").trim().toLowerCase();
+  if (!ALLOWED_INGEST_CATEGORIES.has(normalizedCategory)) {
+    throw new Error(
+      `Invalid ingest category "${normalizedCategory}". Allowed categories: provider, advisory, architecture.`,
+    );
+  }
+
   const cleanTitle = (input.title || "").trim();
   const cleanSummary = (input.summary || "").trim();
+  if (!cleanTitle || !cleanSummary) {
+    throw new Error("Both title and summary are required for Atlas document ingest.");
+  }
   if (cleanTitle.length > 200) {
     throw new Error("Document title exceeds maximum length of 200 characters.");
   }
@@ -973,37 +1140,111 @@ export async function ingestAtlasDocument(input: {
     throw new Error("Document summary exceeds maximum length of 4000 characters.");
   }
 
-  const scrubber = createSessionScrubber();
-  const safeTitle = scrubber.scrub(cleanTitle).scrubbed;
-  const safeSummary = scrubber.scrub(cleanSummary).scrubbed;
+  const [titleRedacted, summaryRedacted] = await Promise.all([
+    redactForAtlasBoundary(cleanTitle),
+    redactForAtlasBoundary(cleanSummary),
+  ]);
+  const safeTitle = titleRedacted.text;
+  const safeSummary = summaryRedacted.text;
+
+  const rawTags =
+    Array.isArray(input.tags) && input.tags.length > 0
+      ? input.tags.slice(0, 20)
+      : [normalizedCategory];
+  const safeTags: string[] = [];
+  for (const tag of rawTags) {
+    if (typeof tag === "string" && tag.trim().length > 0) {
+      const rTag = await redactForAtlasBoundary(tag.trim());
+      safeTags.push(rTag.text);
+    }
+  }
 
   const slug = safeTitle
     .toLowerCase()
+    .replace(/\[[a-z0-9_]+\]/gi, "")
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 48);
-  const docId = input.docId?.trim() || `custom-${slug || "doc"}-${Date.now().toString(36)}`;
-  const sourceUrl =
+  const rawDocId = input.docId?.trim();
+  const safeDocId = rawDocId
+    ? (await redactForAtlasBoundary(rawDocId)).text.replace(/[^a-zA-Z0-9_-]+/g, "-")
+    : `custom-${slug || "doc"}-${Date.now().toString(36)}`;
+
+  const sourceUrl = sanitizeSourceUrl(
     (typeof input.sourceUrl === "string" && input.sourceUrl.trim()) ||
-    (typeof input.metadata?.sourceUrl === "string" && input.metadata.sourceUrl.trim()) ||
-    "https://docs.tinfoil.sh/verification/attestation-architecture";
-  const retrievedAt =
-    (typeof input.retrievedAt === "string" && input.retrievedAt.trim()) ||
-    new Date().toISOString().slice(0, 10);
+      (typeof input.metadata?.sourceUrl === "string" && input.metadata.sourceUrl.trim()) ||
+      undefined,
+  );
+  const retrievedAtCandidate =
+    typeof input.retrievedAt === "string" ? input.retrievedAt.trim() : "";
+  const retrievedAt = /^\d{4}-\d{2}-\d{2}$/.test(retrievedAtCandidate)
+    ? retrievedAtCandidate
+    : new Date().toISOString().slice(0, 10);
+
+  const safeMetadata = input.metadata
+    ? await redactMetadataRecord(input.metadata)
+    : { ingestedVia: "atlas-api-ingest" };
+
+  const combinedCountsByKind: Record<string, number> = {
+    ...titleRedacted.redaction.countsByKind,
+  };
+  for (const [k, v] of Object.entries(summaryRedacted.redaction.countsByKind)) {
+    combinedCountsByKind[k] = (combinedCountsByKind[k] ?? 0) + v;
+  }
+  const combinedMechanicalCounts: Record<string, number> = {
+    ...titleRedacted.redaction.mechanical.countsByKind,
+  };
+  for (const [k, v] of Object.entries(summaryRedacted.redaction.mechanical.countsByKind)) {
+    combinedMechanicalCounts[k] = (combinedMechanicalCounts[k] ?? 0) + v;
+  }
+  const combinedRedaction: AtlasQueryRedactionReport = {
+    filterRan:
+      titleRedacted.redaction.filterRan === "mechanical+attested" ||
+      summaryRedacted.redaction.filterRan === "mechanical+attested"
+        ? "mechanical+attested"
+        : "mechanical-only",
+    filtersApplied:
+      titleRedacted.redaction.filterRan === "mechanical+attested" ||
+      summaryRedacted.redaction.filterRan === "mechanical+attested"
+        ? ["mechanical", "attested-pii-filter"]
+        : ["mechanical"],
+    totalRedactions:
+      titleRedacted.redaction.totalRedactions + summaryRedacted.redaction.totalRedactions,
+    countsByKind: combinedCountsByKind,
+    mechanical: {
+      ran: true,
+      redactionCount:
+        titleRedacted.redaction.mechanical.redactionCount +
+        summaryRedacted.redaction.mechanical.redactionCount,
+      countsByKind: combinedMechanicalCounts,
+    },
+    attested: {
+      ran:
+        titleRedacted.redaction.attested.ran || summaryRedacted.redaction.attested.ran,
+      verified:
+        titleRedacted.redaction.attested.verified ||
+        summaryRedacted.redaction.attested.verified,
+      model: summaryRedacted.redaction.attested.model,
+      redactionCount:
+        titleRedacted.redaction.attested.redactionCount +
+        summaryRedacted.redaction.attested.redactionCount,
+      fallbackToMechanicalOnly:
+        titleRedacted.redaction.attested.fallbackToMechanicalOnly &&
+        summaryRedacted.redaction.attested.fallbackToMechanicalOnly,
+      note: summaryRedacted.redaction.attested.note,
+    },
+  };
 
   const embeddedDoc = await buildEmbeddedIntelligenceDocWithProvider({
-    docId,
+    docId: safeDocId,
     title: safeTitle,
-    category: (input.category || "advisory").trim().toLowerCase(),
+    category: normalizedCategory,
     summary: safeSummary,
     sourceUrl,
     retrievedAt,
-    tags:
-      Array.isArray(input.tags) && input.tags.length > 0
-        ? input.tags.slice(0, 20)
-        : [input.category || "custom"],
+    tags: safeTags.length > 0 ? safeTags : [normalizedCategory],
     metadata: {
-      ...(input.metadata ?? { ingestedVia: "atlas-api-ingest" }),
+      ...safeMetadata,
       sourceUrl,
       retrievedAt,
     },
@@ -1032,6 +1273,7 @@ export async function ingestAtlasDocument(input: {
   return {
     storedInAtlas,
     document: embeddedDoc,
+    redaction: combinedRedaction,
   };
 }
 
@@ -1138,7 +1380,7 @@ export async function runAtlasStreamAnalytics(): Promise<AtlasStreamAnalyticsRes
           .catch(() => 0),
         database
           .collection(ATLAS_RECEIPTS_COLLECTION_NAME)
-          .countDocuments()
+          .countDocuments({ mode: "live" })
           .catch(() => 0),
         database
           .collection("relay_totals")

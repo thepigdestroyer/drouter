@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { Db } from "mongodb";
 import {
   ATLAS_SEED_DOCS,
+  clearAtlasPrivacyCachesForTests,
+  clearAtlasRuntimeStateForTests,
   clearEmbeddingCacheForTests,
   coarsenIsoToUtcHour,
   CORPUS_RETRIEVED_AT_UTC,
@@ -16,20 +18,26 @@ import {
   runAtlasHybridSearch,
   runAtlasStreamAnalytics,
   searchAgentVerificationReceipts,
+  setAtlasAttestedPiiFilterForTests,
   setAtlasDbForTests,
+  setAtlasMechanicalRedactorForTests,
   setTinfoilEmbeddingHandlerForTests,
   TINFOIL_ATTESTED_EMBEDDING_MODEL,
 } from "@/lib/atlas";
-import { POST as atlasPost } from "@/app/api/atlas/route";
+import { GET as atlasGet, POST as atlasPost } from "@/app/api/atlas/route";
 
 afterEach(() => {
   setTinfoilEmbeddingHandlerForTests(null);
   setAtlasDbForTests(undefined);
+  setAtlasMechanicalRedactorForTests(null);
+  setAtlasAttestedPiiFilterForTests(null);
   clearEmbeddingCacheForTests();
+  clearAtlasPrivacyCachesForTests();
+  clearAtlasRuntimeStateForTests();
 });
 
-describe("MongoDB Atlas Enclave Intelligence & Hybrid Search", () => {
-  it("produces 768-dim unit-normalized fallback vectors when Tinfoil is unreachable and separates semantic clusters", () => {
+describe("MongoDB Atlas Enclave Intelligence, D3/D4 Query Redaction & Hybrid Search", () => {
+  it("produces 768-dim unit-normalized fallback vectors clearly labelled with fallbackUsed=true when Tinfoil is unreachable", () => {
     const embA = embedDocumentText("DDR5 memory bus interposer probe");
     const embB = embedDocumentText("TEE.fail DDR5 Riser Attack");
     const embUnrelated = embedDocumentText("Shamir 3-of-5 secret sharing RSA blind credit nullifier");
@@ -39,6 +47,9 @@ describe("MongoDB Atlas Enclave Intelligence & Hybrid Search", () => {
     expect(embA.vector).toHaveLength(768);
     expect(embA.model).toBe(LOCAL_STANDIN_EMBEDDING_MODEL);
     expect(embA.isLiveModel).toBe(false);
+    expect(embA.attestedEnclave).toBe(false);
+    expect(embA.fallbackUsed).toBe(true);
+    expect(embA.fallbackReason).toMatch(/Tinfoil/i);
 
     const l2NormA = Math.sqrt(embA.vector.reduce((acc, v) => acc + v * v, 0));
     const l2NormB = Math.sqrt(embB.vector.reduce((acc, v) => acc + v * v, 0));
@@ -53,7 +64,7 @@ describe("MongoDB Atlas Enclave Intelligence & Hybrid Search", () => {
     expect(relatedSim - unrelatedSim).toBeGreaterThan(0.4);
   });
 
-  it("embeds batches and queries through Tinfoil's attested nomic-embed-text enclave (mocked network) and caches results", async () => {
+  it("embeds batches and queries through Tinfoil's attested nomic-embed-text enclave and keys cache by SHA-256 digest without storing query text", async () => {
     let callCount = 0;
     setTinfoilEmbeddingHandlerForTests(async (texts) => {
       callCount += 1;
@@ -64,8 +75,9 @@ describe("MongoDB Atlas Enclave Intelligence & Hybrid Search", () => {
       };
     });
 
+    const sampleQuery = "AMD SEV-SNP router and Intel TDX model enclave";
     const batch = await embedBatchWithProvider([
-      "AMD SEV-SNP router and Intel TDX model enclave",
+      sampleQuery,
       "TEE.fail DDR5 memory bus interposer",
     ]);
     expect(callCount).toBe(1);
@@ -74,12 +86,21 @@ describe("MongoDB Atlas Enclave Intelligence & Hybrid Search", () => {
     expect(batch[0].dimensions).toBe(768);
     expect(batch[0].isLiveModel).toBe(true);
     expect(batch[0].attestedEnclave).toBe(true);
+    expect(batch[0].fallbackUsed).toBe(false);
     expect(batch[0].vector).toHaveLength(768);
 
-    // Second call for an already-embedded string hits in-memory cache without network
-    const cachedSingle = await embedDocumentTextWithProvider(
-      "AMD SEV-SNP router and Intel TDX model enclave",
-    );
+    // Verify in-memory cache keys are 64-char SHA-256 hex digests, never raw text
+    const rawCache = (
+      globalThis as unknown as { __drouterLiveEmbeddingCache?: Map<string, unknown> }
+    ).__drouterLiveEmbeddingCache;
+    expect(rawCache).toBeDefined();
+    for (const key of rawCache!.keys()) {
+      expect(key).toMatch(/^[0-9a-f]{64}$/);
+      expect(key).not.toContain("AMD");
+    }
+
+    // Second call for an already-embedded string hits digest cache without network
+    const cachedSingle = await embedDocumentTextWithProvider(sampleQuery);
     expect(callCount).toBe(1);
     expect(cachedSingle.model).toBe(TINFOIL_ATTESTED_EMBEDDING_MODEL);
     expect(cachedSingle.isLiveModel).toBe(true);
@@ -111,10 +132,167 @@ describe("MongoDB Atlas Enclave Intelligence & Hybrid Search", () => {
     }
   });
 
+  it("redacts every query leaving the enclave boundary for MongoDB via D3 (mechanicalRedact) and D4 (attestedPiiFilter), never sends plaintext PII to $search, and reports counts and filters", async () => {
+    const capturedPipelines: Array<Array<Record<string, unknown>>> = [];
+    const teeFailDoc = ATLAS_SEED_DOCS.find((d) => d.docId === "advisory-tee-fail-ddr5")!;
+
+    const mockCol = {
+      createIndex: async () => "ok",
+      createSearchIndex: async () => "ok",
+      deleteMany: async () => ({ deletedCount: 0 }),
+      listSearchIndexes: () => ({
+        toArray: async () => [
+          { name: "drouter_text_search", type: "search", status: "READY" },
+          {
+            name: "drouter_vector_index",
+            type: "vectorSearch",
+            status: "READY",
+            latestDefinition: { fields: [{ numDimensions: 768 }] },
+          },
+        ],
+      }),
+      find: () => ({
+        toArray: async () =>
+          ATLAS_SEED_DOCS.map((d) => ({
+            ...d,
+            embeddingModel: TINFOIL_ATTESTED_EMBEDDING_MODEL,
+          })),
+        sort: () => ({
+          limit: () => ({
+            toArray: async () => [],
+          }),
+        }),
+      }),
+      bulkWrite: async () => ({ upsertedCount: 0, modifiedCount: 0 }),
+      aggregate: (pipeline: Array<Record<string, unknown>>) => {
+        capturedPipelines.push(pipeline);
+        return {
+          toArray: async () => {
+            const firstStage = pipeline[0] ?? {};
+            if ("$rankFusion" in firstStage) {
+              return [
+                {
+                  ...teeFailDoc,
+                  embeddingModel: TINFOIL_ATTESTED_EMBEDDING_MODEL,
+                  scoreDetails: {
+                    value: 2 / 61,
+                    details: [
+                      { inputPipelineName: "vectorPipeline", rank: 1, value: 0.96 },
+                      { inputPipelineName: "textPipeline", rank: 1, value: 8.4 },
+                    ],
+                  },
+                },
+              ];
+            }
+            if ("$vectorSearch" in firstStage) {
+              return [{ docId: teeFailDoc.docId, score: 0.96 }];
+            }
+            if ("$search" in firstStage) {
+              return [{ docId: teeFailDoc.docId, score: 8.4 }];
+            }
+            return [];
+          },
+        };
+      },
+    };
+
+    setAtlasDbForTests({
+      collection: () => mockCol,
+    } as unknown as Db);
+
+    const sensitiveQuery =
+      "Patient Alice Johnson (alice.johnson@hospital.org, phone +1 415-555-0199, IP 192.168.10.42, " +
+      "SSN 123-45-6789, 742 Evergreen Terrace, date 2026-04-12, case #984512, key sk-live-9876543210abcdef, " +
+      "portal https://portal.hospital.org/p/4829) asks about TEE.fail DDR5 memory bus";
+
+    // 1. D3-only fallback when D4 (attestedPiiFilter) is unavailable
+    const d3OnlyRes = await runAtlasHybridSearch(sensitiveQuery);
+    expect(d3OnlyRes.filterRan).toBe("mechanical-only");
+    expect(d3OnlyRes.redaction.filterRan).toBe("mechanical-only");
+    expect(d3OnlyRes.redaction.filtersApplied).toEqual(["mechanical"]);
+    expect(d3OnlyRes.redaction.attested.ran).toBe(false);
+    expect(d3OnlyRes.redaction.attested.fallbackToMechanicalOnly).toBe(true);
+    expect(d3OnlyRes.totalRedactions).toBeGreaterThanOrEqual(8);
+
+    const serializedResponse = JSON.stringify(d3OnlyRes);
+    const serializedPipelines = JSON.stringify(capturedPipelines);
+    for (const forbiddenPii of [
+      "Alice Johnson",
+      "alice.johnson@hospital.org",
+      "415-555-0199",
+      "192.168.10.42",
+      "123-45-6789",
+      "742 Evergreen Terrace",
+      "2026-04-12",
+      "984512",
+      "sk-live-9876543210abcdef",
+      "portal.hospital.org",
+    ]) {
+      expect(d3OnlyRes.query).not.toContain(forbiddenPii);
+      expect(serializedResponse).not.toContain(forbiddenPii);
+      expect(serializedPipelines).not.toContain(forbiddenPii);
+    }
+
+    // 2. D3 + D4 (attestedPiiFilter) when attested enclave filter is available
+    capturedPipelines.length = 0;
+    setAtlasAttestedPiiFilterForTests(async (d3Text) => ({
+      text: d3Text.replace(/\bSt\.?\s+Jude\b/gi, "[ATTESTED_ORG_1]"),
+      redactionCount: 1,
+      model: "pii-filter",
+      verified: true,
+    }));
+
+    const d3AndD4Res = await runAtlasHybridSearch(
+      `${sensitiveQuery} at St. Jude wing`,
+    );
+    expect(d3AndD4Res.filterRan).toBe("mechanical+attested");
+    expect(d3AndD4Res.redaction.filterRan).toBe("mechanical+attested");
+    expect(d3AndD4Res.redaction.filtersApplied).toEqual([
+      "mechanical",
+      "attested-pii-filter",
+    ]);
+    expect(d3AndD4Res.redaction.attested.ran).toBe(true);
+    expect(d3AndD4Res.redaction.attested.verified).toBe(true);
+    expect(d3AndD4Res.redaction.attested.model).toBe("pii-filter");
+    expect(d3AndD4Res.redaction.attested.redactionCount).toBe(1);
+    expect(d3AndD4Res.redaction.attested.fallbackToMechanicalOnly).toBe(false);
+    expect(d3AndD4Res.redactionCounts.ATTESTED_PII).toBe(1);
+    expect(d3AndD4Res.query).not.toContain("St. Jude");
+    expect(JSON.stringify(capturedPipelines)).not.toContain("St. Jude");
+
+    // 3. Verify GET /api/atlas and POST /api/atlas expose redaction counts and filterRan
+    const getReq = new Request(
+      `http://localhost:3000/api/atlas?q=${encodeURIComponent(sensitiveQuery)}`,
+    );
+    const getHttpRes = await atlasGet(getReq);
+    expect(getHttpRes.status).toBe(200);
+    const getBody = (await getHttpRes.json()) as Record<string, unknown>;
+    expect(getBody.filterRan).toBe("mechanical+attested");
+    expect(typeof getBody.totalRedactions).toBe("number");
+    expect((getBody.totalRedactions as number) >= 8).toBe(true);
+    expect(JSON.stringify(getBody)).not.toContain("alice.johnson@hospital.org");
+
+    const postReq = new Request("http://localhost:3000/api/atlas", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        query: `${sensitiveQuery} at St. Jude wing`,
+        customTerms: ["Project Nightfall"],
+      }),
+    });
+    const postHttpRes = await atlasPost(postReq);
+    expect(postHttpRes.status).toBe(200);
+    const postBody = (await postHttpRes.json()) as Record<string, unknown>;
+    expect(postBody.filterRan).toBe("mechanical+attested");
+    expect((postBody.totalRedactions as number) >= 9).toBe(true);
+    expect(JSON.stringify(postBody)).not.toContain("St. Jude");
+  });
+
   it("ranks queries accurately using Reciprocal Rank Fusion and reports engines truthfully in both attested-enclave and fallback modes", async () => {
     // 1. Fallback mode when Tinfoil is unreachable in unit test env
     const fallbackSearch = await runAtlasHybridSearch("Kimi K3 8x GPU confidential enclave");
     expect(fallbackSearch.results.length).toBeGreaterThan(0);
+    expect(fallbackSearch.embeddingFallbackUsed).toBe(true);
     expect(fallbackSearch.engines.vectorSearch).toBe("app-fallback");
     expect(fallbackSearch.engines.textSearch).toBe("app-fallback");
     expect(fallbackSearch.engines.fusion).toBe("app-rrf");
@@ -140,6 +318,7 @@ describe("MongoDB Atlas Enclave Intelligence & Hybrid Search", () => {
     const mockCol = {
       createIndex: async () => "ok",
       createSearchIndex: async () => "ok",
+      deleteMany: async () => ({ deletedCount: 0 }),
       listSearchIndexes: () => ({
         toArray: async () => [
           { name: "drouter_text_search", type: "search", status: "READY" },
@@ -199,6 +378,7 @@ describe("MongoDB Atlas Enclave Intelligence & Hybrid Search", () => {
 
     const teeFailSearch = await runAtlasHybridSearch("TEE.fail DDR5 memory bus");
     expect(teeFailSearch.executionMode).toBe("atlas-hybrid-rrf");
+    expect(teeFailSearch.embeddingFallbackUsed).toBe(false);
     expect(teeFailSearch.engines).toEqual({
       vectorSearch: "atlas",
       textSearch: "atlas",
@@ -214,14 +394,34 @@ describe("MongoDB Atlas Enclave Intelligence & Hybrid Search", () => {
     expect(topTeeFail.rrfScore).toBeCloseTo(2 / 61, 5);
   });
 
-  it("stores and searches per-run agent verification receipts with coarsened UTC-hour timestamps and zero PII", async () => {
+  it("stores and searches live agent verification receipts with coarsened UTC-hour timestamps, zero PII, and rejects simulated receipts", async () => {
     const coarsened = coarsenIsoToUtcHour("2026-10-24T16:42:19.831Z");
     expect(coarsened).toBe("2026-10-24T16:00:00.000Z");
 
+    await expect(
+      recordAgentVerificationReceipt({
+        receiptId: "sim-receipt-rejected",
+        timestampIso: "2026-10-24T16:42:19.831Z",
+        mode: "simulated",
+        primaryModel: "gemini-4-argon",
+        enclaveModel: "kimi-k3",
+        routerHost: "router-0.tinfoil.sh",
+        enclaveHost: "kimi-k3-inf14.tinfoil.containers.tinfoil.dev",
+        overallPassed: true,
+        faultInjected: false,
+        selfHealed: false,
+        humanGateState: "paused_awaiting_human",
+        checksSummary: [{ id: "C1", passed: true }],
+        forensicProofDigestHex: "a".repeat(64),
+        ed25519SignatureHex: "b".repeat(128),
+        signerPublicKeyHex: "c".repeat(64),
+      }),
+    ).rejects.toThrow(/Simulated agent verification receipts must not be stored/i);
+
     const recorded = await recordAgentVerificationReceipt({
-      receiptId: "argon-run-test-receipt-01",
+      receiptId: "argon-run-live-receipt-ab",
       timestampIso: "2026-10-24T16:42:19.831Z",
-      mode: "simulated",
+      mode: "live",
       primaryModel: "gemini-4-argon",
       enclaveModel: "kimi-k3",
       routerHost: "router-0.tinfoil.sh",
@@ -239,26 +439,36 @@ describe("MongoDB Atlas Enclave Intelligence & Hybrid Search", () => {
       signerPublicKeyHex: "c".repeat(64),
     });
 
+    expect(recorded.receipt.mode).toBe("live");
     expect(recorded.receipt.coarsenedAt).toBe("2026-10-24T16:00:00.000Z");
     expect(recorded.receipt.embedding).toHaveLength(768);
     expect(recorded.receipt.embeddingDimensions).toBe(768);
 
     const foundReceipts = await searchAgentVerificationReceipts("kimi-k3-inf14", 5);
-    expect(foundReceipts.some((r) => r.receiptId === "argon-run-test-receipt-01")).toBe(true);
+    expect(foundReceipts.some((r) => r.receiptId === "argon-run-live-receipt-ab")).toBe(true);
 
     const hybridWithReceipts = await runAtlasHybridSearch("kimi-k3-inf14");
     expect(
-      hybridWithReceipts.matchingReceipts.some((r) => r.receiptId === "argon-run-test-receipt-01"),
+      hybridWithReceipts.matchingReceipts.some((r) => r.receiptId === "argon-run-live-receipt-ab"),
     ).toBe(true);
   });
 
-  it("gates HTTP POST ingest with ATLAS_INGEST_TOKEN, caps document size, and rejects prompts", async () => {
+  it("gates HTTP POST ingest with ATLAS_INGEST_TOKEN, caps document size, and rejects user text and prompts", async () => {
     await expect(
       ingestAtlasDocument({
         title: "Test Prompt Leak",
         summary: "Summary text",
         category: "advisory",
         prompt: "secret user prompt",
+      }),
+    ).rejects.toThrow(/Prompts must never be stored/i);
+
+    await expect(
+      ingestAtlasDocument({
+        title: "Test User Text Leak",
+        summary: "Summary text",
+        category: "advisory",
+        userText: "secret user message",
       }),
     ).rejects.toThrow(/Prompts must never be stored/i);
 
@@ -285,7 +495,7 @@ describe("MongoDB Atlas Enclave Intelligence & Hybrid Search", () => {
       const resDisabled = await atlasPost(reqDisabled);
       expect(resDisabled.status).toBe(403);
 
-      process.env.ATLAS_INGEST_TOKEN = "test-ingest-token-secret";
+      process.env.ATLAS_INGEST_TOKEN = "test-ingest-token-secret-2026";
       const reqUnauthorized = new Request("http://localhost:3000/api/atlas", {
         method: "POST",
         headers: {
@@ -309,7 +519,7 @@ describe("MongoDB Atlas Enclave Intelligence & Hybrid Search", () => {
     }
   });
 
-  it("supports 768-d embedding on ingest with PII scrubbing and multi-collection $facet aggregation", async () => {
+  it("supports 768-d embedding on ingest with D3/D4 PII redaction and multi-collection $facet aggregation", async () => {
     setTinfoilEmbeddingHandlerForTests(async (texts) => ({
       vectors: texts.map((t) => embedDocumentText(t).vector),
       model: TINFOIL_ATTESTED_EMBEDDING_MODEL,
@@ -320,7 +530,7 @@ describe("MongoDB Atlas Enclave Intelligence & Hybrid Search", () => {
       docId: "advisory-custom-cxl-probe",
       title: "CXL 3.0 SEV-TIO Fabric Link Replay Test",
       summary:
-        "Evaluates CXL 3.0 IDE link encryption counters between AMD Turin SEV-SNP host and NVIDIA B200 HBM3e confidential memory. Contact security@example.com for details.",
+        "Evaluates CXL 3.0 IDE link encryption counters between AMD Turin SEV-SNP host and NVIDIA B200 HBM3e confidential memory. Contact Dr. Jane Smith at security@example.com or 192.168.1.99 for details.",
       category: "advisory",
       sourceUrl: "https://www.amd.com/en/developer/sev.html",
       retrievedAt: CORPUS_RETRIEVED_AT_UTC,
@@ -333,6 +543,9 @@ describe("MongoDB Atlas Enclave Intelligence & Hybrid Search", () => {
     expect(ingested.document.sourceUrl).toBe("https://www.amd.com/en/developer/sev.html");
     expect(ingested.document.retrievedAt).toBe(CORPUS_RETRIEVED_AT_UTC);
     expect(ingested.document.summary).not.toContain("security@example.com");
+    expect(ingested.document.summary).not.toContain("Jane Smith");
+    expect(ingested.document.summary).not.toContain("192.168.1.99");
+    expect(ingested.redaction.totalRedactions).toBeGreaterThanOrEqual(3);
 
     const searchAfterIngest = await runAtlasHybridSearch("CXL 3.0 SEV-TIO Fabric Link Replay", {
       category: "advisory",

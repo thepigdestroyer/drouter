@@ -1,4 +1,6 @@
 
+import { hashTextSha256Hex, stripRedactionPlaceholdersForScoring } from "./privacy-filter";
+
 export const EMBEDDING_DIMENSIONS = 768 as const;
 export const TINFOIL_EMBEDDING_MODEL_ID = "nomic-embed-text" as const;
 export const TINFOIL_ATTESTED_EMBEDDING_MODEL =
@@ -13,6 +15,8 @@ export interface EmbeddingResult {
   isLiveModel: boolean;
   attestedEnclave?: boolean;
   enclaveHost?: string;
+  fallbackUsed?: boolean;
+  fallbackReason?: string;
 }
 
 export type TinfoilEmbeddingTestHandler = (texts: string[]) => Promise<{
@@ -58,9 +62,9 @@ export function clearEmbeddingCacheForTests(): void {
 }
 
 export function seedLiveEmbeddingCache(text: string, result: EmbeddingResult): void {
-  const key = (text || "").trim();
-  if (key && result.isLiveModel && result.vector.length === EMBEDDING_DIMENSIONS) {
-    getLiveEmbeddingCache().set(key, result);
+  const clean = (text || "").trim();
+  if (clean && result.isLiveModel && result.vector.length === EMBEDDING_DIMENSIONS) {
+    getLiveEmbeddingCache().set(hashTextSha256Hex(clean), result);
   }
 }
 
@@ -448,7 +452,8 @@ export function normalizeVectorL2(vec: number[]): number[] {
  * or when synchronous offline embedding is requested.
  */
 export function embedDocumentText(text: string): EmbeddingResult {
-  const normalized = (text || "").toLowerCase().trim();
+  const withoutPlaceholders = stripRedactionPlaceholdersForScoring(text || "");
+  const normalized = withoutPlaceholders.toLowerCase().trim();
   const raw = new Array<number>(EMBEDDING_DIMENSIONS).fill(0);
 
   // 1. Activate curated semantic concept clusters (Dims 0..63)
@@ -521,6 +526,9 @@ export function embedDocumentText(text: string): EmbeddingResult {
     dimensions: EMBEDDING_DIMENSIONS,
     isLiveModel: false,
     attestedEnclave: false,
+    fallbackUsed: true,
+    fallbackReason:
+      "Tinfoil attested nomic-embed-text enclave unreachable or TINFOIL_API_KEY not configured",
   };
 }
 
@@ -565,7 +573,8 @@ export async function embedBatchWithProvider(texts: string[]): Promise<Embedding
 
   for (let i = 0; i < texts.length; i++) {
     const clean = (texts[i] || "").trim() || "confidential enclave";
-    const cached = cache.get(clean);
+    const digestKey = hashTextSha256Hex(clean);
+    const cached = cache.get(digestKey);
     if (cached && cached.vector.length === EMBEDDING_DIMENSIONS) {
       results[i] = cached;
     } else {
@@ -593,8 +602,9 @@ export async function embedBatchWithProvider(texts: string[]): Promise<Embedding
               isLiveModel: true,
               attestedEnclave: true,
               enclaveHost: mocked.enclaveHost || "inference.tinfoil.sh",
+              fallbackUsed: false,
             };
-            cache.set(missingInputs[m], entry);
+            cache.set(hashTextSha256Hex(missingInputs[m]), entry);
             results[missingIndices[m]] = entry;
           }
         }
@@ -624,8 +634,9 @@ export async function embedBatchWithProvider(texts: string[]): Promise<Embedding
                 isLiveModel: true,
                 attestedEnclave: true,
                 enclaveHost: verified.enclaveHost,
+                fallbackUsed: false,
               };
-              cache.set(missingInputs[m], entry);
+              cache.set(hashTextSha256Hex(missingInputs[m]), entry);
               results[missingIndices[m]] = entry;
             }
           }
