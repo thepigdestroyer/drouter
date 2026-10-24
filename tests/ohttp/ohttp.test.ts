@@ -396,6 +396,8 @@ describe("RFC 9458 Oblivious HTTP (OHTTP) Binary KeyConfig & Framing", () => {
     expect(decodedFromGet.keyId).toBe(1);
 
     // 4. POST /api/ohttp forwards inner /api/v1/chat/completions (sim-echo-1) and encapsulates the real completion
+    // The practice model is only served when the dev flag is set.
+    process.env.DROUTER_ENABLE_SIM_MODEL = "1";
     const chatInnerReq = JSON.stringify({
       method: "POST",
       path: "/api/v1/chat/completions",
@@ -430,6 +432,7 @@ describe("RFC 9458 Oblivious HTTP (OHTTP) Binary KeyConfig & Framing", () => {
     expect(parsedChatRes.status).toBe(200);
     expect(parsedChatRes.forwardedTo).toBe("/api/v1/chat/completions");
     expect(parsedChatRes.body.choices[0].message.content).toContain("Simulated enclave sim-1");
+    delete process.env.DROUTER_ENABLE_SIM_MODEL;
 
     // 5. POST /api/ohttp rejects non-allowlisted inner path with encapsulated 403
     // Re-fetch current gateway key after SIM_HARDWARE_SEED may have been initialized by chatCompletionsPost
