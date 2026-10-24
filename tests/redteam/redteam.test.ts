@@ -66,4 +66,14 @@ describe("Spec §Testing V8 — Canary Realism Generator & Red-Team Classifier",
     expect(computeMannWhitneyAuc([0.1, 0.2, 0.8, 0.9], [true, true, false, false])).toBe(0.0);
     expect(computeMannWhitneyAuc([0.5, 0.5, 0.5, 0.5], [true, false, true, false])).toBe(0.5);
   });
+
+  it("handles edge-case corpus sizes (0, 1, 3, 500 samples) without NaN or division by zero", () => {
+    expect(runRedTeamClassifierV8([]).auc).toBe(0.5);
+    expect(runRedTeamClassifierV8(generateRealisticSessionCorpus(2).slice(0, 1)).auc).toBe(0.5);
+
+    const largeRealistic = generateRealisticSessionCorpus(500);
+    const largeRes = runRedTeamClassifierV8(largeRealistic);
+    expect(Number.isFinite(largeRes.auc)).toBe(true);
+    expect(largeRes.v8Passed).toBe(true);
+  });
 });

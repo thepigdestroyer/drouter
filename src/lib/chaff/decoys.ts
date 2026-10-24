@@ -169,14 +169,15 @@ function synthesizeBucketMatchedDecoyPrompt(
   let expanded = basePrompt;
   let appendixIndex = 1;
   while (utf8Encoder.encode(expanded).byteLength < minBytesForBucket) {
-    expanded += `\n[Context Block ${appendixIndex} — ${domain}]: ${supplementalClauses}`;
+    expanded += `\n[Context Block ${appendixIndex} - ${domain}]: ${supplementalClauses}`;
     appendixIndex += 1;
   }
 
-  // Ensure we did not overshoot `targetBucketTokens`
+  // Ensure we did not overshoot `targetBucketTokens` in UTF-8 bytes
   const maxBytesForBucket = targetBucketTokens * 4;
-  if (utf8Encoder.encode(expanded).byteLength > maxBytesForBucket) {
-    expanded = expanded.slice(0, maxBytesForBucket - 16);
+  const encodedBytes = utf8Encoder.encode(expanded);
+  if (encodedBytes.byteLength > maxBytesForBucket) {
+    expanded = new TextDecoder().decode(encodedBytes.subarray(0, maxBytesForBucket - 16));
   }
 
   return expanded;

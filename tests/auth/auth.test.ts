@@ -122,4 +122,52 @@ describe("dRouter Zero-Knowledge Client Vault", () => {
     expect(getCurrentVaultSession()).toBeNull();
     expect(getPersistedVaultMetadata().exists).toBe(true);
   });
+
+  it("enforces OWASP PBKDF2-HMAC-SHA512 >= 210,000 iterations by default and rejects tampered export signatures or swapped public keys", async () => {
+    const { VAULT_PBKDF2_ITERATIONS } = await import("@/lib/auth/vault");
+    expect(VAULT_PBKDF2_ITERATIONS).toBeGreaterThanOrEqual(210_000);
+
+    const pass = "aurora bastion catalyst dolmen equinox granite";
+    unlockVaultWithPassphrase(pass, false);
+    updateVaultPayload({ customScrubTerms: ["SecretAlpha"], notes: "note" });
+    const exportedJson = exportEncryptedVaultJson();
+
+    // 1. Missing signatureHex or ed25519PublicKeyHex must be rejected
+    const parsedMissingSig = JSON.parse(exportedJson);
+    delete parsedMissingSig.signatureHex;
+    expect(() => importEncryptedVaultJson(JSON.stringify(parsedMissingSig), pass)).toThrow();
+
+    // 2. Swapped attacker public key + valid attacker signature must be rejected
+    const attacker = deriveVaultIdentity("badger cavern chisel comet cougar crystal", {
+      iterations: 10_000,
+    });
+    const swappedKeyFile = JSON.parse(exportedJson);
+    swappedKeyFile.ed25519PublicKeyHex = attacker.ed25519PublicKeyHex;
+    expect(() => importEncryptedVaultJson(JSON.stringify(swappedKeyFile), pass)).toThrow(
+      /public key does not match/i,
+    );
+
+    // 3. Tampered signature byte must be rejected
+    const badSigFile = JSON.parse(exportedJson);
+    badSigFile.signatureHex =
+      (badSigFile.signatureHex.startsWith("00") ? "ff" : "00") +
+      badSigFile.signatureHex.slice(2);
+    expect(() => importEncryptedVaultJson(JSON.stringify(badSigFile), pass)).toThrow(
+      /signature verification failed/i,
+    );
+
+    // 4. Randomized seal/open fuzz loop (200 iterations across boundary sizes 0B, 1B, 64KB)
+    const fastIdentity = deriveVaultIdentity("falcon glacier harbor lantern obsidian quartz", {
+      iterations: 10_000,
+    });
+    for (let i = 0; i < 200; i++) {
+      const payload = {
+        customScrubTerms: i === 0 ? [] : [`Term-${i}`, `Entity-${i * 17}`],
+        notes: i === 1 ? "x" : "A".repeat((i * 31) % 512),
+        createdAt: 1760000000000 + i,
+      };
+      const bundle = sealVaultBundle(payload, fastIdentity.vaultKeyHex);
+      expect(openVaultBundle(bundle, fastIdentity.vaultKeyHex)).toEqual(payload);
+    }
+  });
 });

@@ -19,6 +19,7 @@ export interface NullifierRecord {
 }
 
 const spentNullifiers = new Map<string, NullifierRecord>();
+const inFlightNullifiers = new Set<string>();
 let redeemedBatchesCount = 0;
 
 let mongoClientPromise: Promise<MongoClient | null> | null = null;
@@ -129,7 +130,7 @@ export async function spendToken(
 
   const nullifier = nullifierFor(token.token);
 
-  if (spentNullifiers.has(nullifier)) {
+  if (spentNullifiers.has(nullifier) || inFlightNullifiers.has(nullifier)) {
     return {
       ok: false,
       error: "Double-spend rejected: credit nullifier already spent",
@@ -137,52 +138,58 @@ export async function spendToken(
     };
   }
 
-  const col = await getMongoCollection();
-  if (col) {
-    try {
-      const existing = await col.findOne({ nullifier });
-      if (existing) {
-        spentNullifiers.set(nullifier, {
-          nullifier: existing.nullifier,
-          denomination: existing.denomination,
-          nodeId: existing.nodeId,
-          spentAt: existing.spentAt,
-          redeemed: existing.redeemed,
-        });
-        return {
-          ok: false,
-          error: "Double-spend rejected: credit nullifier already spent",
-          status: 409,
-        };
+  // Reserve nullifier synchronously before any async I/O to eliminate TOCTOU race conditions
+  inFlightNullifiers.add(nullifier);
+  try {
+    const col = await getMongoCollection();
+    if (col) {
+      try {
+        const existing = await col.findOne({ nullifier });
+        if (existing) {
+          spentNullifiers.set(nullifier, {
+            nullifier: existing.nullifier,
+            denomination: existing.denomination,
+            nodeId: existing.nodeId,
+            spentAt: existing.spentAt,
+            redeemed: existing.redeemed,
+          });
+          return {
+            ok: false,
+            error: "Double-spend rejected: credit nullifier already spent",
+            status: 409,
+          };
+        }
+      } catch {
+        // Best-effort Mongo check
       }
-    } catch {
-      // Best-effort Mongo check
     }
-  }
 
-  const record: NullifierRecord = {
-    nullifier,
-    denomination: token.denomination,
-    nodeId,
-    spentAt: Date.now(),
-    redeemed: false,
-  };
+    const record: NullifierRecord = {
+      nullifier,
+      denomination: token.denomination,
+      nodeId,
+      spentAt: Date.now(),
+      redeemed: false,
+    };
 
-  spentNullifiers.set(nullifier, record);
+    spentNullifiers.set(nullifier, record);
 
-  if (col) {
-    try {
-      await col.insertOne({ ...record });
-    } catch {
-      // Best-effort Mongo persistence
+    if (col) {
+      try {
+        await col.insertOne({ ...record });
+      } catch {
+        // Best-effort Mongo persistence
+      }
     }
-  }
 
-  return {
-    ok: true,
-    nullifier,
-    remainingPoolUnredeemed: countUnredeemed(),
-  };
+    return {
+      ok: true,
+      nullifier,
+      remainingPoolUnredeemed: countUnredeemed(),
+    };
+  } finally {
+    inFlightNullifiers.delete(nullifier);
+  }
 }
 
 export async function redeemBatch(nodeId?: string): Promise<{

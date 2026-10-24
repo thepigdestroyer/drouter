@@ -53,6 +53,19 @@ function normalizeHex(hex: string): string {
     : trimmed;
 }
 
+function constantTimeEqualHex(a: string, b: string): boolean {
+  const cleanA = normalizeHex(a).toLowerCase();
+  const cleanB = normalizeHex(b).toLowerCase();
+  const maxLen = Math.max(cleanA.length, cleanB.length);
+  let diff = cleanA.length ^ cleanB.length;
+  for (let i = 0; i < maxLen; i++) {
+    const codeA = i < cleanA.length ? cleanA.charCodeAt(i) : 0;
+    const codeB = i < cleanB.length ? cleanB.charCodeAt(i) : 0;
+    diff |= codeA ^ codeB;
+  }
+  return diff === 0;
+}
+
 /**
  * Generates a fresh 256-bit (32-byte) per-device key using CSPRNG.
  */
@@ -212,9 +225,8 @@ export function decryptHistoryAtRest<T = LocalSessionHistory | LocalHistoryMessa
     // Resolve and cross-check ciphertext bytes vs hex (detects tampering on either field)
     let ciphertextBytes: Uint8Array;
     if (bundle.ciphertextBytes instanceof Uint8Array && typeof bundle.ciphertextHex === "string") {
-      const hexFromBytes = bytesToHex(bundle.ciphertextBytes).toLowerCase();
-      const normalizedHex = normalizeHex(bundle.ciphertextHex).toLowerCase();
-      if (hexFromBytes !== normalizedHex) {
+      const hexFromBytes = bytesToHex(bundle.ciphertextBytes);
+      if (!constantTimeEqualHex(hexFromBytes, bundle.ciphertextHex)) {
         throw new Error("Ciphertext integrity mismatch between bytes and hex");
       }
       ciphertextBytes = bundle.ciphertextBytes;
@@ -226,12 +238,15 @@ export function decryptHistoryAtRest<T = LocalSessionHistory | LocalHistoryMessa
       throw new Error("Missing ciphertext");
     }
 
+    if (ciphertextBytes.byteLength < 16) {
+      throw new Error("Ciphertext too short to contain GCM authentication tag");
+    }
+
     // Resolve and cross-check nonce bytes vs hex
     let nonceBytes: Uint8Array;
     if (bundle.nonceBytes instanceof Uint8Array && typeof bundle.nonceHex === "string") {
-      const hexFromBytes = bytesToHex(bundle.nonceBytes).toLowerCase();
-      const normalizedHex = normalizeHex(bundle.nonceHex).toLowerCase();
-      if (hexFromBytes !== normalizedHex) {
+      const hexFromBytes = bytesToHex(bundle.nonceBytes);
+      if (!constantTimeEqualHex(hexFromBytes, bundle.nonceHex)) {
         throw new Error("Nonce integrity mismatch");
       }
       nonceBytes = bundle.nonceBytes;
@@ -243,16 +258,19 @@ export function decryptHistoryAtRest<T = LocalSessionHistory | LocalHistoryMessa
       throw new Error("Missing nonce");
     }
 
+    if (nonceBytes.byteLength !== 12) {
+      throw new Error("Invalid GCM nonce length: expected 12 bytes");
+    }
+
     // Resolve and cross-check AAD bytes vs hex and sessionId binding
     const sessionId = bundle.sessionId ?? "default-local-session";
     const expectedAadBytes = utf8ToBytes(`${LOCAL_HISTORY_AAD_PREFIX}${sessionId}`);
-    const expectedAadHex = bytesToHex(expectedAadBytes).toLowerCase();
+    const expectedAadHex = bytesToHex(expectedAadBytes);
 
     let aadBytes: Uint8Array;
     if (bundle.aadBytes instanceof Uint8Array && typeof bundle.aadHex === "string") {
-      const hexFromBytes = bytesToHex(bundle.aadBytes).toLowerCase();
-      const normalizedHex = normalizeHex(bundle.aadHex).toLowerCase();
-      if (hexFromBytes !== normalizedHex) {
+      const hexFromBytes = bytesToHex(bundle.aadBytes);
+      if (!constantTimeEqualHex(hexFromBytes, bundle.aadHex)) {
         throw new Error("AAD integrity mismatch");
       }
       aadBytes = bundle.aadBytes;
@@ -264,20 +282,20 @@ export function decryptHistoryAtRest<T = LocalSessionHistory | LocalHistoryMessa
       aadBytes = expectedAadBytes;
     }
 
-    if (bytesToHex(aadBytes).toLowerCase() !== expectedAadHex) {
+    if (!constantTimeEqualHex(bytesToHex(aadBytes), expectedAadHex)) {
       throw new Error("Session AAD binding mismatch");
     }
 
     if (
       typeof bundle.sha256Hex === "string" &&
-      bytesToHex(sha256(ciphertextBytes)).toLowerCase() !==
-        normalizeHex(bundle.sha256Hex).toLowerCase()
+      !constantTimeEqualHex(bytesToHex(sha256(ciphertextBytes)), bundle.sha256Hex)
     ) {
       throw new Error("Ciphertext SHA-256 digest mismatch");
     }
 
     const plaintextBytes = gcm(keyBytes, nonceBytes, aadBytes).decrypt(ciphertextBytes);
     const jsonStr = new TextDecoder().decode(plaintextBytes);
+    plaintextBytes.fill(0);
     return JSON.parse(jsonStr) as T;
   } catch {
     throw new Error(

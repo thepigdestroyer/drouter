@@ -52,7 +52,7 @@ const DETECTION_RULES: DetectionRule[] = [
     category: "credentials",
     severity: 40,
     pattern:
-      /\b(?:sk-[A-Za-z0-9_-]{8,}|tk_[A-Za-z0-9_-]{8,}|ghp_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{10,}|AKIA[0-9A-Z]{12,20}|xox[baprs]-[A-Za-z0-9-]{10,})\b/g,
+      /\b(?:sk-[A-Za-z0-9_-]{8,}|tk_[A-Za-z0-9_-]{8,}|ghp_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{10,}|(?:AKIA|ASIA)[0-9A-Z]{12,20}|xox[baprs]-[A-Za-z0-9-]{10,}|eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\b/g,
     recommendation:
       "Replace live API tokens and cloud access keys with <CREDENTIAL_REDACTED> before sending off-device.",
     maskPreview: true,
@@ -264,7 +264,7 @@ export function generalizePromptPapillon(
   );
 
   working = working.replace(
-    /\b(?:sk-[A-Za-z0-9_-]{8,}|tk_[A-Za-z0-9_-]{8,}|ghp_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{10,}|AKIA[0-9A-Z]{12,20}|xox[baprs]-[A-Za-z0-9-]{10,})\b/g,
+    /\b(?:sk-[A-Za-z0-9_-]{8,}|tk_[A-Za-z0-9_-]{8,}|ghp_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{10,}|(?:AKIA|ASIA)[0-9A-Z]{12,20}|xox[baprs]-[A-Za-z0-9-]{10,}|eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\b/g,
     (match) =>
       assignVaultToken(
         localContextVault,
@@ -436,21 +436,24 @@ export function rehydratePapillonAnswer(
     return answer;
   }
 
-  let rehydrated = answer;
-  const entries = Object.entries(localContextVault).sort(
-    (a, b) => b[0].length - a[0].length
-  );
-
-  for (const [symbol, originalValue] of entries) {
+  const lookup = new Map<string, string>();
+  for (const [symbol, originalValue] of Object.entries(localContextVault)) {
     const normalizedSymbol =
       symbol.startsWith("<") && symbol.endsWith(">")
         ? symbol
         : `<${symbol}>`;
-    rehydrated = rehydrated.split(normalizedSymbol).join(originalValue);
+    lookup.set(normalizedSymbol, originalValue);
     if (normalizedSymbol !== symbol) {
-      rehydrated = rehydrated.split(symbol).join(originalValue);
+      lookup.set(symbol, originalValue);
     }
   }
 
-  return rehydrated;
+  if (lookup.size === 0) return answer;
+
+  const escapedKeys = Array.from(lookup.keys())
+    .sort((a, b) => b.length - a.length)
+    .map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+
+  const pattern = new RegExp(escapedKeys.join("|"), "g");
+  return answer.replace(pattern, (matched) => lookup.get(matched) ?? matched);
 }

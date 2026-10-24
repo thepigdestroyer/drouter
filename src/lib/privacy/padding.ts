@@ -122,6 +122,54 @@ export function bucketForTokens(tokenCount: number): BucketPaddingInfo {
   };
 }
 
+/**
+ * Pads a UTF-8 string payload to the exact byte length of its `2^j * 1024`-token bucket
+ * (`bucketTokens * 4` bytes) using an unambiguous `\0` delimiter followed by deterministic
+ * filler bytes so no length information leaks beyond the power-of-two bucket.
+ */
+export function padPayloadToBucket(payload: string): {
+  paddedBytes: Uint8Array;
+  bucketTokens: number;
+  bucketBytes: number;
+} {
+  const rawBytes = utf8Encoder.encode(payload ?? "");
+  // Reserve at least 4 bytes for big-endian length prefix so exact payload is recoverable even if it contains \0
+  const requiredBytes = rawBytes.byteLength + 4;
+  const requiredTokens = Math.max(1, Math.ceil(requiredBytes / 4));
+  const info = bucketForTokens(requiredTokens);
+  const bucketBytes = info.bucketTokens * 4;
+
+  const out = new Uint8Array(bucketBytes);
+  const view = new DataView(out.buffer, out.byteOffset, out.byteLength);
+  view.setUint32(0, rawBytes.byteLength, false);
+  out.set(rawBytes, 4);
+  return {
+    paddedBytes: out,
+    bucketTokens: info.bucketTokens,
+    bucketBytes,
+  };
+}
+
+/**
+ * Unpads a bucket-padded byte buffer produced by `padPayloadToBucket` back to the exact original string.
+ */
+export function unpadPayloadFromBucket(paddedBytes: Uint8Array): string {
+  if (!(paddedBytes instanceof Uint8Array) || paddedBytes.byteLength < BASE_BUCKET_TOKENS * 4) {
+    throw new Error("Invalid bucket-padded payload length");
+  }
+  const totalBytes = paddedBytes.byteLength;
+  const totalTokens = totalBytes / 4;
+  if (!Number.isInteger(totalTokens) || (totalTokens & (totalTokens - 1)) !== 0) {
+    throw new Error("Padded payload size is not a power-of-two bucket");
+  }
+  const view = new DataView(paddedBytes.buffer, paddedBytes.byteOffset, paddedBytes.byteLength);
+  const origLen = view.getUint32(0, false);
+  if (origLen > totalBytes - 4) {
+    throw new Error("Corrupted length prefix in padded payload");
+  }
+  return new TextDecoder().decode(paddedBytes.subarray(4, 4 + origLen));
+}
+
 function extractKeywords(text: string): string[] {
   const matches = text.toLowerCase().match(/[a-z0-9_]{2,}/g);
   if (!matches) return [];

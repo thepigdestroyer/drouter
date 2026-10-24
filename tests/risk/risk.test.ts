@@ -85,4 +85,24 @@ describe("Client-Side Privacy Exposure Scorer & PAPILLON Generalizer", () => {
     expect(rehydrated).toContain("$45,000");
     expect(rehydrated).toContain("ops@acme.io");
   });
+
+  it("detects JWTs and AWS STS keys and prevents cross-placeholder injection during rehydratePapillonAnswer", () => {
+    const jwt =
+      "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+    const promptWithJwt = `Authenticate with ${jwt} and ASIAIOSFODNN7EXAMPLE on 10.0.0.1.`;
+    const gen = generalizePromptPapillon(promptWithJwt);
+    expect(gen.generalizedPrompt).not.toContain("eyJhbGci");
+    expect(gen.generalizedPrompt).not.toContain("ASIAIOSFODNN7EXAMPLE");
+    expect(gen.riskAfter).toBe(0);
+
+    // Ensure single-pass rehydration does not double-substitute if a vault value contains another placeholder tag
+    const vault = {
+      "<CREDENTIAL_REDACTED>": "literal-<TARGET_SYSTEM>-inside-secret",
+      "<TARGET_SYSTEM>": "10.0.0.1",
+    };
+    const reply = "Key=<CREDENTIAL_REDACTED> Host=<TARGET_SYSTEM>";
+    expect(rehydratePapillonAnswer(reply, vault)).toBe(
+      "Key=literal-<TARGET_SYSTEM>-inside-secret Host=10.0.0.1"
+    );
+  });
 });

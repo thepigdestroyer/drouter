@@ -1,9 +1,11 @@
 export const EMBEDDING_DIMENSIONS = 128 as const;
+export const LOCAL_STANDIN_EMBEDDING_MODEL = "local-hashed-128 (stand-in)" as const;
 
 export interface EmbeddingResult {
   vector: number[];
   model: string;
   dimensions: 128;
+  isLiveModel: boolean;
 }
 
 /**
@@ -378,12 +380,13 @@ export function normalizeVectorL2(vec: number[]): number[] {
 }
 
 /**
- * Automated Embedding Pipeline:
- * Maps technical security/enclave concepts (SEV-SNP, Intel TDX, NVIDIA B200/H200 CC,
- * HPKE RFC 9180, Sigstore Rekor, TEE.fail DDR5 probe, DDRop, Cipherleaks, VoltPillager,
- * Shamir threshold, RSA blind signatures, Kimi K3, GLM-5.3, DeepSeek, Circle Arc,
- * zero-retention, crypto-shredding, dm-verity, VMPL0 SVSM) + signed trigram/token hash
- * projections into a unit-normalized 128-dimensional float vector (L2 norm === 1.0).
+ * Local 128-d Feature-Hash Stand-In Embedding:
+ * Note: Atlas Automated Embedding (`type: "autoEmbed"` with Voyage AI models) requires
+ * MongoDB 8.2+ and an Atlas Model API key (plus M10+ dedicated storage auto-scaling).
+ * The live dRouter Atlas M0 cluster runs MongoDB 8.0.34, where `autoEmbed` indexes remain PENDING.
+ * When `VOYAGE_API_KEY` is not set, this function computes a deterministic 128-dimensional
+ * feature-hash vector (`local-hashed-128 (stand-in)`) so native Atlas `$vectorSearch`
+ * (`drouter_vector_index`, 128-d cosine) and native `$rankFusion` execute on the live cluster.
  */
 export function embedDocumentText(text: string): EmbeddingResult {
   const normalized = (text || "").toLowerCase().trim();
@@ -456,22 +459,23 @@ export function embedDocumentText(text: string): EmbeddingResult {
 
   return {
     vector,
-    model: "drouter-semantic-128d-v1 (voyage-3-large / nomic-embed-text compatible)",
+    model: LOCAL_STANDIN_EMBEDDING_MODEL,
     dimensions: EMBEDDING_DIMENSIONS,
+    isLiveModel: false,
   };
 }
 
 /**
- * Optional live Voyage AI (`VOYAGE_API_KEY`) or Tinfoil attested (`TINFOIL_API_KEY` -> `nomic-embed-text`)
- * embedding upgrade, automatically projected & L2-normalized to 128 dimensions, with deterministic
- * zero-latency fallback to `embedDocumentText`.
+ * Live Voyage AI (`VOYAGE_API_KEY`) embedding call when configured, with deterministic
+ * fallback to `embedDocumentText` (`local-hashed-128 (stand-in)`).
  */
 export async function embedDocumentTextWithProvider(text: string): Promise<EmbeddingResult> {
   const deterministic = embedDocumentText(text);
-  const voyageKey = process.env.VOYAGE_API_KEY;
+  const voyageKey = process.env.VOYAGE_API_KEY?.trim();
 
   if (voyageKey) {
     try {
+      const voyageModel = process.env.VOYAGE_MODEL?.trim() || "voyage-3-lite";
       const res = await fetch("https://api.voyageai.com/v1/embeddings", {
         method: "POST",
         headers: {
@@ -480,9 +484,9 @@ export async function embedDocumentTextWithProvider(text: string): Promise<Embed
         },
         body: JSON.stringify({
           input: [text],
-          model: process.env.VOYAGE_MODEL || "voyage-3-lite",
+          model: voyageModel,
         }),
-        signal: AbortSignal.timeout(2500),
+        signal: AbortSignal.timeout(3500),
       });
       if (res.ok) {
         const data = (await res.json()) as {
@@ -491,20 +495,17 @@ export async function embedDocumentTextWithProvider(text: string): Promise<Embed
         };
         const remoteVec = data.data?.[0]?.embedding;
         if (Array.isArray(remoteVec) && remoteVec.length >= EMBEDDING_DIMENSIONS) {
-          // Combine Matryoshka 128-d slice with domain feature vector and L2-normalize
-          const combined = new Array<number>(EMBEDDING_DIMENSIONS);
-          for (let i = 0; i < EMBEDDING_DIMENSIONS; i++) {
-            combined[i] = remoteVec[i] * 0.5 + deterministic.vector[i] * 0.5;
-          }
+          const sliced = remoteVec.slice(0, EMBEDDING_DIMENSIONS);
           return {
-            vector: normalizeVectorL2(combined),
-            model: `${data.model || "voyage-3-lite"}+drouter-128d`,
+            vector: normalizeVectorL2(sliced),
+            model: `${data.model || voyageModel} (live Voyage AI)`,
             dimensions: EMBEDDING_DIMENSIONS,
+            isLiveModel: true,
           };
         }
       }
     } catch {
-      // Fallback to deterministic 128-d embedding
+      // Fallback to deterministic 128-d stand-in embedding
     }
   }
 

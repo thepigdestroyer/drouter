@@ -199,4 +199,65 @@ describe("Verifiable Forensic Proof Bundle Exporter & Standalone Offline Verifie
     expect(resSig.digestMatches).toBe(false);
     expect(resSig.popReceiptSignatureValid).toBe(false);
   });
+
+  it("reports originVerified: false when no pinned key is supplied, and verifies or rejects against a pinned expectedClientPublicKeyHex", () => {
+    const clientSk = ed25519.utils.randomSecretKey();
+    const clientPkHex = bytesToHex(ed25519.getPublicKey(clientSk));
+    const popReceipt = makeSignedPopReceipt();
+
+    const bundle = createForensicProofBundle({
+      createdAt: 1760000123000,
+      nodeId: "0x01",
+      nodeName: "Tinfoil Confidential Router #1",
+      nodeKind: "tinfoil",
+      modelId: "kimi-k3",
+      checks: makePassingChecks(),
+      evidence: makeEvidenceRegisters(),
+      popReceipt,
+      clientSecretKey: clientSk,
+    });
+
+    // Unpinned verification: valid integrity, but originVerified is false
+    const unpinned = verifyForensicProofBundleOffline(bundle);
+    expect(unpinned.valid).toBe(true);
+    expect(unpinned.originVerified).toBe(false);
+    expect(unpinned.popOriginVerified).toBe(false);
+
+    // Requiring pinned origin without supplying a key fails
+    const strictUnpinned = verifyForensicProofBundleOffline(bundle, {
+      requirePinnedOrigin: true,
+    });
+    expect(strictUnpinned.valid).toBe(false);
+    expect(strictUnpinned.originVerified).toBe(false);
+
+    // Pinned verification with matching keys sets originVerified: true and popOriginVerified: true
+    const pinnedOk = verifyForensicProofBundleOffline(bundle, {
+      expectedClientPublicKeyHex: clientPkHex,
+      expectedPopSignerPublicKeyHex: popReceipt.signerPublicKey,
+      requirePinnedOrigin: true,
+    });
+    expect(pinnedOk.valid).toBe(true);
+    expect(pinnedOk.originVerified).toBe(true);
+    expect(pinnedOk.popOriginVerified).toBe(true);
+
+    // Attacker re-signs a forged bundle with their own keypair: caught by pinned key check
+    const attackerSk = ed25519.utils.randomSecretKey();
+    const forgedBundle = createForensicProofBundle({
+      createdAt: 1760000123000,
+      nodeId: "0x01",
+      nodeName: "Forged Router",
+      nodeKind: "tinfoil",
+      modelId: "kimi-k3",
+      checks: makePassingChecks(),
+      evidence: { ...makeEvidenceRegisters(), "Guest policy": "0x30001 (Debug=1)" },
+      popReceipt,
+      clientSecretKey: attackerSk,
+    });
+    const pinnedForged = verifyForensicProofBundleOffline(forgedBundle, {
+      expectedClientPublicKeyHex: clientPkHex,
+    });
+    expect(pinnedForged.valid).toBe(false);
+    expect(pinnedForged.originVerified).toBe(false);
+    expect(pinnedForged.reasons.some((r) => /expectedClientPublicKeyHex/i.test(r))).toBe(true);
+  });
 });

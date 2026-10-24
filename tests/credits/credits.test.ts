@@ -146,4 +146,46 @@ describe("Subsystem 1: Unlinkable Blind-Signed Credits (Spec §7)", () => {
     expect(batch.batchHash).toMatch(/^[0-9a-f]{64}$/);
     expect(ledgerStats().unredeemedCount).toBe(0);
   });
+
+  it("defeats blind-signature denomination escalation (blinding denom=20 and signing at denom=1) and concurrent double-spend races", async () => {
+    const pub = issuerPublicInfo();
+    const attackerTokenHex = "fedcba9876543210".repeat(4);
+
+    // Attacker blinds a denomination=20 message but requests a denomination=1 signature
+    const blindedAs20 = blindToken(attackerTokenHex, 20, pub);
+    const { signatures } = mintBlindedBatch([blindedAs20.blindedHex], 1);
+    const unblindedForgedSig = unblindSignature(signatures[0], blindedAs20.rHex, pub);
+
+    // Must fail verification for denomination=20 AND denomination=1
+    expect(
+      verifyTokenSignature(
+        { token: attackerTokenHex, signature: unblindedForgedSig, denomination: 20 },
+        pub
+      )
+    ).toBe(false);
+    expect(
+      verifyTokenSignature(
+        { token: attackerTokenHex, signature: unblindedForgedSig, denomination: 1 },
+        pub
+      )
+    ).toBe(false);
+
+    // Concurrent double-spend race test: 10 parallel spendToken calls on the same valid token
+    const raceTokenHex = "99887766554433221100aabbccddeeff".repeat(2);
+    const bRace = blindToken(raceTokenHex, 5, pub);
+    const { signatures: raceSigs } = mintBlindedBatch([bRace.blindedHex], 5);
+    const validRaceToken: BlindCreditToken = {
+      token: raceTokenHex,
+      signature: unblindSignature(raceSigs[0], bRace.rHex, pub),
+      denomination: 5,
+    };
+
+    const raceResults = await Promise.all(
+      Array.from({ length: 10 }, (_, idx) => spendToken(validRaceToken, `node-${idx}`))
+    );
+    const successes = raceResults.filter((r) => r.ok);
+    const rejections = raceResults.filter((r) => !r.ok && r.status === 409);
+    expect(successes).toHaveLength(1);
+    expect(rejections).toHaveLength(9);
+  });
 });

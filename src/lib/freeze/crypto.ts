@@ -22,11 +22,25 @@ function randomBytes(length: number): Uint8Array {
 }
 
 function normalizeHex(hex: string): string {
-  return hex.startsWith("0x") || hex.startsWith("0X") ? hex.slice(2) : hex;
+  const trimmed = (hex ?? "").trim();
+  return trimmed.startsWith("0x") || trimmed.startsWith("0X") ? trimmed.slice(2) : trimmed;
+}
+
+function constantTimeEqualHex(a: string, b: string): boolean {
+  const cleanA = normalizeHex(a).toLowerCase();
+  const cleanB = normalizeHex(b).toLowerCase();
+  const maxLen = Math.max(cleanA.length, cleanB.length);
+  let diff = cleanA.length ^ cleanB.length;
+  for (let i = 0; i < maxLen; i++) {
+    const codeA = i < cleanA.length ? cleanA.charCodeAt(i) : 0;
+    const codeB = i < cleanB.length ? cleanB.charCodeAt(i) : 0;
+    diff |= codeA ^ codeB;
+  }
+  return diff === 0;
 }
 
 function isZeroOrEmptyHex(hex: string): boolean {
-  const clean = normalizeHex(hex || "").trim();
+  const clean = normalizeHex(hex || "");
   if (!clean || clean.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(clean)) {
     return true;
   }
@@ -38,12 +52,17 @@ function isZeroOrEmptyHex(hex: string): boolean {
  * and sessionId using HKDF-SHA-384 with domain separation "drouter/v1/freeze".
  */
 export function deriveFreezeKey(freezeSecretHex: string, sessionIdHex: string): Uint8Array {
-  if (isZeroOrEmptyHex(freezeSecretHex)) {
+  if (isZeroOrEmptyHex(freezeSecretHex) || isZeroOrEmptyHex(sessionIdHex)) {
     throw new Error("Crypto-shredded or invalid freeze key: authentication tag mismatch");
   }
   const secretBytes = hexToBytes(normalizeHex(freezeSecretHex));
   const sessionBytes = hexToBytes(normalizeHex(sessionIdHex));
-  return hkdf(sha384, secretBytes, sessionBytes, utf8ToBytes("drouter/v1/freeze"), 32);
+  try {
+    return hkdf(sha384, secretBytes, sessionBytes, utf8ToBytes("drouter/v1/freeze"), 32);
+  } finally {
+    secretBytes.fill(0);
+    sessionBytes.fill(0);
+  }
 }
 
 /**
@@ -63,23 +82,28 @@ export function encryptFrozenState(
     : bytesToHex(randomBytes(16));
 
   const key = deriveFreezeKey(secretHex, sidHex);
-  const nonce = randomBytes(12);
-  const aad = utf8ToBytes("drouter/v1/freeze-blob:" + sidHex);
-  const plaintext = utf8ToBytes(JSON.stringify(state));
+  try {
+    const nonce = randomBytes(12);
+    const aad = utf8ToBytes("drouter/v1/freeze-blob:" + sidHex);
+    const plaintext = utf8ToBytes(JSON.stringify(state));
 
-  const ciphertext = gcm(key, nonce, aad).encrypt(plaintext);
-  const blobId = bytesToHex(sha256(ciphertext)).slice(0, 32);
+    const ciphertext = gcm(key, nonce, aad).encrypt(plaintext);
+    plaintext.fill(0);
+    const blobId = bytesToHex(sha256(ciphertext)).slice(0, 32);
 
-  return {
-    blobId,
-    freezeSecretHex: secretHex,
-    sessionIdHex: sidHex,
-    nonceHex: bytesToHex(nonce),
-    aadHex: bytesToHex(aad),
-    ciphertextHex: bytesToHex(ciphertext),
-    modelId: state.modelId,
-    createdAt: state.createdAt,
-  };
+    return {
+      blobId,
+      freezeSecretHex: secretHex,
+      sessionIdHex: sidHex,
+      nonceHex: bytesToHex(nonce),
+      aadHex: bytesToHex(aad),
+      ciphertextHex: bytesToHex(ciphertext),
+      modelId: state.modelId,
+      createdAt: state.createdAt,
+    };
+  } finally {
+    key.fill(0);
+  }
 }
 
 /**
@@ -99,20 +123,31 @@ export function decryptFrozenState(
     throw new Error("Crypto-shredded or invalid freeze key: authentication tag mismatch");
   }
 
+  let key: Uint8Array | null = null;
   try {
     const sidHex = normalizeHex(bundle.sessionIdHex);
-    const key = deriveFreezeKey(freezeSecretHex, sidHex);
-    const nonce = hexToBytes(normalizeHex(bundle.nonceHex));
+    key = deriveFreezeKey(freezeSecretHex, sidHex);
+    const cleanNonceHex = normalizeHex(bundle.nonceHex);
+    if (cleanNonceHex.length !== 24) {
+      throw new Error("Invalid nonce length");
+    }
+    const nonce = hexToBytes(cleanNonceHex);
     const aad = hexToBytes(normalizeHex(bundle.aadHex));
     const expectedAadHex = bytesToHex(utf8ToBytes("drouter/v1/freeze-blob:" + sidHex));
-    if (normalizeHex(bundle.aadHex).toLowerCase() !== expectedAadHex.toLowerCase()) {
+    if (!constantTimeEqualHex(bundle.aadHex, expectedAadHex)) {
       throw new Error("AAD mismatch");
     }
     const ciphertext = hexToBytes(normalizeHex(bundle.ciphertextHex));
+    if (ciphertext.byteLength < 16) {
+      throw new Error("Ciphertext too short");
+    }
     const plaintextBytes = gcm(key, nonce, aad).decrypt(ciphertext);
     const decoded = new TextDecoder().decode(plaintextBytes);
+    plaintextBytes.fill(0);
     return JSON.parse(decoded) as FrozenSessionState;
   } catch {
     throw new Error("Crypto-shredded or invalid freeze key: authentication tag mismatch");
+  } finally {
+    if (key) key.fill(0);
   }
 }

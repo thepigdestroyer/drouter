@@ -95,6 +95,13 @@ export async function saveFrozenBlob(input: SaveFrozenBlobInput): Promise<Stored
   const aadHex = cleanHex(raw.aadHex, "aadHex");
   const ciphertextHex = cleanHex(raw.ciphertextHex, "ciphertextHex");
 
+  if (nonceHex.length !== 24) {
+    throw new Error("Field nonceHex must be 12 bytes (24 hex chars)");
+  }
+  if (ciphertextHex.length < 32) {
+    throw new Error("Field ciphertextHex must include at least the 16-byte GCM authentication tag");
+  }
+
   const byteLength = ciphertextHex.length / 2;
   const modelId =
     typeof raw.modelId === "string" && raw.modelId.trim().length > 0

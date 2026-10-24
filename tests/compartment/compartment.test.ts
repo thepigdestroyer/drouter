@@ -93,4 +93,23 @@ describe("Compartmentalized Sub-Agent Task Splitter", () => {
     expect(idxTwo).toBeGreaterThan(idxOne);
     expect(idxThree).toBeGreaterThan(idxTwo);
   });
+
+  it("handles empty/1-char prompts, NaN risk inputs, and 200 randomized compartment plans", () => {
+    const nanRisk = computeFragmentCompromiseRisk(Number.NaN, Number.NaN);
+    expect(nanRisk.fullLeakProbability).toBe(0);
+    expect(nanRisk.singleNodeLeakProbability).toBe(0);
+
+    const emptyPlan = splitTaskIntoCompartments("", []);
+    expect(emptyPlan.fragments.length).toBeGreaterThanOrEqual(2);
+
+    const singleCharPlan = splitTaskIntoCompartments("x", ["node-1", "node-2"]);
+    expect(singleCharPlan.fragments.length).toBe(2);
+
+    for (let i = 0; i < 200; i++) {
+      const p = `1. Subtask A ${i}\n2. Subtask B ${i}\n3. Subtask C ${i}`;
+      const plan = splitTaskIntoCompartments(p, ["n1", "n2", "n3", "n4"]);
+      expect(plan.fragments).toHaveLength(3);
+      expect(new Set(plan.fragments.map((f) => f.assignedNodeId)).size).toBe(3);
+    }
+  });
 });

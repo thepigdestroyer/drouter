@@ -35,7 +35,7 @@ describe("Shamir k-of-n Threshold Key Release", () => {
     expect(combineShares(subset135, k)).toBe(sampleSecretHex);
   });
 
-  it("fails to reconstruct the secret when given fewer than k=3 shares (e.g. 2 shares)", () => {
+  it("fails to reconstruct the secret when given fewer than k=3 shares (throws on under-threshold)", () => {
     const k = 3;
     const n = 5;
     const shares = splitSecret(sampleSecretHex, k, n, "deadbeefcafebabe");
@@ -43,9 +43,61 @@ describe("Shamir k-of-n Threshold Key Release", () => {
     const twoSharesA = [shares[0], shares[1]];
     const twoSharesB = [shares[1], shares[4]];
 
-    expect(combineShares(twoSharesA, k)).not.toBe(sampleSecretHex);
-    expect(combineShares(twoSharesB, k)).not.toBe(sampleSecretHex);
-    expect(combineShares([shares[0]], k)).not.toBe(sampleSecretHex);
+    expect(() => combineShares(twoSharesA, k)).toThrow(/Insufficient shares/i);
+    expect(() => combineShares(twoSharesB, k)).toThrow(/Insufficient shares/i);
+    expect(() => combineShares([shares[0]], k)).toThrow(/Insufficient shares/i);
+    expect(() => combineShares([], k)).toThrow(/Insufficient shares/i);
+  });
+
+  it("rejects secrets >= SHAMIR_PRIME, x=0 shares, negative indices, duplicate x indices, and tampered commitments", async () => {
+    const { SHAMIR_PRIME, verifyShareCommitment } = await import("@/lib/threshold/shamir");
+    const shares = splitSecret(sampleSecretHex, 3, 5, "deadbeefcafebabe");
+
+    for (const s of shares) {
+      expect(verifyShareCommitment(s)).toBe(true);
+    }
+
+    // Secret >= SHAMIR_PRIME must throw rather than silently reducing mod P
+    const primeHex = SHAMIR_PRIME.toString(16).padStart(64, "0");
+    const maxUint256Hex = "f".repeat(64);
+    expect(() => splitSecret(primeHex, 3, 5)).toThrow(/exceeds GF\(P\)/i);
+    expect(() => splitSecret(maxUint256Hex, 3, 5)).toThrow(/exceeds GF\(P\)/i);
+
+    // Share with x=0 or negative index must throw
+    expect(() =>
+      combineShares([{ index: 0, yHex: shares[0].yHex }, shares[1], shares[2]], 3)
+    ).toThrow(/Invalid share index/i);
+    expect(() =>
+      combineShares([{ index: -1, yHex: shares[0].yHex }, shares[1], shares[2]], 3)
+    ).toThrow(/Invalid share index/i);
+
+    // Duplicate x index must throw
+    expect(() =>
+      combineShares([shares[0], shares[0], shares[2]], 3)
+    ).toThrow(/Duplicate share index/i);
+
+    // Tampered commitmentHex must throw
+    expect(() =>
+      combineShares(
+        [
+          { ...shares[0], commitmentHex: "00".repeat(32) },
+          shares[1],
+          shares[2],
+        ],
+        3
+      )
+    ).toThrow(/commitment mismatch/i);
+
+    // Fuzz loop: 250 random secrets and random k-of-n subsets
+    for (let trial = 0; trial < 250; trial++) {
+      const randBytes = new Uint8Array(32);
+      crypto.getRandomValues(randBytes);
+      randBytes[0] &= 0x7f; // strictly < SHAMIR_PRIME
+      const secHex = bytesToHex(randBytes);
+      const s = splitSecret(secHex, 3, 5);
+      expect(combineShares([s[0], s[2], s[4]], 3)).toBe(secHex);
+      expect(combineShares([s[1], s[3], s[4]], 3)).toBe(secHex);
+    }
   });
 
   it("releases and reconstructs the 32-byte key when all regional checker criteria pass", () => {

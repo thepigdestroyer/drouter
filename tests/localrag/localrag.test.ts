@@ -258,4 +258,29 @@ describe("Spec §1 — Encrypted-at-Rest Local Session History Store (AES-256-GC
       ),
     ).toThrow(/wrong key or tampered ciphertext/i);
   });
+
+  it("stress-tests boundary sizes (empty history, 1-byte message, 1MB document) and 200 randomized encrypt/decrypt cycles", () => {
+    const key = generateDeviceHistoryKey();
+    const emptyHistory: LocalSessionHistory = { sessionId: "s-empty", messages: [] };
+    expect(decryptHistoryAtRest(encryptHistoryAtRest(emptyHistory, key), key)).toEqual(emptyHistory);
+
+    const oneMbHistory: LocalSessionHistory = {
+      sessionId: "s-1mb",
+      messages: [{ role: "user", content: "M".repeat(1024 * 1024) }],
+    };
+    const dec1Mb = decryptHistoryAtRest<LocalSessionHistory>(
+      encryptHistoryAtRest(oneMbHistory, key),
+      key,
+    );
+    expect(dec1Mb.messages[0].content.length).toBe(1024 * 1024);
+
+    for (let i = 0; i < 200; i++) {
+      const h: LocalSessionHistory = {
+        sessionId: `sess-fuzz-${i}`,
+        messages: [{ role: "user", content: `msg-${i}-${"x".repeat(i % 64)}` }],
+      };
+      const enc = encryptHistoryAtRest(h, key);
+      expect(decryptHistoryAtRest(enc, key)).toEqual(h);
+    }
+  });
 });

@@ -1,7 +1,13 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { MongoClient, type Collection, type Db } from "mongodb";
-import { cosineSimilarity, embedDocumentText, EMBEDDING_DIMENSIONS } from "./embeddings";
+import { createSessionScrubber } from "@/lib/privacy/scrubber";
+import {
+  cosineSimilarity,
+  embedDocumentText,
+  embedDocumentTextWithProvider,
+  EMBEDDING_DIMENSIONS,
+} from "./embeddings";
 import {
   ATLAS_SEED_DOCS,
   buildEmbeddedIntelligenceDoc,
@@ -10,12 +16,44 @@ import {
 } from "./knowledge-base";
 
 export const ATLAS_COLLECTION_NAME = "enclave_intelligence";
+export const ATLAS_RECEIPTS_COLLECTION_NAME = "agent_verification_receipts";
 export const ATLAS_TEXT_INDEX_NAME = "drouter_text_search";
 export const ATLAS_VECTOR_INDEX_NAME = "drouter_vector_index";
+export const MAX_INGEST_DOCUMENT_BYTES = 8192;
 
 export interface HybridSearchOptions {
   category?: string;
   limit?: number;
+  includeReceiptsInResults?: boolean;
+}
+
+export interface AtlasSearchEngines {
+  vectorSearch: "atlas" | "app-fallback";
+  textSearch: "atlas" | "app-fallback";
+  fusion: "$rankFusion" | "app-rrf";
+  embedding: string;
+}
+
+export interface AgentVerificationReceiptDoc {
+  receiptId: string;
+  coarsenedAt: string;
+  mode: "live" | "simulated";
+  primaryModel: string;
+  enclaveModel: string;
+  routerHost: string;
+  enclaveHost: string;
+  overallPassed: boolean;
+  faultInjected: boolean;
+  selfHealed: boolean;
+  humanGateState: "paused_awaiting_human" | "executed_with_human_approval";
+  checksSummary: Array<{ id: string; passed: boolean }>;
+  forensicProofDigestHex: string;
+  ed25519SignatureHex: string;
+  signerPublicKeyHex: string;
+  summary: string;
+  embedding: number[];
+  embeddingModel: string;
+  embeddingDimensions: 128;
 }
 
 export interface HybridSearchResultItem {
@@ -40,6 +78,7 @@ export interface HybridSearchResponse {
   embeddingModel: string;
   embeddingDimensions: 128;
   executionMode: "atlas-hybrid-rrf" | "local-hybrid-rrf";
+  engines: AtlasSearchEngines;
   nativeVectorHits: number;
   nativeTextHits: number;
   totalCorpusDocs: number;
@@ -51,6 +90,7 @@ export interface HybridSearchResponse {
     rrfFormula: string;
   };
   results: HybridSearchResultItem[];
+  matchingReceipts: AgentVerificationReceiptDoc[];
 }
 
 export interface AtlasStreamAnalyticsResponse {
@@ -58,6 +98,12 @@ export interface AtlasStreamAnalyticsResponse {
   database: string;
   collection: string;
   totalIntelligenceDocs: number;
+  totalKnowledgeDocs: number;
+  verificationsCount: number;
+  receiptsCount: number;
+  agentVerificationReceiptsCount: number;
+  nullifiersCount: number;
+  frozenBlobsCount: number;
   categoryBreakdown: Array<{
     category: string;
     count: number;
@@ -67,6 +113,7 @@ export interface AtlasStreamAnalyticsResponse {
     enclaveIntelligence: number;
     verifications: number;
     receipts: number;
+    agentVerificationReceipts: number;
     relayRequests: number;
     relayBytesUp: number;
     relayBytesDown: number;
@@ -97,6 +144,7 @@ const globalForAtlas = globalThis as unknown as {
   __drouterAtlasClient?: Promise<MongoClient>;
   __drouterAtlasSeeded?: boolean;
   __drouterRuntimeDocs?: Map<string, EnclaveIntelligenceDoc>;
+  __drouterRuntimeReceipts?: Map<string, AgentVerificationReceiptDoc>;
 };
 
 function getRuntimeDocsMap(): Map<string, EnclaveIntelligenceDoc> {
@@ -108,6 +156,23 @@ function getRuntimeDocsMap(): Map<string, EnclaveIntelligenceDoc> {
     globalForAtlas.__drouterRuntimeDocs = map;
   }
   return globalForAtlas.__drouterRuntimeDocs;
+}
+
+function getRuntimeReceiptsMap(): Map<string, AgentVerificationReceiptDoc> {
+  if (!globalForAtlas.__drouterRuntimeReceipts) {
+    globalForAtlas.__drouterRuntimeReceipts = new Map<string, AgentVerificationReceiptDoc>();
+  }
+  return globalForAtlas.__drouterRuntimeReceipts;
+}
+
+/**
+ * Coarsens any timestamp down to the UTC hour boundary (`YYYY-MM-DDTHH:00:00.000Z`)
+ * so stored receipts cannot be correlated with individual user request timings.
+ */
+export function coarsenIsoToUtcHour(input?: string | Date): string {
+  const dt = input instanceof Date ? input : input ? new Date(input) : new Date();
+  const ms = Number.isFinite(dt.getTime()) ? dt.getTime() : Date.now();
+  return new Date(ms - (ms % 3_600_000)).toISOString();
 }
 
 /**
@@ -216,7 +281,7 @@ export async function ensureAtlasSeededAndIndexed(db?: Db | null): Promise<{
     });
     indexesCreated.push(ATLAS_TEXT_INDEX_NAME);
   } catch {
-    // Already exists or building on Atlas M0
+    // Already exists on Atlas M0
   }
 
   // 2. Create Atlas Vector Search index (`drouter_vector_index`, 128 dims, cosine)
@@ -241,7 +306,7 @@ export async function ensureAtlasSeededAndIndexed(db?: Db | null): Promise<{
     });
     indexesCreated.push(ATLAS_VECTOR_INDEX_NAME);
   } catch {
-    // Already exists or building on Atlas M0
+    // Already exists on Atlas M0
   }
 
   return { seededCount: docsToSeed.length, indexesCreated };
@@ -277,7 +342,6 @@ export function computeBm25TextScore(doc: EnclaveIntelligenceDoc, query: string)
     if (titleLower.includes(token)) tokenScore += 3.2;
     if (tagsLower.some((tag) => tag === token || tag.includes(token))) tokenScore += 2.6;
     if (summaryLower.includes(token)) {
-      // Count occurrences in summary for TF saturation
       const parts = summaryLower.split(token).length - 1;
       const tf = (parts * (1.2 + 1)) / (parts + 1.2);
       tokenScore += 1.5 * tf;
@@ -289,15 +353,151 @@ export function computeBm25TextScore(doc: EnclaveIntelligenceDoc, query: string)
   return Number((score / Math.sqrt(rawTokens.length)).toFixed(6));
 }
 
+interface RankFusionScoreDetailSub {
+  inputPipelineName?: string;
+  rank?: number;
+  weight?: number;
+  value?: number;
+}
+
+interface RankFusionDocResult extends EnclaveIntelligenceDoc {
+  scoreDetails?: {
+    value?: number;
+    details?: RankFusionScoreDetailSub[];
+  };
+}
+
+/**
+ * Persists a non-PII, prompt-free agent verification receipt with a coarsened UTC-hour
+ * timestamp into MongoDB Atlas `agent_verification_receipts` and the runtime receipt map.
+ */
+export async function recordAgentVerificationReceipt(input: {
+  receiptId: string;
+  timestampIso?: string;
+  mode: "live" | "simulated";
+  primaryModel: string;
+  enclaveModel: string;
+  routerHost: string;
+  enclaveHost: string;
+  overallPassed: boolean;
+  faultInjected: boolean;
+  selfHealed: boolean;
+  humanGateState: "paused_awaiting_human" | "executed_with_human_approval";
+  checksSummary: Array<{ id: string; passed: boolean }>;
+  forensicProofDigestHex: string;
+  ed25519SignatureHex: string;
+  signerPublicKeyHex: string;
+  rawPromptMustNotBePassed?: never;
+}): Promise<{ storedInAtlas: boolean; receipt: AgentVerificationReceiptDoc }> {
+  // Enforce privacy invariant: scrub summary and ensure no PII or secrets can ever be persisted
+  const scrubber = createSessionScrubber();
+  const rawSummary =
+    `Agent verification receipt ${input.receiptId} (mode=${input.mode}, orchestrator=${input.primaryModel}): ` +
+    `router=${input.routerHost} -> enclave=${input.enclaveHost} (${input.enclaveModel}), ` +
+    `overallPassed=${input.overallPassed}, faultInjected=${input.faultInjected}, selfHealed=${input.selfHealed}, ` +
+    `humanGate=${input.humanGateState}, digest=0x${input.forensicProofDigestHex.slice(0, 16)}.`;
+  const scrubbedSummary = scrubber.scrub(rawSummary).scrubbed;
+
+  const coarsenedAt = coarsenIsoToUtcHour(input.timestampIso);
+  const embedded = await embedDocumentTextWithProvider(scrubbedSummary);
+
+  const receipt: AgentVerificationReceiptDoc = {
+    receiptId: input.receiptId,
+    coarsenedAt,
+    mode: input.mode,
+    primaryModel: input.primaryModel,
+    enclaveModel: input.enclaveModel,
+    routerHost: input.routerHost,
+    enclaveHost: input.enclaveHost,
+    overallPassed: input.overallPassed,
+    faultInjected: input.faultInjected,
+    selfHealed: input.selfHealed,
+    humanGateState: input.humanGateState,
+    checksSummary: input.checksSummary.map((c) => ({ id: c.id, passed: Boolean(c.passed) })),
+    forensicProofDigestHex: input.forensicProofDigestHex,
+    ed25519SignatureHex: input.ed25519SignatureHex,
+    signerPublicKeyHex: input.signerPublicKeyHex,
+    summary: scrubbedSummary,
+    embedding: embedded.vector,
+    embeddingModel: embedded.model,
+    embeddingDimensions: EMBEDDING_DIMENSIONS,
+  };
+
+  getRuntimeReceiptsMap().set(receipt.receiptId, receipt);
+
+  let storedInAtlas = false;
+  const database = await getAtlasDb();
+  if (database) {
+    try {
+      const col = database.collection<AgentVerificationReceiptDoc>(ATLAS_RECEIPTS_COLLECTION_NAME);
+      await col.createIndex({ receiptId: 1 }, { unique: true }).catch(() => {});
+      await col.updateOne(
+        { receiptId: receipt.receiptId },
+        { $set: receipt },
+        { upsert: true },
+      );
+      storedInAtlas = true;
+    } catch {
+      storedInAtlas = false;
+    }
+  }
+
+  return { storedInAtlas, receipt };
+}
+
+/**
+ * Searches past agent verification receipts stored in MongoDB Atlas `agent_verification_receipts`.
+ */
+export async function searchAgentVerificationReceipts(
+  query: string,
+  limit = 5,
+): Promise<AgentVerificationReceiptDoc[]> {
+  const runtimeReceipts = getRuntimeReceiptsMap();
+  const database = await getAtlasDb();
+  if (database) {
+    try {
+      const col = database.collection<AgentVerificationReceiptDoc>(ATLAS_RECEIPTS_COLLECTION_NAME);
+      const docs = await col
+        .find({}, { projection: { _id: 0 } })
+        .sort({ coarsenedAt: -1 })
+        .limit(25)
+        .toArray();
+      for (const d of docs) {
+        if (d.receiptId) {
+          runtimeReceipts.set(d.receiptId, d);
+        }
+      }
+    } catch {
+      // Fall back to runtime map
+    }
+  }
+
+  const allReceipts = Array.from(runtimeReceipts.values());
+  if (allReceipts.length === 0) return [];
+
+  const qEmb = embedDocumentText(query || "verification receipt");
+  const scored = allReceipts.map((r) => {
+    const sim = Array.isArray(r.embedding) && r.embedding.length === EMBEDDING_DIMENSIONS
+      ? cosineSimilarity(qEmb.vector, r.embedding)
+      : 0;
+    const textMatch = r.summary.toLowerCase().includes((query || "").toLowerCase().trim()) ? 0.5 : 0;
+    return { receipt: r, score: sim + textMatch };
+  });
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, Math.max(1, limit)).map((s) => s.receipt);
+}
+
 /**
  * Runs MongoDB Atlas Hybrid Search combining:
- * 1. `$vectorSearch` (128-dim semantic cosine similarity on `drouter_vector_index`)
- * 2. `$search` (Lucene full-text BM25 search on `drouter_text_search`)
- * 3. Reciprocal Rank Fusion (`RRF`, `score = 1 / (60 + vectorRank) + 1 / (60 + textRank)`)
+ * 1. Native `$vectorSearch` (128-dim cosine similarity on `drouter_vector_index`)
+ * 2. Native `$search` (Lucene full-text BM25 search on `drouter_text_search`)
+ * 3. Native `$rankFusion` on MongoDB 8.0+ (`score = 1 / (60 + vectorRank) + 1 / (60 + textRank)`),
+ *    with deterministic application-side RRF fallback if Atlas is unreachable.
+ * Also searches past verification receipts in `agent_verification_receipts`.
  */
 export async function runAtlasHybridSearch(
   query: string,
-  opts?: HybridSearchOptions
+  opts?: HybridSearchOptions,
 ): Promise<HybridSearchResponse> {
   const startedAt = Date.now();
   const effectiveQuery =
@@ -308,17 +508,16 @@ export async function runAtlasHybridSearch(
     opts?.category && opts.category !== "all" ? opts.category.trim().toLowerCase() : null;
   const limit = Math.max(1, Math.min(opts?.limit ?? 10, 50));
 
-  // 1. Compute 128-dim query vector via Automated Embedding Pipeline
-  const queryEmbedding = embedDocumentText(effectiveQuery);
+  // 1. Compute 128-dim query vector (Voyage AI live API if VOYAGE_API_KEY is set, else local-hashed-128 stand-in)
+  const queryEmbedding = await embedDocumentTextWithProvider(effectiveQuery);
 
-  // Build canonical Atlas pipeline stage descriptors for transparency & execution
   const vectorSearchStage: Record<string, unknown> = {
     $vectorSearch: {
       index: ATLAS_VECTOR_INDEX_NAME,
       path: "embedding",
       queryVector: queryEmbedding.vector,
       numCandidates: 64,
-      limit: 16,
+      limit: 20,
       ...(categoryFilter ? { filter: { category: categoryFilter } } : {}),
     },
   };
@@ -362,16 +561,17 @@ export async function runAtlasHybridSearch(
     $rankFusion: {
       input: {
         pipelines: {
-          vectorPipeline: [vectorSearchStage, { $limit: 16 }],
-          textPipeline: [atlasSearchStage, { $limit: 16 }],
+          vectorPipeline: [vectorSearchStage, { $limit: 20 }],
+          textPipeline: [atlasSearchStage, { $limit: 20 }],
         },
       },
       combination: {
         weights: {
-          vectorPipeline: 0.5,
-          textPipeline: 0.5,
+          vectorPipeline: 1,
+          textPipeline: 1,
         },
       },
+      scoreDetails: true,
     },
   };
 
@@ -379,8 +579,12 @@ export async function runAtlasHybridSearch(
   let executionMode: "atlas-hybrid-rrf" | "local-hybrid-rrf" = "local-hybrid-rrf";
   let nativeVectorHits = 0;
   let nativeTextHits = 0;
+  let nativeRankFusionSucceeded = false;
+
   const nativeVectorScores = new Map<string, number>();
   const nativeTextScores = new Map<string, number>();
+  const nativeVectorRanks = new Map<string, number>();
+  const nativeTextRanks = new Map<string, number>();
 
   const runtimeMap = getRuntimeDocsMap();
   let candidateDocs: EnclaveIntelligenceDoc[] = Array.from(runtimeMap.values());
@@ -390,9 +594,30 @@ export async function runAtlasHybridSearch(
     const col = database.collection<EnclaveIntelligenceDoc>(ATLAS_COLLECTION_NAME);
 
     try {
-      // Attempt native Atlas `$vectorSearch`, native Atlas `$search`, and MongoDB corpus fetch concurrently
       const filterQuery = categoryFilter ? { category: categoryFilter } : {};
-      const [vecRes, textRes, mongoDocs] = await Promise.all([
+      const [rankFusionDocs, vecRes, textRes, mongoDocs] = await Promise.all([
+        col
+          .aggregate<RankFusionDocResult>([
+            rankFusionStage,
+            {
+              $project: {
+                _id: 0,
+                docId: 1,
+                title: 1,
+                category: 1,
+                summary: 1,
+                tags: 1,
+                metadata: 1,
+                embedding: 1,
+                embeddingModel: 1,
+                embeddingDimensions: 1,
+                updatedAt: 1,
+                scoreDetails: { $meta: "scoreDetails" },
+              },
+            },
+          ])
+          .toArray()
+          .catch(() => []),
         col
           .aggregate<{ docId: string; score: number }>([
             vectorSearchStage,
@@ -425,20 +650,40 @@ export async function runAtlasHybridSearch(
           .catch(() => []),
       ]);
 
-      nativeVectorHits = vecRes.length;
-      nativeTextHits = textRes.length;
-      for (const v of vecRes) {
-        if (v.docId && typeof v.score === "number") {
-          nativeVectorScores.set(v.docId, v.score);
-        }
-      }
-      for (const t of textRes) {
-        if (t.docId && typeof t.score === "number") {
-          nativeTextScores.set(t.docId, t.score);
+      if (rankFusionDocs.length > 0) {
+        nativeRankFusionSucceeded = true;
+        for (const doc of rankFusionDocs) {
+          const subDetails = doc.scoreDetails?.details ?? [];
+          for (const sub of subDetails) {
+            if (sub.inputPipelineName === "vectorPipeline") {
+              if (typeof sub.rank === "number") nativeVectorRanks.set(doc.docId, sub.rank);
+              if (typeof sub.value === "number") nativeVectorScores.set(doc.docId, sub.value);
+            } else if (sub.inputPipelineName === "textPipeline") {
+              if (typeof sub.rank === "number") nativeTextRanks.set(doc.docId, sub.rank);
+              if (typeof sub.value === "number") nativeTextScores.set(doc.docId, sub.value);
+            }
+          }
         }
       }
 
-      if (mongoDocs.length > 0) {
+      vecRes.forEach((v, idx) => {
+        if (v.docId && typeof v.score === "number") {
+          if (!nativeVectorScores.has(v.docId)) nativeVectorScores.set(v.docId, v.score);
+          if (!nativeVectorRanks.has(v.docId)) nativeVectorRanks.set(v.docId, idx + 1);
+        }
+      });
+
+      textRes.forEach((t, idx) => {
+        if (t.docId && typeof t.score === "number") {
+          if (!nativeTextScores.has(t.docId)) nativeTextScores.set(t.docId, t.score);
+          if (!nativeTextRanks.has(t.docId)) nativeTextRanks.set(t.docId, idx + 1);
+        }
+      });
+
+      nativeVectorHits = Math.max(vecRes.length, nativeVectorScores.size);
+      nativeTextHits = Math.max(textRes.length, nativeTextScores.size);
+
+      if (mongoDocs.length > 0 || rankFusionDocs.length > 0) {
         executionMode = "atlas-hybrid-rrf";
         const mergedById = new Map<string, EnclaveIntelligenceDoc>();
         for (const d of candidateDocs) {
@@ -461,18 +706,18 @@ export async function runAtlasHybridSearch(
     candidateDocs = candidateDocs.filter((d) => d.category.toLowerCase() === categoryFilter);
   }
 
-  // 2. Compute exact cosine similarity (`vectorScore`) and BM25 full-text score (`textScore`)
+  // 2. Score documents (combining native Atlas scores with exact cosine/BM25 for any newly ingested docs)
   const scored = candidateDocs.map((doc) => {
     const exactCosine = cosineSimilarity(queryEmbedding.vector, doc.embedding);
     const nativeVec = nativeVectorScores.get(doc.docId);
     const vectorScore = Number(
-      (nativeVec !== undefined ? Math.max(exactCosine, nativeVec) : exactCosine).toFixed(6)
+      (nativeVec !== undefined ? Math.max(exactCosine, nativeVec) : exactCosine).toFixed(6),
     );
 
     const localBm25 = computeBm25TextScore(doc, effectiveQuery);
     const nativeTxt = nativeTextScores.get(doc.docId);
     const textScore = Number(
-      (nativeTxt !== undefined ? Math.max(localBm25, nativeTxt) : localBm25).toFixed(6)
+      (nativeTxt !== undefined ? Math.max(localBm25, nativeTxt) : localBm25).toFixed(6),
     );
 
     return {
@@ -516,7 +761,7 @@ export async function runAtlasHybridSearch(
       vectorRank,
       textRank,
       rrfScore,
-      embeddingModel: doc.embeddingModel,
+      embeddingModel: queryEmbedding.model,
       embeddingDimensions: doc.embeddingDimensions,
     };
   });
@@ -528,6 +773,15 @@ export async function runAtlasHybridSearch(
     return combinedB - combinedA;
   });
 
+  const matchingReceipts = await searchAgentVerificationReceipts(effectiveQuery, 5);
+
+  const engines: AtlasSearchEngines = {
+    vectorSearch: nativeVectorHits > 0 ? "atlas" : "app-fallback",
+    textSearch: nativeTextHits > 0 ? "atlas" : "app-fallback",
+    fusion: nativeRankFusionSucceeded ? "$rankFusion" : "app-rrf",
+    embedding: queryEmbedding.model,
+  };
+
   const latencyMs = Math.max(1, Date.now() - startedAt);
 
   return {
@@ -536,6 +790,7 @@ export async function runAtlasHybridSearch(
     embeddingModel: queryEmbedding.model,
     embeddingDimensions: EMBEDDING_DIMENSIONS,
     executionMode,
+    engines,
     nativeVectorHits,
     nativeTextHits,
     totalCorpusDocs: candidateDocs.length,
@@ -547,12 +802,13 @@ export async function runAtlasHybridSearch(
       rrfFormula: "score = 1 / (60 + vectorRank) + 1 / (60 + textRank)",
     },
     results: fused.slice(0, limit),
+    matchingReceipts,
   };
 }
 
 /**
- * Ingests a new document into the Automated Embedding Pipeline and persists it
- * to MongoDB Atlas `enclave_intelligence` (as well as the runtime corpus).
+ * Ingests a new document with size-cap and no-prompt/no-PII validation, embeds it,
+ * and persists it to MongoDB Atlas `enclave_intelligence`.
  */
 export async function ingestAtlasDocument(input: {
   docId?: string;
@@ -561,12 +817,37 @@ export async function ingestAtlasDocument(input: {
   category: AtlasDocCategory;
   tags?: string[];
   metadata?: Record<string, unknown>;
+  [key: string]: unknown;
 }): Promise<{
   storedInAtlas: boolean;
   document: EnclaveIntelligenceDoc;
 }> {
-  const cleanTitle = input.title.trim();
-  const slug = cleanTitle
+  if ("prompt" in input || "rawPrompt" in input || "taskPrompt" in input) {
+    throw new Error("Prompts must never be stored in MongoDB Atlas.");
+  }
+
+  const serializedBytes = new TextEncoder().encode(JSON.stringify(input)).byteLength;
+  if (serializedBytes > MAX_INGEST_DOCUMENT_BYTES) {
+    throw new Error(
+      `Document exceeds maximum ingest size of ${MAX_INGEST_DOCUMENT_BYTES} bytes (${serializedBytes} bytes).`,
+    );
+  }
+
+  const cleanTitle = (input.title || "").trim();
+  const cleanSummary = (input.summary || "").trim();
+  if (cleanTitle.length > 200) {
+    throw new Error("Document title exceeds maximum length of 200 characters.");
+  }
+  if (cleanSummary.length > 4000) {
+    throw new Error("Document summary exceeds maximum length of 4000 characters.");
+  }
+
+  // Scrub any accidental secrets or PII before embedding or storing
+  const scrubber = createSessionScrubber();
+  const safeTitle = scrubber.scrub(cleanTitle).scrubbed;
+  const safeSummary = scrubber.scrub(cleanSummary).scrubbed;
+
+  const slug = safeTitle
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
@@ -575,13 +856,16 @@ export async function ingestAtlasDocument(input: {
 
   const embeddedDoc = buildEmbeddedIntelligenceDoc({
     docId,
-    title: cleanTitle,
+    title: safeTitle,
     category: (input.category || "advisory").trim().toLowerCase(),
-    summary: input.summary.trim(),
-    tags: Array.isArray(input.tags) && input.tags.length > 0 ? input.tags : [input.category || "custom"],
+    summary: safeSummary,
+    tags:
+      Array.isArray(input.tags) && input.tags.length > 0
+        ? input.tags.slice(0, 20)
+        : [input.category || "custom"],
     metadata: input.metadata ?? { ingestedVia: "atlas-api-ingest" },
   });
-  embeddedDoc.updatedAt = new Date().toISOString();
+  embeddedDoc.updatedAt = coarsenIsoToUtcHour();
 
   const runtimeMap = getRuntimeDocsMap();
   runtimeMap.set(embeddedDoc.docId, embeddedDoc);
@@ -594,7 +878,7 @@ export async function ingestAtlasDocument(input: {
       await col.updateOne(
         { docId: embeddedDoc.docId },
         { $set: embeddedDoc },
-        { upsert: true }
+        { upsert: true },
       );
       storedInAtlas = true;
     } catch {
@@ -609,15 +893,16 @@ export async function ingestAtlasDocument(input: {
 }
 
 /**
- * Atlas Stream Processing / Multi-Collection Windowed Aggregation Pipeline:
- * Executes a real MongoDB `$facet` + `$group` aggregation across `enclave_intelligence`,
- * `verifications`, `receipts`, `relay_totals`, `credit_nullifiers`, and `frozen_blobs`.
+ * Multi-Collection `$facet` and `$group` Aggregation Pipeline on Atlas M0:
+ * Note: Atlas M0 does not support Atlas Stream Processing workspaces; this function runs
+ * standard MongoDB `$facet` and `$group` aggregations across `enclave_intelligence`,
+ * `agent_verification_receipts`, `verifications`, `receipts`, `relay_totals`,
+ * `credit_nullifiers`, and `frozen_blobs`.
  */
 export async function runAtlasStreamAnalytics(): Promise<AtlasStreamAnalyticsResponse> {
   const database = await getAtlasDb();
   const runtimeDocs = Array.from(getRuntimeDocsMap().values());
 
-  // Compute fallback category breakdown from runtime corpus
   const fallbackCategoryCounts = new Map<string, number>();
   for (const d of runtimeDocs) {
     fallbackCategoryCounts.set(d.category, (fallbackCategoryCounts.get(d.category) ?? 0) + 1);
@@ -633,6 +918,7 @@ export async function runAtlasStreamAnalytics(): Promise<AtlasStreamAnalyticsRes
   let passedVerifications = 0;
   let failedVerifications = 0;
   let receiptsCount = 0;
+  let agentVerificationReceiptsCount = getRuntimeReceiptsMap().size;
   let relayRequests = 0;
   let relayBytesUp = 0;
   let relayBytesDown = 0;
@@ -640,8 +926,8 @@ export async function runAtlasStreamAnalytics(): Promise<AtlasStreamAnalyticsRes
   let frozenBlobs = 0;
   let totalIntelligenceDocs = runtimeDocs.length;
   const searchIndexes: Array<{ name: string; type: string; status: string }> = [
-    { name: ATLAS_TEXT_INDEX_NAME, type: "search", status: "READY (Lucene Standard + Keyword)" },
-    { name: ATLAS_VECTOR_INDEX_NAME, type: "vectorSearch", status: "READY (128-d Cosine kNN)" },
+    { name: ATLAS_TEXT_INDEX_NAME, type: "search", status: "READY" },
+    { name: ATLAS_VECTOR_INDEX_NAME, type: "vectorSearch", status: "READY" },
   ];
 
   if (database) {
@@ -653,6 +939,7 @@ export async function runAtlasStreamAnalytics(): Promise<AtlasStreamAnalyticsRes
         intelFacet,
         verifFacet,
         receiptsTotal,
+        agentReceiptsTotal,
         relayDoc,
         nullifiersTotal,
         frozenTotal,
@@ -693,6 +980,10 @@ export async function runAtlasStreamAnalytics(): Promise<AtlasStreamAnalyticsRes
           .catch(() => []),
         database
           .collection("receipts")
+          .countDocuments()
+          .catch(() => 0),
+        database
+          .collection(ATLAS_RECEIPTS_COLLECTION_NAME)
           .countDocuments()
           .catch(() => 0),
         database
@@ -741,6 +1032,10 @@ export async function runAtlasStreamAnalytics(): Promise<AtlasStreamAnalyticsRes
       failedVerifications = Number(vStats?.failed ?? 0);
 
       receiptsCount = Number(receiptsTotal ?? 0);
+      agentVerificationReceiptsCount = Math.max(
+        agentVerificationReceiptsCount,
+        Number(agentReceiptsTotal ?? 0),
+      );
       relayRequests = Number(relayDoc?.requests ?? 0);
       relayBytesUp = Number(relayDoc?.bytesUp ?? 0);
       relayBytesDown = Number(relayDoc?.bytesDown ?? 0);
@@ -770,25 +1065,25 @@ export async function runAtlasStreamAnalytics(): Promise<AtlasStreamAnalyticsRes
 
   const anomalyAlerts: AtlasStreamAnalyticsResponse["anomalyAlerts"] = [
     {
-      alertId: "STREAM-TEE-FAIL-GUARD",
+      alertId: "AGG-TEE-FAIL-GUARD",
       severity: "INFO",
       subsystem: "Two-Hop GPU Custody (Spec §2.3)",
       message:
         "DDR5 memory-bus interposer mitigation active: monotonic AES-256-GCM counters verified with 0 repeated 16-byte blocks across offloaded KV-cache pages.",
     },
     {
-      alertId: "STREAM-VECTOR-INDEX",
+      alertId: "AGG-HYBRID-RANKFUSION",
       severity: "INFO",
-      subsystem: "Atlas Hybrid Search ($vectorSearch + $search)",
-      message: `${totalIntelligenceDocs} enclave intelligence documents embedded in 128-dim unit vector space with Reciprocal Rank Fusion (RRF k=60).`,
+      subsystem: "Atlas Hybrid Search ($rankFusion + $vectorSearch + $search)",
+      message: `${totalIntelligenceDocs} enclave intelligence documents and ${agentVerificationReceiptsCount} agent verification receipt(s) indexed on MongoDB 8.0.34.`,
     },
   ];
 
   if (failedVerifications > 0) {
     anomalyAlerts.unshift({
-      alertId: "STREAM-ATTESTATION-ANOMALY",
+      alertId: "AGG-ATTESTATION-ANOMALY",
       severity: "WARN",
-      subsystem: "Attestation Verifier Stream",
+      subsystem: "Attestation Verifier Aggregation",
       message: `Detected ${failedVerifications} failed enclave verification(s) across ${verificationsCount} total checks (${passRatePct}% pass rate).`,
     });
   }
@@ -798,11 +1093,18 @@ export async function runAtlasStreamAnalytics(): Promise<AtlasStreamAnalyticsRes
     database: process.env.MONGODB_DB ?? "drouter",
     collection: ATLAS_COLLECTION_NAME,
     totalIntelligenceDocs,
+    totalKnowledgeDocs: totalIntelligenceDocs,
+    verificationsCount,
+    receiptsCount: receiptsCount + agentVerificationReceiptsCount,
+    agentVerificationReceiptsCount,
+    nullifiersCount: creditNullifiers,
+    frozenBlobsCount: frozenBlobs,
     categoryBreakdown,
     collectionTelemetry: {
       enclaveIntelligence: totalIntelligenceDocs,
       verifications: verificationsCount,
       receipts: receiptsCount,
+      agentVerificationReceipts: agentVerificationReceiptsCount,
       relayRequests,
       relayBytesUp,
       relayBytesDown,
@@ -820,3 +1122,5 @@ export async function runAtlasStreamAnalytics(): Promise<AtlasStreamAnalyticsRes
     pipelineStagesExecuted: ["$match", "$facet", "$group", "$sort", "$project"],
   };
 }
+
+export const runAtlasMultiCollectionAggregation = runAtlasStreamAnalytics;

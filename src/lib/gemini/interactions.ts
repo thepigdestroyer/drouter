@@ -1,16 +1,12 @@
 /**
- * Google DeepMind Gemini 4 Argon (`gemini-4-argon`) Interactions API Contract
- * and Companion Toolkit Registry.
+ * Google DeepMind Gemini 4 Argon (`gemini-4-argon`) Interactions API Contract,
+ * Privacy Invariant Guard, and Companion Toolkit Registry (`src/lib/gemini/interactions.ts`).
  *
- * Enforces the official Gemini 4 Argon API rules:
- * - Model ID: "gemini-4-argon"
- * - Uses `thinking_level` ("low" | "medium" | "high")
- * - Rejects deprecated `thinking_budget`, `temperature`, `top_p`, `top_k`,
- *   and explicit `cached_content` (implicit caching is automatic in gemini-4-argon)
- * - Sets `background: true` for long decode (> 65,536 tokens up to 1,000,000 tokens)
- *   or autonomous multi-step execution
- * - Builds the official `client.interactions.create` payload for `@google/genai >= 2.3.0`
+ * Uses the official `@google/genai` (v2.31.0) SDK (`new GoogleGenAI({ apiKey })`
+ * and `client.interactions.create(...)`), never raw fetch with `?key=`.
  */
+
+import { GoogleGenAI } from "@google/genai";
 
 export const GEMINI_4_ARGON_MODEL_ID = "gemini-4-argon" as const;
 
@@ -60,11 +56,23 @@ const FORBIDDEN_ALIAS_MAP: Record<string, ForbiddenArgonParameter> = {
 
 export const ARGON_LONG_DECODE_THRESHOLD_TOKENS = 65_536;
 export const ARGON_MAX_UNIFIED_CONTEXT_TOKENS = 1_000_000;
+export const TINFOIL_KIMI_K3_MAX_CONTEXT_TOKENS = 262_144;
+
+export interface ArgonModelCallRecord {
+  model: string;
+  purpose: string;
+  ok: boolean;
+  latencyMs: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  error?: string;
+}
 
 export interface ArgonToolkitModelSpec {
   id: string;
   role: string;
   stageUsed: string;
+  statusInDemo: "used-when-key-set" | "live-enclave" | "not-used";
   trustBoundary: "on-device-local" | "attested-tee-enclave" | "gemini-interactions-cloud";
   description: string;
   tinfoilEnclaveAlias?: string;
@@ -73,78 +81,123 @@ export interface ArgonToolkitModelSpec {
 export const ARGON_TOOLKIT_MANIFEST: readonly ArgonToolkitModelSpec[] = [
   {
     id: GEMINI_4_ARGON_MODEL_ID,
-    role: "Primary 1M-Context Autonomous Reasoning & Routing Orchestrator",
-    stageUsed: "Stage 4 (1M Unified Context Synthesis & Confidential Routing)",
+    role: "Primary 1M-Context Autonomous Reasoning and Tool-Calling Orchestrator",
+    stageUsed: "Stage 4 (Autonomous Tool Loop and Synthesis when GEMINI_API_KEY is provided)",
+    statusInDemo: "used-when-key-set",
     trustBoundary: "gemini-interactions-cloud",
     description:
-      "Flagship Gemini 4 Argon model invoked via client.interactions.create with thinking_level control, automatic implicit context caching, and background long-decode execution.",
-  },
-  {
-    id: ARGON_COMPANION_MODELS.sandboxAgent,
-    role: "Antigravity Managed Agent for Formal Policy & Memory-Bus Sandbox Verification",
-    stageUsed: "Stage 3 (1,344-State VMPL0 Check, V1/V6 Audit & Self-Healing Loop)",
-    trustBoundary: "attested-tee-enclave",
-    description:
-      "Executes isolated verification loops inside attested microVMs, detects invariant counterexamples or memory-bus leaks, and patches routing policies autonomously.",
+      "Invoked via @google/genai client.interactions.create with generation_config.thinking_level and background execution over scrubbed and symmetry-masked text.",
   },
   {
     id: ARGON_COMPANION_MODELS.parallelSubagentFast,
-    role: "High-Throughput Parallel Subagent Swarm Coordinator",
-    stageUsed: "Stage 2 (Parallel Atlas Hybrid Search & 2-Hop Attestation Audit)",
+    role: "Parallel Subagent for Attestation and Atlas Hybrid Search Summarization",
+    stageUsed: "Stage 2 (Parallel Subagent Summary when GEMINI_API_KEY is provided)",
+    statusInDemo: "used-when-key-set",
     trustBoundary: "gemini-interactions-cloud",
     description:
-      "Runs low-latency parallel subagents to query MongoDB Atlas Hybrid Search ($vectorSearch + $search) and verify AMD SEV-SNP + NVIDIA B200/H200 CC attestation bundles.",
+      "Called in parallel via client.interactions.create to summarize MongoDB Atlas Hybrid Search ($rankFusion) and Tinfoil 2-hop attestation results.",
   },
   {
     id: ARGON_COMPANION_MODELS.parallelSubagentLite,
-    role: "Ultra-Fast Quorum & Nullifier Subagent",
-    stageUsed: "Stage 2 (5-of-7 Verifier Quorum & Circle Arc Stake Check)",
+    role: "Parallel Subagent for Quorum and Policy Verification Summarization",
+    stageUsed: "Stage 2 (Parallel Subagent Summary when GEMINI_API_KEY is provided)",
+    statusInDemo: "used-when-key-set",
     trustBoundary: "gemini-interactions-cloud",
     description:
-      "Performs sub-50ms Ed25519 quorum signature checks across the 7 independent hardware verification authorities.",
-  },
-  {
-    id: ARGON_COMPANION_MODELS.deepResearch,
-    role: "Deep Web & Literature Grounding Agent with Citations",
-    stageUsed: "Stage 2 (Protocol & Hardware Vulnerability Cross-Reference)",
-    trustBoundary: "gemini-interactions-cloud",
-    description:
-      "Synthesizes cited public literature and CVE/TEE hardware advisories without receiving unredacted private data.",
-  },
-  {
-    id: ARGON_COMPANION_MODELS.realtimeVoice,
-    role: "Real-Time Bidirectional Lab Voice & Interruption Stream",
-    stageUsed: "Stage 6 (Live Benchtop Voice Control & Human-in-the-Loop Gate)",
-    trustBoundary: "gemini-interactions-cloud",
-    description:
-      "Provides hands-free wet-lab voice interaction for approving or rejecting Circle Arc on-chain settlement and session key release.",
-  },
-  {
-    id: ARGON_COMPANION_MODELS.voiceTts,
-    role: "Structured Security Briefing Audio Synthesizer",
-    stageUsed: "Stage 6 (Multimodal Audit Readout & Forensic Digest)",
-    trustBoundary: "gemini-interactions-cloud",
-    description:
-      "Renders the verified cryptographic audit summary and genomic pipeline readout into low-latency spoken audio.",
+      "Called in parallel via client.interactions.create to summarize 5-of-7 Ed25519 hardware verifier quorum and Circle Arc registry readiness.",
   },
   {
     id: ARGON_COMPANION_MODELS.confidentialOpenCloud,
     role: "Open-Weight Confidential Enclave Model (Tinfoil Live Attested)",
-    stageUsed: "Stage 1 & Stage 4 (Confidential Enclave Inference on 8x B200/H200 CC)",
+    stageUsed: "Stage 4 (Attested Tinfoil Enclave Inference via gemma4-31b / kimi-k3)",
+    statusInDemo: "live-enclave",
     trustBoundary: "attested-tee-enclave",
     tinfoilEnclaveAlias: ARGON_COMPANION_MODELS.tinfoilEnclaveGemma,
     description:
-      "Maps directly to Tinfoil's live attested gemma4-31b enclave over RFC 9180 HPKE Encrypted HTTP Body (EHBP) so sensitive genomic sequences never leave hardware-encrypted GPU memory.",
+      "Maps to Tinfoil's live attested gemma4-31b (gemma4-31b-inf10-0.tinfoil.containers.tinfoil.dev) and kimi-k3 (kimi-k3-inf14.tinfoil.containers.tinfoil.dev, Intel TDX + NVIDIA CC GPUs, max-model-len 262,144 tokens) routed via router-0.tinfoil.sh (AMD SEV-SNP).",
+  },
+  {
+    id: ARGON_COMPANION_MODELS.sandboxAgent,
+    role: "Not used in this demo (VMPL0 1,344-state and V1/V6 memory-bus checks run in deterministic local TypeScript)",
+    stageUsed: "not used (Stage 3 uses local TypeScript verifiers)",
+    statusInDemo: "not-used",
+    trustBoundary: "attested-tee-enclave",
+    description:
+      "Not used in this demo. Stage 3 runs deterministic local TypeScript formal checks (verifyMonitorPolicyExhaustive across 1,344 states and runMemoryBusAndPopAudit).",
+  },
+  {
+    id: ARGON_COMPANION_MODELS.deepResearch,
+    role: "Not used in this demo (CVE and provider advisories are queried from MongoDB Atlas enclave_intelligence)",
+    stageUsed: "not used",
+    statusInDemo: "not-used",
+    trustBoundary: "gemini-interactions-cloud",
+    description:
+      "Not used in this demo. Hardware advisories (TEE.fail, DDRop, Cipherleaks, VoltPillager) are retrieved from MongoDB Atlas Hybrid Search.",
+  },
+  {
+    id: ARGON_COMPANION_MODELS.realtimeVoice,
+    role: "Not used in this demo (Human-in-the-Loop approval gate is controlled via HTTP/UI)",
+    stageUsed: "not used",
+    statusInDemo: "not-used",
+    trustBoundary: "gemini-interactions-cloud",
+    description:
+      "Not used in this demo. Stage 5 Human-in-the-Loop control is enforced deterministically in server code.",
+  },
+  {
+    id: ARGON_COMPANION_MODELS.voiceTts,
+    role: "Not used in this demo (Stage 6 produces a text briefing and Ed25519-signed forensic digest)",
+    stageUsed: "not used",
+    statusInDemo: "not-used",
+    trustBoundary: "gemini-interactions-cloud",
+    description:
+      "Not used in this demo. Stage 6 generates a text readout and signs the canonical SHA-256 forensic digest with Ed25519 locally.",
   },
   {
     id: ARGON_COMPANION_MODELS.confidentialOnDevice,
-    role: "On-Device Local Privacy Filter & PAPILLON Prompt Generalizer",
-    stageUsed: "Stage 1 (Local PII/Secret Scrubbing & Symmetry Masking)",
+    role: "Not used in this demo (Stage 1 PII scrubbing and symmetry masking run in deterministic local TypeScript)",
+    stageUsed: "not used (Stage 1 uses local regex scrubber and symmetry transform)",
+    statusInDemo: "not-used",
     trustBoundary: "on-device-local",
     description:
-      "Runs strictly on the researcher's local workstation to strip API keys, patient cohort IDs, and unpublished results before any network hop.",
+      "Not used in this demo. Stage 1 runs deterministic local regex scrubbing (src/lib/privacy) and homomorphic symmetry masking (src/lib/symmetry).",
   },
 ] as const;
+
+export class PrivacyInvariantViolationError extends Error {
+  readonly leakedToken: string;
+
+  constructor(leakedToken: string) {
+    super(
+      `PRIVACY_INVARIANT_VIOLATION: Outbound Google payload contained unredacted sensitive value (${leakedToken.slice(0, 4)}***). Call aborted before network transmission.`,
+    );
+    this.name = "PrivacyInvariantViolationError";
+    this.leakedToken = leakedToken;
+  }
+}
+
+/**
+ * Enforces the dRouter Privacy Invariant: Google must only ever receive scrubbed text.
+ * Inspects the serialized outbound payload and throws `PrivacyInvariantViolationError`
+ * if any original placeholder value or unmasked sensitive token (>= 4 chars) is present.
+ */
+export function assertOutboundPrivacyInvariant(
+  outboundPayload: unknown,
+  sensitiveOriginals: readonly string[],
+): void {
+  const serialized =
+    typeof outboundPayload === "string"
+      ? outboundPayload
+      : JSON.stringify(outboundPayload ?? {});
+  const lowerSerialized = serialized.toLowerCase();
+
+  for (const rawOrig of sensitiveOriginals) {
+    const cleaned = (rawOrig || "").trim();
+    if (cleaned.length < 4) continue;
+    if (serialized.includes(cleaned) || lowerSerialized.includes(cleaned.toLowerCase())) {
+      throw new PrivacyInvariantViolationError(cleaned);
+    }
+  }
+}
 
 export interface ArgonRequestConfigInput {
   model?: string;
@@ -156,7 +209,6 @@ export interface ArgonRequestConfigInput {
   max_context_tokens?: number;
   maxContextTokens?: number;
   autonomousMultiStep?: boolean;
-  // Deprecated / forbidden fields in gemini-4-argon that must be rejected:
   thinking_budget?: unknown;
   thinkingBudget?: unknown;
   temperature?: unknown;
@@ -187,13 +239,12 @@ export interface ArgonValidationResult {
 }
 
 /**
- * Validates a candidate Gemini 4 Argon request configuration against the official
- * DeepMind Argon API specification:
+ * Validates a candidate Gemini 4 Argon request configuration:
  * 1. Model must be "gemini-4-argon" (defaults to "gemini-4-argon" if omitted).
- * 2. Requires a valid `thinking_level` ("low" | "medium" | "high").
+ * 2. Requires a valid `thinking_level` ("low" | "medium" | "high", defaults to "medium").
  * 3. Rejects `thinking_budget`, `temperature`, `top_p`, `top_k`, and `cached_content`.
  * 4. Automatically enables `background: true` when `max_output_tokens > 65536`
- *    (up to 1,000,000 tokens) or when `autonomousMultiStep` / `background` is requested.
+ *    or when `autonomousMultiStep` / `background` is requested.
  */
 export function validateArgonRequestConfig(
   input: ArgonRequestConfigInput,
@@ -250,7 +301,7 @@ export function validateArgonRequestConfig(
     );
   }
 
-  const rawThinkingLevel = input.thinking_level ?? input.thinkingLevel ?? "high";
+  const rawThinkingLevel = input.thinking_level ?? input.thinkingLevel ?? "medium";
   if (
     typeof rawThinkingLevel !== "string" ||
     !(VALID_THINKING_LEVELS as readonly string[]).includes(rawThinkingLevel)
@@ -351,7 +402,7 @@ export function sanitizeToArgonConfig(
       typeof cleaned.thinking_level === "string" &&
       (VALID_THINKING_LEVELS as readonly string[]).includes(cleaned.thinking_level)
         ? (cleaned.thinking_level as ArgonThinkingLevel)
-        : "high",
+        : "medium",
     autonomousMultiStep: true,
   });
 
@@ -366,6 +417,7 @@ export function sanitizeToArgonConfig(
 }
 
 export interface ArgonInteractionToolDeclaration {
+  type: "function";
   name: string;
   description: string;
   parameters: {
@@ -377,28 +429,30 @@ export interface ArgonInteractionToolDeclaration {
 
 export const ARGON_CONFIDENTIAL_TOOLS: readonly ArgonInteractionToolDeclaration[] = [
   {
+    type: "function",
     name: "scrub_and_symmetry_mask",
     description:
-      "Runs on-device gemma-4-e4b privacy scrubbing, PAPILLON generalization, and homomorphic symmetry masking f(T(x)) = T(f(x)) with 4096-byte OHTTP frame padding.",
+      "Runs local PII/secret scrubbing, PAPILLON generalization, and homomorphic symmetry masking f(T(x)) = T(f(x)) with 4096-byte RFC 8259 bucket padding.",
     parameters: {
       type: "OBJECT",
       properties: {
         rawPayload: {
           type: "STRING",
-          description: "Raw genomic protocol and codebase context to scrub locally.",
+          description: "Already-scrubbed prompt context to verify and pad locally.",
         },
         bucketQuantumBytes: {
           type: "INTEGER",
-          description: "Byte padding quantum (must be 4096).",
+          description: "Byte padding quantum (4096).",
         },
       },
       required: ["rawPayload", "bucketQuantumBytes"],
     },
   },
   {
+    type: "function",
     name: "verify_two_hop_enclave_and_quorum",
     description:
-      "Dispatches gemini-3.8-flash and gemini-3.5-flash-lite subagents to verify AMD SEV-SNP + 8x NVIDIA B200/H200 CC attestation and 5-of-7 Circle Arc verifier quorum.",
+      "Fetches and verifies live Tinfoil attestation (router-0.tinfoil.sh AMD SEV-SNP report + Intel TDX and NVIDIA CC GPU model enclave) and 5-of-7 Ed25519 verifier quorum.",
     parameters: {
       type: "OBJECT",
       properties: {
@@ -415,9 +469,30 @@ export const ARGON_CONFIDENTIAL_TOOLS: readonly ArgonInteractionToolDeclaration[
     },
   },
   {
+    type: "function",
+    name: "search_atlas_hybrid_kb",
+    description:
+      "Executes MongoDB Atlas Hybrid Search ($rankFusion combining $vectorSearch and $search) over enclave_intelligence and past agent_verification_receipts.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        query: {
+          type: "STRING",
+          description: "Scrubbed technical search query for confidential enclaves and advisories.",
+        },
+        category: {
+          type: "STRING",
+          description: "Optional category filter (provider, advisory, architecture, all).",
+        },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    type: "function",
     name: "run_antigravity_vmpl0_and_memory_audit",
     description:
-      "Invokes antigravity-preview-09-2026 in an attested microVM to exhaustively check all 1,344 VMPL0 exit policy states (I1-I5) and V1/V6 DDR5 memory-bus Shannon entropy.",
+      "Exhaustively checks all 1,344 VMPL0 exit policy states (I1-I5) and V1/V6 DDR5 memory-bus Shannon entropy in an isolated sandbox.",
     parameters: {
       type: "OBJECT",
       properties: {
@@ -427,22 +502,43 @@ export const ARGON_CONFIDENTIAL_TOOLS: readonly ArgonInteractionToolDeclaration[
         },
         autoPatchOnFailure: {
           type: "BOOLEAN",
-          description: "Whether to autonomously patch and re-route if a fault is found.",
+          description: "Whether to fail over and re-verify on an attested node if a fault is found.",
         },
       },
       required: ["candidateNodeId", "autoPatchOnFailure"],
     },
   },
   {
+    type: "function",
+    name: "invoke_attested_enclave",
+    description:
+      "Dispatches the scrubbed and symmetry-masked prompt to the verified Tinfoil confidential enclave (gemma4-31b or kimi-k3) over RFC 9180 HPKE Encrypted HTTP Body.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        enclaveModel: {
+          type: "STRING",
+          description: "Attested Tinfoil enclave model ID (gemma4-31b or kimi-k3).",
+        },
+        maskedPrompt: {
+          type: "STRING",
+          description: "Scrubbed and symmetry-masked prompt text.",
+        },
+      },
+      required: ["enclaveModel", "maskedPrompt"],
+    },
+  },
+  {
+    type: "function",
     name: "anchor_arc_settlement_with_human_gate",
     description:
-      "Submits a verified batch execution receipt or node slash transaction to Circle Arc Testnet (chainId 5042002) only after explicit Human-in-the-Loop approval.",
+      "Prepares or submits a verified execution receipt to Circle Arc Testnet (chainId 5042002, registry 0xbc8085c2b6fe6e0db05f169925c0b841828f4481) only when humanApproved is true.",
     parameters: {
       type: "OBJECT",
       properties: {
         actionKind: {
           type: "STRING",
-          description: "anchor_receipt | slash_faulty_node | release_freeze_key",
+          description: "anchor_receipt | slash_faulty_node",
         },
         humanApproved: {
           type: "BOOLEAN",
@@ -461,6 +557,10 @@ export interface InteractionsCreatePayload {
   max_output_tokens: number;
   max_context_tokens: number;
   implicit_caching: "enabled";
+  generation_config: {
+    thinking_level: ArgonThinkingLevel;
+    max_output_tokens: number;
+  };
   system_instruction: string;
   input: Array<{
     role: "user" | "system";
@@ -479,10 +579,10 @@ export interface InteractionsCreatePayload {
     live_voice_gate: typeof ARGON_COMPANION_MODELS.realtimeVoice;
   };
   metadata: {
-    sdk_target: "@google/genai>=2.3.0";
+    sdk_target: "@google/genai>=2.31.0";
     api_surface: "client.interactions.create";
     persona: string;
-    enclave_protocol: "RFC 9180 HPKE EHBP + AMD SEV-SNP + NVIDIA B200 CC";
+    enclave_protocol: "RFC 9180 HPKE EHBP + AMD SEV-SNP Router + Intel TDX / NVIDIA CC GPU Enclaves";
   };
 }
 
@@ -495,7 +595,7 @@ export function buildInteractionsCreatePayload(params: {
 }): InteractionsCreatePayload {
   const validation = validateArgonRequestConfig({
     model: GEMINI_4_ARGON_MODEL_ID,
-    thinking_level: params.thinkingLevel ?? "high",
+    thinking_level: params.thinkingLevel ?? "medium",
     background: params.background ?? true,
     max_output_tokens: params.maxOutputTokens ?? 131_072,
     max_context_tokens: ARGON_MAX_UNIFIED_CONTEXT_TOKENS,
@@ -520,11 +620,15 @@ export function buildInteractionsCreatePayload(params: {
     max_output_tokens: cfg.max_output_tokens,
     max_context_tokens: cfg.max_context_tokens,
     implicit_caching: cfg.implicit_caching,
+    generation_config: {
+      thinking_level: cfg.thinking_level,
+      max_output_tokens: cfg.max_output_tokens,
+    },
     system_instruction:
       "You are the Gemini 4 Argon Confidential Security and Routing Orchestrator for dRouter. " +
-      "Never accept unredacted secrets or raw genomic identifiers outside the local trust boundary. " +
-      "Verify all 1,344 VMPL0 exit policy states (I1-I5) and V1/V6 DDR5 memory-bus entropy via antigravity-preview-09-2026 before dispatching long-context inference to attested Tinfoil enclaves (gemma4-31b / kimi-k3). " +
-      "Require explicit Human-in-the-Loop confirmation before anchoring receipts or slashing nodes on Circle Arc.",
+      "Never accept unredacted secrets or raw patient identifiers outside the local trust boundary. " +
+      "Use the provided tools to verify live Tinfoil attestation (router-0.tinfoil.sh AMD SEV-SNP + Intel TDX / NVIDIA CC GPU model enclaves), query MongoDB Atlas Hybrid Search ($rankFusion), verify all 1,344 VMPL0 exit policy states, and dispatch scrubbed inference to the attested enclave. " +
+      "Require explicit Human-in-the-Loop confirmation before anchoring receipts on Circle Arc.",
     input: [
       {
         role: "user",
@@ -544,10 +648,11 @@ export function buildInteractionsCreatePayload(params: {
       live_voice_gate: ARGON_COMPANION_MODELS.realtimeVoice,
     },
     metadata: {
-      sdk_target: "@google/genai>=2.3.0",
+      sdk_target: "@google/genai>=2.31.0",
       api_surface: "client.interactions.create",
       persona,
-      enclave_protocol: "RFC 9180 HPKE EHBP + AMD SEV-SNP + NVIDIA B200 CC",
+      enclave_protocol:
+        "RFC 9180 HPKE EHBP + AMD SEV-SNP Router + Intel TDX / NVIDIA CC GPU Enclaves",
     },
   };
 }
@@ -559,7 +664,7 @@ export function generateInteractionsSdkSnippets(
   python: string;
 } {
   const typescript = [
-    `import { GoogleGenAI } from "@google/genai"; // >= 2.3.0`,
+    `import { GoogleGenAI } from "@google/genai"; // v2.31.0`,
     ``,
     `const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });`,
     ``,
@@ -568,13 +673,14 @@ export function generateInteractionsSdkSnippets(
     `// because gemini-4-argon enforces thinking_level and automatic implicit caching.`,
     `const interaction = await client.interactions.create({`,
     `  model: "${payload.model}",`,
-    `  thinking_level: "${payload.thinking_level}",`,
-    `  background: ${String(payload.background)}, // > 65,536 token decode & multi-step loop`,
-    `  max_output_tokens: ${payload.max_output_tokens},`,
-    `  max_context_tokens: ${payload.max_context_tokens},`,
+    `  background: ${String(payload.background)},`,
+    `  generation_config: {`,
+    `    thinking_level: "${payload.thinking_level}",`,
+    `    max_output_tokens: ${payload.max_output_tokens},`,
+    `  },`,
     `  system_instruction: ${JSON.stringify(payload.system_instruction)},`,
-    `  input: ${JSON.stringify(payload.input, null, 2)},`,
-    `  subagent_routing: ${JSON.stringify(payload.subagent_routing, null, 2)},`,
+    `  input: [{ type: "text", text: ${JSON.stringify(payload.input[0]?.content ?? "")} }],`,
+    `  tools: ${JSON.stringify(payload.tools, null, 2)},`,
     `});`,
     ``,
     `console.log(interaction.id, interaction.status, interaction.output_text);`,
@@ -588,12 +694,13 @@ export function generateInteractionsSdkSnippets(
     `# Official Gemini 4 Argon Interactions API call`,
     `interaction = client.interactions.create(`,
     `    model="${payload.model}",`,
-    `    thinking_level="${payload.thinking_level}",`,
     `    background=${payload.background ? "True" : "False"},`,
-    `    max_output_tokens=${payload.max_output_tokens},`,
-    `    max_context_tokens=${payload.max_context_tokens},`,
+    `    generation_config={`,
+    `        "thinking_level": "${payload.thinking_level}",`,
+    `        "max_output_tokens": ${payload.max_output_tokens},`,
+    `    },`,
     `    system_instruction=${JSON.stringify(payload.system_instruction)},`,
-    `    input=[{"role": "user", "content": ${JSON.stringify(payload.input[0]?.content ?? "")}}],`,
+    `    input=[{"type": "text", "text": ${JSON.stringify(payload.input[0]?.content ?? "")}}],`,
     `)`,
     `print(interaction.id, interaction.status)`,
   ].join("\n");
@@ -604,95 +711,308 @@ export function generateInteractionsSdkSnippets(
 export interface LiveGeminiCallResult {
   attemptedLiveCall: boolean;
   liveEndpointReached: boolean;
-  endpointUrl: string;
-  httpStatus?: number;
+  sdkMethod: "client.interactions.create";
+  interactionId?: string;
+  interactionStatus?: string;
+  toolCallsExecuted?: string[];
   liveSummaryText?: string;
   fallbackReason?: string;
+  modelCallRecord?: ArgonModelCallRecord;
 }
 
+export interface GenAIInteractionsClientLike {
+  interactions: {
+    create(params: Record<string, unknown>): Promise<{
+      id?: string;
+      status?: string;
+      output_text?: string;
+      steps?: Array<{
+        type: string;
+        id?: string;
+        name?: string;
+        arguments?: Record<string, unknown>;
+        content?: Array<{ type?: string; text?: string }>;
+      }>;
+      usage?: {
+        total_input_tokens?: number;
+        total_output_tokens?: number;
+      };
+    }>;
+  };
+}
+
+export type ArgonToolExecutor = (
+  toolName: string,
+  args: Record<string, unknown>,
+) => Promise<Record<string, unknown>>;
+
 /**
- * Calls the Google Gemini Interactions / v1beta endpoint when a `GEMINI_API_KEY`
- * is provided, while preserving deterministic local cryptographic verification.
+ * Calls `@google/genai` (`new GoogleGenAI({ apiKey }).interactions.create(...)`)
+ * and executes a multi-turn function-calling loop when a key or mock client is provided.
+ * Strictly enforces `assertOutboundPrivacyInvariant` before every SDK call.
  */
 export async function callGeminiInteractionsEndpoint(params: {
   payload: InteractionsCreatePayload;
   apiKey?: string;
-  timeoutMs?: number;
+  sensitiveOriginals?: readonly string[];
+  toolExecutor?: ArgonToolExecutor;
+  genaiClient?: GenAIInteractionsClientLike;
 }): Promise<LiveGeminiCallResult> {
-  const resolvedKey = (
+  const sensitiveOriginals = params.sensitiveOriginals ?? [];
+
+  // Enforce the Privacy Invariant on the payload before checking key or calling Google
+  assertOutboundPrivacyInvariant(params.payload.input, sensitiveOriginals);
+  assertOutboundPrivacyInvariant(params.payload.system_instruction, sensitiveOriginals);
+
+  const resolvedKey =
     params.apiKey?.trim() ||
     process.env.GEMINI_API_KEY?.trim() ||
-    ""
-  );
-  const interactionsUrl =
-    "https://generativelanguage.googleapis.com/v1beta/interactions";
+    "";
 
-  if (!resolvedKey) {
+  if (!resolvedKey && !params.genaiClient) {
     return {
       attemptedLiveCall: false,
       liveEndpointReached: false,
-      endpointUrl: interactionsUrl,
+      sdkMethod: "client.interactions.create",
       fallbackReason:
-        "No GEMINI_API_KEY provided in request or environment; executed deterministic local cryptographic and enclave verification harness.",
+        "Simulated mode: no GEMINI_API_KEY configured in environment or request; local cryptographic, Tinfoil attestation, and MongoDB Atlas verifiers ran for real.",
     };
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), params.timeoutMs ?? 4500);
+  const client: GenAIInteractionsClientLike =
+    params.genaiClient ??
+    (new GoogleGenAI({ apiKey: resolvedKey }) as unknown as GenAIInteractionsClientLike);
+
+  const startedAt = Date.now();
+  const toolCallsExecuted: string[] = [];
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
 
   try {
-    const response = await fetch(
-      `${interactionsUrl}?key=${encodeURIComponent(resolvedKey)}`,
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          model: params.payload.model,
-          thinking_level: params.payload.thinking_level,
-          background: params.payload.background,
-          max_output_tokens: params.payload.max_output_tokens,
-          system_instruction: params.payload.system_instruction,
-          input: params.payload.input,
-        }),
-        signal: controller.signal,
+    const createRequest: Record<string, unknown> = {
+      model: params.payload.model,
+      background: params.payload.background,
+      system_instruction: params.payload.system_instruction,
+      generation_config: {
+        thinking_level: params.payload.thinking_level,
+        max_output_tokens: params.payload.max_output_tokens,
       },
-    );
+      input: [
+        {
+          type: "text",
+          text: params.payload.input[0]?.content ?? "",
+        },
+      ],
+      tools: params.payload.tools,
+    };
 
-    if (response.ok) {
-      const json = (await response.json()) as Record<string, unknown>;
-      const outputText =
-        typeof json.output_text === "string"
-          ? json.output_text
-          : JSON.stringify(json).slice(0, 360);
-      return {
-        attemptedLiveCall: true,
-        liveEndpointReached: true,
-        endpointUrl: interactionsUrl,
-        httpStatus: response.status,
-        liveSummaryText: outputText,
+    assertOutboundPrivacyInvariant(createRequest, sensitiveOriginals);
+
+    let interaction = await client.interactions.create(createRequest);
+    if (typeof interaction.usage?.total_input_tokens === "number") {
+      totalInputTokens += interaction.usage.total_input_tokens;
+    }
+    if (typeof interaction.usage?.total_output_tokens === "number") {
+      totalOutputTokens += interaction.usage.total_output_tokens;
+    }
+
+    // Multi-turn tool-calling loop (up to 4 turns) when model emits function_call steps
+    let turn = 0;
+    while (turn < 4 && params.toolExecutor && Array.isArray(interaction.steps)) {
+      const fnCalls = interaction.steps.filter(
+        (s) => s && s.type === "function_call" && typeof s.name === "string",
+      );
+      if (fnCalls.length === 0) break;
+
+      const fnResults: Array<Record<string, unknown>> = [];
+      for (const call of fnCalls) {
+        const name = call.name as string;
+        const callId = call.id || `call-${turn}-${name}`;
+        toolCallsExecuted.push(name);
+        const resultObj = await params.toolExecutor(name, call.arguments ?? {});
+        const resultStep = {
+          type: "function_result",
+          call_id: callId,
+          name,
+          result: JSON.stringify(resultObj),
+        };
+        assertOutboundPrivacyInvariant(resultStep, sensitiveOriginals);
+        fnResults.push(resultStep);
+      }
+
+      const followUpRequest: Record<string, unknown> = {
+        model: params.payload.model,
+        background: params.payload.background,
+        previous_interaction_id: interaction.id,
+        generation_config: {
+          thinking_level: params.payload.thinking_level,
+          max_output_tokens: params.payload.max_output_tokens,
+        },
+        input: fnResults,
+        tools: params.payload.tools,
       };
+
+      assertOutboundPrivacyInvariant(followUpRequest, sensitiveOriginals);
+      interaction = await client.interactions.create(followUpRequest);
+
+      if (typeof interaction.usage?.total_input_tokens === "number") {
+        totalInputTokens += interaction.usage.total_input_tokens;
+      }
+      if (typeof interaction.usage?.total_output_tokens === "number") {
+        totalOutputTokens += interaction.usage.total_output_tokens;
+      }
+      turn += 1;
+    }
+
+    const latencyMs = Math.max(1, Date.now() - startedAt);
+    let outputText = interaction.output_text;
+    if (!outputText && Array.isArray(interaction.steps)) {
+      for (const s of interaction.steps) {
+        if (s.type === "model_output" && Array.isArray(s.content)) {
+          const txt = s.content
+            .map((c) => (typeof c.text === "string" ? c.text : ""))
+            .join("")
+            .trim();
+          if (txt) {
+            outputText = txt;
+            break;
+          }
+        }
+      }
     }
 
     return {
       attemptedLiveCall: true,
-      liveEndpointReached: false,
-      endpointUrl: interactionsUrl,
-      httpStatus: response.status,
-      fallbackReason: `Gemini Interactions endpoint returned HTTP ${response.status}; verified execution plan synthesized via local confidential enclave harness.`,
+      liveEndpointReached: true,
+      sdkMethod: "client.interactions.create",
+      interactionId: interaction.id,
+      interactionStatus: interaction.status ?? "completed",
+      toolCallsExecuted,
+      liveSummaryText:
+        outputText ||
+        `Gemini 4 Argon interaction ${interaction.id ?? "live"} completed (${toolCallsExecuted.length} tool call(s) executed).`,
+      modelCallRecord: {
+        model: params.payload.model,
+        purpose: "Primary autonomous routing & tool-calling orchestrator (Stage 4)",
+        ok: true,
+        latencyMs,
+        ...(totalInputTokens > 0 ? { inputTokens: totalInputTokens } : {}),
+        ...(totalOutputTokens > 0 ? { outputTokens: totalOutputTokens } : {}),
+      },
     };
   } catch (err) {
+    if (err instanceof PrivacyInvariantViolationError) {
+      throw err;
+    }
+    const latencyMs = Math.max(1, Date.now() - startedAt);
+    const rawMsg = err instanceof Error ? err.message : "SDK error";
+    // Never echo back an API key in error messages
+    const safeMsg = resolvedKey ? rawMsg.split(resolvedKey).join("[REDACTED_KEY]") : rawMsg;
+
     return {
       attemptedLiveCall: true,
       liveEndpointReached: false,
-      endpointUrl: interactionsUrl,
-      fallbackReason:
-        err instanceof Error
-          ? `Network or timeout during live Gemini call (${err.message}); local enclave verification completed.`
-          : "Network error during live Gemini call; local enclave verification completed.",
+      sdkMethod: "client.interactions.create",
+      toolCallsExecuted,
+      fallbackReason: `Gemini Interactions SDK call failed (${safeMsg.slice(0, 180)}); local cryptographic and enclave verifiers completed.`,
+      modelCallRecord: {
+        model: params.payload.model,
+        purpose: "Primary autonomous routing & tool-calling orchestrator (Stage 4)",
+        ok: false,
+        latencyMs,
+        error: safeMsg.slice(0, 180),
+      },
     };
-  } finally {
-    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Invokes a companion subagent (`gemini-3.8-flash` or `gemini-3.5-flash-lite`) via
+ * `client.interactions.create` when a Gemini API key or mock client is available.
+ * Enforces `assertOutboundPrivacyInvariant` before calling the SDK.
+ */
+export async function callCompanionSubagentInteraction(params: {
+  model:
+    | typeof ARGON_COMPANION_MODELS.parallelSubagentFast
+    | typeof ARGON_COMPANION_MODELS.parallelSubagentLite;
+  purpose: string;
+  scrubbedInput: string;
+  apiKey?: string;
+  sensitiveOriginals?: readonly string[];
+  genaiClient?: GenAIInteractionsClientLike;
+}): Promise<{
+  liveReached: boolean;
+  summaryText?: string;
+  modelCallRecord?: ArgonModelCallRecord;
+}> {
+  const sensitiveOriginals = params.sensitiveOriginals ?? [];
+  assertOutboundPrivacyInvariant(params.scrubbedInput, sensitiveOriginals);
+
+  const resolvedKey =
+    params.apiKey?.trim() ||
+    process.env.GEMINI_API_KEY?.trim() ||
+    "";
+
+  if (!resolvedKey && !params.genaiClient) {
+    return { liveReached: false };
+  }
+
+  const client: GenAIInteractionsClientLike =
+    params.genaiClient ??
+    (new GoogleGenAI({ apiKey: resolvedKey }) as unknown as GenAIInteractionsClientLike);
+
+  const startedAt = Date.now();
+  try {
+    const req: Record<string, unknown> = {
+      model: params.model,
+      background: false,
+      generation_config: {
+        thinking_level: "low",
+        max_output_tokens: 256,
+      },
+      system_instruction:
+        "Summarize the confidential compute verification artifact concisely in one plain sentence without em dashes.",
+      input: [{ type: "text", text: params.scrubbedInput }],
+    };
+    assertOutboundPrivacyInvariant(req, sensitiveOriginals);
+
+    const interaction = await client.interactions.create(req);
+    const latencyMs = Math.max(1, Date.now() - startedAt);
+    const text = interaction.output_text?.trim();
+
+    return {
+      liveReached: true,
+      summaryText: text,
+      modelCallRecord: {
+        model: params.model,
+        purpose: params.purpose,
+        ok: true,
+        latencyMs,
+        ...(typeof interaction.usage?.total_input_tokens === "number"
+          ? { inputTokens: interaction.usage.total_input_tokens }
+          : {}),
+        ...(typeof interaction.usage?.total_output_tokens === "number"
+          ? { outputTokens: interaction.usage.total_output_tokens }
+          : {}),
+      },
+    };
+  } catch (err) {
+    if (err instanceof PrivacyInvariantViolationError) {
+      throw err;
+    }
+    const latencyMs = Math.max(1, Date.now() - startedAt);
+    const rawMsg = err instanceof Error ? err.message : "Subagent SDK error";
+    const safeMsg = resolvedKey ? rawMsg.split(resolvedKey).join("[REDACTED_KEY]") : rawMsg;
+
+    return {
+      liveReached: false,
+      modelCallRecord: {
+        model: params.model,
+        purpose: params.purpose,
+        ok: false,
+        latencyMs,
+        error: safeMsg.slice(0, 160),
+      },
+    };
   }
 }

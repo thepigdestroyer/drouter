@@ -187,6 +187,45 @@ describe("Subsystem 9: Model Weights Registry (Spec §2.6 & §4)", () => {
       if (!lowQuorumRes.released) {
         expect(lowQuorumRes.reason).toMatch(/quorum/i);
       }
+
+      // requiredQuorum: 0 bypass attempt must be rejected
+      const zeroQuorumBypass = providerWrapWeightKey({
+        providerId: "provider-alpha",
+        modelId: "frontier-closed-x1",
+        weightKeyHex: sampleWeightKeyHex,
+        nodeEvidence: {
+          chipId: "H200-TEE-005",
+          measurement: approvedMeasurement,
+          approvedMeasurement,
+          status: "full",
+          quorumSignatures: 0,
+          requiredQuorum: 0,
+          custodyX25519Pk: custodyKeys.x25519PublicKey,
+          custodyMlkemPk: custodyKeys.mlkemPublicKey,
+        },
+      });
+      expect(zeroQuorumBypass.released).toBe(false);
+
+      // Forged provider public key in release bundle must be rejected by custodyUnwrapWeightKey
+      const validRel = providerWrapWeightKey({
+        providerId: "provider-alpha",
+        modelId: "frontier-closed-x1",
+        weightKeyHex: sampleWeightKeyHex,
+        nodeEvidence: {
+          chipId: "H200-TEE-006",
+          measurement: approvedMeasurement,
+          approvedMeasurement,
+          status: "full",
+          quorumSignatures: 5,
+          requiredQuorum: 4,
+          custodyX25519Pk: custodyKeys.x25519PublicKey,
+          custodyMlkemPk: custodyKeys.mlkemPublicKey,
+        },
+      });
+      if (!validRel.released) throw new Error("Expected release");
+      expect(() =>
+        custodyUnwrapWeightKey(validRel, custodyKeys, "aa".repeat(32))
+      ).toThrow(/Provider public key does not match/i);
     });
   });
 });

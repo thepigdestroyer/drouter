@@ -68,16 +68,37 @@ function deriveTokenizerHash(modelId: string): string {
   return bytesToHex(sha256(utf8ToBytes(`drouter:tokenizer:v1:${modelId}:tiktoken-bpe`)));
 }
 
+function constantTimeEqualHex(a: string, b: string): boolean {
+  const cleanA = a.toLowerCase();
+  const cleanB = b.toLowerCase();
+  const maxLen = Math.max(cleanA.length, cleanB.length);
+  let diff = cleanA.length ^ cleanB.length;
+  for (let i = 0; i < maxLen; i++) {
+    const codeA = i < cleanA.length ? cleanA.charCodeAt(i) : 0;
+    const codeB = i < cleanB.length ? cleanB.charCodeAt(i) : 0;
+    diff |= codeA ^ codeB;
+  }
+  return diff === 0;
+}
+
+function validateShardHashes(shardHashesHex: string[]): string[] {
+  if (!Array.isArray(shardHashesHex) || shardHashesHex.length === 0) {
+    throw new Error("shardHashesHex must be a non-empty array of SHA-256 hex strings");
+  }
+  return shardHashesHex.map((h, idx) => {
+    if (typeof h !== "string" || !/^[0-9a-fA-F]{64}$/.test(h)) {
+      throw new Error(`Invalid SHA-256 hex digest at shard index ${idx}`);
+    }
+    return h.toLowerCase();
+  });
+}
+
 /**
  * Computes the binary Merkle root over per-shard SHA-256 hex digests.
  * Odd levels duplicate the trailing node before pairing.
  */
 export function computeShardMerkleRoot(shardHashesHex: string[]): string {
-  if (!Array.isArray(shardHashesHex) || shardHashesHex.length === 0) {
-    throw new Error("shardHashesHex must be a non-empty array of SHA-256 hex strings");
-  }
-
-  let level = shardHashesHex.map((h) => h.toLowerCase());
+  let level = validateShardHashes(shardHashesHex);
   while (level.length > 1) {
     const working = level.length % 2 === 1 ? [...level, level[level.length - 1]] : level;
     const nextLevel: string[] = [];
@@ -97,14 +118,11 @@ export function proveShardMembership(
   shardHashesHex: string[],
   shardIndex: number
 ): ShardMembershipProof {
-  if (!Array.isArray(shardHashesHex) || shardHashesHex.length === 0) {
-    throw new Error("shardHashesHex must be a non-empty array");
-  }
-  if (!Number.isInteger(shardIndex) || shardIndex < 0 || shardIndex >= shardHashesHex.length) {
-    throw new Error(`shardIndex ${shardIndex} out of bounds for ${shardHashesHex.length} shards`);
+  let level = validateShardHashes(shardHashesHex);
+  if (!Number.isInteger(shardIndex) || shardIndex < 0 || shardIndex >= level.length) {
+    throw new Error(`shardIndex ${shardIndex} out of bounds for ${level.length} shards`);
   }
 
-  let level = shardHashesHex.map((h) => h.toLowerCase());
   const shardHash = level[shardIndex];
   const proof: MerkleProofStep[] = [];
   let idx = shardIndex;
@@ -146,21 +164,28 @@ export function verifyShardBeforeLoad(
     if (!shardHashHex || !committedRootHex || !proof || !Array.isArray(proof.proof)) {
       return false;
     }
+    if (!/^[0-9a-fA-F]{64}$/.test(committedRootHex) || !/^[0-9a-fA-F]{64}$/.test(proof.root)) {
+      return false;
+    }
     const normalizedCommitted = committedRootHex.toLowerCase();
     const normalizedProofRoot = proof.root.toLowerCase();
-    if (normalizedProofRoot !== normalizedCommitted) {
+    if (!constantTimeEqualHex(normalizedProofRoot, normalizedCommitted)) {
       return false;
     }
 
     let current = shardHashHex.toLowerCase();
-    if (current.length !== 64) {
+    if (!/^[0-9a-f]{64}$/.test(current)) {
       return false;
     }
-    // Validate hex format
     hexToBytes(current);
 
     for (const step of proof.proof) {
-      if (!step || (step.side !== "left" && step.side !== "right") || typeof step.hash !== "string" || step.hash.length !== 64) {
+      if (
+        !step ||
+        (step.side !== "left" && step.side !== "right") ||
+        typeof step.hash !== "string" ||
+        !/^[0-9a-fA-F]{64}$/.test(step.hash)
+      ) {
         return false;
       }
       if (step.side === "left") {
@@ -170,7 +195,7 @@ export function verifyShardBeforeLoad(
       }
     }
 
-    return current === normalizedCommitted;
+    return constantTimeEqualHex(current, normalizedCommitted);
   } catch {
     return false;
   }

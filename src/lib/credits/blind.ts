@@ -11,6 +11,28 @@ const TWO = BigInt(2);
 const THREE = BigInt(3);
 const RSA_E = BigInt(65537);
 
+/**
+ * Distinct coprime public exponents per credit denomination (1 -> 65537, 5 -> 65539, 20 -> 65543)
+ * so an attacker cannot blind a high-denomination token and request a low-denomination signature.
+ */
+const DENOMINATION_EXPONENTS: Record<number, bigint> = {
+  1: BigInt(65537),
+  5: BigInt(65539),
+  20: BigInt(65543),
+};
+
+const ALL_DENOMINATION_EXPONENTS = [BigInt(65537), BigInt(65539), BigInt(65543)];
+
+function exponentForDenomination(denomination: number, fallbackE?: string): bigint {
+  if (!CREDIT_DENOMINATIONS.includes(denomination)) {
+    throw new Error(`Unsupported credit denomination: ${denomination}`);
+  }
+  if (denomination === 1 && fallbackE) {
+    return hexToBigInt(fallbackE);
+  }
+  return DENOMINATION_EXPONENTS[denomination] ?? RSA_E;
+}
+
 const SMALL_PRIMES = [
   3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73,
   79, 83, 89, 97, 101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157,
@@ -20,12 +42,21 @@ const SMALL_PRIMES = [
 
 const MR_BASES = [2, 3, 5, 7, 11, 13, 17, 19].map((b) => BigInt(b));
 
-const keyCache = new Map<string, { n: string; e: string; d: string }>();
+const keyCache = new Map<
+  string,
+  { n: string; e: string; d: string; dByDenom: Record<number, string> }
+>();
 
 function cleanHex(hex: string): string {
+  if (typeof hex !== "string") {
+    throw new Error("Expected hex string");
+  }
   const trimmed = hex.trim().toLowerCase();
   const withoutPrefix = trimmed.startsWith("0x") ? trimmed.slice(2) : trimmed;
   if (!withoutPrefix) return "0";
+  if (!/^[0-9a-f]+$/.test(withoutPrefix)) {
+    throw new Error("Invalid hex string");
+  }
   return withoutPrefix.length % 2 === 1 ? "0" + withoutPrefix : withoutPrefix;
 }
 
@@ -130,6 +161,13 @@ function isProbablePrime(n: bigint): boolean {
   return true;
 }
 
+function isCoprimeToAllExponents(pMinusOne: bigint): boolean {
+  for (const exp of ALL_DENOMINATION_EXPONENTS) {
+    if (pMinusOne % exp === ZERO) return false;
+  }
+  return true;
+}
+
 function deriveDeterministicPrime(seedHex: string, label: string): bigint {
   const ikm = utf8ToBytes("drouter/v1/issuer-seed:" + cleanHex(seedHex));
   const info = utf8ToBytes("drouter/v1/rsa-prime-512:" + label);
@@ -141,17 +179,18 @@ function deriveDeterministicPrime(seedHex: string, label: string): bigint {
 
   let candidate = bytesToBigInt(candidateBytes);
   while (true) {
-    if ((candidate - ONE) % RSA_E !== ZERO && isProbablePrime(candidate)) {
+    if (isCoprimeToAllExponents(candidate - ONE) && isProbablePrime(candidate)) {
       return candidate;
     }
     candidate += TWO;
   }
 }
 
-export function deriveIssuerKey(seedHex: string): {
+function deriveFullIssuerKey(seedHex: string): {
   n: string;
   e: string;
   d: string;
+  dByDenom: Record<number, string>;
 } {
   const normalizedSeed = cleanHex(seedHex);
   const cached = keyCache.get(normalizedSeed);
@@ -161,7 +200,7 @@ export function deriveIssuerKey(seedHex: string): {
   let q = deriveDeterministicPrime(normalizedSeed, "q");
   while (q === p) {
     q += TWO;
-    while ((q - ONE) % RSA_E === ZERO || !isProbablePrime(q)) {
+    while (!isCoprimeToAllExponents(q - ONE) || !isProbablePrime(q)) {
       q += TWO;
     }
   }
@@ -169,14 +208,29 @@ export function deriveIssuerKey(seedHex: string): {
   const n = p * q;
   const phi = (p - ONE) * (q - ONE);
   const d = modInverse(RSA_E, phi);
+  const dByDenom: Record<number, string> = {};
+  for (const denom of CREDIT_DENOMINATIONS) {
+    const exp = exponentForDenomination(denom);
+    dByDenom[denom] = bigIntToHex(modInverse(exp, phi));
+  }
 
   const key = {
     n: bigIntToHex(n),
     e: bigIntToHex(RSA_E),
     d: bigIntToHex(d),
+    dByDenom,
   };
   keyCache.set(normalizedSeed, key);
   return key;
+}
+
+export function deriveIssuerKey(seedHex: string): {
+  n: string;
+  e: string;
+  d: string;
+} {
+  const { n, e, d } = deriveFullIssuerKey(seedHex);
+  return { n, e, d };
 }
 
 export function getPublicKey(seedHex: string): {
@@ -184,7 +238,7 @@ export function getPublicKey(seedHex: string): {
   e: string;
   denominations: number[];
 } {
-  const { n, e } = deriveIssuerKey(seedHex);
+  const { n, e } = deriveFullIssuerKey(seedHex);
   return {
     n,
     e,
@@ -192,35 +246,50 @@ export function getPublicKey(seedHex: string): {
   };
 }
 
+/**
+ * Full-Domain Hash (FDH) expanding over the full modulus byte length of `n`
+ * using HKDF-SHA-256 and rejection/gcd checks so `m` is uniform in Z_n^* (coprime to n, 1 < m < n).
+ */
 export function hashTokenMessage(
   tokenHex: string,
   denomination: number,
   nHex: string
 ): bigint {
-  const n = hexToBigInt(nHex);
+  if (!CREDIT_DENOMINATIONS.includes(denomination)) {
+    throw new Error(`Unsupported credit denomination: ${denomination}`);
+  }
+  const cleanN = cleanHex(nHex);
+  const n = hexToBigInt(cleanN);
+  if (n <= THREE) {
+    throw new Error("Invalid RSA modulus n");
+  }
+  const modulusBytes = Math.max(64, Math.ceil(cleanN.length / 2));
   const normalizedToken = cleanHex(tokenHex);
   const ikm = utf8ToBytes(`${normalizedToken}:${denomination}`);
-  const info = utf8ToBytes("drouter/v1/credit-fdh-512");
-  const digest = hkdf(sha256, ikm, undefined, info, 64);
-  // Ensure top bit is set so it is a 512-bit integer strictly < 1024-bit n.
-  const buf = new Uint8Array(digest);
-  buf[0] |= 0x80;
-  let m = bytesToBigInt(buf) % n;
+  const salt = utf8ToBytes(`drouter/v1/credit-fdh-salt:${cleanN}`);
+  const info = utf8ToBytes(`drouter/v1/credit-fdh-full:${denomination}`);
+  const digest = hkdf(sha256, ikm, salt, info, modulusBytes);
+
+  let m = bytesToBigInt(digest) % n;
   if (m <= ONE) {
-    m += TWO;
+    m = TWO;
+  }
+  while (gcd(m, n) !== ONE) {
+    m = (m + ONE) % n;
+    if (m <= ONE) m = TWO;
   }
   return m;
 }
 
-function randomBlindingFactorHex(): string {
-  const bytes = new Uint8Array(64);
-  if (typeof globalThis.crypto !== "undefined" && globalThis.crypto.getRandomValues) {
-    globalThis.crypto.getRandomValues(bytes);
-  } else {
-    for (let i = 0; i < bytes.length; i++) {
-      bytes[i] = Math.floor(Math.random() * 256);
-    }
+function randomBlindingFactorHex(byteLength = 128): string {
+  if (
+    typeof globalThis.crypto === "undefined" ||
+    typeof globalThis.crypto.getRandomValues !== "function"
+  ) {
+    throw new Error("CSPRNG unavailable: crypto.getRandomValues is required for blinding");
   }
+  const bytes = new Uint8Array(byteLength);
+  globalThis.crypto.getRandomValues(bytes);
   bytes[0] |= 0x01;
   return bytesToHex(bytes);
 }
@@ -231,11 +300,18 @@ export function blindToken(
   pub: { n: string; e: string },
   rHex?: string
 ): { blindedHex: string; rHex: string } {
+  if (!CREDIT_DENOMINATIONS.includes(denomination)) {
+    throw new Error(`Unsupported credit denomination: ${denomination}`);
+  }
   const n = hexToBigInt(pub.n);
-  const e = hexToBigInt(pub.e);
+  if (n <= THREE) {
+    throw new Error("Invalid RSA modulus n");
+  }
+  const e = exponentForDenomination(denomination, pub.e);
   const m = hashTokenMessage(tokenHex, denomination, pub.n);
 
-  let chosenRHex = rHex ? cleanHex(rHex) : randomBlindingFactorHex();
+  const modulusBytes = Math.max(64, Math.ceil(cleanHex(pub.n).length / 2));
+  let chosenRHex = rHex ? cleanHex(rHex) : randomBlindingFactorHex(modulusBytes);
   let r = hexToBigInt(chosenRHex) % n;
   if (r <= ONE) {
     r = THREE;
@@ -263,12 +339,13 @@ export function signBlinded(
   if (!CREDIT_DENOMINATIONS.includes(denomination)) {
     throw new Error(`Unsupported credit denomination: ${denomination}`);
   }
-  const key = deriveIssuerKey(seedHex);
+  const key = deriveFullIssuerKey(seedHex);
   const n = hexToBigInt(key.n);
-  const d = hexToBigInt(key.d);
+  const dHex = key.dByDenom[denomination] ?? key.d;
+  const d = hexToBigInt(dHex);
   const mPrime = hexToBigInt(blindedHex);
-  if (mPrime <= ZERO || mPrime >= n) {
-    throw new Error("Blinded message out of range");
+  if (mPrime <= ONE || mPrime >= n || gcd(mPrime, n) !== ONE) {
+    throw new Error("Blinded message out of range or not coprime to modulus");
   }
   const sPrime = modPow(mPrime, d, n);
   return bigIntToHex(sPrime);
@@ -281,7 +358,13 @@ export function unblindSignature(
 ): string {
   const n = hexToBigInt(pub.n);
   const sPrime = hexToBigInt(blindSigHex);
+  if (sPrime <= ZERO || sPrime >= n) {
+    throw new Error("Blind signature out of range");
+  }
   const r = hexToBigInt(rHex) % n;
+  if (r <= ONE || gcd(r, n) !== ONE) {
+    throw new Error("Blinding factor r is not invertible modulo n");
+  }
   const rInv = modInverse(r, n);
   const s = (sPrime * rInv) % n;
   return bigIntToHex(s);
@@ -295,9 +378,9 @@ export function verifyTokenSignature(
     if (!token || !token.token || !token.signature) return false;
     if (!CREDIT_DENOMINATIONS.includes(token.denomination)) return false;
     const n = hexToBigInt(pub.n);
-    const e = hexToBigInt(pub.e);
+    const e = exponentForDenomination(token.denomination, pub.e);
     const s = hexToBigInt(token.signature);
-    if (s <= ZERO || s >= n) return false;
+    if (s <= ONE || s >= n) return false;
 
     const expected = hashTokenMessage(token.token, token.denomination, pub.n);
     const actual = modPow(s, e, n);

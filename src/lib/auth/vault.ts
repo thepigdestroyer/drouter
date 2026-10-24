@@ -8,8 +8,15 @@ import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 export const VAULT_STORAGE_KEY = "drouter.zkvault.v1";
 
 /**
- * Built-in 256-word high-entropy wordlist (8 bits of entropy per word).
- * A 6-word passphrase carries 48 bits of pure random selection before PBKDF2-SHA512 stretching.
+ * OWASP 2024+ recommended minimum iteration count for PBKDF2-HMAC-SHA-512.
+ */
+export const VAULT_PBKDF2_ITERATIONS = 210_000;
+
+/**
+ * Built-in 256-word wordlist (8 bits of entropy per word).
+ * Note: A 6-word passphrase from a 256-word list carries 48 bits of raw selection entropy
+ * (8 bits/word), which is stretched with 210,000 rounds of PBKDF2-HMAC-SHA-512.
+ * Use 10+ words (80+ bits) for high-value offline archives.
  */
 export const VAULT_WORDLIST: readonly string[] = [
   "abacus", "admiral", "agate", "alchemy", "almanac", "amber", "amethyst", "anchor",
@@ -146,17 +153,33 @@ function normalizeHex(hex: string): string {
   return clean.startsWith("0x") || clean.startsWith("0X") ? clean.slice(2) : clean;
 }
 
+function constantTimeEqualAscii(a: string, b: string): boolean {
+  const lenA = a.length;
+  const lenB = b.length;
+  const maxLen = Math.max(lenA, lenB);
+  let diff = lenA ^ lenB;
+  for (let i = 0; i < maxLen; i++) {
+    const codeA = i < lenA ? a.charCodeAt(i) : 0;
+    const codeB = i < lenB ? b.charCodeAt(i) : 0;
+    diff |= codeA ^ codeB;
+  }
+  return diff === 0;
+}
+
 function deriveVaultIdFromVaultKey(vaultKeyBytes: Uint8Array): string {
-  const digest = sha256(
-    hkdf(sha384, vaultKeyBytes, VAULT_PBKDF2_SALT, utf8ToBytes("drouter/v1/vault-id"), 32),
-  );
+  const derived = hkdf(sha384, vaultKeyBytes, VAULT_PBKDF2_SALT, utf8ToBytes("drouter/v1/vault-id"), 32);
+  const digest = sha256(derived);
+  derived.fill(0);
   return `zk-${bytesToHex(digest).slice(0, 10)}`;
 }
 
 /**
- * Generates a high-entropy human-memorable passphrase using CSPRNG (`crypto.getRandomValues`).
+ * Generates a human-memorable passphrase using CSPRNG (`crypto.getRandomValues`).
  */
 export function generatePassphrase(wordCount = 6): string {
+  if (!Number.isFinite(wordCount)) {
+    throw new Error("wordCount must be a finite number");
+  }
   const count = Math.max(4, Math.min(24, Math.floor(wordCount)));
   const randomBytes = new Uint8Array(count);
   globalThis.crypto.getRandomValues(randomBytes);
@@ -164,21 +187,31 @@ export function generatePassphrase(wordCount = 6): string {
   for (let i = 0; i < count; i++) {
     words.push(VAULT_WORDLIST[randomBytes[i] % VAULT_WORDLIST.length]);
   }
+  randomBytes.fill(0);
   return words.join(" ");
 }
 
 /**
- * Deterministically derives a Zero-Knowledge Client Vault identity from a passphrase.
- * Uses PBKDF2-HMAC-SHA-512 (10,000 rounds) followed by HKDF-SHA-384 subkey expansion.
+ * Deterministically derives a client-side vault identity from a passphrase.
+ * Note: This is client-side PBKDF2/HKDF key derivation, not a zero-knowledge proof system.
+ * Uses PBKDF2-HMAC-SHA-512 (210,000 rounds by default per OWASP guidance) followed by HKDF-SHA-384 subkey expansion.
  */
-export function deriveVaultIdentity(passphrase: string): VaultIdentity {
+export function deriveVaultIdentity(
+  passphrase: string,
+  options?: { iterations?: number },
+): VaultIdentity {
   const normalized = normalizePassphrase(passphrase);
   if (!normalized) {
     throw new Error("Passphrase cannot be empty");
   }
 
+  const iterations =
+    options?.iterations !== undefined
+      ? Math.max(10_000, Math.floor(options.iterations))
+      : VAULT_PBKDF2_ITERATIONS;
+
   const masterSeed = pbkdf2(sha512, utf8ToBytes(normalized), VAULT_PBKDF2_SALT, {
-    c: 10000,
+    c: iterations,
     dkLen: 64,
   });
 
@@ -210,13 +243,20 @@ export function deriveVaultIdentity(passphrase: string): VaultIdentity {
 
   const vaultId = deriveVaultIdFromVaultKey(vaultKey);
 
-  return {
+  const result: VaultIdentity = {
     vaultId,
     ed25519PublicKeyHex: bytesToHex(ed25519PublicKey),
     ed25519PrivateKeyHex: bytesToHex(ed25519PrivateKey),
     x25519PublicKeyHex: bytesToHex(x25519PublicKey),
     vaultKeyHex: bytesToHex(vaultKey),
   };
+
+  masterSeed.fill(0);
+  ed25519PrivateKey.fill(0);
+  x25519PrivateKey.fill(0);
+  vaultKey.fill(0);
+
+  return result;
 }
 
 /**
@@ -232,30 +272,38 @@ export function sealVaultBundle(
   }
 
   const keyBytes = hexToBytes(cleanKeyHex);
-  const vaultId = deriveVaultIdFromVaultKey(keyBytes);
-  const nonce = new Uint8Array(12);
-  globalThis.crypto.getRandomValues(nonce);
+  try {
+    const vaultId = deriveVaultIdFromVaultKey(keyBytes);
+    const nonce = new Uint8Array(12);
+    globalThis.crypto.getRandomValues(nonce);
 
-  const sanitizedPayload: VaultPayload = {
-    customScrubTerms: Array.from(
-      new Set(
-        (payload.customScrubTerms ?? [])
-          .map((t) => t.trim())
-          .filter((t) => t.length > 0),
+    const sanitizedPayload: VaultPayload = {
+      customScrubTerms: Array.from(
+        new Set(
+          (payload.customScrubTerms ?? [])
+            .map((t) => String(t).trim())
+            .filter((t) => t.length > 0),
+        ),
       ),
-    ),
-    notes: payload.notes ?? "",
-    createdAt: typeof payload.createdAt === "number" ? payload.createdAt : Date.now(),
-  };
+      notes: payload.notes ?? "",
+      createdAt:
+        typeof payload.createdAt === "number" && Number.isFinite(payload.createdAt)
+          ? payload.createdAt
+          : Date.now(),
+    };
 
-  const plaintext = utf8ToBytes(JSON.stringify(sanitizedPayload));
-  const ciphertext = gcm(keyBytes, nonce, VAULT_BUNDLE_AAD).encrypt(plaintext);
+    const plaintext = utf8ToBytes(JSON.stringify(sanitizedPayload));
+    const ciphertext = gcm(keyBytes, nonce, VAULT_BUNDLE_AAD).encrypt(plaintext);
+    plaintext.fill(0);
 
-  return {
-    nonceHex: bytesToHex(nonce),
-    ciphertextHex: bytesToHex(ciphertext),
-    vaultId,
-  };
+    return {
+      nonceHex: bytesToHex(nonce),
+      ciphertextHex: bytesToHex(ciphertext),
+      vaultId,
+    };
+  } finally {
+    keyBytes.fill(0);
+  }
 }
 
 /**
@@ -271,12 +319,22 @@ export function openVaultBundle(
     throw new Error("Invalid 256-bit vault key hex");
   }
 
+  const keyBytes = hexToBytes(cleanKeyHex);
   try {
-    const keyBytes = hexToBytes(cleanKeyHex);
-    const nonce = hexToBytes(normalizeHex(bundle.nonceHex));
-    const ciphertext = hexToBytes(normalizeHex(bundle.ciphertextHex));
+    const cleanNonceHex = normalizeHex(bundle?.nonceHex ?? "");
+    const cleanCipherHex = normalizeHex(bundle?.ciphertextHex ?? "");
+    if (cleanNonceHex.length !== 24 || !/^[0-9a-fA-F]+$/.test(cleanNonceHex)) {
+      throw new Error("Invalid 96-bit GCM nonce");
+    }
+    if (cleanCipherHex.length < 32 || cleanCipherHex.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(cleanCipherHex)) {
+      throw new Error("Invalid ciphertext hex");
+    }
+    const nonce = hexToBytes(cleanNonceHex);
+    const ciphertext = hexToBytes(cleanCipherHex);
     const plaintextBytes = gcm(keyBytes, nonce, VAULT_BUNDLE_AAD).decrypt(ciphertext);
-    const parsed = JSON.parse(new TextDecoder().decode(plaintextBytes)) as VaultPayload;
+    const decoded = new TextDecoder().decode(plaintextBytes);
+    plaintextBytes.fill(0);
+    const parsed = JSON.parse(decoded) as VaultPayload;
     if (!parsed || !Array.isArray(parsed.customScrubTerms)) {
       throw new Error("Malformed vault payload");
     }
@@ -286,7 +344,9 @@ export function openVaultBundle(
       createdAt: typeof parsed.createdAt === "number" ? parsed.createdAt : Date.now(),
     };
   } catch {
-    throw new Error("Failed to decrypt ZK Vault: wrong passphrase or tampered ciphertext");
+    throw new Error("Failed to decrypt Client Vault: wrong passphrase or tampered ciphertext");
+  } finally {
+    keyBytes.fill(0);
   }
 }
 
@@ -326,7 +386,7 @@ function persistSessionIfConfigured(session: VaultSession): void {
 }
 
 /**
- * Returns the currently unlocked in-memory ZK Vault session, or null if locked.
+ * Returns the currently unlocked in-memory Client Vault session, or null if locked.
  */
 export function getCurrentVaultSession(): VaultSession | null {
   return activeSession;
@@ -359,7 +419,7 @@ export function getPersistedVaultMetadata(): {
 
 /**
  * Derives keys in-browser from `passphrase` and unlocks the session.
- * If an encrypted vault matching this identity exists in local storage, it is decrypted automatically.
+ * If an encrypted vault matching this identity exists in local storage, it is verified and decrypted automatically.
  */
 export function unlockVaultWithPassphrase(
   passphrase: string,
@@ -380,15 +440,36 @@ export function unlockVaultWithPassphrase(
         parsed &&
         parsed.nonceHex &&
         parsed.ciphertextHex &&
-        parsed.vaultId === identity.vaultId
+        typeof parsed.vaultId === "string" &&
+        constantTimeEqualAscii(parsed.vaultId, identity.vaultId)
       ) {
-        payload = openVaultBundle(
-          { nonceHex: parsed.nonceHex, ciphertextHex: parsed.ciphertextHex },
-          identity.vaultKeyHex,
-        );
+        const cleanPubKey = normalizeHex(parsed.ed25519PublicKeyHex ?? "").toLowerCase();
+        if (
+          cleanPubKey &&
+          parsed.signatureHex &&
+          constantTimeEqualAscii(cleanPubKey, identity.ed25519PublicKeyHex.toLowerCase())
+        ) {
+          const msg = buildCanonicalExportMessage(
+            parsed.vaultId,
+            parsed.ed25519PublicKeyHex,
+            parsed.nonceHex,
+            parsed.ciphertextHex,
+          );
+          const sigOk = ed25519.verify(
+            hexToBytes(normalizeHex(parsed.signatureHex)),
+            msg,
+            hexToBytes(identity.ed25519PublicKeyHex),
+          );
+          if (sigOk) {
+            payload = openVaultBundle(
+              { nonceHex: parsed.nonceHex, ciphertextHex: parsed.ciphertextHex },
+              identity.vaultKeyHex,
+            );
+          }
+        }
       }
     } catch {
-      // If stored vault belongs to a different passphrase, start fresh session
+      // If stored vault belongs to a different passphrase or is corrupted, start fresh session
     }
   }
 
@@ -414,7 +495,7 @@ export function updateVaultPayload(
   updater: Partial<VaultPayload> | ((prev: VaultPayload) => VaultPayload),
 ): VaultSession {
   if (!activeSession) {
-    throw new Error("ZK Vault is locked");
+    throw new Error("Client Vault is locked");
   }
   const nextPayload =
     typeof updater === "function"
@@ -448,7 +529,7 @@ export function updateVaultPayload(
  */
 export function setVaultPersistenceMode(persistEncrypted: boolean): VaultSession {
   if (!activeSession) {
-    throw new Error("ZK Vault is locked");
+    throw new Error("Client Vault is locked");
   }
   activeSession = {
     ...activeSession,
@@ -463,10 +544,19 @@ export function setVaultPersistenceMode(persistEncrypted: boolean): VaultSession
   return activeSession;
 }
 
+function scrubActiveSessionInPlace(): void {
+  if (!activeSession) return;
+  activeSession.ed25519PrivateKeyHex = "0".repeat(64);
+  activeSession.vaultKeyHex = "0".repeat(64);
+  activeSession.payload.customScrubTerms = [];
+  activeSession.payload.notes = "";
+}
+
 /**
  * Locks the in-memory vault session and zeroes the RAM reference.
  */
 export function lockVault(): void {
+  scrubActiveSessionInPlace();
   activeSession = null;
   notifyListeners();
 }
@@ -475,6 +565,7 @@ export function lockVault(): void {
  * Cryptographically wipes both the in-memory session and any encrypted bundle in localStorage.
  */
 export function wipeLocalVault(): void {
+  scrubActiveSessionInPlace();
   activeSession = null;
   removeStorage(VAULT_STORAGE_KEY);
   notifyListeners();
@@ -485,7 +576,7 @@ export function wipeLocalVault(): void {
  */
 export function exportEncryptedVaultJson(): string {
   if (!activeSession) {
-    throw new Error("Cannot export: ZK Vault is currently locked");
+    throw new Error("Cannot export: Client Vault is currently locked");
   }
   const sealed = sealVaultBundle(activeSession.payload, activeSession.vaultKeyHex);
   const msg = buildCanonicalExportMessage(
@@ -494,7 +585,9 @@ export function exportEncryptedVaultJson(): string {
     sealed.nonceHex,
     sealed.ciphertextHex,
   );
-  const sig = ed25519.sign(msg, hexToBytes(activeSession.ed25519PrivateKeyHex));
+  const skBytes = hexToBytes(activeSession.ed25519PrivateKeyHex);
+  const sig = ed25519.sign(msg, skBytes);
+  skBytes.fill(0);
 
   const exported: ExportedVaultFile = {
     format: "drouter-zk-vault-v1",
@@ -510,8 +603,9 @@ export function exportEncryptedVaultJson(): string {
 }
 
 /**
- * Imports and decrypts an `.drouter-vault.json` string using `passphrase`, verifying both
- * the Ed25519 signature and the AES-256-GCM authentication tag.
+ * Imports and decrypts an `.drouter-vault.json` string using `passphrase`, verifying that
+ * the embedded Ed25519 public key matches the derived identity, the Ed25519 signature is valid,
+ * and the AES-256-GCM authentication tag passes.
  */
 export function importEncryptedVaultJson(
   jsonStr: string,
@@ -530,31 +624,44 @@ export function importEncryptedVaultJson(
     parsed.format !== "drouter-zk-vault-v1" ||
     typeof parsed.nonceHex !== "string" ||
     typeof parsed.ciphertextHex !== "string" ||
-    typeof parsed.vaultId !== "string"
+    typeof parsed.vaultId !== "string" ||
+    typeof parsed.ed25519PublicKeyHex !== "string" ||
+    typeof parsed.signatureHex !== "string" ||
+    !parsed.ed25519PublicKeyHex.trim() ||
+    !parsed.signatureHex.trim()
   ) {
     throw new Error("Unrecognized vault file schema");
   }
 
   const identity = deriveVaultIdentity(passphrase);
-  if (parsed.vaultId !== identity.vaultId) {
-    throw new Error("Failed to decrypt ZK Vault: passphrase does not match vaultId");
+  if (!constantTimeEqualAscii(parsed.vaultId, identity.vaultId)) {
+    throw new Error("Failed to decrypt Client Vault: passphrase does not match vaultId");
   }
 
-  if (parsed.signatureHex && parsed.ed25519PublicKeyHex) {
-    const msg = buildCanonicalExportMessage(
-      parsed.vaultId,
-      parsed.ed25519PublicKeyHex,
-      parsed.nonceHex,
-      parsed.ciphertextHex,
-    );
-    const validSig = ed25519.verify(
-      hexToBytes(normalizeHex(parsed.signatureHex)),
-      msg,
-      hexToBytes(normalizeHex(parsed.ed25519PublicKeyHex)),
-    );
-    if (!validSig) {
-      throw new Error("Vault signature verification failed");
+  const filePubKeyHex = normalizeHex(parsed.ed25519PublicKeyHex).toLowerCase();
+  const expectedPubKeyHex = identity.ed25519PublicKeyHex.toLowerCase();
+  if (!constantTimeEqualAscii(filePubKeyHex, expectedPubKeyHex)) {
+    throw new Error("Vault public key does not match derived passphrase identity");
+  }
+
+  const msg = buildCanonicalExportMessage(
+    parsed.vaultId,
+    parsed.ed25519PublicKeyHex,
+    parsed.nonceHex,
+    parsed.ciphertextHex,
+  );
+  let validSig = false;
+  try {
+    const sigBytes = hexToBytes(normalizeHex(parsed.signatureHex));
+    const pubBytes = hexToBytes(expectedPubKeyHex);
+    if (sigBytes.byteLength === 64 && pubBytes.byteLength === 32) {
+      validSig = ed25519.verify(sigBytes, msg, pubBytes);
     }
+  } catch {
+    validSig = false;
+  }
+  if (!validSig) {
+    throw new Error("Vault signature verification failed");
   }
 
   const payload = openVaultBundle(

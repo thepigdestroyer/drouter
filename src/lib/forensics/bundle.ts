@@ -38,18 +38,44 @@ export interface CreateForensicProofBundleInput {
   clientSecretKey?: Uint8Array | string;
 }
 
+export interface VerifyForensicProofOptions {
+  /** Pinned/expected 32-byte Ed25519 client public key (hex). Required to prove origin rather than mere self-signed integrity. */
+  expectedClientPublicKeyHex?: string;
+  /** Pinned/expected 32-byte Ed25519 enclave signer public key for the embedded PopReceipt (hex). */
+  expectedPopSignerPublicKeyHex?: string;
+  /** When true, `valid` is false unless `expectedClientPublicKeyHex` is provided and matches. */
+  requirePinnedOrigin?: boolean;
+}
+
 export interface ForensicProofVerificationResult {
   valid: boolean;
   digestMatches: boolean;
   clientSignatureValid: boolean;
   popReceiptSignatureValid: boolean | null;
   allChecksPassed: boolean;
+  /** True only when `expectedClientPublicKeyHex` was supplied and matched `bundle.clientPublicKeyHex`. */
+  originVerified: boolean;
+  /** True only when `expectedPopSignerPublicKeyHex` was supplied and matched `bundle.popReceipt.signerPublicKey` (null if no popReceipt). */
+  popOriginVerified: boolean | null;
   reasons: string[];
 }
 
 function normalizeHex(hex: string): string {
   const trimmed = hex.trim();
   return trimmed.startsWith("0x") || trimmed.startsWith("0X") ? trimmed.slice(2) : trimmed;
+}
+
+function constantTimeEqualHex(a: string, b: string): boolean {
+  const cleanA = normalizeHex(a).toLowerCase();
+  const cleanB = normalizeHex(b).toLowerCase();
+  const maxLen = Math.max(cleanA.length, cleanB.length);
+  let diff = cleanA.length ^ cleanB.length;
+  for (let i = 0; i < maxLen; i++) {
+    const codeA = i < cleanA.length ? cleanA.charCodeAt(i) : 0;
+    const codeB = i < cleanB.length ? cleanB.charCodeAt(i) : 0;
+    diff |= codeA ^ codeB;
+  }
+  return diff === 0;
 }
 
 /**
@@ -163,8 +189,12 @@ export function signForensicPopReceipt(
 
 /**
  * Verify a PopReceipt's Ed25519 signature offline against its canonical fields.
+ * If `expectedSignerPublicKeyHex` is provided, also enforces that `receipt.signerPublicKey` matches the pinned enclave key.
  */
-export function verifyPopReceiptSignatureOffline(receipt: PopReceipt): boolean {
+export function verifyPopReceiptSignatureOffline(
+  receipt: PopReceipt,
+  expectedSignerPublicKeyHex?: string
+): boolean {
   try {
     if (!receipt || typeof receipt !== "object") return false;
     if (receipt.verified !== true) return false;
@@ -181,6 +211,13 @@ export function verifyPopReceiptSignatureOffline(receipt: PopReceipt): boolean {
       !receipt.signerPublicKey ||
       typeof receipt.time !== "number" ||
       !Number.isFinite(receipt.time)
+    ) {
+      return false;
+    }
+
+    if (
+      expectedSignerPublicKeyHex !== undefined &&
+      !constantTimeEqualHex(receipt.signerPublicKey, expectedSignerPublicKeyHex)
     ) {
       return false;
     }
@@ -289,12 +326,21 @@ export function createForensicProofBundle(
 /**
  * Standalone offline verifier for `.drouter-proof.json` bundles.
  * Recomputes the canonical SHA-256 digest, verifies the client's Ed25519 signature,
- * verifies the embedded PopReceipt Ed25519 signature (if present), and checks C1–C7.
+ * verifies the embedded PopReceipt Ed25519 signature (if present), and checks C1-C7.
+ *
+ * Security note: Because a bundle carries its own `clientPublicKeyHex` and `popReceipt.signerPublicKey`,
+ * signature verification without pinned keys proves only self-consistency, not origin (`originVerified: false`).
+ * Pass `options.expectedClientPublicKeyHex` (and `options.expectedPopSignerPublicKeyHex`) to verify origin.
  */
 export function verifyForensicProofBundleOffline(
-  bundle: ForensicProofBundle
+  bundle: ForensicProofBundle,
+  options?: VerifyForensicProofOptions | string
 ): ForensicProofVerificationResult {
   const reasons: string[] = [];
+  const opts: VerifyForensicProofOptions =
+    typeof options === "string"
+      ? { expectedClientPublicKeyHex: options }
+      : (options ?? {});
 
   if (!bundle || typeof bundle !== "object") {
     return {
@@ -303,6 +349,8 @@ export function verifyForensicProofBundleOffline(
       clientSignatureValid: false,
       popReceiptSignatureValid: null,
       allChecksPassed: false,
+      originVerified: false,
+      popOriginVerified: null,
       reasons: ["Bundle is not a valid object"],
     };
   }
@@ -335,7 +383,8 @@ export function verifyForensicProofBundleOffline(
     });
     digestMatches =
       typeof bundle.bundleDigestHex === "string" &&
-      recomputedDigestHex.toLowerCase() === normalizeHex(bundle.bundleDigestHex).toLowerCase();
+      recomputedDigestHex.length === 64 &&
+      constantTimeEqualHex(recomputedDigestHex, bundle.bundleDigestHex);
   } catch {
     digestMatches = false;
   }
@@ -363,7 +412,22 @@ export function verifyForensicProofBundleOffline(
     reasons.push("Client Ed25519 signature verification failed");
   }
 
-  // 3. Verify all C1–C7 checks are present and passed
+  // 2b. Check pinned client public key for origin authentication
+  let originVerified = false;
+  if (typeof opts.expectedClientPublicKeyHex === "string" && opts.expectedClientPublicKeyHex.trim()) {
+    const keyMatches =
+      typeof bundle.clientPublicKeyHex === "string" &&
+      constantTimeEqualHex(bundle.clientPublicKeyHex, opts.expectedClientPublicKeyHex);
+    if (!keyMatches) {
+      reasons.push("Client public key does not match pinned expectedClientPublicKeyHex");
+    } else if (clientSignatureValid) {
+      originVerified = true;
+    }
+  } else if (opts.requirePinnedOrigin) {
+    reasons.push("Origin not verified: expectedClientPublicKeyHex is required when requirePinnedOrigin is true");
+  }
+
+  // 3. Verify all C1-C7 checks are present and passed
   let allChecksPassed = false;
   if (Array.isArray(bundle.checks) && bundle.checks.length >= REQUIRED_CHECK_IDS.length) {
     const checkMap = new Map<string, CheckResult>();
@@ -388,15 +452,38 @@ export function verifyForensicProofBundleOffline(
       );
     }
   } else {
-    reasons.push("Verification checklist is incomplete (requires C1–C7)");
+    reasons.push("Verification checklist is incomplete (requires C1-C7)");
   }
 
-  // 4. Verify optional PopReceipt Ed25519 signature
+  // 4. Verify optional PopReceipt Ed25519 signature and nodeId binding
   let popReceiptSignatureValid: boolean | null = null;
+  let popOriginVerified: boolean | null = null;
   if (bundle.popReceipt !== undefined && bundle.popReceipt !== null) {
-    popReceiptSignatureValid = verifyPopReceiptSignatureOffline(bundle.popReceipt);
-    if (!popReceiptSignatureValid) {
+    const nodeIdMatches = bundle.popReceipt.nodeId === bundle.nodeId;
+    popReceiptSignatureValid =
+      nodeIdMatches && verifyPopReceiptSignatureOffline(bundle.popReceipt);
+    if (!nodeIdMatches) {
+      reasons.push("Embedded PopReceipt nodeId does not match bundle.nodeId");
+    } else if (!popReceiptSignatureValid) {
       reasons.push("Embedded PopReceipt Ed25519 signature verification failed");
+    }
+
+    popOriginVerified = false;
+    if (
+      typeof opts.expectedPopSignerPublicKeyHex === "string" &&
+      opts.expectedPopSignerPublicKeyHex.trim()
+    ) {
+      const popKeyMatches =
+        typeof bundle.popReceipt.signerPublicKey === "string" &&
+        constantTimeEqualHex(
+          bundle.popReceipt.signerPublicKey,
+          opts.expectedPopSignerPublicKeyHex
+        );
+      if (!popKeyMatches) {
+        reasons.push("PopReceipt signerPublicKey does not match pinned expectedPopSignerPublicKeyHex");
+      } else if (popReceiptSignatureValid) {
+        popOriginVerified = true;
+      }
     }
   }
 
@@ -414,6 +501,8 @@ export function verifyForensicProofBundleOffline(
     clientSignatureValid,
     popReceiptSignatureValid,
     allChecksPassed,
+    originVerified,
+    popOriginVerified,
     reasons,
   };
 }

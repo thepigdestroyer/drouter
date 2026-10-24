@@ -231,4 +231,132 @@ describe("RFC 9458 Oblivious HTTP (OHTTP) Binary KeyConfig & Framing", () => {
     expect(parsedResponse.status).toBe(200);
     expect(parsedResponse.decapsulatedRequest.path).toBe("/v1/chat/completions");
   });
+
+  it("matches the IETF RFC 9458 Appendix A complete request and response test vector byte-for-byte", async () => {
+    const {
+      OHTTP_AEAD_ID_AES_128_GCM,
+      OHTTP_AEAD_ID_CHACHA20_POLY1305,
+      decapsulateOhttpResponseBytes,
+      deriveResponseKeyAndNonce,
+      hexToBytes,
+    } = await import("@/lib/ohttp/rfc9458");
+
+    // RFC 9458 Appendix A vectors
+    const skR = hexToBytes("3c168975674b2fa8e465970b79c8dcf09f1c741626480bd4c6162fc5b6a98e1a");
+    const pkR = x25519.getPublicKey(skR);
+    expect(bytesToHex(pkR)).toBe(
+      "31e1f05a740102115220e9af918f738674aec95f54db6e04eb705aae8e798155"
+    );
+
+    const expectedKeyConfigHex =
+      "01002031e1f05a740102115220e9af918f738674aec95f54db6e04eb705aae8e79815500080001000100010003";
+    const encodedKeyConfig = encodeOhttpKeyConfig({
+      keyId: 1,
+      publicKey: pkR,
+      symmetricAlgorithms: [
+        { kdfId: OHTTP_KDF_ID_HKDF_SHA256, aeadId: OHTTP_AEAD_ID_AES_128_GCM },
+        { kdfId: OHTTP_KDF_ID_HKDF_SHA256, aeadId: OHTTP_AEAD_ID_CHACHA20_POLY1305 },
+      ],
+    });
+    expect(bytesToHex(encodedKeyConfig)).toBe(expectedKeyConfigHex);
+
+    const decodedKeyConfig = decodeOhttpKeyConfig(encodedKeyConfig);
+    expect(decodedKeyConfig.keyId).toBe(1);
+    expect(decodedKeyConfig.symmetricAlgorithms).toHaveLength(2);
+
+    const bhttpRequest = hexToBytes("00034745540568747470730b6578616d706c652e636f6d012f");
+    const skE = hexToBytes("bc51d5e930bda26589890ac7032f70ad12e4ecb37abb1b65b1256c9c48999c73");
+    const expectedEncHex = "4b28f881333e7c164ffc499ad9796f877f4e1051ee6d31bad19dec96c208b472";
+    const expectedInfoHex = "6d6573736167652f626874747020726571756573740001002000010001";
+    const expectedEncapsulatedReqHex =
+      "010020000100014b28f881333e7c164ffc499ad9796f877f4e1051ee6d31bad19dec96c208b4726374e469135906992e1268c594d2a10c695d858c40a026e7965e7d86b83dd440b2c0185204b4d63525";
+
+    const { encapsulatedRequest, clientContext, infoBytes } = encapsulateOhttpRequest(
+      bhttpRequest,
+      pkR,
+      1,
+      {
+        aeadId: OHTTP_AEAD_ID_AES_128_GCM,
+        ephemeralPrivateKey: skE,
+      }
+    );
+
+    expect(bytesToHex(clientContext.enc)).toBe(expectedEncHex);
+    expect(bytesToHex(infoBytes)).toBe(expectedInfoHex);
+    expect(bytesToHex(encapsulatedRequest)).toBe(expectedEncapsulatedReqHex);
+
+    // Gateway decapsulates the Appendix A request
+    const { plaintextBytes, serverContext } = decapsulateOhttpRequest(
+      encapsulatedRequest,
+      skR
+    );
+    expect(bytesToHex(plaintextBytes)).toBe(bytesToHex(bhttpRequest));
+
+    // Appendix A response derivation & encapsulation
+    const bhttpResponse = hexToBytes("0140c8");
+    const responseNonce = hexToBytes("c789e7151fcba46158ca84b04464910d");
+    const derivedResp = deriveResponseKeyAndNonce(serverContext, responseNonce);
+
+    expect(bytesToHex(derivedResp.exportedSecret)).toBe("62d87a6ba569ee81014c2641f52bea36");
+    expect(bytesToHex(derivedResp.prk)).toBe(
+      "979aaeae066cf211ab407b31ae49767f344e1501e475c84e8aff547cc5a683db"
+    );
+    expect(bytesToHex(derivedResp.key)).toBe("5d0172a080e428b16d298c4ea0db620d");
+    expect(bytesToHex(derivedResp.nonce)).toBe("f6bf1aeb88d6df87007fa263");
+
+    const encapsulatedResponse = encapsulateOhttpResponse(
+      bhttpResponse,
+      serverContext,
+      responseNonce
+    );
+    expect(bytesToHex(encapsulatedResponse)).toBe(
+      "c789e7151fcba46158ca84b04464910d86f9013e404feea014e7be4a441f234f857fbd"
+    );
+
+    const decapsulatedRespBytes = decapsulateOhttpResponseBytes(
+      encapsulatedResponse,
+      clientContext
+    );
+    expect(bytesToHex(decapsulatedRespBytes)).toBe("0140c8");
+  });
+
+  it("handles boundary payload sizes (0B, 1B, 4095B, 4096B, 4097B, 1MB) and 200 randomized round-trips", () => {
+    const gateway = getDefaultOhttpGatewayKeypair(9);
+    const boundaryLengths = [0, 1, 4095, 4096, 4097, 1024 * 1024];
+
+    for (const len of boundaryLengths) {
+      const payload = "x".repeat(len);
+      const { encapsulatedRequest, clientContext } = encapsulateOhttpRequest(
+        payload,
+        gateway.publicKey,
+        gateway.keyId
+      );
+      const { plaintextHttpJson, serverContext } = decapsulateOhttpRequest(
+        encapsulatedRequest,
+        gateway.privateKey
+      );
+      expect(plaintextHttpJson.length).toBe(len);
+      expect(plaintextHttpJson).toBe(payload);
+
+      const encRes = encapsulateOhttpResponse(payload, serverContext);
+      const decRes = decapsulateOhttpResponse(encRes, clientContext);
+      expect(decRes.length).toBe(len);
+    }
+
+    for (let i = 0; i < 200; i++) {
+      const msg = `ohttp-fuzz-${i}-${Math.imul(i + 1, 0x9e3779b1)}`;
+      const { encapsulatedRequest, clientContext } = encapsulateOhttpRequest(
+        msg,
+        gateway.publicKey,
+        i % 256
+      );
+      const { plaintextHttpJson, serverContext } = decapsulateOhttpRequest(
+        encapsulatedRequest,
+        gateway.privateKey
+      );
+      expect(plaintextHttpJson).toBe(msg);
+      const resp = encapsulateOhttpResponse(`ack:${msg}`, serverContext);
+      expect(decapsulateOhttpResponse(resp, clientContext)).toBe(`ack:${msg}`);
+    }
+  });
 });

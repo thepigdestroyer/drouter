@@ -24,6 +24,9 @@ function buildMonotonicGcmNonce(
   channelId: number,
   counter: number
 ): Uint8Array {
+  if (!Number.isInteger(counter) || counter <= 0 || counter > 0xffffffff) {
+    throw new Error(`Custody GCM nonce counter out of range or wrapped: ${counter}`);
+  }
   const nonce = new Uint8Array(12);
   nonce.set(noncePrefix.subarray(0, 4), 0);
   const view = new DataView(nonce.buffer, nonce.byteOffset, nonce.byteLength);

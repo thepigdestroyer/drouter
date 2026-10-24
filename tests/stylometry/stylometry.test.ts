@@ -91,4 +91,22 @@ describe("Stylometric De-Identification & Writing-Fingerprint Normalizer", () =>
     expect(result.riskAfter).toBe(0);
     expect(result.changesApplied).toEqual([]);
   });
+
+  it("strips zero-width characters and handles CRLF line endings when normalizing stylometric tells across 200 fuzz iterations", () => {
+    const crlfWithZeroWidth =
+      "Dear Alice,\r\n\r\nWe must opti\u200Bmise the col\u200Cour and beha\u200Dviour of the system.  It\u2019s ready.\r\n\r\nBest regards,\r\nDana\r\nSent from my iPhone";
+    const res = normalizeStylometry(crlfWithZeroWidth);
+    expect(res.normalized).toContain("optimize");
+    expect(res.normalized).toContain("color");
+    expect(res.normalized).toContain("behavior");
+    expect(res.normalized).not.toMatch(/Best regards|Sent from my iPhone|Dear Alice/i);
+    expect(res.riskAfter).toBe(0);
+
+    for (let i = 0; i < 200; i++) {
+      const input = `Hi there,\n\nTrial ${i}: Please analyse the colour and optimise the programme.  We shan’t delay!\n\nCheers,\nSent from my iPad`;
+      const norm = normalizeStylometry(input);
+      expect(norm.riskAfter).toBeLessThan(norm.riskBefore);
+      expect(norm.riskAfter).toBe(0);
+    }
+  });
 });

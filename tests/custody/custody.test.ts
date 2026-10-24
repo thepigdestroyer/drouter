@@ -128,5 +128,26 @@ describe("Subsystem 10: GPU Custody Module (§2.3, §2.4, V1, V6)", () => {
       expect(report.v1Passed).toBe(true);
       expect(report.v6Passed).toBe(true);
     });
+
+    it("rejects all-zero hardware seeds, all-zero prefix keys, and non-positive or oversized generate requests", () => {
+      expect(() => new CustodyCtrDrbg(new Uint8Array(32))).toThrow(/all-zero/i);
+      expect(() => new CustodyCtrDrbg(new Uint8Array(16).fill(1))).toThrow(/32-byte/i);
+
+      const validSeed = new Uint8Array(32).fill(0x33);
+      const drbg = new CustodyCtrDrbg(validSeed);
+      expect(() => drbg.generate(0)).toThrow();
+      expect(() => drbg.generate(-8)).toThrow();
+      expect(() => drbg.generate(32 * 1024 * 1024)).toThrow();
+
+      // Boundary sizes: 1B, 15B, 16B, 17B, 1MB
+      for (const size of [1, 15, 16, 17, 1024 * 1024]) {
+        const out = drbg.generate(size);
+        expect(out.byteLength).toBe(size);
+      }
+
+      expect(() => computePrefixBlockHashes([1, 2, 3], new Uint8Array(32))).toThrow(
+        /all-zero/i
+      );
+    });
   });
 });

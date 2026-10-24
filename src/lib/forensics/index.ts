@@ -11,4 +11,5 @@ export {
   type CreateForensicProofBundleInput,
   type ForensicProofBundle,
   type ForensicProofVerificationResult,
+  type VerifyForensicProofOptions,
 } from "./bundle";

@@ -1,4 +1,24 @@
-import { randomBytes, randomInt } from "node:crypto";
+import { bytesToHex } from "@noble/hashes/utils.js";
+
+function csprngBytesHex(byteLength: number): string {
+  const buf = new Uint8Array(byteLength);
+  globalThis.crypto.getRandomValues(buf);
+  return bytesToHex(buf);
+}
+
+function csprngInt(minInclusive: number, maxExclusive: number): number {
+  const range = maxExclusive - minInclusive;
+  if (range <= 1) return minInclusive;
+  const maxUint32PlusOne = 0x100000000;
+  const limit = maxUint32PlusOne - (maxUint32PlusOne % range);
+  const buf = new Uint32Array(1);
+  let sample = 0;
+  do {
+    globalThis.crypto.getRandomValues(buf);
+    sample = buf[0];
+  } while (sample >= limit);
+  return minInclusive + (sample % range);
+}
 
 export interface FragmentCompromiseRisk {
   fullLeakProbability: number;
@@ -45,8 +65,10 @@ export function computeFragmentCompromiseRisk(
   compromisedNodeFraction: number,
   fragmentCount: number
 ): FragmentCompromiseRisk {
-  const p = Math.min(Math.max(compromisedNodeFraction, 0), 1);
-  const m = Math.max(1, Math.floor(fragmentCount));
+  const safeFraction = Number.isFinite(compromisedNodeFraction) ? compromisedNodeFraction : 0;
+  const safeCount = Number.isFinite(fragmentCount) ? fragmentCount : 1;
+  const p = Math.min(Math.max(safeFraction, 0), 1);
+  const m = Math.max(1, Math.floor(safeCount));
 
   const singleNodeLeakProbability = p;
   const fullLeakProbability = Math.pow(p, m);
@@ -161,7 +183,7 @@ function normalizeSectionCount(parts: string[]): string[] {
 function shuffleNodes(nodes: string[]): string[] {
   const copy = [...nodes];
   for (let i = copy.length - 1; i > 0; i--) {
-    const j = randomInt(0, i + 1);
+    const j = csprngInt(0, i + 1);
     const tmp = copy[i];
     copy[i] = copy[j];
     copy[j] = tmp;
@@ -179,8 +201,11 @@ export function splitTaskIntoCompartments(
   availableNodes: string[]
 ): CompartmentPlan {
   const sections = partitionPromptIntoSections(prompt);
+  const validAvailable = Array.isArray(availableNodes)
+    ? availableNodes.filter((n) => typeof n === "string" && n.trim().length > 0)
+    : [];
   const nodePool =
-    availableNodes.length > 0 ? availableNodes : DEFAULT_COMPARTMENT_NODES;
+    validAvailable.length > 0 ? validAvailable : DEFAULT_COMPARTMENT_NODES;
 
   // Deduplicate while preserving all distinct nodes, then shuffle each cycle
   const distinctNodes = Array.from(new Set(nodePool));
@@ -196,9 +221,9 @@ export function splitTaskIntoCompartments(
   }
 
   const fragments: CompartmentFragment[] = sections.map((section, index) => {
-    const fragmentHex = randomBytes(6).toString("hex");
-    const keyHex = randomBytes(8).toString("hex");
-    const jitterDelayMs = randomInt(50, 601); // 50..600 ms inclusive
+    const fragmentHex = csprngBytesHex(6);
+    const keyHex = csprngBytesHex(8);
+    const jitterDelayMs = csprngInt(50, 601); // 50..600 ms inclusive
 
     return {
       index,

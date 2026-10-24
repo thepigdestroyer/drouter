@@ -1,9 +1,26 @@
+import { gcm } from "@noble/ciphers/aes.js";
+import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
+import { getCurrentVaultSession } from "@/lib/auth/vault";
 import { decryptFrozenState, encryptFrozenState } from "./crypto";
 import type { FreezeReceipt, FrozenSessionState } from "@/lib/types";
 
 const STORAGE_KEY = "drouter.freeze.v1";
+const FREEZE_RECEIPT_STORAGE_AAD = utf8ToBytes("drouter/v1/freeze-receipt-storage");
 
 let memoryFallback: FreezeReceipt[] = [];
+let ephemeralReceiptKey: Uint8Array | null = null;
+
+function getReceiptWrappingKey(): Uint8Array {
+  const vault = getCurrentVaultSession();
+  if (vault && vault.vaultKeyHex && /^[0-9a-fA-F]{64}$/.test(vault.vaultKeyHex)) {
+    return hexToBytes(vault.vaultKeyHex);
+  }
+  if (!ephemeralReceiptKey) {
+    ephemeralReceiptKey = new Uint8Array(32);
+    globalThis.crypto.getRandomValues(ephemeralReceiptKey);
+  }
+  return ephemeralReceiptKey;
+}
 
 function hasLocalStorage(): boolean {
   try {
@@ -22,24 +39,45 @@ function readReceipts(): FreezeReceipt[] {
   if (hasLocalStorage()) {
     try {
       const raw = globalThis.localStorage.getItem(STORAGE_KEY);
-      if (!raw) return [];
+      if (!raw) return [...memoryFallback];
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
+      if (parsed && typeof parsed === "object" && "nonceHex" in parsed && "ciphertextHex" in parsed) {
+        const key = getReceiptWrappingKey();
+        const nonce = hexToBytes(String((parsed as { nonceHex: string }).nonceHex));
+        const ct = hexToBytes(String((parsed as { ciphertextHex: string }).ciphertextHex));
+        const pt = gcm(key, nonce, FREEZE_RECEIPT_STORAGE_AAD).decrypt(ct);
+        const list = JSON.parse(new TextDecoder().decode(pt));
+        if (Array.isArray(list)) {
+          return list as FreezeReceipt[];
+        }
+      } else if (Array.isArray(parsed)) {
         return parsed as FreezeReceipt[];
       }
       return [];
     } catch {
-      return [];
+      return [...memoryFallback];
     }
   }
   return [...memoryFallback];
 }
 
 function writeReceipts(receipts: FreezeReceipt[]): void {
-  memoryFallback = [...receipts];
+  memoryFallback = receipts.map((r) => ({ ...r }));
   if (hasLocalStorage()) {
     try {
-      globalThis.localStorage.setItem(STORAGE_KEY, JSON.stringify(receipts));
+      const key = getReceiptWrappingKey();
+      const nonce = new Uint8Array(12);
+      globalThis.crypto.getRandomValues(nonce);
+      const plaintext = utf8ToBytes(JSON.stringify(receipts));
+      const ciphertext = gcm(key, nonce, FREEZE_RECEIPT_STORAGE_AAD).encrypt(plaintext);
+      globalThis.localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({
+          format: "drouter-freeze-receipts-v1-gcm",
+          nonceHex: bytesToHex(nonce),
+          ciphertextHex: bytesToHex(ciphertext),
+        }),
+      );
     } catch {
       // Ignore quota/storage errors and rely on memoryFallback
     }
@@ -150,8 +188,16 @@ export async function downloadAndResume(
  */
 export function shredLocalFreezeSecret(blobId: string): { shredded: boolean } {
   const current = readReceipts();
-  const next = current.filter((r) => r.blobId !== blobId);
-  const shredded = next.length !== current.length;
+  let shredded = false;
+  const next: FreezeReceipt[] = [];
+  for (const r of current) {
+    if (r.blobId === blobId) {
+      r.freezeSecretHex = "0".repeat(64);
+      shredded = true;
+    } else {
+      next.push(r);
+    }
+  }
   writeReceipts(next);
   return { shredded };
 }

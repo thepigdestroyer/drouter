@@ -33,16 +33,144 @@ interface CandidateSpan {
 
 const PLACEHOLDER_RE = /\[(?:SECRET|EMAIL|PHONE|IP|ACCT|ENTITY)_\d+\]/g;
 
+/**
+ * Zero-width / invisible formatting characters that attackers insert to split PII/secrets.
+ */
+const ZERO_WIDTH_CODE_UNITS = new Set<number>([
+  0x00ad, // soft hyphen
+  0x180e, // Mongolian vowel separator
+  0x200b, // zero-width space
+  0x200c, // zero-width non-joiner
+  0x200d, // zero-width joiner
+  0x2060, // word joiner
+  0xfeff, // zero-width no-break space / BOM
+]);
+
+/**
+ * Common Cyrillic and Greek 1-to-1 single-code-unit homoglyphs used to evade ASCII regexes.
+ */
+const HOMOGLYPH_MAP: Readonly<Record<string, string>> = {
+  "\u0430": "a", // Cyrillic small a
+  "\u0435": "e", // Cyrillic small ie
+  "\u0456": "i", // Cyrillic small byelorussian-ukrainian i
+  "\u0458": "j", // Cyrillic small je
+  "\u043e": "o", // Cyrillic small o
+  "\u0440": "p", // Cyrillic small er
+  "\u0441": "c", // Cyrillic small es
+  "\u0445": "x", // Cyrillic small ha
+  "\u0443": "y", // Cyrillic small u
+  "\u0455": "s", // Cyrillic small dze
+  "\u0410": "A", // Cyrillic capital A
+  "\u0412": "B", // Cyrillic capital VE
+  "\u0415": "E", // Cyrillic capital IE
+  "\u0406": "I", // Cyrillic capital I
+  "\u0408": "J", // Cyrillic capital JE
+  "\u041a": "K", // Cyrillic capital KA
+  "\u041c": "M", // Cyrillic capital EM
+  "\u041d": "H", // Cyrillic capital EN
+  "\u041e": "O", // Cyrillic capital O
+  "\u0420": "P", // Cyrillic capital ER
+  "\u0421": "C", // Cyrillic capital ES
+  "\u0422": "T", // Cyrillic capital TE
+  "\u0425": "X", // Cyrillic capital HA
+  "\u0405": "S", // Cyrillic capital DZE
+  "\u03b1": "a", // Greek small alpha
+  "\u03bf": "o", // Greek small omicron
+  "\u03c1": "p", // Greek small rho
+  "\u0391": "A", // Greek capital Alpha
+  "\u0392": "B", // Greek capital Beta
+  "\u0395": "E", // Greek capital Epsilon
+  "\u0397": "H", // Greek capital Eta
+  "\u0399": "I", // Greek capital Iota
+  "\u039a": "K", // Greek capital Kappa
+  "\u039c": "M", // Greek capital Mu
+  "\u039d": "N", // Greek capital Nu
+  "\u039f": "O", // Greek capital Omicron
+  "\u03a1": "P", // Greek capital Rho
+  "\u03a4": "T", // Greek capital Tau
+  "\u03a7": "X", // Greek capital Chi
+};
+
+/**
+ * Strips zero-width characters and folds fullwidth ASCII + Cyrillic/Greek homoglyphs
+ * to canonical ASCII while maintaining an exact index map back to `text`.
+ */
+function normalizeWithIndexMap(text: string): {
+  normalized: string;
+  mapToOriginal: number[];
+} {
+  const chars: string[] = [];
+  const mapToOriginal: number[] = [];
+
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (ZERO_WIDTH_CODE_UNITS.has(code)) {
+      continue;
+    }
+    let ch = text[i];
+    // Fullwidth ASCII variants (U+FF01..U+FF5E -> 0x21..0x7E)
+    if (code >= 0xff01 && code <= 0xff5e) {
+      ch = String.fromCharCode(code - 0xfee0);
+    } else if (ch in HOMOGLYPH_MAP) {
+      ch = HOMOGLYPH_MAP[ch];
+    }
+    chars.push(ch);
+    mapToOriginal.push(i);
+  }
+
+  return {
+    normalized: chars.join(""),
+    mapToOriginal,
+  };
+}
+
 const SECRET_PATTERNS: RegExp[] = [
+  // PEM private key blocks (multi-line or single header line)
+  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[^\r\n]*/g,
+  // JSON Web Tokens (JWTs: header.payload.signature)
+  /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
+  // Labeled AWS secret access keys
+  /\b(?:aws_secret_access_key|aws_secret_key|secret_access_key)\s*[:=]\s*["']?[A-Za-z0-9/+=]{32,44}["']?/gi,
+  // Bearer tokens
   /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}\b/g,
-  /\b(?:sk-(?:proj-|live-|test-)?[A-Za-z0-9_-]{8,}|tk_[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|AKIA[0-9A-Z]{12,20}|xox[baprs]-[A-Za-z0-9-]{8,})\b/g,
+  // API keys split across newlines or multi-space/digit chunks (e.g. sk-proj-abcd\nefgh123456)
+  /\b(?:sk-(?:proj-|live-|test-)?|tk_(?:live_|test_)?|gh[pousr]_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]{2,}(?:(?:\r?\n[ \t]*|[ \t]{2,})[A-Za-z0-9_-]{4,}|[ \t]+(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{4,})+\b/g,
+  // Standard contiguous API keys and cloud access keys (OpenAI, Anthropic, Tinfoil, GitHub, AWS AKIA/ASIA, Slack)
+  /\b(?:sk-(?:proj-|live-|test-|ant-)?[A-Za-z0-9_-]{8,}|tk_[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{12,20}|xox[baprs]-[A-Za-z0-9-]{8,})\b/g,
 ];
+
+const BASE64_CANDIDATE_RE = /\b[A-Za-z0-9+/]{16,}={0,2}\b/g;
+
+const DECODED_SECRET_CHECK_RE =
+  /(?:-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|\b(?:sk-(?:proj-|live-|test-|ant-)?[A-Za-z0-9_-]{8,}|tk_[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{12,20}|xox[baprs]-[A-Za-z0-9-]{8,}|Bearer\s+[A-Za-z0-9._~+/=-]{8,}|eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}))/;
+
+function isBase64WrappedSecret(raw: string): boolean {
+  if (raw.length < 16 || raw.length % 4 === 1) return false;
+  try {
+    let decoded = "";
+    if (typeof Buffer !== "undefined") {
+      decoded = Buffer.from(raw, "base64").toString("utf8");
+    } else if (typeof globalThis.atob === "function") {
+      decoded = globalThis.atob(raw);
+    }
+    if (!decoded || decoded.length < 10) return false;
+    return DECODED_SECRET_CHECK_RE.test(decoded);
+  } catch {
+    return false;
+  }
+}
 
 const EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
 
 const ACCT_PATTERNS: RegExp[] = [
   // 0x Ethereum/EVM wallet address (40 hex chars)
   /\b0x[a-fA-F0-9]{40}\b/g,
+  // US Social Security Number (SSN: XXX-XX-XXXX)
+  /\b(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b/g,
+  // UK National Insurance Number (e.g. QQ 12 34 56 C)
+  /\b[A-CEGHJ-PR-TW-Z][A-CEGHJ-NPR-TW-Z]\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-D]\b/gi,
+  // Explicit UK NHS number (labeled or 3-3-4 format)
+  /\bNHS(?:\s*(?:No\.?|Number|#|:))?\s*\d{3}[\s-]?\d{3}[\s-]?\d{4}\b/gi,
   // IBAN (2 letters + 2 check digits + 11..30 alphanumeric chars, optional spaces)
   /\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{4}){2,7}(?:[ ]?[A-Z0-9]{1,4})?\b/g,
   // Credit card numbers (13-19 digits, spaced/dashed in groups of 4 or contiguous)
@@ -109,6 +237,7 @@ export function createSessionScrubber(initialCustomTerms: string[] = []): Sessio
   const customTerms = new Map<string, string>(); // lowercase -> canonical original
   const byKey = new Map<string, StoredMapping>();
   const byPlaceholder = new Map<string, StoredMapping>();
+  const reservedLiterals = new Set<string>();
   const counters: Record<PiiKind, number> = {
     SECRET: 0,
     EMAIL: 0,
@@ -121,7 +250,8 @@ export function createSessionScrubber(initialCustomTerms: string[] = []): Sessio
   function addCustomTerm(term: string): void {
     const cleaned = term.trim();
     if (!cleaned) return;
-    const lower = cleaned.toLowerCase();
+    const { normalized } = normalizeWithIndexMap(cleaned);
+    const lower = normalized.toLowerCase();
     if (!customTerms.has(lower)) {
       customTerms.set(lower, cleaned);
     }
@@ -136,10 +266,15 @@ export function createSessionScrubber(initialCustomTerms: string[] = []): Sessio
     if (existing) {
       return existing;
     }
-    counters[kind] += 1;
-    const placeholder = `[${kind}_${counters[kind]}]`;
+    let placeholder = "";
+    do {
+      counters[kind] += 1;
+      placeholder = `[${kind}_${counters[kind]}]`;
+    } while (byPlaceholder.has(placeholder) || reservedLiterals.has(placeholder));
+
+    const { normalized: normRaw } = normalizeWithIndexMap(raw.trim());
     const original =
-      kind === "ENTITY" ? (customTerms.get(raw.trim().toLowerCase()) ?? raw) : raw;
+      kind === "ENTITY" ? (customTerms.get(normRaw.toLowerCase()) ?? raw) : raw;
     const mapping: StoredMapping = {
       placeholder,
       kind,
@@ -152,53 +287,85 @@ export function createSessionScrubber(initialCustomTerms: string[] = []): Sessio
   }
 
   function collectSpans(text: string): CandidateSpan[] {
+    const { normalized, mapToOriginal } = normalizeWithIndexMap(text);
+    if (!normalized) return [];
+
     const occupied: { start: number; end: number }[] = [];
 
     const overlaps = (start: number, end: number): boolean =>
       occupied.some((s) => start < s.end && end > s.start);
 
-    // Protect any existing placeholders already in the text
+    const candidates: CandidateSpan[] = [];
+
+    // Protect any existing literal placeholders already in the user text.
+    // - If a literal `[KIND_N]` is NOT yet in `byPlaceholder`, record it in `reservedLiterals`
+    //   so no real PII is ever assigned that placeholder number, and leave it in place.
+    // - If a literal `[KIND_N]` collides with an ALREADY-assigned placeholder in `byPlaceholder`
+    //   (from an earlier turn), wrap the literal `[KIND_N]` into a dedicated non-colliding placeholder
+    //   whose `original` is the literal string `"[KIND_N]"`, so `restore()` restores it back to `"[KIND_N]"`.
     PLACEHOLDER_RE.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = PLACEHOLDER_RE.exec(text)) !== null) {
-      occupied.push({ start: m.index, end: m.index + m[0].length });
+      const lit = m[0];
+      const start = m.index;
+      const end = start + lit.length;
+      occupied.push({ start, end });
+      if (byPlaceholder.has(lit)) {
+        candidates.push({
+          start,
+          end,
+          kind: "ENTITY",
+          raw: lit,
+          canonicalKey: `LITERAL_COLLISION:${lit}`,
+        });
+      } else {
+        reservedLiterals.add(lit);
+      }
     }
-
-    const candidates: CandidateSpan[] = [];
 
     const addMatches = (
       regex: RegExp,
       kind: PiiKind,
-      validate?: (raw: string, start: number, fullText: string) => boolean,
+      validate?: (normRaw: string, normStart: number, fullNormText: string) => boolean,
     ) => {
       const re = new RegExp(regex.source, regex.flags);
       let match: RegExpExecArray | null;
-      while ((match = re.exec(text)) !== null) {
-        const raw = match[0];
-        const start = match.index;
-        const end = start + raw.length;
-        if (overlaps(start, end)) continue;
-        if (validate && !validate(raw, start, text)) continue;
-        occupied.push({ start, end });
+      while ((match = re.exec(normalized)) !== null) {
+        const normRaw = match[0];
+        if (!normRaw) {
+          re.lastIndex += 1;
+          continue;
+        }
+        const normStart = match.index;
+        const normEnd = normStart + normRaw.length;
+        const origStart = mapToOriginal[normStart];
+        const origEnd = mapToOriginal[normEnd - 1] + 1;
+        if (overlaps(origStart, origEnd)) continue;
+        if (validate && !validate(normRaw, normStart, normalized)) continue;
+        occupied.push({ start: origStart, end: origEnd });
+        const raw = text.slice(origStart, origEnd);
         candidates.push({
-          start,
-          end,
+          start: origStart,
+          end: origEnd,
           kind,
           raw,
-          canonicalKey: canonicalKeyFor(kind, raw),
+          canonicalKey: canonicalKeyFor(kind, normRaw),
         });
       }
     };
 
-    // 1. Secrets / API keys / tokens
+    // 1. Secrets / API keys / tokens / PEM / JWT
     for (const pat of SECRET_PATTERNS) {
       addMatches(pat, "SECRET");
     }
 
+    // 1b. Base64-wrapped secrets (only when decoded payload contains a known secret format)
+    addMatches(BASE64_CANDIDATE_RE, "SECRET", (normRaw) => isBase64WrappedSecret(normRaw));
+
     // 2. Email addresses
     addMatches(EMAIL_PATTERN, "EMAIL");
 
-    // 3. Account identifiers: 0x wallets, IBANs, credit cards
+    // 3. Account identifiers: 0x wallets, SSNs, UK NI, NHS, IBANs, credit cards
     for (const pat of ACCT_PATTERNS) {
       addMatches(pat, "ACCT");
     }
@@ -208,11 +375,11 @@ export function createSessionScrubber(initialCustomTerms: string[] = []): Sessio
 
     // 5. Phone numbers (>= 10 and <= 15 digits, not preceded by word/dot/slash)
     for (const pat of PHONE_PATTERNS) {
-      addMatches(pat, "PHONE", (raw, start, full) => {
-        const digits = raw.replace(/\D/g, "");
+      addMatches(pat, "PHONE", (normRaw, normStart, fullNorm) => {
+        const digits = normRaw.replace(/\D/g, "");
         if (digits.length < 10 || digits.length > 15) return false;
-        if (start > 0) {
-          const prev = full[start - 1];
+        if (normStart > 0) {
+          const prev = fullNorm[normStart - 1];
           if (/[A-Za-z0-9_./-]/.test(prev)) return false;
         }
         return true;
@@ -221,11 +388,11 @@ export function createSessionScrubber(initialCustomTerms: string[] = []): Sessio
 
     // 6. Custom terms (ENTITY), longest first
     if (customTerms.size > 0) {
-      const sortedTerms = [...customTerms.values()].sort((a, b) => b.length - a.length);
-      for (const term of sortedTerms) {
-        const escaped = escapeRegExp(term);
-        const startsWithWord = /^\w/.test(term);
-        const endsWithWord = /\w$/.test(term);
+      const sortedTerms = [...customTerms.keys()].sort((a, b) => b.length - a.length);
+      for (const normTerm of sortedTerms) {
+        const escaped = escapeRegExp(normTerm);
+        const startsWithWord = /^\w/.test(normTerm);
+        const endsWithWord = /\w$/.test(normTerm);
         const pattern = `${startsWithWord ? "\\b" : ""}${escaped}${endsWithWord ? "\\b" : ""}`;
         addMatches(new RegExp(pattern, "gi"), "ENTITY");
       }
@@ -282,6 +449,7 @@ export function createSessionScrubber(initialCustomTerms: string[] = []): Sessio
   function clear(): void {
     byKey.clear();
     byPlaceholder.clear();
+    reservedLiterals.clear();
     counters.SECRET = 0;
     counters.EMAIL = 0;
     counters.PHONE = 0;

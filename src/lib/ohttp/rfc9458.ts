@@ -1,18 +1,22 @@
 import { gcm } from "@noble/ciphers/aes.js";
 import { x25519 } from "@noble/curves/ed25519.js";
-import { hkdf } from "@noble/hashes/hkdf.js";
+import { expand, extract, hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 
 /**
- * IETF RFC 9458 Oblivious HTTP (OHTTP) HPKE Cipher Suite Identifiers:
+ * IETF RFC 9458 Oblivious HTTP (OHTTP) & RFC 9180 HPKE Cipher Suite Identifiers:
  * - KEM:  0x0020 (DHKEM(X25519, HKDF-SHA256))
  * - KDF:  0x0001 (HKDF-SHA256)
+ * - AEAD: 0x0001 (AES-128-GCM, Nk = 16, Nn = 12, Nt = 16)
  * - AEAD: 0x0002 (AES-256-GCM, Nk = 32, Nn = 12, Nt = 16)
+ * - AEAD: 0x0003 (ChaCha20Poly1305, Nk = 32, Nn = 12, Nt = 16)
  */
 export const OHTTP_KEM_ID_X25519_HKDF_SHA256 = 0x0020;
 export const OHTTP_KDF_ID_HKDF_SHA256 = 0x0001;
+export const OHTTP_AEAD_ID_AES_128_GCM = 0x0001;
 export const OHTTP_AEAD_ID_AES_256_GCM = 0x0002;
+export const OHTTP_AEAD_ID_CHACHA20_POLY1305 = 0x0003;
 
 export const OHTTP_HEADER_LENGTH = 7;
 export const OHTTP_X25519_PUBLIC_KEY_LENGTH = 32;
@@ -30,6 +34,7 @@ export interface OhttpKeyConfigInput {
   kemId?: number;
   kdfId?: number;
   aeadId?: number;
+  symmetricAlgorithms?: OhttpSymmetricAlgorithm[];
 }
 
 export interface DecodedOhttpKeyConfig {
@@ -43,17 +48,21 @@ export interface DecodedOhttpKeyConfig {
 
 export interface OhttpContext {
   sharedSecret: Uint8Array;
+  exporterSecret?: Uint8Array;
   enc: Uint8Array;
   keyId: number;
+  aeadId?: number;
 }
 
 export interface EncapsulatedOhttpRequestResult {
   encapsulatedRequest: Uint8Array;
   clientContext: OhttpContext;
+  infoBytes: Uint8Array;
 }
 
 export interface DecapsulatedOhttpRequestResult {
   plaintextHttpJson: string;
+  plaintextBytes: Uint8Array;
   serverContext: OhttpContext;
 }
 
@@ -66,6 +75,9 @@ export interface OhttpGatewayKeypair {
 }
 
 const textDecoder = new TextDecoder();
+const HPKE_VERSION_LABEL = utf8ToBytes("HPKE-v1");
+const KEM_SUITE_ID_X25519 = new Uint8Array([0x4b, 0x45, 0x4d, 0x00, 0x20]); // "KEM" || 0x0020
+const EMPTY_BYTES = new Uint8Array(0);
 
 function concatBytes(...arrays: Uint8Array[]): Uint8Array {
   const totalLength = arrays.reduce((acc, arr) => acc + arr.length, 0);
@@ -86,14 +98,189 @@ function readUint16BE(bytes: Uint8Array, offset: number): number {
   return ((bytes[offset] & 0xff) << 8) | (bytes[offset + 1] & 0xff);
 }
 
+function aeadKeyLength(aeadId: number): number {
+  if (aeadId === OHTTP_AEAD_ID_AES_128_GCM) return 16;
+  if (aeadId === OHTTP_AEAD_ID_AES_256_GCM) return 32;
+  throw new Error(
+    `Unsupported HPKE AEAD ID: 0x${aeadId.toString(16).padStart(4, "0")} (expected 0x0001 AES-128-GCM or 0x0002 AES-256-GCM)`
+  );
+}
+
+function responseNonceLengthForAead(aeadId: number): number {
+  // RFC 9458 §4.2: Nonce length is max(Nn, Nk) where Nn = 12
+  return Math.max(12, aeadKeyLength(aeadId));
+}
+
+function buildHpkeSuiteId(kemId: number, kdfId: number, aeadId: number): Uint8Array {
+  return concatBytes(
+    utf8ToBytes("HPKE"),
+    writeUint16BE(kemId),
+    writeUint16BE(kdfId),
+    writeUint16BE(aeadId)
+  );
+}
+
+/**
+ * RFC 9180 §4 LabeledExtract(salt, label, ikm)
+ */
+function hpkeLabeledExtract(
+  suiteId: Uint8Array,
+  salt: Uint8Array,
+  label: string,
+  ikm: Uint8Array
+): Uint8Array {
+  const labeledIkm = concatBytes(HPKE_VERSION_LABEL, suiteId, utf8ToBytes(label), ikm);
+  return extract(sha256, labeledIkm, salt.length > 0 ? salt : undefined);
+}
+
+/**
+ * RFC 9180 §4 LabeledExpand(prk, label, info, L)
+ */
+function hpkeLabeledExpand(
+  suiteId: Uint8Array,
+  prk: Uint8Array,
+  label: string,
+  info: Uint8Array,
+  length: number
+): Uint8Array {
+  const labeledInfo = concatBytes(
+    writeUint16BE(length),
+    HPKE_VERSION_LABEL,
+    suiteId,
+    utf8ToBytes(label),
+    info
+  );
+  return expand(sha256, prk, labeledInfo, length);
+}
+
+/**
+ * RFC 9180 §4.1 DHKEM(X25519, HKDF-SHA256) ExtractAndExpand
+ */
+function deriveDhkemSharedSecret(
+  dhShared: Uint8Array,
+  enc: Uint8Array,
+  gatewayPublicKey: Uint8Array
+): Uint8Array {
+  const kemContext = concatBytes(enc, gatewayPublicKey);
+  const eaePrk = hpkeLabeledExtract(KEM_SUITE_ID_X25519, EMPTY_BYTES, "eae_prk", dhShared);
+  return hpkeLabeledExpand(KEM_SUITE_ID_X25519, eaePrk, "shared_secret", kemContext, 32);
+}
+
+/**
+ * RFC 9180 §5.1 KeySchedule(mode_base = 0x00, shared_secret, info, psk = "", psk_id = "")
+ * and RFC 9458 §4.3 request info binding ("message/bhttp request" || 0x00 || hdr).
+ */
+function deriveHpkeKeySchedule(
+  sharedSecret: Uint8Array,
+  headerBytes: Uint8Array,
+  aeadId = OHTTP_AEAD_ID_AES_256_GCM
+): {
+  key: Uint8Array;
+  baseNonce: Uint8Array;
+  exporterSecret: Uint8Array;
+  infoBytes: Uint8Array;
+} {
+  const nk = aeadKeyLength(aeadId);
+  const nn = 12;
+  const nh = 32;
+  const suiteId = buildHpkeSuiteId(
+    OHTTP_KEM_ID_X25519_HKDF_SHA256,
+    OHTTP_KDF_ID_HKDF_SHA256,
+    aeadId
+  );
+
+  const infoBytes = concatBytes(
+    utf8ToBytes("message/bhttp request"),
+    new Uint8Array([0x00]),
+    headerBytes
+  );
+
+  const pskIdHash = hpkeLabeledExtract(suiteId, EMPTY_BYTES, "psk_id_hash", EMPTY_BYTES);
+  const infoHash = hpkeLabeledExtract(suiteId, EMPTY_BYTES, "info_hash", infoBytes);
+  const ksContext = concatBytes(new Uint8Array([0x00]), pskIdHash, infoHash);
+
+  const secret = hpkeLabeledExtract(suiteId, sharedSecret, "secret", EMPTY_BYTES);
+  const key = hpkeLabeledExpand(suiteId, secret, "key", ksContext, nk);
+  const baseNonce = hpkeLabeledExpand(suiteId, secret, "base_nonce", ksContext, nn);
+  const exporterSecret = hpkeLabeledExpand(suiteId, secret, "exp", ksContext, nh);
+
+  return { key, baseNonce, exporterSecret, infoBytes };
+}
+
+/**
+ * RFC 9180 §5.3 Context.Export(exporter_context, L)
+ */
+export function hpkeContextExport(
+  exporterSecret: Uint8Array,
+  exporterContext: Uint8Array,
+  length: number,
+  aeadId = OHTTP_AEAD_ID_AES_256_GCM
+): Uint8Array {
+  const suiteId = buildHpkeSuiteId(
+    OHTTP_KEM_ID_X25519_HKDF_SHA256,
+    OHTTP_KDF_ID_HKDF_SHA256,
+    aeadId
+  );
+  return hpkeLabeledExpand(suiteId, exporterSecret, "sec", exporterContext, length);
+}
+
+/**
+ * RFC 9458 §4.4 Response Key and Nonce Derivation
+ */
+export function deriveResponseKeyAndNonce(
+  context: OhttpContext,
+  responseNonce: Uint8Array
+): {
+  exportedSecret: Uint8Array;
+  prk: Uint8Array;
+  key: Uint8Array;
+  nonce: Uint8Array;
+  aad: Uint8Array;
+} {
+  const aeadId = context.aeadId ?? OHTTP_AEAD_ID_AES_256_GCM;
+  const nk = aeadKeyLength(aeadId);
+  const nn = 12;
+  const secretLen = Math.max(nn, nk);
+
+  let exporterSecret = context.exporterSecret;
+  if (!exporterSecret) {
+    const headerBytes = buildOhttpHeader(
+      context.keyId,
+      OHTTP_KEM_ID_X25519_HKDF_SHA256,
+      OHTTP_KDF_ID_HKDF_SHA256,
+      aeadId
+    );
+    exporterSecret = deriveHpkeKeySchedule(context.sharedSecret, headerBytes, aeadId).exporterSecret;
+  }
+
+  const exportedSecret = hpkeContextExport(
+    exporterSecret,
+    utf8ToBytes("message/bhttp response"),
+    secretLen,
+    aeadId
+  );
+
+  const salt = concatBytes(context.enc, responseNonce);
+  const prk = extract(sha256, exportedSecret, salt);
+  const key = expand(sha256, prk, utf8ToBytes("key"), nk);
+  const nonce = expand(sha256, prk, utf8ToBytes("nonce"), nn);
+
+  return {
+    exportedSecret,
+    prk,
+    key,
+    nonce,
+    aad: EMPTY_BYTES,
+  };
+}
+
 /**
  * Encodes an RFC 9458 §3.1 OHTTP Key Configuration structure:
  *   Key Identifier (1B) ||
  *   HPKE KEM ID (2B, 0x0020) ||
  *   HPKE Public Key (32B X25519) ||
- *   HPKE Symmetric Algorithms Length (2B, 0x0004) ||
- *   HPKE KDF ID (2B, 0x0001) ||
- *   HPKE AEAD ID (2B, 0x0002)
+ *   HPKE Symmetric Algorithms Length (2B) ||
+ *   (HPKE KDF ID (2B) || HPKE AEAD ID (2B))...
  */
 export function encodeOhttpKeyConfig(config: OhttpKeyConfigInput): Uint8Array {
   if (!Number.isInteger(config.keyId) || config.keyId < 0 || config.keyId > 255) {
@@ -109,16 +296,26 @@ export function encodeOhttpKeyConfig(config: OhttpKeyConfigInput): Uint8Array {
   }
 
   const kemId = config.kemId ?? OHTTP_KEM_ID_X25519_HKDF_SHA256;
-  const kdfId = config.kdfId ?? OHTTP_KDF_ID_HKDF_SHA256;
-  const aeadId = config.aeadId ?? OHTTP_AEAD_ID_AES_256_GCM;
+  const algs: OhttpSymmetricAlgorithm[] =
+    config.symmetricAlgorithms && config.symmetricAlgorithms.length > 0
+      ? config.symmetricAlgorithms
+      : [
+          {
+            kdfId: config.kdfId ?? OHTTP_KDF_ID_HKDF_SHA256,
+            aeadId: config.aeadId ?? OHTTP_AEAD_ID_AES_256_GCM,
+          },
+        ];
+
+  const algBytes = algs.map((a) =>
+    concatBytes(writeUint16BE(a.kdfId), writeUint16BE(a.aeadId))
+  );
 
   return concatBytes(
     new Uint8Array([config.keyId & 0xff]),
     writeUint16BE(kemId),
     config.publicKey,
-    writeUint16BE(4), // 4 bytes = 1 symmetric algorithm entry (kdfId + aeadId)
-    writeUint16BE(kdfId),
-    writeUint16BE(aeadId)
+    writeUint16BE(algs.length * 4),
+    ...algBytes
   );
 }
 
@@ -157,9 +354,13 @@ export function decodeOhttpKeyConfig(bytes: Uint8Array): DecodedOhttpKeyConfig {
         `Unsupported OHTTP KDF ID: 0x${kdfId.toString(16).padStart(4, "0")} (expected 0x0001)`
       );
     }
-    if (aeadId !== OHTTP_AEAD_ID_AES_256_GCM) {
+    if (
+      aeadId !== OHTTP_AEAD_ID_AES_128_GCM &&
+      aeadId !== OHTTP_AEAD_ID_AES_256_GCM &&
+      aeadId !== OHTTP_AEAD_ID_CHACHA20_POLY1305
+    ) {
       throw new Error(
-        `Unsupported OHTTP AEAD ID: 0x${aeadId.toString(16).padStart(4, "0")} (expected 0x0002)`
+        `Unsupported OHTTP AEAD ID: 0x${aeadId.toString(16).padStart(4, "0")} (expected 0x0001, 0x0002, or 0x0003)`
       );
     }
     symmetricAlgorithms.push({ kdfId, aeadId });
@@ -189,90 +390,23 @@ function buildOhttpHeader(
   );
 }
 
-function deriveDhkemSharedSecret(
-  dhShared: Uint8Array,
-  enc: Uint8Array,
-  gatewayPublicKey: Uint8Array
-): Uint8Array {
-  const kemContext = concatBytes(enc, gatewayPublicKey);
-  return hkdf(
-    sha256,
-    dhShared,
-    utf8ToBytes("RFC9458-DHKEM-X25519-HKDF-SHA256"),
-    concatBytes(utf8ToBytes("eae_prk+shared_secret:"), kemContext),
-    32
-  );
-}
-
-function deriveRequestKeyAndNonce(
-  sharedSecret: Uint8Array,
-  enc: Uint8Array,
-  headerBytes: Uint8Array
-): { key: Uint8Array; nonce: Uint8Array } {
-  // RFC 9458 §4.3 binds "message/bhttp request" || 0x00 || hdr
-  const requestInfo = concatBytes(
-    utf8ToBytes("message/bhttp request"),
-    new Uint8Array([0x00]),
-    headerBytes
-  );
-  const key = hkdf(
-    sha256,
-    sharedSecret,
-    enc,
-    concatBytes(requestInfo, utf8ToBytes(":key")),
-    32
-  );
-  const nonce = hkdf(
-    sha256,
-    sharedSecret,
-    enc,
-    concatBytes(requestInfo, utf8ToBytes(":nonce")),
-    12
-  );
-  return { key, nonce };
-}
-
-function deriveResponseKeyAndNonce(
-  sharedSecret: Uint8Array,
-  enc: Uint8Array,
-  responseNonce: Uint8Array,
-  keyId: number
-): { key: Uint8Array; nonce: Uint8Array; aad: Uint8Array } {
-  // RFC 9458 §4.4 binds salt = concat(enc, responseNonce)
-  const salt = concatBytes(enc, responseNonce);
-  const responseInfo = concatBytes(
-    utf8ToBytes("message/bhttp response"),
-    new Uint8Array([0x00]),
-    new Uint8Array([keyId & 0xff])
-  );
-  const key = hkdf(
-    sha256,
-    sharedSecret,
-    salt,
-    concatBytes(responseInfo, utf8ToBytes(":key")),
-    32
-  );
-  const nonce = hkdf(
-    sha256,
-    sharedSecret,
-    salt,
-    concatBytes(responseInfo, utf8ToBytes(":nonce")),
-    12
-  );
-  const aad = concatBytes(enc, responseNonce, new Uint8Array([keyId & 0xff]));
-  return { key, nonce, aad };
+export interface EncapsulateOhttpRequestOptions {
+  aeadId?: number;
+  ephemeralPrivateKey?: Uint8Array;
 }
 
 /**
- * Encapsulates a plaintext HTTP/JSON request into an RFC 9458 binary Encapsulated Request:
+ * Encapsulates a plaintext HTTP/JSON or binary HTTP request into an RFC 9458 binary Encapsulated Request
+ * using genuine RFC 9180 HPKE Base mode (DHKEM(X25519, HKDF-SHA256)):
  *   Header (7B: [keyId(1), kemId(2), kdfId(2), aeadId(2)]) ||
  *   enc (32B ephemeral X25519 public key) ||
- *   AES-256-GCM Ciphertext (plaintext + 16B tag)
+ *   HPKE AEAD Ciphertext (plaintext + 16B GCM tag)
  */
 export function encapsulateOhttpRequest(
-  plaintextHttpJson: string,
+  plaintextHttpJson: string | Uint8Array,
   gatewayPublicKey: Uint8Array,
-  keyId = 1
+  keyId = 1,
+  options?: EncapsulateOhttpRequestOptions
 ): EncapsulatedOhttpRequestResult {
   if (
     !(gatewayPublicKey instanceof Uint8Array) ||
@@ -286,29 +420,59 @@ export function encapsulateOhttpRequest(
     throw new Error(`Invalid OHTTP keyId: ${keyId} (expected uint8 0..255)`);
   }
 
-  const headerBytes = buildOhttpHeader(keyId);
-  const ephemeralKeypair = x25519.keygen();
-  const enc = ephemeralKeypair.publicKey;
-  const dhShared = x25519.getSharedSecret(ephemeralKeypair.secretKey, gatewayPublicKey);
+  const aeadId = options?.aeadId ?? OHTTP_AEAD_ID_AES_256_GCM;
+  aeadKeyLength(aeadId);
+
+  const headerBytes = buildOhttpHeader(
+    keyId,
+    OHTTP_KEM_ID_X25519_HKDF_SHA256,
+    OHTTP_KDF_ID_HKDF_SHA256,
+    aeadId
+  );
+
+  const ephemeralSecretKey =
+    options?.ephemeralPrivateKey instanceof Uint8Array
+      ? options.ephemeralPrivateKey
+      : x25519.keygen().secretKey;
+  if (ephemeralSecretKey.length !== 32) {
+    throw new Error("Invalid ephemeralPrivateKey length: expected 32 bytes");
+  }
+
+  const enc = x25519.getPublicKey(ephemeralSecretKey);
+  const dhShared = x25519.getSharedSecret(ephemeralSecretKey, gatewayPublicKey);
   const sharedSecret = deriveDhkemSharedSecret(dhShared, enc, gatewayPublicKey);
 
-  const { key, nonce } = deriveRequestKeyAndNonce(sharedSecret, enc, headerBytes);
-  const cipher = gcm(key, nonce, headerBytes);
-  const ciphertext = cipher.encrypt(utf8ToBytes(plaintextHttpJson));
+  const { key, baseNonce, exporterSecret, infoBytes } = deriveHpkeKeySchedule(
+    sharedSecret,
+    headerBytes,
+    aeadId
+  );
+
+  const plaintextBytes =
+    typeof plaintextHttpJson === "string"
+      ? utf8ToBytes(plaintextHttpJson)
+      : plaintextHttpJson;
+
+  // RFC 9458 §4.3 step 4: ct = sctxt.Seal("", request)
+  const cipher = gcm(key, baseNonce, EMPTY_BYTES);
+  const ciphertext = cipher.encrypt(plaintextBytes);
 
   return {
     encapsulatedRequest: concatBytes(headerBytes, enc, ciphertext),
     clientContext: {
       sharedSecret,
+      exporterSecret,
       enc,
       keyId: keyId & 0xff,
+      aeadId,
     },
+    infoBytes,
   };
 }
 
 /**
- * Decapsulates an RFC 9458 binary Encapsulated Request inside the OHTTP Target Gateway.
- * Verifies the 7-byte header and AES-256-GCM authentication tag.
+ * Decapsulates an RFC 9458 binary Encapsulated Request inside the OHTTP Target Gateway
+ * using RFC 9180 HPKE SetupBaseR and Open("", ct).
  */
 export function decapsulateOhttpRequest(
   encapsulatedRequest: Uint8Array,
@@ -347,7 +511,7 @@ export function decapsulateOhttpRequest(
       `Unsupported or tampered OHTTP KDF ID in header: 0x${kdfId.toString(16).padStart(4, "0")}`
     );
   }
-  if (aeadId !== OHTTP_AEAD_ID_AES_256_GCM) {
+  if (aeadId !== OHTTP_AEAD_ID_AES_128_GCM && aeadId !== OHTTP_AEAD_ID_AES_256_GCM) {
     throw new Error(
       `Unsupported or tampered OHTTP AEAD ID in header: 0x${aeadId.toString(16).padStart(4, "0")}`
     );
@@ -365,27 +529,35 @@ export function decapsulateOhttpRequest(
   const dhShared = x25519.getSharedSecret(gatewayPrivateKey, enc);
   const sharedSecret = deriveDhkemSharedSecret(dhShared, enc, gatewayPublicKey);
 
-  const { key, nonce } = deriveRequestKeyAndNonce(sharedSecret, enc, headerBytes);
-  const cipher = gcm(key, nonce, headerBytes);
+  const { key, baseNonce, exporterSecret } = deriveHpkeKeySchedule(
+    sharedSecret,
+    headerBytes,
+    aeadId
+  );
+  const cipher = gcm(key, baseNonce, EMPTY_BYTES);
   const plaintextBytes = cipher.decrypt(ciphertext);
 
   return {
     plaintextHttpJson: textDecoder.decode(plaintextBytes),
+    plaintextBytes,
     serverContext: {
       sharedSecret,
+      exporterSecret,
       enc,
       keyId,
+      aeadId,
     },
   };
 }
 
 /**
- * Encapsulates an HTTP/JSON response from the OHTTP Gateway using the request's serverContext:
- *   responseNonce (32B random) || AES-256-GCM Ciphertext (derived from sharedSecret, enc, responseNonce)
+ * Encapsulates an HTTP/JSON or binary HTTP response from the OHTTP Gateway using RFC 9458 §4.4:
+ *   responseNonce (max(Nn, Nk) random bytes) || AEAD-Protected Response
  */
 export function encapsulateOhttpResponse(
-  responseJson: string,
-  serverContext: OhttpContext
+  responseJson: string | Uint8Array,
+  serverContext: OhttpContext,
+  customResponseNonce?: Uint8Array
 ): Uint8Array {
   if (
     !serverContext ||
@@ -397,18 +569,26 @@ export function encapsulateOhttpResponse(
     throw new Error("Invalid OHTTP serverContext");
   }
 
-  const responseNonce = crypto.getRandomValues(
-    new Uint8Array(OHTTP_RESPONSE_NONCE_LENGTH)
-  );
-  const { key, nonce, aad } = deriveResponseKeyAndNonce(
-    serverContext.sharedSecret,
-    serverContext.enc,
-    responseNonce,
-    serverContext.keyId
-  );
+  const aeadId = serverContext.aeadId ?? OHTTP_AEAD_ID_AES_256_GCM;
+  const expectedNonceLen = responseNonceLengthForAead(aeadId);
 
+  const responseNonce =
+    customResponseNonce instanceof Uint8Array
+      ? customResponseNonce
+      : globalThis.crypto.getRandomValues(new Uint8Array(expectedNonceLen));
+
+  if (responseNonce.length !== expectedNonceLen) {
+    throw new Error(
+      `Invalid OHTTP responseNonce length: ${responseNonce.length} (expected ${expectedNonceLen} bytes)`
+    );
+  }
+
+  const { key, nonce, aad } = deriveResponseKeyAndNonce(serverContext, responseNonce);
+
+  const responseBytes =
+    typeof responseJson === "string" ? utf8ToBytes(responseJson) : responseJson;
   const cipher = gcm(key, nonce, aad);
-  const ciphertext = cipher.encrypt(utf8ToBytes(responseJson));
+  const ciphertext = cipher.encrypt(responseBytes);
 
   return concatBytes(responseNonce, ciphertext);
 }
@@ -416,10 +596,10 @@ export function encapsulateOhttpResponse(
 /**
  * Decapsulates an RFC 9458 binary Encapsulated Response on the client using clientContext.
  */
-export function decapsulateOhttpResponse(
+export function decapsulateOhttpResponseBytes(
   encapsulatedResponse: Uint8Array,
   clientContext: OhttpContext
-): string {
+): Uint8Array {
   if (
     !clientContext ||
     !(clientContext.sharedSecret instanceof Uint8Array) ||
@@ -430,7 +610,9 @@ export function decapsulateOhttpResponse(
     throw new Error("Invalid OHTTP clientContext");
   }
 
-  const minLength = OHTTP_RESPONSE_NONCE_LENGTH + OHTTP_GCM_TAG_LENGTH;
+  const aeadId = clientContext.aeadId ?? OHTTP_AEAD_ID_AES_256_GCM;
+  const responseNonceLen = responseNonceLengthForAead(aeadId);
+  const minLength = responseNonceLen + OHTTP_GCM_TAG_LENGTH;
   if (
     !(encapsulatedResponse instanceof Uint8Array) ||
     encapsulatedResponse.length < minLength
@@ -440,19 +622,20 @@ export function decapsulateOhttpResponse(
     );
   }
 
-  const responseNonce = encapsulatedResponse.slice(0, OHTTP_RESPONSE_NONCE_LENGTH);
-  const ciphertext = encapsulatedResponse.slice(OHTTP_RESPONSE_NONCE_LENGTH);
+  const responseNonce = encapsulatedResponse.slice(0, responseNonceLen);
+  const ciphertext = encapsulatedResponse.slice(responseNonceLen);
 
-  const { key, nonce, aad } = deriveResponseKeyAndNonce(
-    clientContext.sharedSecret,
-    clientContext.enc,
-    responseNonce,
-    clientContext.keyId
-  );
+  const { key, nonce, aad } = deriveResponseKeyAndNonce(clientContext, responseNonce);
 
   const cipher = gcm(key, nonce, aad);
-  const plaintextBytes = cipher.decrypt(ciphertext);
+  return cipher.decrypt(ciphertext);
+}
 
+export function decapsulateOhttpResponse(
+  encapsulatedResponse: Uint8Array,
+  clientContext: OhttpContext
+): string {
+  const plaintextBytes = decapsulateOhttpResponseBytes(encapsulatedResponse, clientContext);
   return textDecoder.decode(plaintextBytes);
 }
 

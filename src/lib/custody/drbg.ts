@@ -59,6 +59,13 @@ export class CustodyCtrDrbg {
         `CustodyCtrDrbg requires a ${DRBG_SEED_BYTES}-byte hardware seed (got ${hardwareSeed?.byteLength ?? 0} bytes)`
       );
     }
+    let nonZero = 0;
+    for (let i = 0; i < hardwareSeed.byteLength; i++) {
+      nonZero |= hardwareSeed[i];
+    }
+    if (nonZero === 0) {
+      throw new Error("CustodyCtrDrbg refuses all-zero hardware seed (RNG fault)");
+    }
 
     this.key = new Uint8Array(DRBG_SEED_BYTES);
     this.counterBlock = new Uint8Array(AES_BLOCK_BYTES);
@@ -131,8 +138,8 @@ export class CustodyCtrDrbg {
    */
   public generate(byteLength: number, additionalInput?: Uint8Array): Uint8Array {
     this.assertAlive();
-    if (!Number.isInteger(byteLength) || byteLength <= 0) {
-      throw new Error(`CustodyCtrDrbg.generate requires a positive integer byteLength (got ${byteLength})`);
+    if (!Number.isInteger(byteLength) || byteLength <= 0 || byteLength > 16 * 1024 * 1024) {
+      throw new Error(`CustodyCtrDrbg.generate requires a positive integer byteLength <= 16 MiB (got ${byteLength})`);
     }
 
     if (additionalInput && additionalInput.byteLength > 0) {

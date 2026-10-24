@@ -444,8 +444,11 @@ function detectGreetingOrSignoff(text: string): boolean {
  * a composite uniqueness risk score (0..100) alongside the extracted feature vector.
  */
 export function analyzeStylometricFingerprint(
-  text: string
+  rawText: string
 ): StylometricFingerprintAnalysis {
+  const text = (rawText ?? "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\u200B-\u200D\u2060\uFEFF\u00AD]/g, "");
   if (!text || !text.trim()) {
     return {
       uniquenessRiskScore: 0,
@@ -570,7 +573,9 @@ export function normalizeStylometry(
     };
   }
 
-  let working = text;
+  let working = text
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\u200B-\u200D\u2060\uFEFF\u00AD]/g, "");
   const changesApplied: string[] = [];
 
   // 1. Replace typographic spaces & punctuation with neutral ASCII equivalents

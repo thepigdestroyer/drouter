@@ -26,8 +26,8 @@ export interface RawEnclaveSeedInput {
 }
 
 /**
- * Automatically builds an embedded `EnclaveIntelligenceDoc` from raw fields
- * using the 128-dim Automated Embedding Pipeline (`embedDocumentText`).
+ * Builds an embedded `EnclaveIntelligenceDoc` from raw fields using the
+ * 128-dim local feature-hash stand-in (`embedDocumentText`).
  */
 export function buildEmbeddedIntelligenceDoc(input: RawEnclaveSeedInput): EnclaveIntelligenceDoc {
   const compositeText = [
@@ -54,9 +54,9 @@ export function buildEmbeddedIntelligenceDoc(input: RawEnclaveSeedInput): Enclav
 
 const PROVIDER_SEED_INPUTS: RawEnclaveSeedInput[] = CONFIDENTIAL_PROVIDERS.map((p) => ({
   docId: `provider-${p.id}`,
-  title: `${p.name} — Confidential Inference Enclave (${p.cpuTee} + ${p.gpuTee})`,
+  title: `${p.name} - Confidential Inference Enclave (${p.cpuTee} + ${p.gpuTee})`,
   category: "provider",
-  summary: `${p.name} (${p.statusInDrouter}) runs confidential inference on ${p.cpuTee} and ${p.gpuTee} with ${p.channelSecurity}. Frontier models: ${p.frontierModels.join(", ")}. Attestation verdict: ${p.attestationVerdict}. Pricing: ${p.inputUsdPerM}. ${p.trustNotes}`,
+  summary: `${p.name} (${p.statusInDrouter}) runs confidential inference on ${p.cpuTee} and ${p.gpuTee} with ${p.channelSecurity}. Frontier models: ${p.frontierModels.join(", ")}. Attestation verdict: ${p.attestationVerdict}. Pricing: ${p.inputUsdPerM}. ${p.trustNotes.replace(/[\u2013\u2014]/g, "-")}`,
   tags: [
     p.id,
     p.name.toLowerCase(),
@@ -215,7 +215,7 @@ const ARCHITECTURE_SEED_INPUTS: RawEnclaveSeedInput[] = [
   },
   {
     docId: "arch-two-hop-gpu-custody",
-    title: "Two-Hop GPU Custody & Deterministic pop() Zeroization (Spec §2.3–2.4)",
+    title: "Two-Hop GPU Custody & Deterministic pop() Zeroization (Spec §2.3-2.4)",
     category: "architecture",
     summary:
       "dRouter's Two-Hop GPU Custody architecture pairs an AMD SEV-SNP ingress router enclave (Hop 1) with an 8x NVIDIA B200/H200/H100 Confidential Computing worker enclave (Hop 2) over attested mutual TLS and RFC 9180 HPKE Encrypted HTTP Body (EHBP). Inside Hop 2, `CustodyCtrDrbg` derives isolated per-session keys (`sessionTrafficKey`, `sessionOffloadKey`, `sessionPrefixKey`), partitions the 512-token prefix cache via HMAC-SHA256 so cross-session cache hits are mathematically zero, and executes `pop()` on session close to cryptographically zeroize all HBM staging pages and DRBG state.",
@@ -234,7 +234,7 @@ const ARCHITECTURE_SEED_INPUTS: RawEnclaveSeedInput[] = [
       "architecture",
     ],
     metadata: {
-      specSection: "§2.3–2.4",
+      specSection: "§2.3-2.4",
       hop1: "AMD SEV-SNP Ingress Router Enclave",
       hop2: "8x NVIDIA B200/H200 CC Worker Enclave",
       blockSizeTokens: 512,

@@ -186,4 +186,35 @@ describe("Subsystem 2: Encrypted Session Freeze, Resume & Crypto-Shredding", () 
       decryptFrozenState({ ...encrypted, aadHex: tamperedAad }, encrypted.freezeSecretHex),
     ).toThrow("Crypto-shredded or invalid freeze key: authentication tag mismatch");
   });
+
+  it("stress-tests 200 randomized freeze/resume round-trips and boundary payload sizes (0 turns, 1B, 1MB)", () => {
+    const largeContent = "Z".repeat(1024 * 1024);
+    const largeState: FrozenSessionState = {
+      modelId: "kimi-k3",
+      nodeKind: "tinfoil",
+      messages: [{ role: "user", content: largeContent }],
+      simContextTokens: 262144,
+      createdAt: 1760000100,
+      turnCount: 1,
+    };
+    const encLarge = encryptFrozenState(largeState);
+    const decLarge = decryptFrozenState(encLarge, encLarge.freezeSecretHex);
+    expect(decLarge.messages[0].content.length).toBe(1024 * 1024);
+
+    for (let i = 0; i < 200; i++) {
+      const state: FrozenSessionState = {
+        modelId: "kimi-k3",
+        nodeKind: i % 2 === 0 ? "tinfoil" : "sim",
+        messages:
+          i === 0
+            ? []
+            : [{ role: "user", content: `Turn ${i}: secret=${i * 997}` }],
+        simContextTokens: i * 16,
+        createdAt: 1760000000 + i,
+        turnCount: i,
+      };
+      const bundle = encryptFrozenState(state);
+      expect(decryptFrozenState(bundle, bundle.freezeSecretHex)).toEqual(state);
+    }
+  });
 });

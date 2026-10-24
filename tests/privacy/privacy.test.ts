@@ -88,6 +88,61 @@ describe("Subsystem 5: Client-Side Privacy Guard", () => {
       scrubber.clear();
       expect(scrubber.entries()).toHaveLength(0);
     });
+
+    it("blocks bypasses (zero-width chars, Cyrillic/fullwidth homoglyphs, split keys, base64-wrapped keys, JWTs, PEM keys, SSNs, NHS/NI numbers) and prevents literal [EMAIL_1] collision", () => {
+      const scrubber = createSessionScrubber(["Project Nightfall"]);
+
+      // 1. Literal placeholder [EMAIL_1] already in user prompt alongside real email
+      const collisionInput =
+        "The doc mentions literal [EMAIL_1] and real contact dana.reyes+audit@sub.acme.co.uk.";
+      const { scrubbed: collisionScrubbed } = scrubber.scrub(collisionInput);
+      expect(collisionScrubbed).toBe(
+        "The doc mentions literal [EMAIL_1] and real contact [EMAIL_2].",
+      );
+      expect(scrubber.restore(collisionScrubbed)).toBe(collisionInput);
+
+      // 2. If a later turn contains literal [EMAIL_2] (which is now in byPlaceholder), it is protected and restored back to literal [EMAIL_2]
+      const turn2Input = "Why did the parser emit literal [EMAIL_2] in the log?";
+      const { scrubbed: turn2Scrubbed } = scrubber.scrub(turn2Input);
+      expect(turn2Scrubbed).not.toContain("[EMAIL_2]");
+      expect(scrubber.restore(turn2Scrubbed)).toBe(turn2Input);
+
+      // 3. Adversarial bypasses: zero-width spaces, Cyrillic homoglyphs, split key, base64 key, JWT, PEM, SSN, UK NI, NHS
+      scrubber.clear();
+      const b64Key = Buffer.from("sk-proj-secretBase64WrappedKey123456").toString("base64");
+      const jwt =
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkRhbmEiLCJpYXQiOjE1MTYyMzkwMjJ9.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+      const pem =
+        "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIJTc7910abcdef1234567890==\n-----END EC PRIVATE KEY-----";
+      const bypassPrompt = [
+        `Zero-width email: al\u200Bice@ac\u200Cme.com`,
+        `Homoglyph email: \u0430lice@\u0430cme.com`,
+        `Homoglyph entity: \u0420roject Nightf\u0430ll`,
+        `Split key: sk-proj-abcd\nefgh12345678`,
+        `Base64 key: ${b64Key}`,
+        `JWT: ${jwt}`,
+        `PEM: ${pem}`,
+        `SSN: 123-45-6789`,
+        `UK NI: QQ 12 34 56 C`,
+        `NHS: NHS 485 777 3456`,
+        `AWS: ASIAIOSFODNN7EXAMPLE`,
+      ].join(" | ");
+
+      const { scrubbed: bypassScrubbed } = scrubber.scrub(bypassPrompt);
+      expect(bypassScrubbed).not.toContain("acme.com");
+      expect(bypassScrubbed).not.toContain("Nightf");
+      expect(bypassScrubbed).not.toContain("efgh12345678");
+      expect(bypassScrubbed).not.toContain(b64Key);
+      expect(bypassScrubbed).not.toContain("eyJhbGci");
+      expect(bypassScrubbed).not.toContain("BEGIN EC PRIVATE KEY");
+      expect(bypassScrubbed).not.toContain("123-45-6789");
+      expect(bypassScrubbed).not.toContain("QQ 12 34 56 C");
+      expect(bypassScrubbed).not.toContain("485 777 3456");
+      expect(bypassScrubbed).not.toContain("ASIAIOSFODNN7EXAMPLE");
+
+      // Both zero-width and homoglyph variants of alice@acme.com canonicalize to [EMAIL_1]
+      expect(scrubber.entries().filter((e) => e.kind === "EMAIL")).toHaveLength(1);
+    });
   });
 
   describe("Upload Bucket Padding & Token Estimation (Spec §6)", () => {
@@ -120,6 +175,31 @@ describe("Subsystem 5: Client-Side Privacy Guard", () => {
       expect(b5000.exponent).toBe(3);
       expect(b5000.padTokens).toBe(3192);
       expect(b5000.frameCadenceMs).toBe(50);
+    });
+
+    it("pads and unpads payloads across exact bucket boundaries (0B, 1B, 4091B, 4092B, 4093B, 1MB) without leaking length inside the bucket", async () => {
+      const { padPayloadToBucket, unpadPayloadFromBucket } = await import(
+        "@/lib/privacy/padding"
+      );
+
+      // 0B and 1B and 4092B (4092 + 4B prefix = 4096B = 1024 tokens) must all produce identical 4096-byte buffers
+      const p0 = padPayloadToBucket("");
+      const p1 = padPayloadToBucket("a");
+      const p4091 = padPayloadToBucket("b".repeat(4091));
+      const p4092 = padPayloadToBucket("c".repeat(4092));
+      const p4093 = padPayloadToBucket("d".repeat(4093));
+
+      expect(p0.bucketBytes).toBe(4096);
+      expect(p1.bucketBytes).toBe(4096);
+      expect(p4091.bucketBytes).toBe(4096);
+      expect(p4092.bucketBytes).toBe(4096);
+      expect(p4093.bucketBytes).toBe(8192);
+
+      expect(unpadPayloadFromBucket(p0.paddedBytes)).toBe("");
+      expect(unpadPayloadFromBucket(p1.paddedBytes)).toBe("a");
+      expect(unpadPayloadFromBucket(p4091.paddedBytes)).toBe("b".repeat(4091));
+      expect(unpadPayloadFromBucket(p4092.paddedBytes)).toBe("c".repeat(4092));
+      expect(unpadPayloadFromBucket(p4093.paddedBytes)).toBe("d".repeat(4093));
     });
   });
 

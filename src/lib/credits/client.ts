@@ -1,5 +1,7 @@
-import { bytesToHex } from "@noble/hashes/utils.js";
+import { gcm } from "@noble/ciphers/aes.js";
+import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 import type { BlindCreditToken } from "@/lib/types";
+import { getCurrentVaultSession } from "@/lib/auth/vault";
 import {
   blindToken,
   unblindSignature,
@@ -7,8 +9,22 @@ import {
 } from "./blind";
 
 const STORAGE_KEY = "drouter.credits.v1";
+const CREDITS_STORAGE_AAD = utf8ToBytes("drouter/v1/credits-wallet");
 
 let memoryStore: BlindCreditToken[] = [];
+let ephemeralWalletKey: Uint8Array | null = null;
+
+function getWalletStorageKey(): Uint8Array {
+  const vault = getCurrentVaultSession();
+  if (vault && vault.vaultKeyHex && /^[0-9a-fA-F]{64}$/.test(vault.vaultKeyHex)) {
+    return hexToBytes(vault.vaultKeyHex);
+  }
+  if (!ephemeralWalletKey) {
+    ephemeralWalletKey = new Uint8Array(32);
+    globalThis.crypto.getRandomValues(ephemeralWalletKey);
+  }
+  return ephemeralWalletKey;
+}
 
 function readStorage(): BlindCreditToken[] {
   if (typeof window === "undefined" || !window.localStorage) {
@@ -16,20 +32,30 @@ function readStorage(): BlindCreditToken[] {
   }
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
+    if (!raw) return [...memoryStore];
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
+    let list: unknown[] = [];
+    if (parsed && typeof parsed === "object" && "nonceHex" in parsed && "ciphertextHex" in parsed) {
+      const key = getWalletStorageKey();
+      const nonce = hexToBytes(String((parsed as { nonceHex: string }).nonceHex));
+      const ct = hexToBytes(String((parsed as { ciphertextHex: string }).ciphertextHex));
+      const pt = gcm(key, nonce, CREDITS_STORAGE_AAD).decrypt(ct);
+      list = JSON.parse(new TextDecoder().decode(pt));
+    } else if (Array.isArray(parsed)) {
+      list = parsed;
+    }
+    if (!Array.isArray(list)) return [];
+    return list.filter(
       (item): item is BlindCreditToken =>
         Boolean(
           item &&
-            typeof item.token === "string" &&
-            typeof item.signature === "string" &&
-            typeof item.denomination === "number"
+            typeof (item as BlindCreditToken).token === "string" &&
+            typeof (item as BlindCreditToken).signature === "string" &&
+            typeof (item as BlindCreditToken).denomination === "number"
         )
     );
   } catch {
-    return [];
+    return [...memoryStore];
   }
 }
 
@@ -39,21 +65,33 @@ function writeStorage(tokens: BlindCreditToken[]): void {
     return;
   }
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(tokens));
+    const key = getWalletStorageKey();
+    const nonce = new Uint8Array(12);
+    globalThis.crypto.getRandomValues(nonce);
+    const plaintext = utf8ToBytes(JSON.stringify(tokens));
+    const ciphertext = gcm(key, nonce, CREDITS_STORAGE_AAD).encrypt(plaintext);
+    window.localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        format: "drouter-credits-v1-gcm",
+        nonceHex: bytesToHex(nonce),
+        ciphertextHex: bytesToHex(ciphertext),
+      })
+    );
   } catch {
     // Ignore storage quota errors
   }
 }
 
 function randomSecretHex(byteLength = 32): string {
-  const bytes = new Uint8Array(byteLength);
-  if (typeof globalThis.crypto !== "undefined" && globalThis.crypto.getRandomValues) {
-    globalThis.crypto.getRandomValues(bytes);
-  } else {
-    for (let i = 0; i < bytes.length; i++) {
-      bytes[i] = Math.floor(Math.random() * 256);
-    }
+  if (
+    typeof globalThis.crypto === "undefined" ||
+    typeof globalThis.crypto.getRandomValues !== "function"
+  ) {
+    throw new Error("CSPRNG unavailable: crypto.getRandomValues is required");
   }
+  const bytes = new Uint8Array(byteLength);
+  globalThis.crypto.getRandomValues(bytes);
   return bytesToHex(bytes);
 }
 
@@ -154,14 +192,26 @@ export async function spendOneCredit(
 
   const [token, ...rest] = wallet;
   writeStorage(rest);
-  const remaining = rest.reduce((sum, t) => sum + (t.denomination || 0), 0);
+  const remainingAfterSpend = rest.reduce((sum, t) => sum + (t.denomination || 0), 0);
 
   const prefix = baseUrl.replace(/\/$/, "");
-  const res = await fetch(`${prefix}/api/credits/spend`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ token, nodeId }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${prefix}/api/credits/spend`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token, nodeId }),
+    });
+  } catch (err) {
+    // Network error before spend reached server: restore token to wallet
+    writeStorage([token, ...rest]);
+    const restoredBalance = [token, ...rest].reduce((sum, t) => sum + (t.denomination || 0), 0);
+    return {
+      ok: false,
+      remaining: restoredBalance,
+      error: err instanceof Error ? err.message : "Network error during credit spend",
+    };
+  }
 
   const data = (await res.json().catch(() => ({}))) as {
     ok?: boolean;
@@ -170,9 +220,18 @@ export async function spendOneCredit(
   };
 
   if (!res.ok || !data.ok) {
+    if (res.status >= 500) {
+      writeStorage([token, ...rest]);
+      const restoredBalance = [token, ...rest].reduce((sum, t) => sum + (t.denomination || 0), 0);
+      return {
+        ok: false,
+        remaining: restoredBalance,
+        error: data.error || `Spend failed with status ${res.status}`,
+      };
+    }
     return {
       ok: false,
-      remaining,
+      remaining: remainingAfterSpend,
       error: data.error || `Spend failed with status ${res.status}`,
     };
   }
@@ -180,6 +239,6 @@ export async function spendOneCredit(
   return {
     ok: true,
     nullifier: data.nullifier,
-    remaining,
+    remaining: remainingAfterSpend,
   };
 }

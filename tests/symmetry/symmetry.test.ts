@@ -134,4 +134,36 @@ describe("Symmetry-Masking Homomorphism Engine", () => {
     expect(params.entityMap["Vault Alpha"]).toBe("Harbor Nine");
     expect(params.entityMap["Project Hyperion"]).toBe("Project Halcyon");
   });
+
+  it("rejects non-bijective entity alias collisions and passes 500 randomized round-trip fuzz trials", () => {
+    expect(() =>
+      createSymmetryTransform({
+        customEntities: {
+          "Entity One": "Shared Alias",
+          "Entity Two": "shared alias",
+        },
+      }),
+    ).toThrow(/Non-bijective/i);
+
+    expect(() =>
+      createSymmetryTransform({
+        numericScaleFactor: 0,
+      }),
+    ).toThrow(/positive finite/i);
+
+    for (let i = 0; i < 500; i++) {
+      const sym = createSymmetryTransform({
+        dateShiftDays: (i % 300) - 150,
+        numericScaleFactor: [0.5, 1.5, 2, 2.5, 4, 5, 8][i % 7],
+      });
+      const month = String((i % 12) + 1).padStart(2, "0");
+      const day = String((i % 28) + 1).padStart(2, "0");
+      const dateStr = `2026-${month}-${day}`;
+      const priceStr = `$${(i * 13 + 101).toLocaleString("en-US")}.${String(i % 100).padStart(2, "0")}`;
+      const intPriceStr = `$${i * 7 + 101}`;
+      const text = `On ${dateStr}, Project Hyperion paid ${priceStr} and ${intPriceStr} to Acme Bio.`;
+      const { transformed } = sym.transform(text);
+      expect(sym.untransform(transformed)).toBe(text);
+    }
+  });
 });

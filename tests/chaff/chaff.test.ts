@@ -82,4 +82,20 @@ describe("k-Anonymity Decoy Bundling & Chaff Cover Traffic", () => {
     }
     expect(seenPositions.size).toBe(4);
   });
+
+  it("matches exact power-of-two byte buckets across boundary sizes (0B, 1B, 4095B, 4096B, 4097B, 32KB) and rejects invalid k", () => {
+    expect(() => createDecoyBundle("test", 0)).toThrow();
+    expect(() => createDecoyBundle("test", -2)).toThrow();
+
+    const boundaryLengths = [0, 1, 4095, 4096, 4097, 8191, 8192, 8193, 32768];
+    for (const len of boundaryLengths) {
+      const prompt = "A".repeat(len);
+      const bundle = createDecoyBundle(prompt, 4);
+      const expectedBucket = computePaddedBucketBytes(prompt).paddedBucketBytes;
+      for (const slot of bundle.slots) {
+        expect(slot.paddedBucketBytes).toBe(expectedBucket);
+        expect(computePaddedBucketBytes(slot.prompt).paddedBucketBytes).toBe(expectedBucket);
+      }
+    }
+  });
 });

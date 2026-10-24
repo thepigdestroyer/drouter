@@ -108,13 +108,64 @@ function formatFieldElementHex(value: bigint): string {
   return mod(value).toString(16).padStart(64, "0");
 }
 
+function constantTimeEqualHex(a: string, b: string): boolean {
+  const cleanA = a.toLowerCase();
+  const cleanB = b.toLowerCase();
+  const maxLen = Math.max(cleanA.length, cleanB.length);
+  let diff = cleanA.length ^ cleanB.length;
+  for (let i = 0; i < maxLen; i++) {
+    const codeA = i < cleanA.length ? cleanA.charCodeAt(i) : 0;
+    const codeB = i < cleanB.length ? cleanB.charCodeAt(i) : 0;
+    diff |= codeA ^ codeB;
+  }
+  return diff === 0;
+}
+
+/**
+ * Rejection-samples a uniform nonzero field element in [1, P - 1].
+ * When `seedHex` is omitted, uses CSPRNG (`crypto.getRandomValues`) directly.
+ * When `seedHex` is provided, expands deterministic counter blocks via SHA-256 without mixing the secret.
+ */
+function sampleNonZeroCoefficient(degree: number, seedHex?: string): bigint {
+  let attempt = 0;
+  while (true) {
+    let rawBytes: Uint8Array;
+    if (seedHex !== undefined) {
+      rawBytes = sha256(
+        utf8ToBytes(`drouter:shamir:coeff:v2:${seedHex}:${degree}:${attempt}`)
+      );
+    } else {
+      rawBytes = new Uint8Array(32);
+      globalThis.crypto.getRandomValues(rawBytes);
+    }
+    const candidate = BigInt("0x" + bytesToHex(rawBytes));
+    rawBytes.fill(0);
+    if (candidate >= BigInt(1) && candidate < SHAMIR_PRIME) {
+      return candidate;
+    }
+    attempt++;
+  }
+}
+
 export function computeShareCommitment(index: number, yHex: string): string {
   return bytesToHex(sha256(utf8ToBytes(`${index}:${yHex.toLowerCase()}`)));
 }
 
+export function verifyShareCommitment(share: ShamirShare): boolean {
+  if (!share || !Number.isInteger(share.index) || share.index <= 0) {
+    return false;
+  }
+  if (typeof share.yHex !== "string" || typeof share.commitmentHex !== "string") {
+    return false;
+  }
+  const expected = computeShareCommitment(share.index, share.yHex);
+  return constantTimeEqualHex(expected, share.commitmentHex);
+}
+
 /**
  * Splits a 32-byte hex secret into `n` Shamir shares with reconstruction threshold `k`
- * over GF(P), evaluating a degree `k - 1` polynomial f(x) at x = 1..n with f(0) = secret mod P.
+ * over GF(P), evaluating a degree `k - 1` polynomial f(x) at x = 1..n with f(0) = secret.
+ * Throws if `secret` >= P or exceeds 32 bytes so secrets are never silently truncated mod P.
  */
 export function splitSecret(
   secretHex: string,
@@ -122,31 +173,29 @@ export function splitSecret(
   n: number,
   seedHex?: string
 ): ShamirShare[] {
-  if (!Number.isInteger(k) || !Number.isInteger(n) || k < 1 || n < k) {
+  if (!Number.isInteger(k) || !Number.isInteger(n) || k < 1 || n < k || n > 255) {
     throw new Error(`Invalid threshold parameters: k=${k}, n=${n}`);
   }
 
+  if (typeof secretHex !== "string") {
+    throw new Error("Secret must be a hex string");
+  }
   const cleanSecret = normalizeHex(secretHex);
-  const secretScalar = mod(BigInt("0x" + cleanSecret));
+  if (cleanSecret.length === 0 || cleanSecret.length > 64) {
+    throw new Error(`Secret hex length out of bounds: expected 1..64 hex chars, got ${cleanSecret.length}`);
+  }
+  const rawSecret = BigInt("0x" + cleanSecret);
+  if (rawSecret >= SHAMIR_PRIME) {
+    throw new Error("Secret value exceeds GF(P) field prime and cannot be represented losslessly");
+  }
+  const secretScalar = rawSecret;
 
-  const effectiveSeed =
-    seedHex !== undefined
-      ? normalizeHex(seedHex)
-      : bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
+  const cleanSeed = seedHex !== undefined ? normalizeHex(seedHex) : undefined;
 
-  // Polynomial coefficients: coefficients[0] = f(0) = secret, coefficients[1..k-1] in [1, P-1]
+  // Polynomial coefficients: coefficients[0] = f(0) = secret, coefficients[1..k-1] uniform in [1, P-1]
   const coefficients: bigint[] = [secretScalar];
   for (let degree = 1; degree < k; degree++) {
-    const coeffDigest = bytesToHex(
-      sha256(
-        utf8ToBytes(
-          `drouter:shamir:coeff:v1:${effectiveSeed}:${cleanSecret}:${degree}`
-        )
-      )
-    );
-    const raw = BigInt("0x" + coeffDigest);
-    const coeff = (raw % (SHAMIR_PRIME - BigInt(1))) + BigInt(1);
-    coefficients.push(coeff);
+    coefficients.push(sampleNonZeroCoefficient(degree, cleanSeed));
   }
 
   const shares: ShamirShare[] = [];
@@ -170,35 +219,52 @@ export function splitSecret(
 
 /**
  * Reconstructs the 32-byte hex secret using Lagrange interpolation at x = 0 modulo P.
+ * Enforces `shares.length >= k`, positive unique x indices in [1, P-1], and valid y elements in [0, P-1].
  */
 export function combineShares(
-  shares: { index: number; yHex: string }[],
+  shares: { index: number; yHex: string; commitmentHex?: string }[],
   k: number
 ): string {
-  if (!Number.isInteger(k) || k < 1) {
+  if (!Number.isInteger(k) || k < 1 || k > 255) {
     throw new Error(`Invalid threshold k=${k}`);
   }
-  if (!Array.isArray(shares) || shares.length === 0) {
-    throw new Error("At least one share is required");
+  if (!Array.isArray(shares) || shares.length < k) {
+    throw new Error(
+      `Insufficient shares to reconstruct secret: got ${Array.isArray(shares) ? shares.length : 0}, required at least k=${k}`
+    );
   }
 
-  const subset = shares.slice(0, k);
   const seenIndices = new Set<number>();
-  for (const s of subset) {
-    if (!Number.isInteger(s.index) || s.index <= 0) {
-      throw new Error(`Invalid share index: ${s.index}`);
+  for (const s of shares) {
+    if (!s || !Number.isInteger(s.index) || s.index <= 0 || BigInt(s.index) >= SHAMIR_PRIME) {
+      throw new Error(`Invalid share index: ${s?.index}`);
     }
     if (seenIndices.has(s.index)) {
       throw new Error(`Duplicate share index: ${s.index}`);
     }
     seenIndices.add(s.index);
+
+    if (typeof s.yHex !== "string") {
+      throw new Error("Share yHex must be a string");
+    }
+    const cleanY = normalizeHex(s.yHex);
+    if (cleanY.length > 64 || BigInt("0x" + cleanY) >= SHAMIR_PRIME) {
+      throw new Error("Share yHex exceeds GF(P) field prime");
+    }
+    if (
+      typeof s.commitmentHex === "string" &&
+      !constantTimeEqualHex(computeShareCommitment(s.index, cleanY.padStart(64, "0")), s.commitmentHex)
+    ) {
+      throw new Error(`Share commitment mismatch at index ${s.index}`);
+    }
   }
 
+  const subset = shares.slice(0, k);
   let secret = BigInt(0);
 
   for (let i = 0; i < subset.length; i++) {
     const xi = BigInt(subset[i].index);
-    const yi = mod(BigInt("0x" + normalizeHex(subset[i].yHex)));
+    const yi = BigInt("0x" + normalizeHex(subset[i].yHex));
 
     let numerator = BigInt(1);
     let denominator = BigInt(1);
@@ -263,6 +329,15 @@ export function authorizeThresholdKeyRelease(
 ): AuthorizeThresholdKeyReleaseResult {
   const k = params.k ?? 3;
   const n = params.n ?? 5;
+  if (!Number.isInteger(k) || !Number.isInteger(n) || k < 1 || n < k || n > 255) {
+    throw new Error(`Invalid threshold parameters: k=${k}, n=${n}`);
+  }
+  if (typeof params.sessionId !== "string" || !params.sessionId.trim()) {
+    throw new Error("sessionId must be a non-empty string");
+  }
+  if (typeof params.chipId !== "string" || !params.chipId.trim()) {
+    throw new Error("chipId must be a non-empty string");
+  }
 
   const checkers = Array.from({ length: n }, (_, idx) => {
     if (idx < REGIONAL_CHECKERS.length) {
@@ -360,7 +435,7 @@ export function authorizeThresholdKeyRelease(
   }
 
   const reconstructedKeyHex = combineShares(releasedShares.slice(0, k), k);
-  if (reconstructedKeyHex !== expectedKeyHex) {
+  if (!constantTimeEqualHex(reconstructedKeyHex, expectedKeyHex)) {
     return {
       released: false,
       k,

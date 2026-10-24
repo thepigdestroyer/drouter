@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="512" height="512" fill="none">
+  <!-- Warm e-paper tile for crisp contrast on both light and dark browser tabs -->
+  <rect x="3" y="3" width="58" height="58" rx="13" fill="#f3f1ec" stroke="#151515" stroke-width="2.5"/>
+
+  <!-- Sealed enclave ring (bowl of lowercase 'd') with a precision ingress aperture on the left -->
+  <path d="M 17.2 28.5 A 14.5 14.5 0 1 1 17.2 41.5" stroke="#151515" stroke-width="4.2" stroke-linecap="round"/>
+
+  <!-- Enclave seal flanges flanking the ingress channel -->
+  <line x1="14.5" y1="28.5" x2="19.5" y2="28.5" stroke="#151515" stroke-width="2.4" stroke-linecap="round"/>
+  <line x1="14.5" y1="41.5" x2="19.5" y2="41.5" stroke="#151515" stroke-width="2.4" stroke-linecap="round"/>
+
+  <!-- Ascender & stem of lowercase 'd' -->
+  <line x1="45" y1="11" x2="45" y2="49.5" stroke="#151515" stroke-width="4.2" stroke-linecap="round"/>
+
+  <!-- Encrypted prompt trace entering the sealed bowl from the left -->
+  <line x1="9.5" y1="35" x2="21.5" y2="35" stroke="#151515" stroke-width="3.2" stroke-linecap="round"/>
+
+  <!-- Single orange element: the confidential prompt/key safely inside the attested hardware ring -->
+  <circle cx="30.5" cy="35" r="5.5" fill="#d9531e"/>
+</svg>

@@ -46,6 +46,13 @@ export function computePrefixBlockHashes(
       `computePrefixBlockHashes requires a 32-byte sessionPrefixKey (got ${sessionPrefixKey?.byteLength ?? 0} bytes)`
     );
   }
+  let nonZero = 0;
+  for (let i = 0; i < sessionPrefixKey.byteLength; i++) {
+    nonZero |= sessionPrefixKey[i];
+  }
+  if (nonZero === 0) {
+    throw new Error("computePrefixBlockHashes refuses all-zero sessionPrefixKey");
+  }
 
   const fullBlocks = Math.floor(tokens.length / HASH_BLOCK_TOKENS);
   const hashes: string[] = [];
@@ -145,16 +152,13 @@ export class PrefixCachePool {
 
     let hitBlocks = 0;
     if (state) {
-      // Verify the session key matches the registered session key before matching blocks
-      let keyMatches = state.keyBuffer.byteLength === sessionPrefixKey.byteLength;
-      if (keyMatches) {
-        for (let i = 0; i < sessionPrefixKey.byteLength; i++) {
-          if (state.keyBuffer[i] !== sessionPrefixKey[i]) {
-            keyMatches = false;
-            break;
-          }
-        }
+      // Constant-time comparison of the session key against the registered session key
+      let diff = state.keyBuffer.byteLength ^ sessionPrefixKey.byteLength;
+      const len = Math.min(state.keyBuffer.byteLength, sessionPrefixKey.byteLength);
+      for (let i = 0; i < len; i++) {
+        diff |= state.keyBuffer[i] ^ sessionPrefixKey[i];
       }
+      const keyMatches = diff === 0;
 
       if (keyMatches) {
         for (let i = 0; i < blockHashes.length; i++) {

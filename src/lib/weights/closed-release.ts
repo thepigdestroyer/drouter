@@ -54,6 +54,31 @@ export type ProviderKeyReleaseResult =
   | ProviderKeyReleaseSuccess
   | ProviderKeyReleaseRefusal;
 
+function constantTimeEqualHex(a: string, b: string): boolean {
+  const cleanA = a.toLowerCase();
+  const cleanB = b.toLowerCase();
+  const maxLen = Math.max(cleanA.length, cleanB.length);
+  let diff = cleanA.length ^ cleanB.length;
+  for (let i = 0; i < maxLen; i++) {
+    const codeA = i < cleanA.length ? cleanA.charCodeAt(i) : 0;
+    const codeB = i < cleanB.length ? cleanB.charCodeAt(i) : 0;
+    diff |= codeA ^ codeB;
+  }
+  return diff === 0;
+}
+
+function deriveProviderSigningKeypair(providerId: string, modelId: string) {
+  const providerIdentitySeed = hkdf(
+    sha384,
+    utf8ToBytes(`drouter:provider-ed25519:${providerId}:${modelId}`),
+    utf8ToBytes("drouter-provider-id-salt"),
+    utf8ToBytes("provider-signing-key"),
+    32
+  );
+  const keys = ed25519.keygen(new Uint8Array(providerIdentitySeed));
+  providerIdentitySeed.fill(0);
+  return keys;
+}
 function concatBytes(...arrays: Uint8Array[]): Uint8Array {
   const totalLen = arrays.reduce((acc, a) => acc + a.length, 0);
   const out = new Uint8Array(totalLen);
@@ -149,8 +174,11 @@ export function providerWrapWeightKey(
 
   if (
     !nodeEvidence.measurement ||
-    nodeEvidence.measurement.toLowerCase() !==
-      nodeEvidence.approvedMeasurement.toLowerCase()
+    !nodeEvidence.approvedMeasurement ||
+    !constantTimeEqualHex(
+      nodeEvidence.measurement,
+      nodeEvidence.approvedMeasurement
+    )
   ) {
     return {
       released: false,
@@ -165,7 +193,12 @@ export function providerWrapWeightKey(
     };
   }
 
-  if (nodeEvidence.quorumSignatures < nodeEvidence.requiredQuorum) {
+  if (
+    !Number.isInteger(nodeEvidence.requiredQuorum) ||
+    nodeEvidence.requiredQuorum < 1 ||
+    !Number.isInteger(nodeEvidence.quorumSignatures) ||
+    nodeEvidence.quorumSignatures < nodeEvidence.requiredQuorum
+  ) {
     return {
       released: false,
       reason: `Insufficient verifier quorum signatures: got ${nodeEvidence.quorumSignatures}, required ${nodeEvidence.requiredQuorum}`,
@@ -176,15 +209,7 @@ export function providerWrapWeightKey(
   const custodyMlkemPkBytes = hexToBytes(nodeEvidence.custodyMlkemPk);
   const weightKeyBytes = hexToBytes(weightKeyHex);
 
-  // Provider deterministic or ephemeral key material
-  const providerIdentitySeed = hkdf(
-    sha384,
-    utf8ToBytes(`drouter:provider-ed25519:${providerId}:${modelId}`),
-    utf8ToBytes("drouter-provider-id-salt"),
-    utf8ToBytes("provider-signing-key"),
-    32
-  );
-  const providerSigningKeys = ed25519.keygen(new Uint8Array(providerIdentitySeed));
+  const providerSigningKeys = deriveProviderSigningKeypair(providerId, modelId);
 
   const ephemeralX25519Keys = x25519.keygen();
   const x25519Shared = x25519.getSharedSecret(
@@ -265,10 +290,24 @@ export function providerWrapWeightKey(
  */
 export function custodyUnwrapWeightKey(
   release: ProviderKeyReleaseSuccess,
-  custodyKeys: CustodyProviderKeypair
+  custodyKeys: CustodyProviderKeypair,
+  expectedProviderPublicKeyHex?: string
 ): string {
   if (!release || release.released !== true) {
     throw new Error("Cannot unwrap an unreleased weight key response");
+  }
+
+  if (expectedProviderPublicKeyHex !== undefined) {
+    if (!constantTimeEqualHex(release.providerPublicKeyHex, expectedProviderPublicKeyHex)) {
+      throw new Error("Provider public key does not match pinned expectedProviderPublicKeyHex");
+    }
+  } else if (release.providerId && release.modelId) {
+    const expectedKeys = deriveProviderSigningKeypair(release.providerId, release.modelId);
+    const expectedPkHex = bytesToHex(expectedKeys.publicKey);
+    expectedKeys.secretKey.fill(0);
+    if (!constantTimeEqualHex(release.providerPublicKeyHex, expectedPkHex)) {
+      throw new Error("Provider public key does not match registered provider identity");
+    }
   }
 
   const transcript = buildReleaseTranscript({
@@ -317,15 +356,25 @@ export function custodyUnwrapWeightKey(
   const info = utf8ToBytes("drouter:closed-weight-key-wrap:hkdf-sha384:v1");
   const kWrap = hkdf(sha384, combinedIkm, salt, info, 32);
 
-  const nonceBytes = hexToBytes(release.nonceHex);
-  const aad = concatBytes(
-    ephemeralPkBytes,
-    sha256(mlkemCipherTextBytes),
-    custodyX25519PkBytes
-  );
+  try {
+    const nonceBytes = hexToBytes(release.nonceHex);
+    const aad = concatBytes(
+      ephemeralPkBytes,
+      sha256(mlkemCipherTextBytes),
+      custodyX25519PkBytes
+    );
 
-  const cipher = gcm(kWrap, nonceBytes, aad);
-  const plaintext = cipher.decrypt(hexToBytes(release.wrappedKeyCiphertextHex));
-
-  return bytesToHex(plaintext);
+    const cipher = gcm(kWrap, nonceBytes, aad);
+    const plaintext = cipher.decrypt(hexToBytes(release.wrappedKeyCiphertextHex));
+    const hexOut = bytesToHex(plaintext);
+    plaintext.fill(0);
+    return hexOut;
+  } finally {
+    custodyX25519SkBytes.fill(0);
+    custodyMlkemSkBytes.fill(0);
+    x25519Shared.fill(0);
+    mlkemShared.fill(0);
+    combinedIkm.fill(0);
+    kWrap.fill(0);
+  }
 }

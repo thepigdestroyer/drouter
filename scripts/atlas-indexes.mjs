@@ -165,7 +165,7 @@ function embedDocumentText(text) {
 
   return {
     vector,
-    model: "drouter-semantic-128d-v1 (voyage-3-large / nomic-embed-text compatible)",
+    model: "local-hashed-128 (stand-in)",
     dimensions: EMBEDDING_DIMENSIONS,
   };
 }
@@ -173,16 +173,16 @@ function embedDocumentText(text) {
 const RAW_SEED_DOCS = [
   {
     docId: "provider-tinfoil",
-    title: "Tinfoil — Confidential Inference Enclave (AMD SEV-SNP + Intel TDX + 8x NVIDIA B200 / H200 / H100 CC)",
+    title: "Tinfoil - Confidential Inference Enclave (AMD SEV-SNP + Intel TDX + 8x NVIDIA B200 / H200 / H100 CC)",
     category: "provider",
     summary:
-      "Tinfoil (live-integrated) runs confidential inference on AMD SEV-SNP + Intel TDX and 8x NVIDIA B200 / H200 / H100 CC with HPKE Encrypted HTTP Body (EHBP, RFC 9180) + Attested TLS. Frontier models: Kimi K3 (2.8T MoE), GLM-5.3, DeepSeek V4.1 Flash, GPT-OSS 120B, Llama 3.3 70B, Gemma 4 31B, Qwen 3.5 72B. Attestation verdict: Full 2-Hop Hardware + Sigstore Rekor + GPU Matrix. Pricing: $0.02+/M. Live primary provider in dRouter.",
+      "Tinfoil (live-integrated) runs confidential inference on AMD SEV-SNP (router-0.tinfoil.sh) + Intel TDX and 8x NVIDIA Confidential Computing GPUs (kimi-k3-inf14.tinfoil.containers.tinfoil.dev, max-model-len 262,144 tokens) with HPKE Encrypted HTTP Body (EHBP, RFC 9180) + Attested TLS. Frontier models: Kimi K3 (2.8T MoE), GLM-5.3, DeepSeek V4.1 Flash, GPT-OSS 120B, Llama 3.3 70B, Gemma 4 31B, Qwen 3.5 72B. Attestation verdict: Full 2-Hop Hardware + Sigstore Rekor + GPU Matrix. Pricing: $0.02+/M. Live primary provider in dRouter.",
     tags: ["tinfoil", "live-integrated", "amd sev-snp", "intel tdx", "8x nvidia b200 / h200 / h100 cc", "pqc-hybrid-ml-kem-768", "kimi k3 (2.8t moe)", "glm-5.3", "deepseek v4.1 flash", "gpt-oss 120b", "llama 3.3 70b", "gemma 4 31b", "qwen 3.5 72b"],
     metadata: { providerId: "tinfoil", statusInDrouter: "live-integrated", cpuTee: "AMD SEV-SNP + Intel TDX", gpuTee: "8x NVIDIA B200 / H200 / H100 CC", pqcHybrid: true },
   },
   {
     docId: "provider-phala-redpill",
-    title: "Phala Cloud / Redpill — Confidential Inference Enclave (Intel TDX + NVIDIA H100 / H200 CC)",
+    title: "Phala Cloud / Redpill - Confidential Inference Enclave (Intel TDX + NVIDIA H100 / H200 CC)",
     category: "provider",
     summary:
       "Phala Cloud / Redpill (compatible-openai-e2ee) runs confidential inference on Intel TDX and NVIDIA H100 / H200 CC with Attested E2EE. Frontier models: DeepSeek V3, DeepSeek R1, Qwen 3 235B, Llama 3.3 70B, Gemma 3 27B. Attestation verdict: On-Chain Attestation (Intel DCAP + NVIDIA CC). Pricing: $0.04+/M. Backs OpenRouter's enterprise confidential tier via Redpill and Phala Cloud CVM workers.",
@@ -191,7 +191,7 @@ const RAW_SEED_DOCS = [
   },
   {
     docId: "provider-near-ai-cloud",
-    title: "NEAR AI Cloud — Confidential Inference Enclave (Intel TDX + NVIDIA H200 CC)",
+    title: "NEAR AI Cloud - Confidential Inference Enclave (Intel TDX + NVIDIA H200 CC)",
     category: "provider",
     summary:
       "NEAR AI Cloud (compatible-openai-e2ee) runs confidential inference on Intel TDX and NVIDIA H200 CC with Attested E2EE. Frontier models: DeepSeek R1, DeepSeek V3, Moonshot Kimi K2.5, GLM-5, Qwen 3, GPT-OSS 120B, Llama 3.3 70B. Attestation verdict: On-Chain Attestation (Intel DCAP + NVIDIA CC). Pricing: $0.01+/M.",
@@ -200,7 +200,7 @@ const RAW_SEED_DOCS = [
   },
   {
     docId: "provider-venice-ai",
-    title: "Venice.ai (E2EE Mode) — Confidential Inference Enclave (Intel TDX + NVIDIA H100 / H200 CC)",
+    title: "Venice.ai (E2EE Mode) - Confidential Inference Enclave (Intel TDX + NVIDIA H100 / H200 CC)",
     category: "provider",
     summary:
       "Venice.ai (E2EE Mode) (compatible-openai-e2ee) runs confidential inference on Intel TDX and NVIDIA H100 / H200 CC with Attested E2EE. Frontier models: Moonshot Kimi K2.5, GLM-5, DeepSeek R1 671B, Qwen 3 235B, Gemma 3 27B, Llama 3.3 70B. Attestation verdict: On-Chain Attestation (Intel DCAP + NVIDIA CC). Pricing: $0.05+/M.",
@@ -209,7 +209,7 @@ const RAW_SEED_DOCS = [
   },
   {
     docId: "provider-prem-ai",
-    title: "Prem AI — Confidential Inference Enclave (Intel TDX + NVIDIA H100 CC)",
+    title: "Prem AI - Confidential Inference Enclave (Intel TDX + NVIDIA H100 CC)",
     category: "provider",
     summary:
       "Prem AI (compatible-openai-e2ee) runs confidential inference on Intel TDX and NVIDIA H100 CC with Attested E2EE. Frontier models: DeepSeek R1, Qwen 3 72B, NVIDIA Nemotron Ultra 253B, Llama 3.3 70B, Mistral Large 2. Attestation verdict: Per-Workload TDX Transcript Binding. Pricing: $0.30+/M.",
@@ -218,7 +218,7 @@ const RAW_SEED_DOCS = [
   },
   {
     docId: "provider-ppq-ai",
-    title: "PPQ.AI — Confidential Inference Enclave (AMD SEV-SNP + Intel TDX + NVIDIA H100 / H200 CC)",
+    title: "PPQ.AI - Confidential Inference Enclave (AMD SEV-SNP + Intel TDX + NVIDIA H100 / H200 CC)",
     category: "provider",
     summary:
       "PPQ.AI (compatible-openai-e2ee) runs confidential inference on AMD SEV-SNP + Intel TDX and NVIDIA H100 / H200 CC with Attested E2EE. Frontier models: Moonshot Kimi K3, DeepSeek V4.1, GLM-5.3, Llama 3.3 70B, Qwen 3 72B, Gemma 4 31B. Attestation verdict: Full 2-Hop Hardware + Sigstore Rekor + GPU Matrix. Pricing: $0.16+/M.",
@@ -227,7 +227,7 @@ const RAW_SEED_DOCS = [
   },
   {
     docId: "provider-confidential-ai",
-    title: "Confidential AI — Confidential Inference Enclave (Intel TDX + NVIDIA H100 CC)",
+    title: "Confidential AI - Confidential Inference Enclave (Intel TDX + NVIDIA H100 CC)",
     category: "provider",
     summary:
       "Confidential AI (compatible-openai-e2ee) runs confidential inference on Intel TDX and NVIDIA H100 CC with Attested E2EE. Frontier models: DeepSeek R1 671B, DeepSeek V3, Llama 3.3 70B. Attestation verdict: Per-Workload TDX Transcript Binding. Pricing: $0.12+/M.",
@@ -236,7 +236,7 @@ const RAW_SEED_DOCS = [
   },
   {
     docId: "provider-chutes-bittensor",
-    title: "Chutes (Bittensor TEE) — Confidential Inference Enclave (AMD SEV-SNP + Intel TDX + NVIDIA H100 / H200 CC)",
+    title: "Chutes (Bittensor TEE) - Confidential Inference Enclave (AMD SEV-SNP + Intel TDX + NVIDIA H100 / H200 CC)",
     category: "provider",
     summary:
       "Chutes (Bittensor TEE) (gateway-tee-only) runs confidential inference on AMD SEV-SNP + Intel TDX and NVIDIA H100 / H200 CC (Miner Dependent) with TEE-Terminated TLS. Frontier models: DeepSeek R1, DeepSeek V3, Moonshot Kimi K2.5, GLM-5, Qwen 3 235B, Mistral Large 2, Llama 3.3 70B. Attestation verdict: Gateway Attestation Only. Pricing: $0.02+/M.",
@@ -245,7 +245,7 @@ const RAW_SEED_DOCS = [
   },
   {
     docId: "provider-privatemode-cosmian",
-    title: "Privatemode (Cosmian / Contrast) — Confidential Inference Enclave (AMD SEV-SNP + Intel TDX + NVIDIA H100 CC)",
+    title: "Privatemode (Cosmian / Contrast) - Confidential Inference Enclave (AMD SEV-SNP + Intel TDX + NVIDIA H100 CC)",
     category: "provider",
     summary:
       "Privatemode (Cosmian / Contrast) (gateway-tee-only) runs confidential inference on AMD SEV-SNP + Intel TDX and NVIDIA H100 CC with TEE-Terminated TLS. Frontier models: DeepSeek R1, GLM-5, GPT-OSS 120B, Qwen 3 72B, Mistral Large 2, Llama 3.3 70B, Gemma 3 27B. Attestation verdict: Gateway Attestation Only. Pricing: $0.15+/M.",
@@ -254,7 +254,7 @@ const RAW_SEED_DOCS = [
   },
   {
     docId: "provider-nanogpt",
-    title: "NanoGPT — Confidential Inference Enclave (Host CPU + NVIDIA CC Driver + NVIDIA H100 CC)",
+    title: "NanoGPT - Confidential Inference Enclave (Host CPU + NVIDIA CC Driver + NVIDIA H100 CC)",
     category: "provider",
     summary:
       "NanoGPT (gateway-tee-only) runs confidential inference on Host CPU + NVIDIA CC Driver and NVIDIA H100 CC with TEE-Only Gateway. Frontier models: Qwen 3 235B, DeepSeek R1, Moonshot Kimi K2.5, GLM-5, Llama 3.3 70B. Attestation verdict: Gateway Attestation Only. Pricing: $0.03+/M.",
@@ -308,12 +308,12 @@ const RAW_SEED_DOCS = [
   },
   {
     docId: "arch-two-hop-gpu-custody",
-    title: "Two-Hop GPU Custody & Deterministic pop() Zeroization (Spec §2.3–2.4)",
+    title: "Two-Hop GPU Custody & Deterministic pop() Zeroization (Spec §2.3-2.4)",
     category: "architecture",
     summary:
       "dRouter's Two-Hop GPU Custody architecture pairs an AMD SEV-SNP ingress router enclave (Hop 1) with an 8x NVIDIA B200/H200/H100 Confidential Computing worker enclave (Hop 2) over attested mutual TLS and RFC 9180 HPKE Encrypted HTTP Body (EHBP). Inside Hop 2, `CustodyCtrDrbg` derives isolated per-session keys (`sessionTrafficKey`, `sessionOffloadKey`, `sessionPrefixKey`), partitions the 512-token prefix cache via HMAC-SHA256 so cross-session cache hits are mathematically zero, and executes `pop()` on session close to cryptographically zeroize all HBM staging pages and DRBG state.",
     tags: ["two-hop gpu custody", "custodyctrdrbg", "pop()", "zeroization", "crypto-shredding", "prefix cache", "8x gpu", "b200", "h200", "hpke", "rfc 9180", "architecture"],
-    metadata: { specSection: "§2.3–2.4", hop1: "AMD SEV-SNP Ingress Router Enclave", hop2: "8x NVIDIA B200/H200 CC Worker Enclave" },
+    metadata: { specSection: "§2.3-2.4", hop1: "AMD SEV-SNP Ingress Router Enclave", hop2: "8x NVIDIA B200/H200 CC Worker Enclave" },
   },
 ];
 
@@ -356,6 +356,10 @@ async function main() {
 
     await col.createIndex({ docId: 1 }, { unique: true });
     await col.createIndex({ category: 1 });
+
+    const receiptsCol = db.collection("agent_verification_receipts");
+    await receiptsCol.createIndex({ receiptId: 1 }, { unique: true });
+    await receiptsCol.createIndex({ coarsenedAt: -1 });
 
     const bulkOps = embeddedDocs.map((doc) => ({
       updateOne: {

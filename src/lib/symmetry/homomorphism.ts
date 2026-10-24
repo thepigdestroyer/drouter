@@ -130,12 +130,22 @@ interface SpanReplacement {
 
 function defaultRandomInt(min: number, max: number): number {
   const range = max - min + 1;
-  if (typeof globalThis.crypto !== "undefined" && globalThis.crypto.getRandomValues) {
-    const arr = new Uint32Array(1);
-    globalThis.crypto.getRandomValues(arr);
-    return min + (arr[0] % range);
+  if (range <= 1) return min;
+  if (
+    typeof globalThis.crypto === "undefined" ||
+    typeof globalThis.crypto.getRandomValues !== "function"
+  ) {
+    throw new Error("CSPRNG unavailable: crypto.getRandomValues is required");
   }
-  return min + Math.floor(Math.random() * range);
+  const maxUint32PlusOne = 0x100000000;
+  const limit = maxUint32PlusOne - (maxUint32PlusOne % range);
+  const arr = new Uint32Array(1);
+  let sample = 0;
+  do {
+    globalThis.crypto.getRandomValues(arr);
+    sample = arr[0];
+  } while (sample >= limit);
+  return min + (sample % range);
 }
 
 const NICE_SCALE_FACTORS = [1.5, 2, 2.5, 4, 5, 8, 10];
@@ -143,13 +153,23 @@ const NICE_SCALE_FACTORS = [1.5, 2, 2.5, 4, 5, 8, 10];
 export function createSymmetryTransform(
   opts: SymmetryTransformOptions = {},
 ): SymmetryTransform {
+  if (opts.dateShiftDays !== undefined && !Number.isFinite(opts.dateShiftDays)) {
+    throw new Error("dateShiftDays must be a finite number");
+  }
+  if (
+    opts.numericScaleFactor !== undefined &&
+    (!Number.isFinite(opts.numericScaleFactor) || opts.numericScaleFactor <= 0)
+  ) {
+    throw new Error("numericScaleFactor must be a positive finite number");
+  }
+
   const dateShiftDays =
     opts.dateShiftDays !== undefined
       ? Math.trunc(opts.dateShiftDays)
       : defaultRandomInt(17, 89);
 
   const numericScaleFactor =
-    opts.numericScaleFactor !== undefined && opts.numericScaleFactor > 0
+    opts.numericScaleFactor !== undefined
       ? opts.numericScaleFactor
       : NICE_SCALE_FACTORS[defaultRandomInt(0, NICE_SCALE_FACTORS.length - 1)];
 
@@ -157,6 +177,25 @@ export function createSymmetryTransform(
     ...DEFAULT_ENTITIES,
     ...(opts.customEntities ?? {}),
   };
+
+  // Validate bijectivity: two distinct original entities must not map to the same masked alias
+  const seenAliases = new Map<string, string>();
+  for (const [orig, alias] of Object.entries(entityMap)) {
+    const cleanOrig = orig.trim();
+    const cleanAlias = alias.trim();
+    if (!cleanOrig || !cleanAlias) continue;
+    const lowerAlias = cleanAlias.toLowerCase();
+    const existingOrig = seenAliases.get(lowerAlias);
+    if (existingOrig && existingOrig.toLowerCase() !== cleanOrig.toLowerCase()) {
+      throw new Error(
+        `Non-bijective entity mapping: "${existingOrig}" and "${cleanOrig}" both map to "${cleanAlias}"`,
+      );
+    }
+    seenAliases.set(lowerAlias, cleanOrig);
+  }
+
+  const exactMaskedCurrencyToOriginal = new Map<string, string[]>();
+  const exactMaskedEntityToOriginal = new Map<string, string>();
 
   // Build sorted pairs for forward and reverse entity replacement (longest match first)
   const forwardEntities = Object.entries(entityMap)
@@ -277,6 +316,13 @@ export function createSymmetryTransform(
     for (const s of spans) {
       out += text.slice(cursor, s.start);
       out += s.masked;
+      if (s.kind === "currency") {
+        const list = exactMaskedCurrencyToOriginal.get(s.masked) ?? [];
+        list.push(s.original);
+        exactMaskedCurrencyToOriginal.set(s.masked, list);
+      } else if (s.kind === "entity") {
+        exactMaskedEntityToOriginal.set(s.masked.toLowerCase(), s.original);
+      }
       applied.push({
         kind: s.kind,
         original: s.original,
@@ -310,7 +356,8 @@ export function createSymmetryTransform(
         const start = m.index;
         const end = start + m[0].length;
         if (overlaps(start, end)) continue;
-        spans.push({ start, end, replacement: orig });
+        const exactOrig = exactMaskedEntityToOriginal.get(m[0].toLowerCase()) ?? orig;
+        spans.push({ start, end, replacement: exactOrig });
       }
     }
 
@@ -335,6 +382,7 @@ export function createSymmetryTransform(
     // 3. Reverse Currency Scaling (1 / numericScaleFactor)
     {
       const invFactor = 1 / numericScaleFactor;
+      const currencyCursor = new Map<string, number>();
       const re = new RegExp(CURRENCY_RE.source, "g");
       let m: RegExpExecArray | null;
       while ((m = re.exec(text)) !== null) {
@@ -342,6 +390,16 @@ export function createSymmetryTransform(
         const start = m.index;
         const end = start + raw.length;
         if (overlaps(start, end)) continue;
+
+        const exactCurrencyList = exactMaskedCurrencyToOriginal.get(raw);
+        if (exactCurrencyList !== undefined && exactCurrencyList.length > 0) {
+          const idx = currencyCursor.get(raw) ?? 0;
+          const exactCurrency =
+            exactCurrencyList[Math.min(idx, exactCurrencyList.length - 1)];
+          currencyCursor.set(raw, idx + 1);
+          spans.push({ start, end, replacement: exactCurrency });
+          continue;
+        }
 
         const symPrefix = m[1];
         const symSep = m[2];
