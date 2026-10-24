@@ -2,6 +2,7 @@ import { p384 } from "@noble/curves/nist.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
+import { getSimHardwareSeed } from "./manifest";
 
 export const FORBIDDEN_PREFIX_HEX = bytesToHex(
   sha256(utf8ToBytes("drouter/forbidden-report-data/v1")),
@@ -34,11 +35,12 @@ function deriveDemoBountyVcek(nodeId: string): {
   secretKey: Uint8Array;
   publicKey: Uint8Array;
 } {
+  // Derived from the server secret so outsiders cannot forge a "compromise proof".
   const keyMaterial = hkdf(
     sha256,
-    utf8ToBytes(`bounty-demo/${nodeId}`),
+    getSimHardwareSeed(),
     undefined,
-    utf8ToBytes("drouter/bounty-demo-vcek/v1"),
+    utf8ToBytes(`drouter/bounty-demo-vcek/v1/${nodeId}`),
     72,
   );
   const secretKey = p384.utils.randomSecretKey(keyMaterial);

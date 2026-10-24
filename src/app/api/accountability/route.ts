@@ -190,6 +190,17 @@ async function recordAccountabilityEvidenceOnChain(
   };
 }
 
+// Honeytokens, salts and decoy prompts stay server side until a leak is revealed.
+function publicCanaries(
+  canaries: Record<string, CanarySession>,
+): Record<string, Pick<CanarySession, "sessionId" | "decoyKind" | "commitment">> {
+  const out: Record<string, Pick<CanarySession, "sessionId" | "decoyKind" | "commitment">> = {};
+  for (const [nodeId, c] of Object.entries(canaries)) {
+    out[nodeId] = { sessionId: c.sessionId, decoyKind: c.decoyKind, commitment: c.commitment };
+  }
+  return out;
+}
+
 export async function GET(request?: Request) {
   await connection();
   if (request) {
@@ -209,7 +220,7 @@ export async function GET(request?: Request) {
   return Response.json({
     manifests: defaultManifests(),
     rampStates: computeRampStates(),
-    activeCanaries: store.activeCanaries,
+    activeCanaries: publicCanaries(store.activeCanaries),
     recentClaims: store.recentClaims,
     forbiddenPrefix: FORBIDDEN_PREFIX_HEX,
     latencyTriangulations: defaultLatencyTriangulations(),
@@ -347,7 +358,7 @@ export async function POST(request: Request) {
       explorerUrl: chainRes.explorerUrl,
       onChain: chainRes.onChain,
       rampStates: computeRampStates(),
-      activeCanaries: store.activeCanaries,
+      activeCanaries: publicCanaries(store.activeCanaries),
       recentClaims: store.recentClaims,
     });
   }
@@ -407,7 +418,7 @@ export async function POST(request: Request) {
       explorerUrl: chainRes.explorerUrl,
       onChain: chainRes.onChain,
       rampStates: computeRampStates(),
-      activeCanaries: store.activeCanaries,
+      activeCanaries: publicCanaries(store.activeCanaries),
       recentClaims: store.recentClaims,
     });
   }
@@ -468,7 +479,7 @@ export async function POST(request: Request) {
       explorerUrl: chainRes.explorerUrl,
       onChain: chainRes.onChain,
       rampStates: computeRampStates(),
-      activeCanaries: store.activeCanaries,
+      activeCanaries: publicCanaries(store.activeCanaries),
       recentClaims: store.recentClaims,
     });
   }
@@ -532,7 +543,7 @@ export async function POST(request: Request) {
     explorerUrl: chainRes.explorerUrl,
     onChain: chainRes.onChain,
     rampStates: computeRampStates(),
-    activeCanaries: store.activeCanaries,
+    activeCanaries: publicCanaries(store.activeCanaries),
     recentClaims: store.recentClaims,
   });
 }

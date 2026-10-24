@@ -17,9 +17,9 @@ import {
   getSandboxCapabilities,
   normalizeSandboxLanguage,
   pauseSandbox,
-  runInVercelSandbox,
   spawnSandbox,
 } from "@/lib/sandbox/microvm";
+import { runInVercelSandbox } from "@/lib/sandbox/vercel-runner";
 
 const MAX_SANDBOX_POST_BODY_BYTES = 16_384; // 16 KB strict body cap
 const MAX_CONCURRENT_SANDBOXES = 2;

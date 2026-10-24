@@ -25,10 +25,16 @@ const DEMO_MANIFEST_NODES: readonly DemoManifestNodeSpec[] = [
   { nodeId: "sim-3", region: "ap-south", tcb: "fmc:2/bl:3/tee:1/snp:4/ucode:9" },
 ];
 
+export function getSimHardwareSeed(): Uint8Array {
+  const raw = process.env.SIM_HARDWARE_SEED;
+  if (raw && /^[0-9a-fA-F]{64}$/.test(raw)) return hexToBytes(raw);
+  // Tests may run without secrets; production must never fall back to a public seed.
+  if (process.env.VITEST) return hexToBytes("02".repeat(32));
+  throw new Error("SIM_HARDWARE_SEED must be set to 64 hex characters");
+}
+
 function getHardwareSeed(): Uint8Array {
-  const raw = process.env.SIM_HARDWARE_SEED || "02".repeat(32);
-  const clean = /^[0-9a-fA-F]{64}$/.test(raw) ? raw : "02".repeat(32);
-  return hexToBytes(clean);
+  return getSimHardwareSeed();
 }
 
 function deriveBytes(info: string, length: number): Uint8Array {

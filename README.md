@@ -2,16 +2,36 @@
 
 ![dRouter: ask frontier AI models without anyone, including us, reading your prompt](public/brand/drouter-cover.png)
 
-dRouter is a privacy-preserving AI inference router that verifies hardware attestation quotes from CPU and GPU Trusted Execution Environments (TEEs) in the client before sealing prompts with RFC 9180 HPKE encryption. It combines on-device PII and secret scrubbing, homomorphic symmetry masking, Gemini 4 Argon autonomous security orchestration, MongoDB Atlas hybrid search, and Circle Arc Testnet receipt settlement so cloud relays and model hosts cannot read raw user secrets.
+dRouter is a privacy-preserving AI inference router that verifies hardware attestation quotes from CPU and GPU Trusted Execution Environments (TEEs) in the client before sealing prompts with RFC 9180 HPKE encryption. It combines on-device PII and secret scrubbing, stylometric normalization, homomorphic symmetry masking, real CKKS Fully Homomorphic Encryption (`node-seal` 7.0.0 WASM), Gemini 4 Argon autonomous verification, MongoDB Atlas 8.0 hybrid search, unlinkable 2,048-bit RSA blind-signed credits, and Circle Arc Testnet receipt settlement so cloud relays and model hosts cannot read raw user secrets.
 
 Live deployment: https://drouter-demo.vercel.app
 Source: https://github.com/thepigdestroyer/drouter
+Deployment & ops runbook: [docs/DEPLOY.md](docs/DEPLOY.md)
+Security policy & limitations: [SECURITY.md](SECURITY.md)
 
 ## Who It Is For
 
 The default workflow is built around **Dana Reyes**, a fictional clinical data scientist on an Oncology Trial Unit at Riverside Teaching Hospital. She needs to audit survival analysis pipelines, de-identified case notes, and R/Python statistical code without exposing patient cohort identifiers, grant figures, or API credentials to cloud model providers.
 
 *Pitch note for the team:* `DEMO_PERSONA` in `src/lib/gemini/orchestrator.ts` is a fictional example persona so no personal data is committed to the repository. Before pitching to judges, replace `DEMO_PERSONA` with a real, consenting user and their actual workflow.
+
+## Real vs. Simulated Subsystems (Code Ground Truth)
+
+Every subsystem in dRouter is either backed by real cryptography and external services or explicitly labelled as `Simulated`:
+
+| Subsystem | Code Path | Status | What Runs in Code |
+|---|---|---|---|
+| **Tinfoil Attested Enclave Routing** | `src/lib/tinfoil/`, `/api/relay/**`, `/api/v1/**` | **Live** (`TINFOIL_API_KEY`) | Browser and CLI verify Hop 1 (`router-0.tinfoil.sh`, AMD EPYC Genoa SEV-SNP report + VCEK chain + Sigstore Rekor bundle) and Hop 2 (`kimi-k3-inf14.tinfoil.containers.tinfoil.dev` or `gemma4-31b-inf10-0.tinfoil.containers.tinfoil.dev`, Intel TDX + NVIDIA Confidential Computing GPUs via `.well-known/tinfoil-proxy` and deployment manifest) before encrypting payloads with RFC 9180 HPKE (`ehbp`). |
+| **Client Prompt Pipeline (I1) & Vault (I3)** | `src/lib/pipeline/`, `src/lib/privacy/`, `src/lib/stylometry/`, `src/lib/auth/vault.ts` | **Live (Client)** | `preparePrompt` runs entirely in the browser: scrubs PII/secrets and vault custom terms (`getActiveCustomScrubTerms`), normalizes stylometry, scores exposure risk, and pads payloads to 4,096-byte power-of-two buckets. Vault keys are derived from 6-word BIP39 passphrases via 210,000 rounds of PBKDF2-HMAC-SHA512 + HKDF-SHA256. |
+| **Unlinkable Blind-Signed Credits (I2)** | `src/lib/credits/`, `/api/credits/**` | **Live** (`CREDITS_ISSUER_RSA_PQ`) | 2,048-bit RSA blind signatures with per-denomination coprime public exponents (`65537`, `65539`, `65543`), full-domain HKDF hashing, AES-256-GCM encrypted client storage (`takeCreditHeader` for `x-drouter-credit`), and MongoDB `credit_nullifiers` double-spend prevention. |
+| **MongoDB Atlas 8.0 Hybrid Search** | `src/lib/atlas/`, `/api/atlas`, `scripts/atlas-indexes.mjs` | **Live** (`MONGODB_URI`) | Connects to MongoDB Atlas 8.0 (`drouter` database, user `drouter-app` with `readWrite@drouter`). Executes native `$rankFusion` combining `$vectorSearch` (`drouter_vector_index`, 128 dims, cosine) and `$search` (`drouter_text_search`), plus multi-collection `$facet` telemetry and UTC-hour coarsened receipts. |
+| **Circle Arc Testnet Registry** | `src/lib/arc/`, `/api/registry`, `/api/anchor` | **Live** (`ARC_RPC_URL`, `ARC_VERIFIER_PRIVATE_KEY`) | Reads registered nodes and anchors verification/receipt digests on Circle Arc Testnet (chain ID `5042002`, contract `0xbc8085c2b6fe6e0db05f169925c0b841828f4481`). |
+| **CKKS Homomorphic Classifier (Tier C)** | `src/lib/ashi/fhe.ts`, `/api/ashi` | **Live WASM FHE** (`node-seal` 7.0.0) | Executes a real Microsoft SEAL 4.1.2 WASM CKKS homomorphic 4x128 linear classifier (`W * Enc(x) + b`) and encrypted squared L2 norm using Galois rotation keys and relinearization keys where the server never sees plaintext or the secret key. (Frontier 3T LLM FHE numbers in `src/lib/ashi/model.ts` are an explicitly labelled analytical simulation.) |
+| **Vercel Sandbox Code Execution** | `src/lib/sandbox/microvm.ts`, `/api/sandbox` | **Live Firecracker microVM** (`@vercel/sandbox`) | Runs Python 3 and Node.js snippets inside an isolated `@vercel/sandbox` Firecracker microVM with zero host environment variables passed. Explicitly labelled as a Firecracker microVM, not a hardware-attested TEE enclave. |
+| **Daily Mystery-Shopper SPRT Auditor** | `src/lib/auditor/`, `/api/auditor`, `/api/cron/auditor` | **Live** (`TINFOIL_API_KEY`, `CRON_SECRET`) | Daily Vercel Cron (`vercel.json`) runs a 3-call calibration battery against Tinfoil enclaves, scores exact answers/format/model-echo/latency, updates Wald's Sequential Probability Ratio Test (SPRT), and stores UTC-hour coarsened records in MongoDB `auditor_runs`. |
+| **Health & Readiness Probe (I4)** | `src/app/api/health/route.ts` | **Live** | Checks MongoDB ping, Circle Arc Testnet block number, Tinfoil attestation endpoint reachability, and required environment variable presence by name only (cached for 30s). |
+| **Simulated Enclave Nodes (`sim-1..3`)** | `src/lib/sim/`, `/api/sim/**` | **Simulated** (`SIM_HARDWARE_SEED`) | Deterministic software simulation of AMD SEV-SNP reports, hybrid X25519 + ML-KEM-768 key agreement, and fixed-size token framing for offline testing and fault injection. |
+| **Quorum, Shamir Checkers, VMPL0 & Custody** | `src/lib/transparency/`, `src/lib/threshold/`, `src/lib/monitor/`, `src/lib/custody/` | **Simulated (Local Crypto)** | Real Ed25519 5-of-7 quorum verification, prime-field Shamir 3-of-5 secret sharing, 1,344-state VMPL0 exhaustive policy checking, and AES-256-GCM memory-bus entropy checks executed in local TypeScript rather than distributed multi-party hardware. |
 
 ## Google DeepMind Gemini 4 Argon Integration (`src/lib/gemini/`, `/api/gemini`, `/argon`)
 
@@ -51,29 +71,13 @@ dRouter runs against a live MongoDB Atlas M0 cluster (`drouter`, database `drout
 6. **Multi-Collection `$facet` Aggregation (`runAtlasStreamAnalytics`)**: Runs standard `$facet` and `$group` aggregations across `enclave_intelligence`, `agent_verification_receipts`, `verifications`, `receipts`, `relay_totals`, `credit_nullifiers`, and `frozen_blobs`. (Atlas Stream Processing workspaces and change streams are not used on M0.)
 7. **Authenticated, Size-Capped Ingest**: HTTP `POST /api/atlas` with `action: "ingest"` requires a valid `X-Atlas-Ingest-Token` header matching `ATLAS_INGEST_TOKEN`, caps documents at 8,192 bytes, and rejects any payload containing a `prompt` field.
 
-## Architecture
-
-1. **Local Privacy & Symmetry Boundary (`src/lib/privacy/`, `src/lib/symmetry/`)**: Strips secrets, emails, phone numbers, wallets, and custom entities into `[KIND_N]` placeholders, shifts ISO dates and scales currency figures homomorphically, and pads JSON frames to 4,096-byte RFC 8259 power-of-two buckets.
-2. **2-Hop Attested Enclave Verification (`src/lib/tinfoil/`)**: Verifies Hop 1 (`router-0.tinfoil.sh`, AMD SEV-SNP) and Hop 2 (`kimi-k3-inf14.tinfoil.containers.tinfoil.dev` or `gemma4-31b-inf10-0.tinfoil.containers.tinfoil.dev`, Intel TDX + NVIDIA Confidential Computing GPUs) against Sigstore Rekor transparency logs and pinned dm-verity root hashes.
-3. **Oblivious Relay (`src/lib/relay.ts`, `/api/relay`)**: Forwards HPKE-encrypted payloads to `*.tinfoil.sh` without reading prompts or completions, pacing streamed responses on a 50 ms cadence.
-4. **MongoDB Atlas Data Plane (`src/lib/atlas/`, `src/lib/db.ts`)**: Stores the confidential provider and hardware advisory knowledge base, coarsened verification receipts, aggregate relay byte counters, spent RSA blind credit nullifiers, and AES-256-GCM frozen session ciphertexts.
-5. **Circle Arc Testnet Registry (`src/lib/arc/`)**: Anchors verification digests and batch receipts on Circle Arc Testnet (chain ID `5042002`, contract `0xbc8085c2b6fe6e0db05f169925c0b841828f4481`).
-
 ## How to Run Locally
 
-1. Create `.env.local` in the project root with the following environment variable names (do not commit values):
+1. Copy `.env.example` to `.env.local` and populate your credentials (never commit secret values):
 
 ```bash
-MONGODB_URI=
-MONGODB_DB=drouter
-TINFOIL_API_KEY=
-GEMINI_API_KEY=
-VOYAGE_API_KEY=
-ATLAS_INGEST_TOKEN=
-ARC_RPC_URL=
-ARC_REGISTRY_ADDRESS=0xbc8085c2b6fe6e0db05f169925c0b841828f4481
-ARC_VERIFIER_PRIVATE_KEY=
-ARC_DEPLOYER_PRIVATE_KEY=
+cp .env.example .env.local
+chmod 600 .env.local
 ```
 
 2. Seed MongoDB Atlas and verify search indexes are `READY`:
@@ -82,10 +86,12 @@ ARC_DEPLOYER_PRIVATE_KEY=
 node --env-file=.env.local scripts/atlas-indexes.mjs
 ```
 
-3. Run the development server or test suites:
+3. Run the development server, health check, or test suites:
 
 ```bash
 npm run dev
+curl -s http://localhost:3000/api/health | jq .
+npx vitest run --config tests/health/vitest.config.ts
 npx vitest run --config tests/gemini/vitest.config.ts
 npx vitest run --config tests/atlas/vitest.config.ts
 ```
@@ -108,7 +114,7 @@ node scripts/drouter-cli.mjs proxy --port 4141 --upstream http://localhost:3000
 ## Ground-Truth Limitations & Caveats
 
 - **Tinfoil Hardware & Context Limits**: Tinfoil's ingress router (`router-0.tinfoil.sh`) attests with AMD SEV-SNP. The Kimi K3 enclave (`kimi-k3-inf14.tinfoil.containers.tinfoil.dev`) runs on Intel TDX plus 8x NVIDIA Confidential Computing GPUs with a maximum context length (`max-model-len`) of 262,144 tokens (not 1,000,000 tokens; the 1,000,000-token context window belongs to `gemini-4-argon`). Live enclave status is published at `https://inference.tinfoil.sh/.well-known/tinfoil-proxy`.
-- **Tinfoil Sidecars**: Tinfoil's router enclave runs an acceptable-use "safeguards" classifier sidecar reporting to `https://api.tinfoil.sh` and a token usage reporter.
-- **Simulated Enclave Nodes**: Nodes `sim-1`, `sim-2`, and `sim-3` (`src/lib/sim/`) are software simulations used for deterministic testing and fault injection, not physical SEV-SNP hardware.
+- **Tinfoil Sidecars**: Tinfoil's router enclave runs an acceptable-use "safeguards" classifier sidecar (`gpt-oss-safeguard-120b` + `kimi-k3` review) reporting to `https://api.tinfoil.sh` and a token usage reporter.
+- **Simulated Enclave Nodes**: Nodes `sim-1`, `sim-2`, and `sim-3` (`src/lib/sim/`) are software simulations derived from `SIM_HARDWARE_SEED` used for deterministic testing and fault injection, not physical SEV-SNP hardware.
 - **Gemini Simulated Mode When Key Is Absent**: When `GEMINI_API_KEY` is not set in the environment or request, `/api/gemini` runs in `mode: "simulated"`. All local verifiers (scrubber, symmetry masking, live Tinfoil attestation check, MongoDB Atlas `$rankFusion` search, 1,344-state VMPL0 check, and V1/V6 memory-bus audit) execute for real, and `TINFOIL_API_KEY` calls the live Tinfoil enclave on `POST /api/gemini`, while Gemini model outputs are labeled as simulated.
 - **MongoDB Atlas M0 Tier Limits**: The live `drouter` cluster is an Atlas M0 free-tier cluster on MongoDB 8.0.34. Native `$vectorSearch`, `$search`, and `$rankFusion` execute on Atlas, whereas Automated Embedding (`autoEmbed`, which requires MongoDB 8.2+ and an Atlas Model API key) and Atlas Stream Processing workspaces are not supported on this tier.

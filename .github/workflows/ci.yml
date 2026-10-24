@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+env:
+  DROUTER_STUB_UPSTREAM: "1"
+
+jobs:
+  verify:
+    name: Typecheck, Test Suites & Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript typecheck
+        run: npx tsc --noEmit
+
+      - name: Run offline unit & integration test suites (no live secrets required)
+        run: |
+          set -euo pipefail
+          # Documented live-service test suites excluded when secrets are absent:
+          # None required by default because all 33 suites run deterministically offline
+          # when MONGODB_URI, TINFOIL_API_KEY, GEMINI_API_KEY, and ARC_RPC_URL are unset.
+          LIVE_ONLY_SUITES=""
+          for cfg in tests/*/vitest.config.ts; do
+            suite="$(basename "$(dirname "$cfg")")"
+            if echo " $LIVE_ONLY_SUITES " | grep -q " $suite "; then
+              echo "Skipping live-only suite: $suite"
+              continue
+            fi
+            echo "Running suite: $suite ($cfg)"
+            npx vitest run --config "$cfg"
+          done
+
+      - name: Run MongoDB Atlas live cluster suite (when MONGODB_URI secret is configured)
+        if: ${{ secrets.MONGODB_URI != '' }}
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          MONGODB_DB: drouter
+        run: npx vitest run --config tests/atlas/vitest.config.ts
+
+      - name: Production Next.js build
+        run: npx next build

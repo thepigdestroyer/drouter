@@ -122,9 +122,9 @@ import {
   getSandboxCapabilities,
   normalizeSandboxLanguage,
   pauseSandbox,
-  runInVercelSandbox,
   spawnSandbox,
 } from "@/lib/sandbox/microvm";
+import { runInVercelSandbox } from "@/lib/sandbox/vercel-runner";
 import {
   GET,
   POST,

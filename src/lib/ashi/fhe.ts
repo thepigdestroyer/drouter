@@ -1,6 +1,6 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
-import { embedDocumentText, EMBEDDING_DIMENSIONS } from "@/lib/atlas/embeddings";
+import { embedDocumentText, normalizeVectorL2 } from "@/lib/atlas/embeddings";
 
 /**
  * Real CKKS Fully Homomorphic Encryption (FHE) linear classifier & dot-product engine
@@ -24,7 +24,16 @@ export const FHE_SECURITY_LEVEL_BITS = 128 as const;
 export const FHE_COEFF_MODULUS_BITS = [40, 28, 41] as const;
 export const FHE_SCALE_BITS = 28 as const;
 export const FHE_SCALE = Math.pow(2, FHE_SCALE_BITS);
-export const FHE_VECTOR_DIM = EMBEDDING_DIMENSIONS; // 128
+// The FHE classifier is a fixed 128-d model, independent of the search embedding size.
+export const FHE_VECTOR_DIM = 128;
+
+/** Folds a local embedding of any length into the 128-d FHE input space and L2-normalizes it. */
+export function toFheVector(vec: readonly number[]): number[] {
+  if (vec.length === FHE_VECTOR_DIM) return Array.from(vec);
+  const folded = new Array<number>(FHE_VECTOR_DIM).fill(0);
+  for (let i = 0; i < vec.length; i++) folded[i % FHE_VECTOR_DIM] += vec[i];
+  return normalizeVectorL2(folded);
+}
 export const FHE_BLOCK_STRIDE = 256 as const; // Power-of-two slot stride (>= 2 * 128) preventing wrap-around contamination during rotation-sum
 export const FHE_ROTATION_STEPS = [1, 2, 4, 8, 16, 32, 64] as const;
 
@@ -111,7 +120,7 @@ export function getPublicScoringMatrix(): PublicScoringMatrix {
       label: spec.label,
       description: spec.description,
       bias: spec.bias,
-      weights: emb.vector,
+      weights: toFheVector(emb.vector),
     };
   });
 
@@ -347,8 +356,8 @@ export async function clientEncryptVector128(
       input.text ??
         "Verify AMD SEV-SNP and SPDM 1.2 TEE-IO riser-proof memory protection against DDR5 bus interposers.",
     );
-    vector128 = emb.vector;
-    embeddingModel = emb.model;
+    vector128 = toFheVector(emb.vector);
+    embeddingModel = `${emb.model} folded to ${FHE_VECTOR_DIM}-d`;
   }
 
   let secretKeyBase64: string;
