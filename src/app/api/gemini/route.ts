@@ -234,6 +234,10 @@ export async function POST(request: NextRequest) {
       arcAnchor = txHash
         ? { broadcast: true, txHash, explorerUrl: explorerTx(txHash), receiptHash }
         : { broadcast: false, reason: "Arc verifier wallet is not configured or the transaction failed." };
+      const anchorAction = autonomousRun.stages.stage5.pendingActions.find(
+        (a) => a.kind === "anchor_arc_receipt",
+      );
+      if (txHash && anchorAction) anchorAction.txHashHex = txHash;
     }
   }
 

@@ -79,7 +79,8 @@ export interface ConsistencyProof {
   consistencyPath: string[];
 }
 
-export const BUILDER_IDS = ["builder-ethz", "builder-stanford", "builder-tinfoil"] as const;
+// Simulated reproducible builders. These are not real organizations.
+export const BUILDER_IDS = ["sim-builder-1", "sim-builder-2", "sim-builder-3"] as const;
 export const REVIEWER_IDS = [
   "reviewer-1",
   "reviewer-2",
@@ -133,9 +134,11 @@ export function canonicalJson(value: unknown): string {
 }
 
 export function getSeedBytes(): Uint8Array {
-  const raw = process.env.SIM_HARDWARE_SEED || "03".repeat(32);
-  const validHex = /^[0-9a-fA-F]{64}$/.test(raw) ? raw : "03".repeat(32);
-  return hexToBytes(validHex);
+  const raw = process.env.SIM_HARDWARE_SEED;
+  if (raw && /^[0-9a-fA-F]{64}$/.test(raw)) return hexToBytes(raw);
+  // Tests may run without secrets; production must never sign with a public seed.
+  if (process.env.VITEST) return hexToBytes("03".repeat(32));
+  throw new Error("SIM_HARDWARE_SEED must be set to 64 hex characters");
 }
 
 export function deriveEd25519Key(info: string): {

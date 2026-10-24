@@ -1495,26 +1495,11 @@ export async function runArgonAutonomousWorkflow(
   // =========================================================================
   // STAGE 5: Human-in-the-Loop Control Gate (Circle Arc Settlement & Key Custody)
   // =========================================================================
-  const arcReceiptTxHash = humanApproved
-    ? `0x${bytesToHex(
-        sha256(
-          utf8ToBytes(
-            `arc-anchor:${papillonGeneralizedPrompt}:${activeEnclaveModel}:approved`,
-          ),
-        ),
-      )}`
-    : undefined;
-
-  const slashTxHash =
-    humanApproved && injectFault
-      ? `0x${bytesToHex(
-          sha256(
-            utf8ToBytes(
-              `arc-slash:${initialEnclaveModel}:${initialPrimaryHost}:approved`,
-            ),
-          ),
-        )}`
-      : undefined;
+  // No transaction hashes are invented here. The API route broadcasts the approved
+  // receipt anchor on Arc and fills in the real hash; slashing is not supported by
+  // the deployed registry contract, so it never gets one.
+  const arcReceiptTxHash: string | undefined = undefined;
+  const slashTxHash: string | undefined = undefined;
 
   const pendingActions: Stage5HumanInTheLoopResult["pendingActions"] = [
     {
@@ -1586,7 +1571,7 @@ export async function runArgonAutonomousWorkflow(
       : `Stage 3 sandbox verifier checked all ${cleanPolicyReport.statesChecked} VMPL0 exit policy states on ${activePrimaryHost} and measured ${stage3.verificationSignal.entropyBitsPerByte} bits per byte of DDR5 bus entropy with zero repeated 16-byte blocks.`,
     `Stage 4 ran planner ${planner.provider}:${planner.model} at thinking level ${thinkingLevel} and restored the ${activeEnclaveModel} analysis results locally.`,
     humanApproved
-      ? `Stage 5 Human-in-the-Loop approval was granted. Circle Arc settlement receipt ${arcReceiptTxHash?.slice(0, 18)}... is marked executed.`
+      ? `Stage 5 Human-in-the-Loop approval was granted. The server anchors the signed run receipt on the Circle Arc testnet after this step.`
       : `Stage 5 Human-in-the-Loop gate is holding ${pendingActions.length} external Circle Arc state action(s) in quarantine until you explicitly approve execution.`,
   ].join(" ");
 

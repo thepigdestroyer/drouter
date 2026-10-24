@@ -50,6 +50,8 @@ export interface LatencyTriangulationResult {
     status: "ok" | "too-fast-impossible" | "relay-delay";
   }[];
   reasons: string[];
+  /** True for practice-network nodes whose RTTs are illustrative, not measured. */
+  simulated?: boolean;
 }
 
 function normalizeRegion(region: string): VantageRegion {
@@ -120,17 +122,13 @@ export function evaluateLatencyTriangulation(input: {
   };
 }
 
+/**
+ * Practice-network triangulations. The round-trip times are illustrative, not measured,
+ * so every result is marked `simulated: true`. The real router is measured separately
+ * by `measureRouterRtt`.
+ */
 export function defaultLatencyTriangulations(): LatencyTriangulationResult[] {
-  return [
-    evaluateLatencyTriangulation({
-      nodeId: "tinfoil-router",
-      declaredRegion: "us-east",
-      measurements: [
-        { vantageRegion: "us-east", rttMs: 6.4 },
-        { vantageRegion: "eu-west", rttMs: 68.2 },
-        { vantageRegion: "ap-south", rttMs: 142.5 },
-      ],
-    }),
+  return ([
     evaluateLatencyTriangulation({
       nodeId: "sim-1",
       declaredRegion: "eu-west",
@@ -158,5 +156,50 @@ export function defaultLatencyTriangulations(): LatencyTriangulationResult[] {
         { vantageRegion: "us-east", rttMs: 145.1 },
       ],
     }),
-  ];
+  ] as LatencyTriangulationResult[]).map((r) => ({ ...r, simulated: true }));
+}
+
+export interface RouterRttMeasurement {
+  host: string;
+  /** Vercel region the measurement ran from, or "local" outside Vercel. */
+  vantage: string;
+  bestRttMs: number;
+  samplesMs: number[];
+}
+
+let cachedRouterRtt: { atMs: number; value: RouterRttMeasurement | null } | null = null;
+const ROUTER_RTT_CACHE_MS = 10 * 60_000;
+
+/**
+ * Measures real round trips from this server to the Tinfoil router (best of 3 HEAD
+ * requests on a kept-alive connection). This is a plain measurement with no
+ * triangulation verdict: the router runs in a region outside the triangulation model.
+ */
+export async function measureRouterRtt(host = "inference.tinfoil.sh"): Promise<RouterRttMeasurement | null> {
+  const now = Date.now();
+  if (cachedRouterRtt && now - cachedRouterRtt.atMs < ROUTER_RTT_CACHE_MS) return cachedRouterRtt.value;
+  const samplesMs: number[] = [];
+  try {
+    for (let i = 0; i < 3; i++) {
+      const t0 = performance.now();
+      const res = await fetch(`https://${host}/.well-known/tinfoil-proxy`, {
+        method: "HEAD",
+        cache: "no-store",
+        signal: AbortSignal.timeout(5_000),
+      });
+      await res.arrayBuffer().catch(() => undefined);
+      samplesMs.push(Math.round((performance.now() - t0) * 10) / 10);
+    }
+  } catch {
+    cachedRouterRtt = { atMs: now, value: null };
+    return null;
+  }
+  const value: RouterRttMeasurement = {
+    host,
+    vantage: process.env.VERCEL_REGION ?? "local",
+    bestRttMs: Math.min(...samplesMs),
+    samplesMs,
+  };
+  cachedRouterRtt = { atMs: now, value };
+  return value;
 }

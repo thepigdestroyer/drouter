@@ -212,12 +212,11 @@ describe("Vercel Sandbox Firecracker microVM integration & API route", () => {
     expect(json.isolation).toBe(SANDBOX_ISOLATION_MODE);
     expect(json.description).toBe(SANDBOX_DESCRIPTION);
     expect(json.specReference).toBe(SANDBOX_DESCRIPTION);
-    expect(json.sandboxId).toMatch(/^sbx-/);
-    expect(typeof json.durationMs).toBe("number");
     expect(json.capabilities.hardwareAttested).toBe(false);
     expect(json.capabilities.tee).toBe(false);
     expect(json.capabilities.envPassedToSandbox).toBe(false);
-    expect(json.trace.fork.parentStatePreserved).toBe(true);
+    expect(json.trace).toBeUndefined();
+    expect(json.usage.method).toBe("POST");
   });
 
   it("POST /api/sandbox runs code and enforces body cap, code length cap, rate limits, and concurrency limit", async () => {

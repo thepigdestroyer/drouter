@@ -15,7 +15,7 @@ import {
   createCanarySession,
   verifyCanaryLeak,
 } from "@/lib/accountability/canary";
-import { defaultLatencyTriangulations } from "@/lib/accountability/latency";
+import { defaultLatencyTriangulations, measureRouterRtt } from "@/lib/accountability/latency";
 import {
   defaultManifests,
   deriveNodeChipId,
@@ -229,6 +229,7 @@ export async function GET(request?: Request) {
     recentClaims: getStore().recentClaims,
     forbiddenPrefix: FORBIDDEN_PREFIX_HEX,
     latencyTriangulations: defaultLatencyTriangulations(),
+    routerLatency: await measureRouterRtt(),
     registrySource: registry.source,
     registryNodes: registry.nodes,
     minStakeUsdc: registry.minStake ?? String(DEFAULT_OPERATOR_STAKE_USDC),

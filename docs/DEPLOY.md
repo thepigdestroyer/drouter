@@ -30,7 +30,7 @@ Configure the following environment variables in the Vercel project settings (`P
 | `MONGODB_DB` | Server | Database name override (defaults to `drouter`). |
 | `ATLAS_INGEST_TOKEN` | Server | Shared secret verified against the `X-Atlas-Ingest-Token` header on `POST /api/atlas` (`action: "ingest"`). If unset, external document ingestion is disabled (`403`). |
 | `GEMINI_API_KEY` | Server | Google Gemini API key for live Gemini 4 Argon (`gemini-4-argon`, `gemini-3.8-flash`, `gemini-3.5-flash-lite`) Interactions API calls. When unset, `/api/gemini` runs all local and Tinfoil/Atlas verifiers for real and labels Gemini model synthesis as `mode: "simulated"`. |
-| `VOYAGE_API_KEY` | Server | Voyage AI API key for live 128-dimensional query embeddings in `/api/atlas`. When unset, dRouter uses the deterministic `local-hashed-128 (stand-in)` embedding engine. |
+| `VOYAGE_API_KEY` | Server | Voyage AI API key for live 768-dimensional query embeddings in `/api/atlas`. When unset, dRouter uses the deterministic `local-hashed-128 (stand-in)` embedding engine. |
 | `VOYAGE_MODEL` | Server | Voyage AI model name override (defaults to `voyage-3-lite`). |
 | `CREDITS_ISSUER_SEED` | Server | Optional hex seed fallback for local/test RSA credit key derivation when `CREDITS_ISSUER_RSA_PQ` is unset. |
 | `ARC_DEPLOYER_PRIVATE_KEY` | Local CLI only | Deployer/operator private key used by `scripts/arc-deploy.mjs` and `scripts/arc-seed.mjs`. Not needed at runtime on Vercel. |
@@ -73,7 +73,7 @@ bash scripts/atlas-setup.sh
 
 ### Seeding Knowledge Documents & Creating Search Indexes
 
-Run `scripts/atlas-indexes.mjs` against `.env.local` to upsert the 16 curated confidential provider and hardware advisory documents (with 128-dimensional unit-normalized embeddings) into `drouter.enclave_intelligence` and ensure the search indexes are created:
+Run `scripts/atlas-indexes.mjs` against `.env.local` to upsert the 16 curated confidential provider and hardware advisory documents (with 768-dimensional unit-normalized embeddings) into `drouter.enclave_intelligence` and ensure the search indexes are created:
 
 ```bash
 node --env-file=.env.local scripts/atlas-indexes.mjs

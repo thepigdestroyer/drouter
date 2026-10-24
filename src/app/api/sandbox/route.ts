@@ -13,10 +13,8 @@ import {
   SANDBOX_ISOLATION_MODE,
   destroySandbox,
   execInSandbox,
-  forkSandbox,
   getSandboxCapabilities,
   normalizeSandboxLanguage,
-  pauseSandbox,
   spawnSandbox,
 } from "@/lib/sandbox/microvm";
 import { runInVercelSandbox } from "@/lib/sandbox/vercel-runner";
@@ -62,37 +60,7 @@ export async function GET(request?: Request) {
     if (limited) return limited;
   }
 
-  const startedAt = Date.now();
-  const sessionId = "ehbp-sess-kimi-k3-1m-demo";
-  const parent = spawnSandbox(sessionId);
-
-  const parentExec1 = execInSandbox(parent, {
-    tool: "python",
-    code: "portfolio_npv = 1250000; print(portfolio_npv)",
-  });
-
-  const parentExec2 = execInSandbox(parent, {
-    tool: "bash",
-    code: 'echo "CONFIDENTIAL_MERGER_TARGET=Helios" > /tmp/deal.env',
-  });
-
-  const pauseReceipt = pauseSandbox(parent);
-
-  const child = forkSandbox(parent);
-
-  const childSpeculativeExec = execInSandbox(child, {
-    tool: "python",
-    code: "portfolio_npv = 0; print(portfolio_npv)",
-  });
-
-  const parentVerifyExec = execInSandbox(parent, {
-    tool: "python",
-    code: "print(portfolio_npv)",
-  });
-
-  const childDestroyReceipt = destroySandbox(child);
-  const parentDestroyReceipt = destroySandbox(parent);
-  const durationMs = Math.max(1, Date.now() - startedAt);
+  // Capability information only. Real code runs via POST in a Vercel Sandbox microVM.
   const capabilities = getSandboxCapabilities({
     maxBodyBytes: MAX_SANDBOX_POST_BODY_BYTES,
     maxConcurrentExecutions: MAX_CONCURRENT_SANDBOXES,
@@ -101,31 +69,12 @@ export async function GET(request?: Request) {
   return NextResponse.json({
     isolation: SANDBOX_ISOLATION_MODE,
     description: SANDBOX_DESCRIPTION,
-    sandboxId: parent.sandboxId,
-    durationMs,
-    capabilities,
-    sessionId,
     specReference: SANDBOX_DESCRIPTION,
-    trace: {
-      spawn: {
-        sandboxId: parent.sandboxId,
-        imageMeasurementHex: parent.imageMeasurementHex,
-        rtmr3Hex: parent.rtmr3Hex,
-      },
-      exec: [parentExec1, parentExec2],
-      pause: pauseReceipt,
-      fork: {
-        childSandboxId: child.sandboxId,
-        parentSandboxId: child.parentSandboxId,
-        childSpeculativeExec,
-        parentVerifyExec,
-        parentStatePreserved:
-          parentVerifyExec.decryptedStdoutForTest === "1250000",
-      },
-      destroy: {
-        child: childDestroyReceipt,
-        parent: parentDestroyReceipt,
-      },
+    capabilities,
+    usage: {
+      method: "POST",
+      body: { language: "python | node", code: "string" },
+      activeExecutions: getActiveSandboxCount(),
     },
   });
 }

@@ -351,10 +351,12 @@ describe("Subsystem 3 — Remote Accountability Layer (Spec §8.1–8.7)", () =>
   });
 
   describe("§8.6 Latency Triangulation", () => {
-    it("validates speed-of-light RTT bounds for the 4 demo nodes and flags relayed attestations", () => {
+    it("validates speed-of-light RTT bounds for the 3 practice nodes and flags relayed attestations", () => {
       const defaults = defaultLatencyTriangulations();
-      expect(defaults).toHaveLength(4);
+      expect(defaults).toHaveLength(3);
       for (const d of defaults) {
+        expect(d.simulated).toBe(true);
+        expect(d.nodeId).toMatch(/^sim-/);
         expect(d.consistent).toBe(true);
         expect(d.relayedSuspected).toBe(false);
       }
