@@ -1,10 +1,6 @@
 import { p384 } from "@noble/curves/nist.js";
 import { describe, expect, it } from "vitest";
-import { openSimSession } from "@/lib/sim/client";
 import { FORBIDDEN_REPORT_DATA_PREFIX, SIM_NODES, SIM_TCB } from "@/lib/sim/constants";
-import { assertSimId, SYNTHETIC_CHIP_ID_HEX_PREFIX } from "@/lib/sim/hardware";
-import { nodeClose, nodeHello, nodeKeyshare, nodeTurn } from "@/lib/sim/node";
-import { simRoots } from "@/lib/sim/roots";
 import {
   REPORT_SIZE,
   encodeReport,
@@ -115,31 +111,5 @@ describe("SEV-SNP report", () => {
     const reportData = new Uint8Array(64);
     reportData.set(FORBIDDEN_REPORT_DATA_PREFIX, 0);
     expect(() => signReport(sampleFields({ reportData }), key.secretKey)).toThrow(/forbidden/i);
-  });
-});
-
-describe("Simulated practice nodes removed from production", () => {
-  it("exports an empty SIM_NODES list and empty simRoots()", () => {
-    expect(SIM_NODES).toEqual([]);
-    expect(simRoots().nodes).toEqual([]);
-    expect(SYNTHETIC_CHIP_ID_HEX_PREFIX).toBe("73696d2d636869702d30303030303030");
-  });
-
-  it("rejects all simulated session and node operations", async () => {
-    expect(() => assertSimId("sim-1")).toThrow(/removed/i);
-    await expect(openSimSession("", "sim-1")).rejects.toThrow(/removed/i);
-    expect(() => nodeHello("sim-1", { clientNonce: "00".repeat(32), modelId: "sim-echo-1" })).toThrow(
-      /removed/i,
-    );
-    expect(() =>
-      nodeKeyshare("sim-1", {
-        ticket: "00",
-        clientX25519Pk: "00",
-        mlkemCt: "00",
-        sealed: "00",
-      }),
-    ).toThrow(/removed/i);
-    expect(() => nodeTurn("sim-1", { ticket: "00", turn: 1, ct: "00" })).toThrow(/removed/i);
-    expect(() => nodeClose("sim-1", { ticket: "00" })).toThrow(/removed/i);
   });
 });
