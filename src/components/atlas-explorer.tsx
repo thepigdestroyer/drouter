@@ -1,6 +1,12 @@
 "use client";
 
 import React, { useCallback, useEffect, useState } from "react";
+import { InkButton } from "@/components/ink/ink-button";
+import { TechDetails } from "@/components/ink/tech-details";
+import {
+  formatPlainAtlasResult,
+  PLAIN_ATLAS_PRESET_QUERIES,
+} from "@/components/argon/argon-helpers";
 
 interface AtlasSearchResultItem {
   docId: string;
@@ -69,13 +75,6 @@ interface AtlasResponse {
   error?: string;
 }
 
-const PRESET_QUERIES = [
-  "AMD SEV-SNP router and Intel TDX model enclave",
-  "Kimi K3 Intel TDX and NVIDIA confidential GPU enclave",
-  "DDR5 memory bus interposer probe mitigation",
-  "Chaumian RSA blind signature credits",
-];
-
 function resolveItemSourceUrl(item: AtlasSearchResultItem): string | null {
   const candidates = [
     item.sourceUrl,
@@ -98,7 +97,9 @@ function resolveItemSourceUrl(item: AtlasSearchResultItem): string | null {
 }
 
 export function AtlasExplorer() {
-  const [query, setQuery] = useState(PRESET_QUERIES[0]);
+  const [query, setQuery] = useState<string>(
+    PLAIN_ATLAS_PRESET_QUERIES[0].label,
+  );
   const [data, setData] = useState<AtlasResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -111,7 +112,7 @@ export function AtlasExplorer() {
       const body = (await res.json().catch(() => null)) as AtlasResponse | null;
       if (!res.ok || !body) {
         const msg =
-          body?.error || `Atlas search failed with HTTP ${res.status}.`;
+          body?.error || `Knowledge search failed with HTTP ${res.status}.`;
         setError(msg);
         return;
       }
@@ -120,7 +121,7 @@ export function AtlasExplorer() {
       setError(
         err instanceof Error
           ? err.message
-          : "Network error while querying /api/atlas.",
+          : "Network error while searching our knowledge base.",
       );
     } finally {
       setLoading(false);
@@ -128,7 +129,7 @@ export function AtlasExplorer() {
   }, []);
 
   useEffect(() => {
-    void runSearch(PRESET_QUERIES[0]);
+    void runSearch(PLAIN_ATLAS_PRESET_QUERIES[0].query);
   }, [runSearch]);
 
   const engines = data?.engines ?? data?.search?.engines;
@@ -176,14 +177,13 @@ export function AtlasExplorer() {
   return (
     <div className="ep-card p-5 sm:p-6 text-ink space-y-5">
       <div className="space-y-1.5">
-        <div className="ep-label">Knowledge retrieval</div>
+        <div className="ep-label">Knowledge search</div>
         <h3 className="font-serif text-xl sm:text-2xl text-ink">
-          Search hardware and enclave documentation
+          Search what we know about private AI
         </h3>
         <p className="max-w-[70ch] text-sm text-ink-2">
-          Queries our hardware advisory and provider catalog using hybrid vector
-          and full-text search, falling back to local ranking when MongoDB Atlas
-          search indexes are unavailable.
+          Look up how deRoute protects your messages, which sealed computers we
+          use, and how we guard against physical hardware attacks.
         </p>
       </div>
 
@@ -192,53 +192,48 @@ export function AtlasExplorer() {
         className="flex flex-col gap-2 sm:flex-row"
         onSubmit={(e) => {
           e.preventDefault();
-          void runSearch(query);
+          const matchedPreset = PLAIN_ATLAS_PRESET_QUERIES.find(
+            (p) => p.label.toLowerCase() === query.trim().toLowerCase(),
+          );
+          void runSearch(matchedPreset ? matchedPreset.query : query);
         }}
       >
         <label htmlFor="atlas-search-input" className="sr-only">
-          Search enclave knowledge base
+          Search what we know about private AI
         </label>
         <input
           id="atlas-search-input"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search providers, hardware checks, or threat notes..."
+          placeholder="Type a question about sealed computers or private AI..."
           className="ep-input flex-1"
         />
-        <button type="submit" disabled={loading} className="ep-btn shrink-0">
+        <InkButton
+          type="submit"
+          variant="primary"
+          disabled={loading}
+          className="shrink-0"
+        >
           {loading ? "Searching..." : "Search"}
-        </button>
+        </InkButton>
       </form>
 
-      {/* Preset queries */}
+      {/* Preset queries in plain words */}
       <div className="flex flex-wrap items-center gap-2">
-        <span className="ep-label">Presets:</span>
-        {PRESET_QUERIES.map((preset) => (
+        <span className="ep-label">Try asking:</span>
+        {PLAIN_ATLAS_PRESET_QUERIES.map((preset) => (
           <button
-            key={preset}
+            key={preset.label}
             type="button"
             onClick={() => {
-              setQuery(preset);
-              void runSearch(preset);
+              setQuery(preset.label);
+              void runSearch(preset.query);
             }}
-            className="ep-muted-chip hover:border-ink hover:text-ink transition-colors cursor-pointer"
+            className="ep-muted-chip max-w-full whitespace-normal text-left hover:border-ink hover:text-ink transition-colors cursor-pointer"
           >
-            {preset}
+            {preset.label}
           </button>
         ))}
-      </div>
-
-      {/* Honest Engines & Index Status bar */}
-      <div className="ep-inset px-3.5 py-2.5 text-xs text-ink-2 space-y-1 font-mono">
-        <div>
-          <span className="text-ink font-medium">Engines:</span> {enginesLine}
-        </div>
-        <div>
-          <span className="text-ink font-medium">Index status:</span>{" "}
-          {indexSummary}
-          {totalDocs !== undefined ? ` (${totalDocs} docs)` : ""}
-          {connectedState ? ` | ${connectedState}` : ""}
-        </div>
       </div>
 
       {/* Error banner with retry */}
@@ -248,91 +243,111 @@ export function AtlasExplorer() {
           className="ep-card border-accent bg-accent-soft/40 p-4 flex flex-wrap items-center justify-between gap-3 text-xs"
         >
           <div className="space-y-0.5">
-            <div className="font-mono font-medium text-ink">
-              Atlas search error
-            </div>
-            <p className="text-ink-2 font-mono">{error}</p>
+            <div className="font-mono font-medium text-ink">Search error</div>
+            <p className="text-ink-2">{error}</p>
           </div>
-          <button
+          <InkButton
             type="button"
+            variant="ghost"
             disabled={loading}
             onClick={() => void runSearch(query)}
-            className="ep-btn text-xs cursor-pointer"
+            className="text-xs"
           >
-            Retry search
-          </button>
+            Try again
+          </InkButton>
         </div>
       )}
 
-      {/* Results list */}
+      {/* Simple results list */}
       <div className="divide-y divide-rule border-t border-b border-rule">
         {(data?.results ?? []).slice(0, 4).map((item) => {
           const sourceUrl = resolveItemSourceUrl(item);
+          const plain = formatPlainAtlasResult(item);
+          const rawTitleDeRoute = item.title.replace(/\bdRouter\b/g, "deRoute");
+          const rawSummaryDeRoute = item.summary.replace(
+            /\bdRouter\b/g,
+            "deRoute",
+          );
           return (
-            <article key={item.docId} className="py-4 space-y-2">
+            <article key={item.docId} className="py-4 space-y-2.5">
               <div className="flex flex-wrap items-baseline justify-between gap-2">
-                <h4 className="font-serif text-base font-medium text-ink">
-                  {sourceUrl ? (
-                    <a
-                      href={sourceUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="ep-link"
-                    >
-                      {item.title}
-                    </a>
-                  ) : (
-                    item.title
-                  )}
+                <h4 className="font-serif text-base sm:text-lg font-medium text-ink">
+                  {plain.title}
                 </h4>
-                <span className="ep-label">
-                  {item.category}
-                  {item.provider ? ` / ${item.provider}` : ""}
-                </span>
+                <span className="ep-muted-chip">{plain.categoryLabel}</span>
               </div>
               <p className="max-w-[70ch] text-sm text-ink-2 leading-relaxed">
-                {item.summary}
+                {plain.summary}
               </p>
-              {sourceUrl && (
-                <div className="font-mono text-xs text-ink-2">
-                  Source:{" "}
-                  <a
-                    href={sourceUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="ep-link break-all"
-                  >
-                    {sourceUrl}
-                  </a>
-                </div>
-              )}
-              <details className="text-xs text-ink-3">
-                <summary className="cursor-pointer font-mono text-ink-2 hover:text-ink select-none">
-                  Show score details
-                </summary>
-                <div className="mt-2 ep-inset p-2.5 font-mono text-xs text-ink-2 space-y-1">
+
+              <TechDetails label="Show technical details">
+                <div className="space-y-2 font-mono text-xs text-ink-2">
                   <div>
-                    RRF score: {item.rrfScore.toFixed(4)} | Vector rank: #
-                    {item.vectorRank} ({item.vectorScore.toFixed(3)}) | Text
-                    rank: #{item.textRank} ({item.textScore.toFixed(3)})
+                    <span className="text-ink font-medium">Record ID:</span>{" "}
+                    {item.docId} ({rawTitleDeRoute})
+                  </div>
+                  <p className="font-sans text-xs text-ink-2 leading-relaxed">
+                    {rawSummaryDeRoute}
+                  </p>
+                  {sourceUrl && (
+                    <div>
+                      <span className="text-ink font-medium">Source:</span>{" "}
+                      <a
+                        href={sourceUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="ep-link break-all"
+                      >
+                        {sourceUrl}
+                      </a>
+                    </div>
+                  )}
+                  <div>
+                    <span className="text-ink font-medium">Scores:</span> RRF{" "}
+                    {item.rrfScore.toFixed(4)} | Vector rank #{item.vectorRank}{" "}
+                    ({item.vectorScore.toFixed(3)}) | Text rank #{item.textRank}{" "}
+                    ({item.textScore.toFixed(3)})
                   </div>
                   {item.embeddingModel && (
-                    <div>Embedding model: {item.embeddingModel}</div>
+                    <div>
+                      <span className="text-ink font-medium">
+                        Embedding model:
+                      </span>{" "}
+                      {item.embeddingModel}
+                    </div>
                   )}
                   {item.tags.length > 0 && (
-                    <div>Tags: {item.tags.join(", ")}</div>
+                    <div>
+                      <span className="text-ink font-medium">Tags:</span>{" "}
+                      {item.tags.join(", ")}
+                    </div>
                   )}
                 </div>
-              </details>
+              </TechDetails>
             </article>
           );
         })}
         {data && data.results.length === 0 && !error && (
           <p className="py-4 text-sm text-ink-3">
-            No matching records found for this query.
+            No matching notes found for that search.
           </p>
         )}
       </div>
+
+      {/* Search engines & index details inside TechDetails */}
+      <TechDetails label="Show search engine details">
+        <div className="space-y-1.5 font-mono text-xs text-ink-2">
+          <div>
+            <span className="text-ink font-medium">Engines:</span> {enginesLine}
+          </div>
+          <div>
+            <span className="text-ink font-medium">Index status:</span>{" "}
+            {indexSummary}
+            {totalDocs !== undefined ? ` (${totalDocs} docs)` : ""}
+            {connectedState ? ` | ${connectedState}` : ""}
+          </div>
+        </div>
+      </TechDetails>
     </div>
   );
 }

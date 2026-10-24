@@ -1,13 +1,32 @@
 "use client";
 
 import React, { useCallback, useEffect, useState } from "react";
+import { AuthGate } from "@/components/auth/auth-gate";
 import { AuthPill } from "@/components/auth-pill";
+import {
+  getCurrentVaultSession,
+  unlockVaultWithKeyMaterial,
+} from "@/lib/auth/vault";
 import { AtlasExplorer } from "@/components/atlas-explorer";
+import { InkButton } from "@/components/ink/ink-button";
+import { InkReveal } from "@/components/ink/ink-reveal";
+import { TechDetails } from "@/components/ink/tech-details";
 import {
   ExhibitSection,
   SpecimenFooter,
   SpecimenHeader,
 } from "@/components/specimen-chrome";
+import {
+  AGENT_INTRO_SENTENCE,
+  APPROVAL_CARD_QUESTION,
+  buildPlainTimelineSteps,
+  DEFAULT_PLAIN_TASK_PROMPT,
+  EXAMPLE_AGENT_TASKS,
+  resolvePlannerModeBadgeText,
+  sanitizeJargonToPlainWords,
+  type ArcAnchorResult,
+  type ArgonPlannerInfo,
+} from "@/components/argon/argon-helpers";
 import {
   ARGON_TOOLKIT_MANIFEST,
   FORBIDDEN_ARGON_PARAMETERS,
@@ -16,28 +35,9 @@ import {
   type ArgonThinkingLevel,
   type ArgonValidationResult,
 } from "@/lib/gemini/interactions";
-import type {
-  ArgonAutonomousRunResult,
-  NamedUserPersona,
-} from "@/lib/gemini/orchestrator";
+import type { ArgonAutonomousRunResult } from "@/lib/gemini/orchestrator";
 
-const DEMO_PERSONA: NamedUserPersona = {
-  name: "Dana Reyes",
-  role: "Clinical data scientist, Oncology Trial Unit",
-  institution: "Riverside Teaching Hospital (fictional example)",
-  assayProtocol:
-    "Phase II trial survival analysis: protocol, de-identified case notes, and R analysis code",
-  contextWindowScale:
-    "Up to 1,000,000 tokens in Gemini 4 Argon orchestrator (scrubbed metadata); 262,144 tokens max context in Tinfoil Kimi K3 enclave",
-  confidentialityMandate:
-    "Run a multi-step AI analysis and code review without exposing patient identifiers, unpublished trial results, or API credentials to any cloud provider.",
-};
-
-const DEFAULT_TASK_PROMPT =
-  "Audit our RTH-ONC-207 survival analysis pipeline for cohort RTH-COHORT-2026-08-14 " +
-  "(grant budget £125,000.00, contact dana.reyes@example.org, credential sk-test-4f9a2c7e1b8d6a3f5e0c). " +
-  "Verify that the patient-level survival models run inside an " +
-  "attested Tinfoil confidential enclave (AMD SEV-SNP router + Intel TDX and NVIDIA Confidential Computing GPUs, 262,144-token enclave context) with zero DDR5 memory-bus leaks.";
+export { resolvePlannerModeBadgeText, type ArgonPlannerInfo };
 
 interface ModelCallRecord {
   model: string;
@@ -48,20 +48,6 @@ interface ModelCallRecord {
   outputTokens?: number;
   error?: string;
 }
-
-export interface ArgonPlannerInfo {
-  provider: string;
-  model: string;
-}
-
-type ArcAnchorResult =
-  | {
-      broadcast: true;
-      txHash: string;
-      explorerUrl: string;
-      receiptHash: string;
-    }
-  | { broadcast: false; reason: string };
 
 interface GeminiRouteResponse {
   ok?: boolean;
@@ -76,36 +62,42 @@ interface GeminiRouteResponse {
   validation?: ArgonValidationResult;
 }
 
-export function resolvePlannerModeBadgeText(params: {
-  planner?: ArgonPlannerInfo | null;
-  mode?: "live" | "simulated";
-  liveGeminiReached?: boolean;
-  enclaveModel?: string;
-}): string {
-  const { planner, mode, liveGeminiReached, enclaveModel } = params;
-  if (planner && typeof planner.model === "string" && planner.model.trim()) {
-    const provider = (planner.provider ?? "").toLowerCase();
-    const model = planner.model.trim();
-    if (
-      provider.includes("google") ||
-      provider.includes("gemini") ||
-      model === GEMINI_4_ARGON_MODEL_ID
-    ) {
-      return "Gemini 4 Argon (live)";
-    }
-    return `Planner: ${model} (no Gemini key)`;
-  }
-
-  if (mode === "live" || liveGeminiReached) {
-    return "Gemini 4 Argon (live)";
-  }
-
-  const fallbackTinfoilModel = enclaveModel?.trim() || "gemma4-31b";
-  return `Planner: ${fallbackTinfoilModel} (no Gemini key)`;
+function InkCheckIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 16 16"
+      className="h-3.5 w-3.5 shrink-0 stroke-current"
+      fill="none"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M3.2 8.4L6.5 11.6L12.8 4.6" />
+    </svg>
+  );
 }
 
-export default function ArgonShowcasePage() {
-  const [taskPrompt, setTaskPrompt] = useState<string>(DEFAULT_TASK_PROMPT);
+function OrangeCrossIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 16 16"
+      className="h-3.5 w-3.5 shrink-0 stroke-current"
+      fill="none"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M4.2 4.2L11.8 11.8M11.8 4.2L4.2 11.8" />
+    </svg>
+  );
+}
+
+function ArgonAuthenticatedView() {
+  const [taskPrompt, setTaskPrompt] = useState<string>(
+    DEFAULT_PLAIN_TASK_PROMPT,
+  );
   const [thinkingLevel, setThinkingLevel] =
     useState<ArgonThinkingLevel>("high");
   const [backgroundDecode] = useState<boolean>(true);
@@ -114,6 +106,8 @@ export default function ArgonShowcasePage() {
   );
   const [injectFault, setInjectFault] = useState<boolean>(true);
   const [humanApproved, setHumanApproved] = useState<boolean>(false);
+  const [userDeclinedApproval, setUserDeclinedApproval] =
+    useState<boolean>(false);
   const [geminiApiKey, setGeminiApiKey] = useState<string>("");
   const [sdkTab, setSdkTab] = useState<"typescript" | "python" | "payload">(
     "typescript",
@@ -147,7 +141,7 @@ export default function ArgonShowcasePage() {
       if (!res.ok || !data || data.ok === false || !data.autonomousRun) {
         const errMsg =
           data?.error ||
-          `Failed to load agent state from /api/gemini (HTTP ${res.status}).`;
+          `Could not load the initial agent state (HTTP ${res.status}).`;
         setApiError(errMsg);
         return;
       }
@@ -167,7 +161,7 @@ export default function ArgonShowcasePage() {
       setApiError(
         err instanceof Error
           ? err.message
-          : "Network error while contacting /api/gemini.",
+          : "Network error while loading the agent.",
       );
     } finally {
       setIsInitialLoading(false);
@@ -188,6 +182,9 @@ export default function ArgonShowcasePage() {
       overrideApproval !== undefined ? overrideApproval : humanApproved;
     if (overrideApproval !== undefined) {
       setHumanApproved(overrideApproval);
+      setUserDeclinedApproval(overrideApproval === false);
+    } else {
+      setUserDeclinedApproval(false);
     }
 
     try {
@@ -239,10 +236,21 @@ export default function ArgonShowcasePage() {
       setApiError(
         err instanceof Error
           ? err.message
-          : "Network error while submitting agent run to /api/gemini.",
+          : "Network error while running the agent.",
       );
     } finally {
       setIsRunning(false);
+    }
+  }
+
+  function handleNotNowClick() {
+    setUserDeclinedApproval(true);
+    setHumanApproved(false);
+    if (
+      runResult &&
+      runResult.stages.stage5.externalActionStatus !== "paused_awaiting_human"
+    ) {
+      void handleExecuteWorkflow(false);
     }
   }
 
@@ -279,947 +287,987 @@ export default function ArgonShowcasePage() {
   const liveGeminiReached = Boolean(
     runResult?.stages.stage4.liveGeminiCall.liveEndpointReached,
   );
-  const modeBadgeText = resolvePlannerModeBadgeText({
+  const plannerBadgeText = resolvePlannerModeBadgeText({
     planner: plannerInfo,
     mode: apiMode,
     liveGeminiReached,
     enclaveModel:
       runResult?.stages.stage4.routedEnclaveModel ?? enclaveModel,
   });
-  const isLiveGeminiBadge = modeBadgeText === "Gemini 4 Argon (live)";
+  const isLiveGeminiBadge = plannerBadgeText === "Planned by Gemini 4 Argon";
 
   const isGatePending =
-    runResult?.stages.stage5.externalActionStatus === "paused_awaiting_human";
+    runResult?.stages.stage5.externalActionStatus === "paused_awaiting_human" ||
+    !runResult?.stages.stage5.approvedByHuman;
+
+  const timelineSteps = runResult
+    ? buildPlainTimelineSteps({
+        run: runResult,
+        plannerBadgeText,
+        arcAnchor,
+        userDeclinedApproval,
+        hasLiveModelCalls: apiModelCalls.some((c) => c.ok),
+      })
+    : [];
+
+  const receiptExplorerUrl =
+    arcAnchor && arcAnchor.broadcast
+      ? arcAnchor.explorerUrl
+      : "https://testnet.arcscan.app/address/0xbc8085c2b6fe6e0db05f169925c0b841828f4481";
+
+  return (
+    <>
+      <div className="mx-auto w-full max-w-5xl px-4 pt-10 pb-4 sm:px-6 space-y-10">
+            {/* 1. Top Intro & Big Task Box */}
+            <InkReveal className="[&[data-ink-reveal=pending]]:!opacity-100 [&[data-ink-reveal=pending]]:![clip-path:none]">
+              <header className="space-y-5 border-b border-rule pb-8">
+                <div className="ep-label">deRoute private agent</div>
+                <h1 className="ep-display text-3xl sm:text-4xl lg:text-5xl">
+                  Private AI agent
+                </h1>
+                <p
+                  data-testid="argon-intro-sentence"
+                  className="max-w-[70ch] text-base sm:text-lg text-ink-2 leading-relaxed"
+                >
+                  {AGENT_INTRO_SENTENCE}
+                </p>
+
+                {/* Honest Planner Card */}
+                <div className="ep-card p-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between min-w-0">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <span
+                      data-testid="argon-mode-badge"
+                      className={
+                        isLiveGeminiBadge
+                          ? "inline-flex items-center rounded-2xl sm:rounded-full bg-ink text-paper px-3.5 py-1.5 font-mono text-xs font-medium tracking-wide max-w-full whitespace-normal break-words"
+                          : "inline-flex items-center rounded-2xl sm:rounded-full border border-ink text-ink px-3.5 py-1.5 font-mono text-xs font-medium tracking-wide max-w-full whitespace-normal break-words"
+                      }
+                    >
+                      {plannerBadgeText}
+                    </span>
+                  </div>
+                  <p className="text-xs text-ink-2 max-w-[56ch]">
+                    {isLiveGeminiBadge
+                      ? "Gemini 4 Argon planned the steps after your device hid your personal details."
+                      : "Our server has no Gemini key set right now, so a sealed computer model planned the steps instead. You can add your own Gemini key in the expert section below."}
+                  </p>
+                </div>
+              </header>
+            </InkReveal>
+
+            {/* Big Task Box with 2 Example Tasks and 1 Run InkButton */}
+            <InkReveal className="[&[data-ink-reveal=pending]]:!opacity-100 [&[data-ink-reveal=pending]]:![clip-path:none]">
+              <section
+                aria-label="Give the agent a task"
+                className="ep-card p-5 sm:p-6 space-y-5"
+              >
+                <div className="space-y-2">
+                  <label
+                    htmlFor="argon-task-prompt"
+                    className="font-serif text-lg font-medium text-ink block"
+                  >
+                    Your private task
+                  </label>
+                  <p className="text-xs sm:text-sm text-ink-2">
+                    Your device hides names, emails, dates, amounts, and secret
+                    keys before anything is sent.
+                  </p>
+                  <textarea
+                    id="argon-task-prompt"
+                    rows={4}
+                    value={taskPrompt}
+                    onChange={(e) => setTaskPrompt(e.target.value)}
+                    className="ep-input text-sm leading-relaxed"
+                  />
+                </div>
+
+                {/* 2 Example Tasks in plain words */}
+                <div className="space-y-2">
+                  <span className="ep-label block">
+                    Or try an example task:
+                  </span>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    {EXAMPLE_AGENT_TASKS.map((ex) => {
+                      const isSelected = taskPrompt.trim() === ex.prompt.trim();
+                      return (
+                        <button
+                          key={ex.id}
+                          type="button"
+                          onClick={() => {
+                            setTaskPrompt(ex.prompt);
+                            setUserDeclinedApproval(false);
+                          }}
+                          className={`text-left rounded border p-3.5 transition-colors cursor-pointer ${
+                            isSelected
+                              ? "border-ink bg-paper-2"
+                              : "border-rule bg-paper hover:border-ink hover:bg-paper-2/60"
+                          }`}
+                        >
+                          <div className="font-serif text-sm font-medium text-ink">
+                            {ex.label}
+                          </div>
+                          <p className="mt-1 text-xs text-ink-2">
+                            {ex.description}
+                          </p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Single Run InkButton */}
+                <div className="pt-1">
+                  <InkButton
+                    type="button"
+                    variant="primary"
+                    disabled={isRunning || isInitialLoading}
+                    onClick={() => void handleExecuteWorkflow(false)}
+                    className="w-full sm:w-auto px-7 py-2.5 text-sm cursor-pointer"
+                  >
+                    {isRunning ? "Running..." : "Run"}
+                  </InkButton>
+                </div>
+              </section>
+            </InkReveal>
+
+            {/* Error Banner with Retry */}
+            {apiError && (
+              <section
+                role="alert"
+                aria-label="Agent error"
+                className="ep-card border-accent bg-accent-soft/40 p-5 sm:p-6 space-y-3"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="space-y-0.5">
+                    <div className="ep-label">Problem running task</div>
+                    <h2 className="font-serif text-xl text-ink">
+                      Could not complete agent request
+                    </h2>
+                  </div>
+                  <span className="ep-fail">
+                    <OrangeCrossIcon />
+                    <span>Error</span>
+                  </span>
+                </div>
+                <p className="text-sm text-ink-2 break-words">
+                  {sanitizeJargonToPlainWords(apiError)}
+                </p>
+                <TechDetails label="Show technical details">
+                  <p className="font-mono text-xs text-ink-2 break-words">
+                    {apiError}
+                  </p>
+                </TechDetails>
+                <div>
+                  <InkButton
+                    type="button"
+                    variant="ghost"
+                    disabled={isRunning || isInitialLoading}
+                    onClick={handleRetry}
+                    className="text-xs cursor-pointer"
+                  >
+                    Try again
+                  </InkButton>
+                </div>
+              </section>
+            )}
+
+            {/* 2. Friendly Vertical Ink Timeline of Plain Steps */}
+            <InkReveal className="[&[data-ink-reveal=pending]]:!opacity-100 [&[data-ink-reveal=pending]]:![clip-path:none]">
+              {runResult ? (
+                <section
+                  aria-label="Agent progress timeline"
+                  className="space-y-6"
+                >
+                  <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-rule pb-3 min-w-0">
+                    <div>
+                      <div className="ep-label">Progress</div>
+                      <h2 className="font-serif text-2xl text-ink">
+                        How your task was handled
+                      </h2>
+                    </div>
+                    <span className="ep-muted-chip max-w-full whitespace-normal break-words text-left">
+                      {plannerBadgeText}
+                    </span>
+                  </div>
+
+                  <ol className="relative border-l-2 border-ink/25 ml-3 pl-6 space-y-6">
+                    {timelineSteps.map((step) => (
+                      <li key={step.id} className="relative space-y-2.5">
+                        <span
+                          aria-hidden="true"
+                          className={`absolute -left-[33px] top-1 flex h-4 w-4 items-center justify-center rounded-full border-2 border-paper ${
+                            step.passed ? "bg-ink" : "bg-accent"
+                          }`}
+                        />
+
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <h3 className="font-serif text-lg sm:text-xl font-medium text-ink">
+                            {step.stepNumber}. {step.title}
+                          </h3>
+                          <span
+                            className={step.passed ? "ep-pass" : "ep-fail"}
+                          >
+                            {step.passed ? (
+                              <InkCheckIcon />
+                            ) : (
+                              <OrangeCrossIcon />
+                            )}
+                            <span>{step.statusText}</span>
+                          </span>
+                        </div>
+
+                        <p className="max-w-[70ch] text-sm text-ink-2 leading-relaxed">
+                          {step.plainResult}
+                        </p>
+
+                        {/* Per-step TechDetails */}
+                        {step.id === "hiding-details" && (
+                          <TechDetails label="Show technical details">
+                            <div className="space-y-2 font-mono text-xs text-ink-2">
+                              <div>
+                                <span className="text-ink font-medium">
+                                  Models / modules:
+                                </span>{" "}
+                                {runResult.stages.stage1.modelsUsed.join(", ")}
+                              </div>
+                              <div>
+                                <span className="text-ink font-medium">
+                                  Redactions:
+                                </span>{" "}
+                                {runResult.stages.stage1.redactionCount} items |{" "}
+                                <span className="text-ink font-medium">
+                                  Bucket size:
+                                </span>{" "}
+                                {runResult.stages.stage1.verificationSignal.bucketBytes.toLocaleString()}{" "}
+                                bytes |{" "}
+                                <span className="text-ink font-medium">
+                                  Plaintext leaks:
+                                </span>{" "}
+                                {
+                                  runResult.stages.stage1.verificationSignal
+                                    .plaintextLeakCount
+                                }
+                              </div>
+                              <div>
+                                <span className="text-ink font-medium">
+                                  Outbound masked prompt:
+                                </span>{" "}
+                                {
+                                  runResult.stages.stage1
+                                    .papillonGeneralizedPrompt
+                                }
+                              </div>
+                              <div>
+                                <span className="text-ink font-medium">
+                                  Homomorphic equation:
+                                </span>{" "}
+                                {runResult.stages.stage1.homomorphicEquation}
+                              </div>
+                              <div>
+                                <span className="text-ink font-medium">
+                                  Verification formula:
+                                </span>{" "}
+                                {
+                                  runResult.stages.stage1.verificationSignal
+                                    .formula
+                                }
+                              </div>
+                            </div>
+                          </TechDetails>
+                        )}
+
+                        {step.id === "checking-seal" && (
+                          <TechDetails label="Show technical details">
+                            <div className="space-y-3 font-mono text-xs text-ink-2">
+                              <div>
+                                <span className="text-ink font-medium">
+                                  Router & enclave target:
+                                </span>{" "}
+                                {runResult.stages.stage2.routerHost} -&gt;{" "}
+                                {runResult.stages.stage2.selectedEnclaveHost} (
+                                {runResult.stages.stage2.selectedEnclaveModel})
+                              </div>
+                              <div>
+                                <span className="text-ink font-medium">
+                                  Stage 2 models:
+                                </span>{" "}
+                                {runResult.stages.stage2.modelsUsed.join(", ")}
+                              </div>
+                              <div className="space-y-1">
+                                <div className="text-ink font-medium">
+                                  Subagent traces:
+                                </div>
+                                {runResult.stages.stage2.subagents.map(
+                                  (sub) => (
+                                    <div key={sub.subagentId}>
+                                      {sub.model} ({sub.latencyMs} ms):{" "}
+                                      {sub.artifactSummary}
+                                    </div>
+                                  ),
+                                )}
+                              </div>
+                              <div className="space-y-1">
+                                <div className="text-ink font-medium">
+                                  Stage 3 sandbox & memory-bus audit:
+                                </div>
+                                {runResult.stages.stage3.attempts.map((att) => (
+                                  <div
+                                    key={att.attemptNumber}
+                                    className="border-t border-rule pt-1.5"
+                                  >
+                                    <div>
+                                      Attempt #{att.attemptNumber}:{" "}
+                                      {att.candidateNodeId} (
+                                      {att.passed ? "Verified" : "Fault caught"}
+                                      )
+                                    </div>
+                                    <div>
+                                      VMPL0 states: {att.vmpl0StatesChecked} |
+                                      Entropy: {att.entropyBitsPerByte}{" "}
+                                      bits/byte | Repeated 16B blocks:{" "}
+                                      {att.repeated16ByteBlocks}
+                                    </div>
+                                    {att.remediationApplied && (
+                                      <div className="text-ink">
+                                        Remediation: {att.remediationApplied}
+                                      </div>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                              <div>
+                                <span className="text-ink font-medium">
+                                  Sandbox receipt:
+                                </span>{" "}
+                                {runResult.stages.stage3.sandboxReceipt.sandboxId}{" "}
+                                | image 0x
+                                {runResult.stages.stage3.sandboxReceipt.imageMeasurementHex.slice(
+                                  0,
+                                  16,
+                                )}
+                                ...
+                              </div>
+                            </div>
+                          </TechDetails>
+                        )}
+
+                        {step.id === "thinking" && (
+                          <TechDetails label="Show technical details">
+                            <div className="space-y-2 font-mono text-xs text-ink-2">
+                              <div>
+                                <span className="text-ink font-medium">
+                                  Planner:
+                                </span>{" "}
+                                {runResult.stages.stage4.planner.provider}:
+                                {runResult.stages.stage4.planner.model} |{" "}
+                                <span className="text-ink font-medium">
+                                  Routed enclave:
+                                </span>{" "}
+                                {runResult.stages.stage4.routedEnclaveModel} (
+                                {runResult.stages.stage4.routedEnclaveHost})
+                              </div>
+                              <div>
+                                <span className="text-ink font-medium">
+                                  Config:
+                                </span>{" "}
+                                thinking_level=&quot;
+                                {runResult.stages.stage4.thinkingLevel}&quot;,
+                                background=
+                                {String(runResult.stages.stage4.background)}
+                              </div>
+                              <div>
+                                <span className="text-ink font-medium">
+                                  Masked enclave output:
+                                </span>{" "}
+                                {
+                                  runResult.stages.stage4
+                                    .enclaveCompletionMasked
+                                }
+                              </div>
+                              <div>
+                                <span className="text-ink font-medium">
+                                  Restored client output:
+                                </span>{" "}
+                                {runResult.stages.stage4.restoredClientOutput}
+                              </div>
+                              <div>
+                                <span className="text-ink font-medium">
+                                  Planner call note:
+                                </span>{" "}
+                                {runResult.stages.stage4.liveGeminiCall
+                                  .liveSummaryText ??
+                                  runResult.stages.stage4.liveGeminiCall
+                                    .fallbackReason ??
+                                  "No live Gemini call"}
+                              </div>
+                            </div>
+                          </TechDetails>
+                        )}
+
+                        {step.id === "waiting-for-you" && (
+                          <TechDetails label="Show technical details">
+                            <div className="space-y-1.5 font-mono text-xs text-ink-2">
+                              <div>
+                                <span className="text-ink font-medium">
+                                  Gate status:
+                                </span>{" "}
+                                {runResult.stages.stage5.externalActionStatus}
+                              </div>
+                              <div>
+                                <span className="text-ink font-medium">
+                                  Circle Arc Testnet registry:
+                                </span>{" "}
+                                0xbc8085c2b6fe6e0db05f169925c0b841828f4481
+                                (chain 5042002)
+                              </div>
+                              {runResult.stages.stage5.pendingActions.map(
+                                (act) => {
+                                  const isRealBroadcast =
+                                    act.kind === "anchor_arc_receipt" &&
+                                    arcAnchor?.broadcast === true;
+                                  return (
+                                    <div key={act.actionId}>
+                                      {act.kind} ({act.status}):{" "}
+                                      {act.description}
+                                      {isRealBroadcast ? (
+                                        <>
+                                          {" "}
+                                          | Broadcast tx:{" "}
+                                          <a
+                                            href={arcAnchor.explorerUrl}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="ep-link"
+                                          >
+                                            {arcAnchor.txHash}
+                                          </a>
+                                        </>
+                                      ) : act.txHashHex ? (
+                                        ` | Simulated digest (not broadcast): ${act.txHashHex}`
+                                      ) : (
+                                        " | Not broadcast on-chain"
+                                      )}
+                                    </div>
+                                  );
+                                },
+                              )}
+                            </div>
+                          </TechDetails>
+                        )}
+
+                        {step.id === "done" && (
+                          <TechDetails label="Show technical details">
+                            <div className="space-y-2 font-mono text-xs text-ink-2">
+                              <div>
+                                <span className="text-ink font-medium">
+                                  Run ID:
+                                </span>{" "}
+                                {runResult.runId}
+                              </div>
+                              <div className="break-all">
+                                <span className="text-ink font-medium">
+                                  SHA-256 run digest:
+                                </span>{" "}
+                                0x
+                                {runResult.stages.stage6.forensicProofDigestHex}
+                              </div>
+                              <div className="break-all">
+                                <span className="text-ink font-medium">
+                                  Ed25519 signature:
+                                </span>{" "}
+                                0x
+                                {runResult.stages.stage6.ed25519SignatureHex}
+                              </div>
+                              <div className="break-all">
+                                <span className="text-ink font-medium">
+                                  Signer public key:
+                                </span>{" "}
+                                0x
+                                {runResult.stages.stage6.signerPublicKeyHex}
+                              </div>
+                              <div className="font-sans text-xs text-ink-2">
+                                {runResult.stages.stage6.voiceTranscript}
+                              </div>
+                            </div>
+                          </TechDetails>
+                        )}
+                      </li>
+                    ))}
+                  </ol>
+                </section>
+              ) : isInitialLoading ? (
+                <div className="ep-card p-6 text-sm text-ink-2">
+                  Loading your private agent...
+                </div>
+              ) : null}
+            </InkReveal>
+
+            {/* 3. Clear Approval Card */}
+            <InkReveal className="[&[data-ink-reveal=pending]]:!opacity-100 [&[data-ink-reveal=pending]]:![clip-path:none]">
+              {runResult && (
+                <section
+                  aria-label="Public receipt approval"
+                  data-testid="argon-approval-card"
+                  className={`ep-card p-5 sm:p-6 space-y-4 ${
+                    isGatePending && !userDeclinedApproval
+                      ? "border-accent bg-accent-soft/40"
+                      : ""
+                  }`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <div className="ep-label">Your choice</div>
+                      <h2 className="font-serif text-xl sm:text-2xl text-ink">
+                        {APPROVAL_CARD_QUESTION}
+                      </h2>
+                    </div>
+                    <span className={isGatePending ? "ep-fail" : "ep-pass"}>
+                      {isGatePending ? (
+                        <OrangeCrossIcon />
+                      ) : (
+                        <InkCheckIcon />
+                      )}
+                      <span>
+                        {isGatePending
+                          ? userDeclinedApproval
+                            ? "Not now"
+                            : "Waiting for you"
+                          : "Allowed"}
+                      </span>
+                    </span>
+                  </div>
+
+                  <p className="max-w-[70ch] text-sm text-ink-2">
+                    A receipt proves that the safety checks passed without
+                    sharing your task or personal details. Nothing is written in
+                    public unless you click Allow.
+                  </p>
+
+                  {/* Confirmation after Allow */}
+                  {!isGatePending && (
+                    <div
+                      data-testid="argon-receipt-confirmation"
+                      className="ep-inset p-4 space-y-2 text-sm text-ink"
+                    >
+                      {arcAnchor?.broadcast ? (
+                        <p>
+                          Confirmed: your receipt was recorded in the public
+                          receipt book.{" "}
+                          <a
+                            href={receiptExplorerUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="ep-link font-medium"
+                          >
+                            See the receipt
+                          </a>
+                        </p>
+                      ) : (
+                        <p>
+                          You allowed the receipt. Live recording was skipped on
+                          this server (
+                          {arcAnchor?.reason
+                            ? sanitizeJargonToPlainWords(arcAnchor.reason)
+                            : "practice mode"}
+                          ), so you can inspect the public receipt book directly:{" "}
+                          <a
+                            href={receiptExplorerUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="ep-link font-medium"
+                          >
+                            See the receipt
+                          </a>
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Plain confirmation when user clicks Not now */}
+                  {isGatePending && userDeclinedApproval && (
+                    <div className="ep-inset p-3.5 text-sm text-ink-2">
+                      Okay, we did not record anything in the public receipt
+                      book. You can click Allow anytime if you change your mind.
+                    </div>
+                  )}
+
+                  <div className="flex flex-wrap items-center gap-3 pt-1">
+                    <InkButton
+                      type="button"
+                      variant={
+                        isGatePending && !userDeclinedApproval
+                          ? "accent"
+                          : "primary"
+                      }
+                      disabled={isRunning || isInitialLoading}
+                      onClick={() => void handleExecuteWorkflow(true)}
+                      className="cursor-pointer"
+                    >
+                      {isRunning && lastApprovalOverride === true
+                        ? "Recording..."
+                        : "Allow"}
+                    </InkButton>
+                    <InkButton
+                      type="button"
+                      variant="ghost"
+                      disabled={isRunning || isInitialLoading}
+                      onClick={handleNotNowClick}
+                      className="cursor-pointer"
+                    >
+                      Not now
+                    </InkButton>
+                  </div>
+
+                  <TechDetails label="Show technical details">
+                    <div className="space-y-1.5 font-mono text-xs text-ink-2">
+                      <div>
+                        Registry contract:
+                        0xbc8085c2b6fe6e0db05f169925c0b841828f4481 (Circle Arc
+                        Testnet, chainId 5042002)
+                      </div>
+                      {arcAnchor?.broadcast ? (
+                        <div className="break-all">
+                          Transaction hash: {arcAnchor.txHash} | Receipt hash:{" "}
+                          {arcAnchor.receiptHash}
+                        </div>
+                      ) : arcAnchor ? (
+                        <div>Broadcast status: {arcAnchor.reason}</div>
+                      ) : (
+                        <div>Broadcast status: waiting for human approval</div>
+                      )}
+                    </div>
+                  </TechDetails>
+                </section>
+              )}
+            </InkReveal>
+
+            {/* 4. For Experts Section (All settings, model calls, SDK code, validator, raw JSON) */}
+            <InkReveal className="[&[data-ink-reveal=pending]]:!opacity-100 [&[data-ink-reveal=pending]]:![clip-path:none]">
+              <section aria-label="For experts">
+                <TechDetails
+                  label="For experts"
+                  summary="Settings, SDK code, and raw data"
+                >
+                  <div className="space-y-6">
+                    {/* Expert run controls */}
+                    <div className="space-y-4">
+                      <div className="ep-label">
+                        Expert agent settings (used on next Run)
+                      </div>
+                      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                        {/* Thinking level */}
+                        <div className="space-y-1.5">
+                          <span className="ep-label block">Thinking level</span>
+                          <div
+                            className="flex gap-1.5"
+                            role="group"
+                            aria-label="Thinking level"
+                          >
+                            {(["low", "medium", "high"] as const).map((lvl) => (
+                              <button
+                                key={lvl}
+                                type="button"
+                                onClick={() => setThinkingLevel(lvl)}
+                                className={
+                                  thinkingLevel === lvl
+                                    ? "ep-btn flex-1 py-1.5 px-2.5 text-xs font-mono uppercase cursor-pointer"
+                                    : "ep-btn-ghost flex-1 py-1.5 px-2.5 text-xs font-mono uppercase cursor-pointer"
+                                }
+                              >
+                                {lvl}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Practice fault injection */}
+                        <div className="space-y-1.5">
+                          <span className="ep-label block">
+                            Simulate a compromised node
+                          </span>
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={injectFault}
+                            onClick={() => setInjectFault((prev) => !prev)}
+                            className={
+                              injectFault
+                                ? "ep-btn w-full py-1.5 px-3 text-xs font-mono cursor-pointer"
+                                : "ep-btn-ghost w-full py-1.5 px-3 text-xs font-mono cursor-pointer"
+                            }
+                          >
+                            {injectFault
+                              ? "On: inject faulty node"
+                              : "Off: clean path"}
+                          </button>
+                        </div>
+
+                        {/* Enclave model */}
+                        <div className="space-y-1.5">
+                          <span className="ep-label block">Enclave model</span>
+                          <div
+                            className="flex gap-1.5"
+                            role="group"
+                            aria-label="Enclave model"
+                          >
+                            {(["gemma4-31b", "kimi-k3"] as const).map((mdl) => (
+                              <button
+                                key={mdl}
+                                type="button"
+                                onClick={() => setEnclaveModel(mdl)}
+                                className={
+                                  enclaveModel === mdl
+                                    ? "ep-btn flex-1 py-1.5 px-2 text-xs font-mono cursor-pointer"
+                                    : "ep-btn-ghost flex-1 py-1.5 px-2 text-xs font-mono cursor-pointer"
+                                }
+                              >
+                                {mdl}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Optional Gemini API key */}
+                      <div className="ep-inset p-3.5 space-y-2">
+                        <label
+                          htmlFor="gemini-api-key-input"
+                          className="block font-mono text-xs text-ink"
+                        >
+                          Use your own Gemini API key (optional, sent for one
+                          call and never stored)
+                        </label>
+                        <input
+                          id="gemini-api-key-input"
+                          type="password"
+                          placeholder="AIzaSy..."
+                          value={geminiApiKey}
+                          onChange={(e) => setGeminiApiKey(e.target.value)}
+                          className="ep-input font-mono text-xs"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Model calls telemetry */}
+                    <div className="space-y-2">
+                      <div className="ep-label">Model calls in this run</div>
+                      {apiModelCalls.length > 0 ? (
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left text-xs border-collapse">
+                            <thead>
+                              <tr className="border-b border-rule font-mono text-[11px] uppercase text-ink-3">
+                                <th className="py-2 pr-3">Model</th>
+                                <th className="py-2 pr-3">Purpose</th>
+                                <th className="py-2 pr-3">Status</th>
+                                <th className="py-2 text-right">Latency</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-rule font-mono text-xs">
+                              {apiModelCalls.map((call, idx) => (
+                                <tr key={`${call.model}-${idx}`}>
+                                  <td className="py-2 pr-3 text-ink font-medium">
+                                    {call.model}
+                                  </td>
+                                  <td className="py-2 pr-3 font-sans text-ink-2">
+                                    {call.purpose}
+                                    {call.error ? (
+                                      <span className="block font-mono text-[11px] text-ink-3">
+                                        {call.error}
+                                      </span>
+                                    ) : null}
+                                  </td>
+                                  <td className="py-2 pr-3">
+                                    <span
+                                      className={
+                                        call.ok ? "ep-pass" : "ep-fail"
+                                      }
+                                    >
+                                      {call.ok ? "ok" : "error"}
+                                    </span>
+                                  </td>
+                                  <td className="py-2 text-right text-ink-2">
+                                    {call.latencyMs} ms
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : (
+                        <p className="ep-inset p-3 font-mono text-xs text-ink-2">
+                          No external LLM calls were recorded in this cached
+                          preview. Click Run or Allow to execute a live call via
+                          POST /api/gemini.
+                        </p>
+                      )}
+                    </div>
+
+                    {/* Interactions SDK snippet */}
+                    <div className="space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="ep-label">
+                          @google/genai client.interactions.create
+                        </div>
+                        <div className="flex gap-1.5">
+                          {(["typescript", "python", "payload"] as const).map(
+                            (tab) => (
+                              <button
+                                key={tab}
+                                type="button"
+                                onClick={() => setSdkTab(tab)}
+                                className={
+                                  sdkTab === tab
+                                    ? "ep-btn py-1 px-2.5 text-xs font-mono uppercase cursor-pointer"
+                                    : "ep-btn-ghost py-1 px-2.5 text-xs font-mono uppercase cursor-pointer"
+                                }
+                              >
+                                {tab}
+                              </button>
+                            ),
+                          )}
+                        </div>
+                      </div>
+
+                      <pre className="ep-inset p-4 overflow-x-auto font-mono text-xs leading-relaxed text-ink">
+                        {runResult
+                          ? (sdkTab === "typescript"
+                              ? runResult.stages.stage4.sdkSnippets.typescript
+                              : sdkTab === "python"
+                                ? runResult.stages.stage4.sdkSnippets.python
+                                : JSON.stringify(
+                                    runResult.stages.stage4.interactionsPayload,
+                                    null,
+                                    2,
+                                  )
+                            ).replace(/\bdRouter\b/g, "deRoute")
+                          : "Loading snippet..."}
+                      </pre>
+                    </div>
+
+                    {/* Argon rule compliance list */}
+                    <div className="space-y-3">
+                      <div className="ep-label">Argon parameter validator</div>
+                      <ul className="ep-inset p-4 space-y-1.5 font-mono text-xs text-ink-2">
+                        <li>
+                          model: &quot;
+                          {activeConfigValidation.normalizedConfig?.model}
+                          &quot;
+                        </li>
+                        <li>
+                          thinking_level: &quot;
+                          {
+                            activeConfigValidation.normalizedConfig
+                              ?.thinking_level
+                          }
+                          &quot;
+                        </li>
+                        <li>
+                          background:{" "}
+                          {String(
+                            activeConfigValidation.normalizedConfig?.background,
+                          )}
+                        </li>
+                        <li>implicit_caching: &quot;enabled&quot;</li>
+                        <li>
+                          Rejected legacy parameters:{" "}
+                          {FORBIDDEN_ARGON_PARAMETERS.join(", ")}
+                        </li>
+                      </ul>
+
+                      <button
+                        type="button"
+                        onClick={handleTestForbiddenParams}
+                        className="ep-btn-ghost text-xs font-mono cursor-pointer"
+                      >
+                        Test validator with forbidden legacy parameters
+                      </button>
+
+                      {legacyTestResult && (
+                        <div className="ep-inset p-3.5 font-mono text-xs text-ink-2 space-y-1">
+                          <div className="text-ink font-medium">
+                            Valid: {String(legacyTestResult.valid)} | Rejected:{" "}
+                            {legacyTestResult.rejectedParameters.join(", ")}
+                          </div>
+                          <ul className="list-disc pl-4 space-y-0.5">
+                            {legacyTestResult.errors.map((err, idx) => (
+                              <li key={idx}>{err}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Companion toolkit */}
+                    <div className="space-y-2">
+                      <div className="ep-label">Model manifest</div>
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        {ARGON_TOOLKIT_MANIFEST.map((item) => (
+                          <div
+                            key={item.id}
+                            className="ep-inset p-3 text-xs space-y-1"
+                          >
+                            <div className="flex items-center justify-between font-mono">
+                              <span className="text-ink font-medium">
+                                {item.id}
+                              </span>
+                              <span className="text-ink-3">
+                                {item.trustBoundary}
+                              </span>
+                            </div>
+                            <p className="text-ink-2">{item.role}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Raw JSON */}
+                    {runResult && (
+                      <div className="space-y-2">
+                        <div className="ep-label">Raw run JSON</div>
+                        <pre className="ep-inset p-4 max-h-80 overflow-auto font-mono text-[11px] text-ink-2">
+                          {JSON.stringify(runResult, null, 2)}
+                        </pre>
+                      </div>
+                    )}
+                  </div>
+                </TechDetails>
+              </section>
+            </InkReveal>
+          </div>
+
+          {/* 5. Knowledge search (AtlasExplorer) */}
+          <ExhibitSection
+            tag="Private AI library"
+            title="Search what we know about private AI"
+            subtitle="Simple answers on how deRoute protects your messages, with technical records and scores available on request."
+          >
+            <AtlasExplorer />
+          </ExhibitSection>
+    </>
+  );
+}
+
+export default function ArgonShowcasePage() {
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (
+      (window.location.hostname === "localhost" ||
+        window.location.hostname === "127.0.0.1") &&
+      new URLSearchParams(window.location.search).get("preview") === "1" &&
+      !getCurrentVaultSession()
+    ) {
+      unlockVaultWithKeyMaterial(new Uint8Array(32).fill(7), false, "passkey");
+    }
+  }, []);
 
   return (
     <div className="min-h-screen flex flex-col bg-paper text-ink overflow-x-hidden">
       <SpecimenHeader activePath="/argon" rightSlot={<AuthPill />} />
 
-      <main className="flex-1 w-full min-w-0">
-        <div className="mx-auto w-full max-w-5xl px-4 pt-10 pb-4 sm:px-6 space-y-10">
-          {/* 1. Intro & Mode Badge */}
-          <header className="space-y-5 border-b border-rule pb-8">
-            <div className="ep-label">Gemini 4 Argon agent</div>
-            <h1 className="ep-display text-3xl sm:text-4xl lg:text-5xl">
-              Confidential research agent with hardware checks and human
-              approval
-            </h1>
-            <p className="max-w-[70ch] text-base sm:text-lg text-ink-2 leading-relaxed">
-              This agent scrubs private identifiers on your device, verifies a
-              confidential hardware enclave, routes your task, and pauses before
-              any on-chain action until a human approves.
-            </p>
-
-            {/* Large Mode Badge */}
-            <div className="ep-card p-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex items-center gap-3">
-                {isLiveGeminiBadge ? (
-                  <span
-                    data-testid="argon-mode-badge"
-                    className="inline-flex items-center rounded-full bg-ink text-paper px-3.5 py-1 font-mono text-xs font-medium tracking-wider"
-                  >
-                    {modeBadgeText}
-                  </span>
-                ) : (
-                  <span
-                    data-testid="argon-mode-badge"
-                    className="inline-flex items-center rounded-full border border-ink text-ink px-3.5 py-1 font-mono text-xs font-medium tracking-wider"
-                  >
-                    {modeBadgeText}
-                  </span>
-                )}
-              </div>
-              <p className="text-xs text-ink-2 max-w-[56ch]">
-                {isLiveGeminiBadge
-                  ? "Connected to Google's live Interactions API with local privacy scrubbing and enclave verification."
-                  : "No GEMINI_API_KEY is configured on the server, so planning runs via the attested Tinfoil enclave model unless you supply a Gemini key below."}
-              </p>
-            </div>
-
-            {/* 2. Persona Card (Example user: Dana Reyes) */}
-            <div className="ep-inset p-4 sm:p-5 space-y-2">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="ep-label">Example user</span>
-                <span className="ep-muted-chip">Fictional persona</span>
-              </div>
-              <div className="font-serif text-lg font-medium text-ink">
-                {DEMO_PERSONA.name}
-              </div>
-              <div className="text-xs font-mono text-ink-2">
-                {DEMO_PERSONA.role} / {DEMO_PERSONA.institution}
-              </div>
-              <p className="max-w-[70ch] text-xs sm:text-sm text-ink-2 leading-relaxed">
-                <strong className="text-ink font-medium">Task:</strong>{" "}
-                {DEMO_PERSONA.assayProtocol}.{" "}
-                <strong className="text-ink font-medium">Goal:</strong>{" "}
-                {DEMO_PERSONA.confidentialityMandate}
-              </p>
-            </div>
-          </header>
-
-          {/* 3. Task Input & Controls */}
-          <section
-            aria-label="Agent controls"
-            className="ep-card p-5 sm:p-6 space-y-5"
-          >
-            <div className="space-y-2">
-              <label htmlFor="argon-task-prompt" className="ep-label block">
-                Task prompt (scrubbed locally in Stage 1 before leaving your
-                device)
-              </label>
-              <textarea
-                id="argon-task-prompt"
-                rows={4}
-                value={taskPrompt}
-                onChange={(e) => setTaskPrompt(e.target.value)}
-                className="ep-input font-mono text-xs sm:text-sm leading-relaxed"
-              />
-            </div>
-
-            {/* Controls row */}
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-              {/* Thinking level */}
-              <div className="space-y-1.5">
-                <span className="ep-label block">Thinking level</span>
-                <div
-                  className="flex gap-1.5"
-                  role="group"
-                  aria-label="Thinking level"
-                >
-                  {(["low", "medium", "high"] as const).map((lvl) => (
-                    <button
-                      key={lvl}
-                      type="button"
-                      onClick={() => setThinkingLevel(lvl)}
-                      className={
-                        thinkingLevel === lvl
-                          ? "ep-btn flex-1 py-1.5 px-2.5 text-xs font-mono uppercase cursor-pointer"
-                          : "ep-btn-ghost flex-1 py-1.5 px-2.5 text-xs font-mono uppercase cursor-pointer"
-                      }
-                    >
-                      {lvl}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Simulate a compromised node */}
-              <div className="space-y-1.5">
-                <span className="ep-label block">
-                  Simulate a compromised node
-                </span>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={injectFault}
-                  onClick={() => setInjectFault((prev) => !prev)}
-                  className={
-                    injectFault
-                      ? "ep-btn w-full py-1.5 px-3 text-xs font-mono cursor-pointer"
-                      : "ep-btn-ghost w-full py-1.5 px-3 text-xs font-mono cursor-pointer"
-                  }
-                >
-                  {injectFault ? "On: inject faulty node" : "Off: clean path"}
-                </button>
-              </div>
-
-              {/* Enclave model */}
-              <div className="space-y-1.5">
-                <span className="ep-label block">Enclave model</span>
-                <div
-                  className="flex gap-1.5"
-                  role="group"
-                  aria-label="Enclave model"
-                >
-                  {(["gemma4-31b", "kimi-k3"] as const).map((mdl) => (
-                    <button
-                      key={mdl}
-                      type="button"
-                      onClick={() => setEnclaveModel(mdl)}
-                      className={
-                        enclaveModel === mdl
-                          ? "ep-btn flex-1 py-1.5 px-2 text-xs font-mono cursor-pointer"
-                          : "ep-btn-ghost flex-1 py-1.5 px-2 text-xs font-mono cursor-pointer"
-                      }
-                    >
-                      {mdl}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            <p className="text-xs text-ink-3">
-              Note: Gemini 4 Argon supports a 1,000,000-token context window. On
-              Tinfoil, router-0.tinfoil.sh attests with AMD SEV-SNP, and the
-              Kimi K3 enclave runs on Intel TDX plus NVIDIA confidential GPUs
-              with a 262,144-token max context length.
-            </p>
-
-            {/* Optional Gemini API key */}
-            <details className="ep-inset p-3.5 text-xs">
-              <summary className="cursor-pointer font-mono text-ink-2 hover:text-ink select-none">
-                Use your own Gemini key (optional)
-              </summary>
-              <div className="mt-3 space-y-2">
-                <label
-                  htmlFor="gemini-api-key-input"
-                  className="block text-ink-2"
-                >
-                  Sent to our server for one call. Never stored or logged.
-                </label>
-                <input
-                  id="gemini-api-key-input"
-                  type="password"
-                  placeholder="AIzaSy..."
-                  value={geminiApiKey}
-                  onChange={(e) => setGeminiApiKey(e.target.value)}
-                  className="ep-input font-mono text-xs"
-                />
-              </div>
-            </details>
-
-            {/* Primary Run button */}
-            <div className="pt-1">
-              <button
-                type="button"
-                disabled={isRunning || isInitialLoading}
-                onClick={() => void handleExecuteWorkflow()}
-                className="ep-btn w-full sm:w-auto px-6 py-2.5 text-sm cursor-pointer"
-              >
-                {isRunning ? "Running agent..." : "Run agent"}
-              </button>
-            </div>
-          </section>
-
-          {/* Real API Error Banner with Retry */}
-          {apiError && (
-            <section
-              role="alert"
-              aria-label="Agent API error"
-              className="ep-card border-accent bg-accent-soft/40 p-5 sm:p-6 space-y-3"
-            >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="space-y-0.5">
-                  <div className="ep-label">API error</div>
-                  <h2 className="font-serif text-xl text-ink">
-                    Could not complete agent request
-                  </h2>
-                </div>
-                <span className="ep-fail">Error</span>
-              </div>
-              <p className="font-mono text-xs text-ink-2 break-words">
-                {apiError}
-              </p>
-              <div>
-                <button
-                  type="button"
-                  disabled={isRunning || isInitialLoading}
-                  onClick={handleRetry}
-                  className="ep-btn text-xs cursor-pointer"
-                >
-                  Retry
-                </button>
-              </div>
-            </section>
-          )}
-
-          {/* 4. Vertical Timeline of Stages */}
-          {runResult ? (
-            <section aria-label="Agent execution stages" className="space-y-6">
-              <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-rule pb-3">
-                <div>
-                  <div className="ep-label">Execution trace</div>
-                  <h2 className="font-serif text-2xl text-ink">
-                    Six verification stages
-                  </h2>
-                </div>
-                <span className="ep-mono">Run ID: {runResult.runId}</span>
-              </div>
-
-              <ol className="relative border-l border-rule-2 ml-3 pl-6 space-y-6">
-                {/* Stage 1 */}
-                <li className="relative space-y-2">
-                  <span className="absolute -left-[31px] top-1 h-3 w-3 rounded-full bg-ink border-2 border-paper" />
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="space-y-0.5">
-                      <h3 className="font-serif text-lg font-medium text-ink">
-                        Stage 1: On-device privacy scrub and masking
-                      </h3>
-                      <div className="font-mono text-xs text-ink-3">
-                        Model: {runResult.stages.stage1.modelsUsed.join(", ")}
-                      </div>
-                    </div>
-                    <span
-                      className={
-                        runResult.stages.stage1.passed ? "ep-pass" : "ep-fail"
-                      }
-                    >
-                      {runResult.stages.stage1.passed ? "Pass" : "Fail"}
-                    </span>
-                  </div>
-                  <p className="max-w-[70ch] text-sm text-ink-2">
-                    Scrubbed {runResult.stages.stage1.redactionCount} sensitive
-                    items (email, API key, cohort ID, grant amount, date) and
-                    padded the frame to{" "}
-                    {runResult.stages.stage1.verificationSignal.bucketBytes.toLocaleString()}{" "}
-                    bytes with{" "}
-                    {
-                      runResult.stages.stage1.verificationSignal
-                        .plaintextLeakCount
-                    }{" "}
-                    plaintext leaks.
-                  </p>
-                  <details className="text-xs text-ink-3">
-                    <summary className="cursor-pointer font-mono text-ink-2 hover:text-ink select-none">
-                      Show details
-                    </summary>
-                    <div className="mt-2 ep-inset p-3 font-mono text-xs space-y-2 text-ink-2">
-                      <div>
-                        <span className="text-ink font-medium">
-                          Outbound masked prompt:
-                        </span>{" "}
-                        {runResult.stages.stage1.papillonGeneralizedPrompt}
-                      </div>
-                      <div>
-                        <span className="text-ink font-medium">Formula:</span>{" "}
-                        {runResult.stages.stage1.verificationSignal.formula}
-                      </div>
-                    </div>
-                  </details>
-                </li>
-
-                {/* Stage 2 */}
-                <li className="relative space-y-2">
-                  <span className="absolute -left-[31px] top-1 h-3 w-3 rounded-full bg-ink border-2 border-paper" />
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="space-y-0.5">
-                      <h3 className="font-serif text-lg font-medium text-ink">
-                        Stage 2: Parallel enclave discovery and quorum check
-                      </h3>
-                      <div className="font-mono text-xs text-ink-3">
-                        Model: {runResult.stages.stage2.modelsUsed.join(", ")}
-                      </div>
-                    </div>
-                    <span
-                      className={
-                        runResult.stages.stage2.passed ? "ep-pass" : "ep-fail"
-                      }
-                    >
-                      {runResult.stages.stage2.passed ? "Pass" : "Fail"}
-                    </span>
-                  </div>
-                  <p className="max-w-[70ch] text-sm text-ink-2">
-                    Matched provider{" "}
-                    {runResult.stages.stage2.selectedEnclaveProvider} for{" "}
-                    {runResult.stages.stage2.selectedEnclaveModel} and verified{" "}
-                    {
-                      runResult.stages.stage2.verificationSignal
-                        .quorumValidSignatures
-                    }{" "}
-                    of 7 verifier signatures.
-                  </p>
-                  <details className="text-xs text-ink-3">
-                    <summary className="cursor-pointer font-mono text-ink-2 hover:text-ink select-none">
-                      Show details
-                    </summary>
-                    <div className="mt-2 ep-inset p-3 font-mono text-xs space-y-2 text-ink-2">
-                      {runResult.stages.stage2.subagents.map((sub) => (
-                        <div key={sub.subagentId}>
-                          <span className="text-ink font-medium">
-                            {sub.model}
-                          </span>{" "}
-                          ({sub.latencyMs} ms): {sub.artifactSummary}
-                        </div>
-                      ))}
-                    </div>
-                  </details>
-                </li>
-
-                {/* Stage 3 */}
-                <li className="relative space-y-2">
-                  <span className="absolute -left-[31px] top-1 h-3 w-3 rounded-full bg-ink border-2 border-paper" />
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="space-y-0.5">
-                      <h3 className="font-serif text-lg font-medium text-ink">
-                        Stage 3: Monitor policy and memory-bus check
-                      </h3>
-                      <div className="font-mono text-xs text-ink-3">
-                        Model: {runResult.stages.stage3.modelsUsed.join(", ")}
-                      </div>
-                    </div>
-                    <span
-                      className={
-                        runResult.stages.stage3.passed ? "ep-pass" : "ep-fail"
-                      }
-                    >
-                      {runResult.stages.stage3.passed
-                        ? runResult.stages.stage3.selfHealed
-                          ? "Pass (recovered)"
-                          : "Pass"
-                        : "Fail"}
-                    </span>
-                  </div>
-                  <p className="max-w-[70ch] text-sm text-ink-2">
-                    {runResult.stages.stage3.faultInjected
-                      ? `Caught injected plaintext leak and 15 repeated 16-byte blocks on ${runResult.stages.stage3.attempts[0]?.candidateNodeId}, blocked the node, and failed over to a clean node.`
-                      : `Verified 1,344 policy states and measured ${runResult.stages.stage3.verificationSignal.entropyBitsPerByte} bits/byte ciphertext entropy with 0 repeated 16-byte blocks.`}
-                  </p>
-                  <details className="text-xs text-ink-3">
-                    <summary className="cursor-pointer font-mono text-ink-2 hover:text-ink select-none">
-                      Show details
-                    </summary>
-                    <div className="mt-2 ep-inset p-3 font-mono text-xs space-y-2 text-ink-2">
-                      {runResult.stages.stage3.attempts.map((att) => (
-                        <div
-                          key={att.attemptNumber}
-                          className="border-b border-rule last:border-b-0 pb-2 last:pb-0"
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-ink font-medium">
-                              Attempt #{att.attemptNumber}:{" "}
-                              {att.candidateNodeId}
-                            </span>
-                            <span
-                              className={
-                                att.passed ? "ep-pass" : "ep-muted-chip"
-                              }
-                            >
-                              {att.passed ? "Verified" : "Fault caught"}
-                            </span>
-                          </div>
-                          <div className="mt-1">
-                            States checked: {att.vmpl0StatesChecked} | Entropy:{" "}
-                            {att.entropyBitsPerByte} bits/byte | Repeated 16B
-                            blocks: {att.repeated16ByteBlocks}
-                          </div>
-                          {att.remediationApplied && (
-                            <div className="mt-1 text-ink">
-                              Remediation: {att.remediationApplied}
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </details>
-                </li>
-
-                {/* Stage 4 */}
-                <li className="relative space-y-2">
-                  <span className="absolute -left-[31px] top-1 h-3 w-3 rounded-full bg-ink border-2 border-paper" />
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="space-y-0.5">
-                      <h3 className="font-serif text-lg font-medium text-ink">
-                        Stage 4: Synthesis and enclave routing
-                      </h3>
-                      <div className="font-mono text-xs text-ink-3">
-                        {modeBadgeText} -&gt;{" "}
-                        {runResult.stages.stage4.routedEnclaveModel}
-                      </div>
-                    </div>
-                    <span
-                      className={
-                        runResult.stages.stage4.passed ? "ep-pass" : "ep-fail"
-                      }
-                    >
-                      {runResult.stages.stage4.passed ? "Pass" : "Fail"}
-                    </span>
-                  </div>
-                  <p className="max-w-[70ch] text-sm text-ink-2">
-                    Validated Argon config (thinking_level=&quot;
-                    {runResult.stages.stage4.thinkingLevel}&quot;, background=
-                    {String(runResult.stages.stage4.background)}) and restored
-                    original local placeholders on the enclave response.
-                  </p>
-                  <details className="text-xs text-ink-3">
-                    <summary className="cursor-pointer font-mono text-ink-2 hover:text-ink select-none">
-                      Show details
-                    </summary>
-                    <div className="mt-2 ep-inset p-3 font-mono text-xs space-y-2 text-ink-2">
-                      <div>
-                        <span className="text-ink font-medium">
-                          Masked enclave output:
-                        </span>{" "}
-                        {runResult.stages.stage4.enclaveCompletionMasked}
-                      </div>
-                      <div>
-                        <span className="text-ink font-medium">
-                          Planner call note:
-                        </span>{" "}
-                        {runResult.stages.stage4.liveGeminiCall
-                          .liveSummaryText ??
-                          runResult.stages.stage4.liveGeminiCall
-                            .fallbackReason ??
-                          "No live Gemini call"}
-                      </div>
-                    </div>
-                  </details>
-                </li>
-
-                {/* Stage 5 */}
-                <li className="relative space-y-2">
-                  <span className="absolute -left-[31px] top-1 h-3 w-3 rounded-full bg-ink border-2 border-paper" />
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="space-y-0.5">
-                      <h3 className="font-serif text-lg font-medium text-ink">
-                        Stage 5: Human approval gate for on-chain actions
-                      </h3>
-                      <div className="font-mono text-xs text-ink-3">
-                        Model: Human-in-the-loop policy gate (Circle Arc Testnet
-                        5042002)
-                      </div>
-                    </div>
-                    <span className={isGatePending ? "ep-fail" : "ep-pass"}>
-                      {isGatePending ? "Waiting for human" : "Approved"}
-                    </span>
-                  </div>
-                  <p className="max-w-[70ch] text-sm text-ink-2">
-                    {isGatePending
-                      ? `Paused: holding ${runResult.stages.stage5.pendingActions.length} external Circle Arc action(s) until you explicitly approve below.`
-                      : arcAnchor?.broadcast
-                        ? `Human approved: receipt anchored on Circle Arc Testnet (${arcAnchor.txHash.slice(0, 14)}...). Other Stage 5 actions are simulated and not broadcast.`
-                        : `Human approved: ${runResult.stages.stage5.pendingActions.length} Circle Arc action(s) evaluated (${arcAnchor ? `not broadcast: ${arcAnchor.reason}` : "not broadcast"}).`}
-                  </p>
-                  <details className="text-xs text-ink-3">
-                    <summary className="cursor-pointer font-mono text-ink-2 hover:text-ink select-none">
-                      Show details
-                    </summary>
-                    <div className="mt-2 ep-inset p-3 font-mono text-xs space-y-1.5 text-ink-2">
-                      <div>
-                        Arc Testnet registry:
-                        0xbc8085c2b6fe6e0db05f169925c0b841828f4481 (chain
-                        5042002)
-                      </div>
-                      {runResult.stages.stage5.pendingActions.map((act) => {
-                        const isRealBroadcast =
-                          act.kind === "anchor_arc_receipt" &&
-                          arcAnchor?.broadcast === true;
-                        return (
-                          <div key={act.actionId}>
-                            {act.kind} ({act.status}): {act.description}
-                            {isRealBroadcast ? (
-                              <>
-                                {" "}
-                                | Broadcast tx:{" "}
-                                <a
-                                  href={arcAnchor.explorerUrl}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="ep-link"
-                                >
-                                  {arcAnchor.txHash}
-                                </a>
-                              </>
-                            ) : act.txHashHex ? (
-                              ` | Simulated (not broadcast on-chain): ${act.txHashHex}`
-                            ) : (
-                              " | Not broadcast on-chain"
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </details>
-                </li>
-
-                {/* Stage 6 */}
-                <li className="relative space-y-2">
-                  <span className="absolute -left-[31px] top-1 h-3 w-3 rounded-full bg-ink border-2 border-paper" />
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="space-y-0.5">
-                      <h3 className="font-serif text-lg font-medium text-ink">
-                        Stage 6: Signed audit digest and briefing
-                      </h3>
-                      <div className="font-mono text-xs text-ink-3">
-                        Model: {runResult.stages.stage6.modelsUsed.join(", ")}
-                      </div>
-                    </div>
-                    <span
-                      className={
-                        runResult.stages.stage6.passed ? "ep-pass" : "ep-fail"
-                      }
-                    >
-                      {runResult.stages.stage6.passed ? "Pass" : "Fail"}
-                    </span>
-                  </div>
-                  <p className="max-w-[70ch] text-sm text-ink-2">
-                    Signed SHA-256 run digest{" "}
-                    <code className="font-mono text-xs">
-                      0x
-                      {runResult.stages.stage6.forensicProofDigestHex.slice(
-                        0,
-                        16,
-                      )}
-                      ...
-                    </code>{" "}
-                    with Ed25519.
-                  </p>
-                  <details className="text-xs text-ink-3">
-                    <summary className="cursor-pointer font-mono text-ink-2 hover:text-ink select-none">
-                      Show details
-                    </summary>
-                    <div className="mt-2 ep-inset p-3 font-mono text-xs space-y-2 text-ink-2">
-                      <div className="font-sans text-ink">
-                        &ldquo;{runResult.stages.stage6.voiceTranscript}&rdquo;
-                      </div>
-                      <div className="break-all">
-                        Ed25519 signature: 0x
-                        {runResult.stages.stage6.ed25519SignatureHex}
-                      </div>
-                    </div>
-                  </details>
-                </li>
-              </ol>
-            </section>
-          ) : isInitialLoading ? (
-            <div className="ep-card p-6 font-mono text-xs text-ink-2">
-              Loading agent trace from /api/gemini...
-            </div>
-          ) : null}
-
-          {/* 5. Human Approval Gate Blocking Card */}
-          {runResult && (
-            <section
-              aria-label="Human approval gate"
-              className={`ep-card p-5 sm:p-6 space-y-4 ${
-                isGatePending ? "border-accent bg-accent-soft/40" : ""
-              }`}
-            >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <div className="ep-label">Human-in-the-loop gate</div>
-                  <h2 className="font-serif text-xl sm:text-2xl text-ink">
-                    {isGatePending
-                      ? "Action required: approve or reject external on-chain actions"
-                      : "External actions approved by human"}
-                  </h2>
-                </div>
-                <span className={isGatePending ? "ep-fail" : "ep-pass"}>
-                  {isGatePending ? "Pending approval" : "Approved"}
-                </span>
-              </div>
-
-              <p className="max-w-[70ch] text-sm text-ink-2">
-                The agent cannot anchor receipts or submit slash reports to
-                Circle Arc Testnet (registry{" "}
-                <code className="font-mono text-xs break-all">
-                  0xbc8085c2b6fe6e0db05f169925c0b841828f4481
-                </code>
-                , chain 5042002) without your confirmation.
-              </p>
-
-              <ul className="space-y-2 text-xs">
-                {runResult.stages.stage5.pendingActions.map((act) => {
-                  const isAnchorAction = act.kind === "anchor_arc_receipt";
-                  return (
-                    <li key={act.actionId} className="ep-inset p-3 space-y-1.5">
-                      <div className="flex flex-wrap items-center justify-between gap-2 font-mono">
-                        <span className="text-ink font-medium">{act.kind}</span>
-                        <span className="text-ink-3">
-                          {isGatePending
-                            ? "not broadcast (awaiting human approval)"
-                            : isAnchorAction && arcAnchor?.broadcast
-                              ? "broadcast on Circle Arc Testnet"
-                              : "simulated (not broadcast on-chain)"}
-                        </span>
-                      </div>
-                      <p className="text-ink-2">{act.description}</p>
-                      {isAnchorAction && arcAnchor?.broadcast ? (
-                        <div className="font-mono text-[11px] text-ink-2 break-all space-y-0.5">
-                          <div>
-                            Anchored on Circle Arc Testnet:{" "}
-                            <a
-                              href={arcAnchor.explorerUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="ep-link"
-                            >
-                              {arcAnchor.txHash}
-                            </a>
-                          </div>
-                          <div className="text-ink-3">
-                            Receipt hash: {arcAnchor.receiptHash}
-                          </div>
-                        </div>
-                      ) : isAnchorAction &&
-                        arcAnchor &&
-                        !arcAnchor.broadcast ? (
-                        <div className="font-mono text-[11px] text-ink-2">
-                          Not broadcast on-chain: {arcAnchor.reason}
-                        </div>
-                      ) : act.txHashHex ? (
-                        <div className="font-mono text-[11px] text-ink-2 break-all">
-                          Simulated digest (not broadcast on-chain):{" "}
-                          {act.txHashHex}
-                        </div>
-                      ) : (
-                        <div className="font-mono text-[11px] text-ink-3">
-                          Not broadcast on-chain (blocked pending human
-                          approval).
-                        </div>
-                      )}
-                    </li>
-                  );
-                })}
-              </ul>
-
-              <div className="flex flex-wrap items-center gap-3 pt-1">
-                <button
-                  type="button"
-                  disabled={isRunning || isInitialLoading}
-                  onClick={() => void handleExecuteWorkflow(true)}
-                  className="ep-btn cursor-pointer"
-                >
-                  {isRunning && lastApprovalOverride === true
-                    ? "Approving & anchoring..."
-                    : "Approve"}
-                </button>
-                <button
-                  type="button"
-                  disabled={isRunning || isInitialLoading}
-                  onClick={() => void handleExecuteWorkflow(false)}
-                  className="ep-btn-ghost cursor-pointer"
-                >
-                  Reject
-                </button>
-              </div>
-            </section>
-          )}
-
-          {/* 6. Final Locally Restored Answer */}
-          {runResult && (
-            <section
-              aria-label="Final locally restored answer"
-              className="ep-card p-5 sm:p-6 space-y-3"
-            >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <div className="ep-label">Final answer</div>
-                  <h2 className="font-serif text-xl sm:text-2xl text-ink">
-                    Locally restored output
-                  </h2>
-                </div>
-                <span className="ep-pass">Placeholders restored on device</span>
-              </div>
-              <p className="text-xs text-ink-3">
-                The enclave returned a masked completion using shifted dates,
-                scaled numbers, and placeholders. Your device restored the real
-                names and figures locally:
-              </p>
-              <div className="ep-inset p-4 font-mono text-xs sm:text-sm leading-relaxed text-ink">
-                {runResult.stages.stage4.restoredClientOutput}
-              </div>
-            </section>
-          )}
-
-          {/* 7. Compact modelCalls Table (Real API modelCalls only) */}
-          {runResult && (
-            <section
-              aria-label="Model calls"
-              className="ep-card p-5 sm:p-6 space-y-3"
-            >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <div className="ep-label">Model telemetry</div>
-                  <h2 className="font-serif text-xl text-ink">
-                    Model calls in this run
-                  </h2>
-                </div>
-                <span className="ep-muted-chip">{modeBadgeText}</span>
-              </div>
-
-              {apiModelCalls.length > 0 ? (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs border-collapse">
-                    <thead>
-                      <tr className="border-b border-rule font-mono text-[11px] uppercase text-ink-3">
-                        <th className="py-2 pr-3">Model</th>
-                        <th className="py-2 pr-3">Purpose</th>
-                        <th className="py-2 pr-3">Status</th>
-                        <th className="py-2 text-right">Latency</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-rule font-mono text-xs">
-                      {apiModelCalls.map((call, idx) => (
-                        <tr key={`${call.model}-${idx}`}>
-                          <td className="py-2.5 pr-3 text-ink font-medium">
-                            {call.model}
-                          </td>
-                          <td className="py-2.5 pr-3 font-sans text-ink-2">
-                            {call.purpose}
-                            {call.error ? (
-                              <span className="block font-mono text-[11px] text-ink-3">
-                                {call.error}
-                              </span>
-                            ) : null}
-                          </td>
-                          <td className="py-2.5 pr-3">
-                            <span className={call.ok ? "ep-pass" : "ep-fail"}>
-                              {call.ok ? "ok" : "error"}
-                            </span>
-                          </td>
-                          <td className="py-2.5 text-right text-ink-2">
-                            {call.latencyMs} ms
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <p className="ep-inset p-3.5 font-mono text-xs text-ink-2">
-                  No external LLM calls were recorded in this cached preview.
-                  Click &ldquo;Run agent&rdquo; or &ldquo;Approve&rdquo; to
-                  execute a live enclave run via POST /api/gemini.
-                </p>
-              )}
-            </section>
-          )}
-
-          {/* 8. Developer Details (Collapsed) */}
-          <section aria-label="Developer details">
-            <details className="ep-card p-5 sm:p-6">
-              <summary className="cursor-pointer font-serif text-lg font-medium text-ink select-none">
-                Developer details (SDK snippet, parameter rules, and raw JSON)
-              </summary>
-
-              <div className="mt-5 space-y-6 border-t border-rule pt-5">
-                {/* Interactions SDK snippet */}
-                <div className="space-y-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="ep-label">
-                      @google/genai client.interactions.create
-                    </div>
-                    <div className="flex gap-1.5">
-                      {(["typescript", "python", "payload"] as const).map(
-                        (tab) => (
-                          <button
-                            key={tab}
-                            type="button"
-                            onClick={() => setSdkTab(tab)}
-                            className={
-                              sdkTab === tab
-                                ? "ep-btn py-1 px-2.5 text-xs font-mono uppercase cursor-pointer"
-                                : "ep-btn-ghost py-1 px-2.5 text-xs font-mono uppercase cursor-pointer"
-                            }
-                          >
-                            {tab}
-                          </button>
-                        ),
-                      )}
-                    </div>
-                  </div>
-
-                  <pre className="ep-inset p-4 overflow-x-auto font-mono text-xs leading-relaxed text-ink">
-                    {runResult
-                      ? sdkTab === "typescript"
-                        ? runResult.stages.stage4.sdkSnippets.typescript
-                        : sdkTab === "python"
-                          ? runResult.stages.stage4.sdkSnippets.python
-                          : JSON.stringify(
-                              runResult.stages.stage4.interactionsPayload,
-                              null,
-                              2,
-                            )
-                      : "Loading snippet..."}
-                  </pre>
-                </div>
-
-                {/* Argon rule compliance list */}
-                <div className="space-y-3">
-                  <div className="ep-label">Argon parameter validator</div>
-                  <ul className="ep-inset p-4 space-y-1.5 font-mono text-xs text-ink-2">
-                    <li>
-                      model: &quot;
-                      {activeConfigValidation.normalizedConfig?.model}
-                      &quot;
-                    </li>
-                    <li>
-                      thinking_level: &quot;
-                      {activeConfigValidation.normalizedConfig?.thinking_level}
-                      &quot;
-                    </li>
-                    <li>
-                      background:{" "}
-                      {String(
-                        activeConfigValidation.normalizedConfig?.background,
-                      )}
-                    </li>
-                    <li>implicit_caching: &quot;enabled&quot;</li>
-                    <li>
-                      Rejected legacy parameters:{" "}
-                      {FORBIDDEN_ARGON_PARAMETERS.join(", ")}
-                    </li>
-                  </ul>
-
-                  <button
-                    type="button"
-                    onClick={handleTestForbiddenParams}
-                    className="ep-btn-ghost text-xs font-mono cursor-pointer"
-                  >
-                    Test validator with forbidden legacy parameters
-                  </button>
-
-                  {legacyTestResult && (
-                    <div className="ep-inset p-3.5 font-mono text-xs text-ink-2 space-y-1">
-                      <div className="text-ink font-medium">
-                        Valid: {String(legacyTestResult.valid)} | Rejected:{" "}
-                        {legacyTestResult.rejectedParameters.join(", ")}
-                      </div>
-                      <ul className="list-disc pl-4 space-y-0.5">
-                        {legacyTestResult.errors.map((err, idx) => (
-                          <li key={idx}>{err}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                </div>
-
-                {/* Companion toolkit */}
-                <div className="space-y-2">
-                  <div className="ep-label">Model manifest</div>
-                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                    {ARGON_TOOLKIT_MANIFEST.map((item) => (
-                      <div
-                        key={item.id}
-                        className="ep-inset p-3 text-xs space-y-1"
-                      >
-                        <div className="flex items-center justify-between font-mono">
-                          <span className="text-ink font-medium">
-                            {item.id}
-                          </span>
-                          <span className="text-ink-3">
-                            {item.trustBoundary}
-                          </span>
-                        </div>
-                        <p className="text-ink-2">{item.role}</p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Raw JSON */}
-                {runResult && (
-                  <div className="space-y-2">
-                    <div className="ep-label">Raw run JSON</div>
-                    <pre className="ep-inset p-4 max-h-80 overflow-auto font-mono text-[11px] text-ink-2">
-                      {JSON.stringify(runResult, null, 2)}
-                    </pre>
-                  </div>
-                )}
-              </div>
-            </details>
-          </section>
-        </div>
-
-        {/* 9. Knowledge search (MongoDB Atlas) */}
-        <ExhibitSection
-          tag="Retrieval tool"
-          title="Knowledge search (MongoDB Atlas)"
-          subtitle="Agent retrieval tool for confidential provider specifications and hardware advisories."
-        >
-          <AtlasExplorer />
-        </ExhibitSection>
+      <main id="main-content" className="flex-1 w-full min-w-0">
+        <AuthGate>
+          <ArgonAuthenticatedView />
+        </AuthGate>
       </main>
 
       <SpecimenFooter />
