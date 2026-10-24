@@ -7,7 +7,7 @@
     },
     {
       "path": "/api/cron/monitor",
-      "schedule": "0 * * * *"
+      "schedule": "45 4 * * *"
     }
   ]
 }

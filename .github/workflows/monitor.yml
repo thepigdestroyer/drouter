@@ -1,0 +1,31 @@
+name: Hourly enclave monitor
+
+# Vercel Hobby only allows daily cron jobs, so the hourly check of the real
+# sealed computers is triggered from here instead.
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: enclave-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Run the monitor
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          code=$(curl -sS -o body.json -w '%{http_code}' --max-time 300 \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            https://drouter-demo.vercel.app/api/cron/monitor)
+          echo "HTTP ${code}"
+          node -e 'const j=JSON.parse(require("fs").readFileSync("body.json","utf8"));const r=j.run||{};console.log(JSON.stringify({ok:j.ok,total:r.totalEnclaves,passed:r.passedEnclaves,failed:r.failedEnclaves,anchorTx:r.anchorTx}))' || true
+          test "${code}" = "200"
