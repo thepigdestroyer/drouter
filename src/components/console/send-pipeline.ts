@@ -1,6 +1,7 @@
 import { getActiveCustomScrubTerms } from "@/lib/auth/vault";
 import { nullifierFor, parseCreditHeader } from "@/lib/credits/blind";
 import {
+  storeCreditTokens,
   storedCreditBalance,
   takeCreditHeader,
 } from "@/lib/credits/client";
@@ -55,18 +56,51 @@ export function previewDraftPrivacy(
 }
 
 /**
+ * Runs `preparePrompt` (including active custom scrub terms from the vault and optional
+ * style normalization) on a historical user message that was resumed without `wireContent`.
+ */
+export function prepareHistoricalTurnText(
+  rawText: string,
+  opts?: PrepareTurnOptions,
+): string {
+  const customTerms = opts?.customTermsOverride ?? getActiveCustomScrubTerms();
+  return preparePrompt(rawText, {
+    customTerms,
+    normalizeStyle: Boolean(opts?.normalizeStyle),
+    scrubber: opts?.scrubber,
+  }).outboundText;
+}
+
+/**
+ * Restores an unspent `x-drouter-credit` header token back into local wallet storage
+ * if a turn fails before any reply tokens arrive.
+ */
+export function restoreUnspentCreditHeader(creditHeader: string | null): number {
+  if (!creditHeader) return storedCreditBalance();
+  try {
+    const parsed = parseCreditHeader(creditHeader);
+    if (parsed) {
+      storeCreditTokens([parsed]);
+    }
+  } catch {
+    // Ignore malformed header
+  }
+  return storedCreditBalance();
+}
+
+/**
  * Executes the real send preparation path before each message:
  * 1. Reads active custom scrub terms from the unlocked vault (`getActiveCustomScrubTerms()`).
  * 2. Calls `preparePrompt` (`@/lib/pipeline`) to scrub PII/secrets/custom terms,
  *    optionally normalize stylometry, score privacy risk before/after, and compute bucket bytes.
- * 3. Takes one unspent blind-signed credit header via `takeCreditHeader()` (`@/lib/credits/client`)
+ * 3. Always uses `preparePrompt`'s `outboundText` so raw unscrubbed text is never sent.
+ * 4. Takes one unspent blind-signed credit header via `takeCreditHeader()` (`@/lib/credits/client`)
  *    when available in local storage.
  */
 export async function prepareOutboundTurn(
   rawText: string,
   opts?: PrepareTurnOptions,
 ): Promise<PreparedTurn> {
-  const scrubEnabled = opts?.scrubEnabled ?? true;
   const customTerms = opts?.customTermsOverride ?? getActiveCustomScrubTerms();
 
   const prepared = preparePrompt(rawText, {
@@ -75,7 +109,7 @@ export async function prepareOutboundTurn(
     scrubber: opts?.scrubber,
   });
 
-  const outboundText = scrubEnabled ? prepared.outboundText : rawText;
+  const outboundText = prepared.outboundText;
 
   let creditHeader: string | null = null;
   let creditNullifier: string | null = null;
@@ -94,12 +128,10 @@ export async function prepareOutboundTurn(
   const creditBalanceAfter = storedCreditBalance();
 
   const report: MessagePrivacyReport = {
-    redactions: scrubEnabled ? prepared.report.redactions : [],
+    redactions: prepared.report.redactions,
     bucketBytes: prepared.bucketBytes,
     riskBefore: prepared.report.riskBefore,
-    riskAfter: scrubEnabled
-      ? prepared.report.riskAfter
-      : prepared.report.riskBefore,
+    riskAfter: prepared.report.riskAfter,
     styleChanges: prepared.report.styleChanges,
     customTermsCount: customTerms.length,
     creditAttached: Boolean(creditHeader),
@@ -114,7 +146,6 @@ export async function prepareOutboundTurn(
     creditBalanceAfter,
     report,
     restore(modelText: string): string {
-      if (!scrubEnabled) return modelText;
       return prepared.restore(modelText);
     },
   };

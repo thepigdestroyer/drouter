@@ -86,9 +86,6 @@ export function ForensicProofCard({
           ) : (
             <span className="ep-fail">Check incomplete</span>
           )}
-          {bundle.nodeKind === "sim" && (
-            <span className="ep-muted-chip">Practice mode</span>
-          )}
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -124,12 +121,18 @@ export function ForensicProofCard({
 
       {!verification.valid && verification.reasons.length > 0 && (
         <div className="rounded border border-accent bg-accent-soft px-3 py-2 text-xs text-accent">
-          {verification.reasons.join(" · ")}
+          Some parts of this proof receipt did not pass local verification. Open
+          technical details below to inspect the exact check notes.
         </div>
       )}
 
       <TechDetails label="Show technical details">
         <div className="mt-2 space-y-3">
+          {!verification.valid && verification.reasons.length > 0 && (
+            <div className="ep-inset p-2.5 font-mono text-[11px] text-accent">
+              {verification.reasons.join(" · ")}
+            </div>
+          )}
           <dl className="divide-y divide-rule border-t border-b border-rule text-xs">
             <div className="grid grid-cols-1 gap-1 py-1.5 sm:grid-cols-[11rem_1fr] sm:gap-3">
               <dt className="font-mono text-[11px] uppercase tracking-wider text-ink-3">

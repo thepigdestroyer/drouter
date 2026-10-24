@@ -4,7 +4,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   CheckResult,
   FreezeReceipt,
-  NodeRecord,
   PopReceipt,
   ScrubResult,
 } from "@/lib/types";
@@ -27,10 +26,13 @@ import {
   postJson,
   type ActiveSession,
   type ChatMessage,
+  type RegistryNodeRecord,
   type RegistryResponse,
 } from "@/components/session";
 import {
+  prepareHistoricalTurnText,
   prepareOutboundTurn,
+  restoreUnspentCreditHeader,
   type MessagePrivacyReport,
 } from "@/components/console/send-pipeline";
 import {
@@ -47,7 +49,6 @@ import {
 } from "@/components/visual-trust-dashboard";
 import { RecordInspectorModal } from "@/components/record-inspector-modal";
 import { TerminalModal } from "@/components/terminal-modal";
-import { TechDetails } from "@/components/ink/tech-details";
 
 type Phase = "idle" | "verifying" | "ready" | "streaming" | "closed" | "error";
 
@@ -134,9 +135,8 @@ function FlowingInkTypingIndicator() {
 
 export function Console() {
   const [registry, setRegistry] = useState<RegistryResponse | null>(null);
-  const [kind, setKind] = useState<NodeRecord["kind"]>("tinfoil");
   const [model, setModel] = useState<string>(TINFOIL_MODELS[0].id);
-  const [node, setNode] = useState<NodeRecord | null>(null);
+  const [node, setNode] = useState<RegistryNodeRecord | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
   const [checks, setChecks] = useState<CheckResult[]>([]);
   const [session, setSession] = useState<ActiveSession | null>(null);
@@ -246,9 +246,9 @@ export function Console() {
   );
 
   const connectWith = useCallback(
-    async (targetKind: NodeRecord["kind"], targetModel: string) => {
+    async (targetModel: string) => {
       if (!registry) return;
-      const chosen = pickNode(registry.nodes, targetKind);
+      const chosen = pickNode(registry.nodes, "tinfoil", targetModel);
       if (!chosen) {
         setError("No available server was found in the directory.");
         setSession(null);
@@ -316,39 +316,24 @@ export function Console() {
   );
 
   const connect = useCallback(async () => {
-    await connectWith(kind, model);
-  }, [connectWith, kind, model]);
+    await connectWith(model);
+  }, [connectWith, model]);
 
   useEffect(() => {
     if (registry && !didAutoConnectRef.current) {
       didAutoConnectRef.current = true;
-      void connectWith(kind, model);
+      void connectWith(model);
     }
-  }, [registry, kind, model, connectWith]);
-
-  const handleSwitchKind = useCallback(
-    (nextKind: NodeRecord["kind"]) => {
-      setKind(nextKind);
-      if (registry && phase !== "streaming") {
-        void connectWith(nextKind, model);
-      }
-    },
-    [connectWith, model, phase, registry],
-  );
+  }, [registry, model, connectWith]);
 
   const handleSwitchModel = useCallback(
     (nextModel: string) => {
       setModel(nextModel);
-      if (
-        registry &&
-        kind === "tinfoil" &&
-        messages.length === 0 &&
-        phase !== "streaming"
-      ) {
-        void connectWith("tinfoil", nextModel);
+      if (registry && messages.length === 0 && phase !== "streaming") {
+        void connectWith(nextModel);
       }
     },
-    [connectWith, kind, messages.length, phase, registry],
+    [connectWith, messages.length, phase, registry],
   );
 
   const hasFailedCheck = checks.some((c) => c.status === "fail");
@@ -388,19 +373,31 @@ export function Console() {
     };
 
     const displayHistory: ChatMessage[] = [...messages, userMsg];
-    const wireHistory: ChatMessage[] = displayHistory.map((m) => ({
-      role: m.role,
-      content:
-        m.wireContent ??
-        (scrubEnabled
-          ? scrubberRef.current.scrub(m.content).scrubbed
-          : m.content),
-      wireContent:
-        m.wireContent ??
-        (scrubEnabled
-          ? scrubberRef.current.scrub(m.content).scrubbed
-          : m.content),
-    }));
+    const wireHistory: ChatMessage[] = displayHistory.map((m) => {
+      if (m.wireContent) {
+        return {
+          role: m.role,
+          content: m.wireContent,
+          wireContent: m.wireContent,
+        };
+      }
+      if (m.role === "user") {
+        const preparedHistorical = prepareHistoricalTurnText(m.content, {
+          normalizeStyle,
+          scrubber: scrubberRef.current,
+        });
+        return {
+          role: m.role,
+          content: preparedHistorical,
+          wireContent: preparedHistorical,
+        };
+      }
+      return {
+        role: m.role,
+        content: m.content,
+        wireContent: m.content,
+      };
+    });
 
     setMessages([...displayHistory, { role: "assistant", content: "" }]);
     setPhase("streaming");
@@ -425,7 +422,13 @@ export function Console() {
       const msg = (e as Error).message || "Could not get a reply right now.";
       setError(msg);
       if (!wireReply) {
-        // Recoverable error: restore user prompt to input if no reply tokens arrived
+        // Recoverable error: restore user prompt to input and refund unspent credit token
+        if (turnPrepared.creditHeader) {
+          const refunded = restoreUnspentCreditHeader(
+            turnPrepared.creditHeader,
+          );
+          setCreditBalance(refunded);
+        }
         setMessages(messages);
         setInput(text);
       }
@@ -477,7 +480,7 @@ export function Console() {
           deepBundle: lastDeepBundle,
         },
         node: activeNode,
-        model: activeNode.kind === "tinfoil" ? model : "sim-echo-1",
+        model,
         checks,
         evidence: activeEvidence,
         receipt,
@@ -503,8 +506,8 @@ export function Console() {
   const handleFreeze = useCallback(async (): Promise<FreezeReceipt | null> => {
     if (!session) return null;
     const saved = await freezeAndUpload(window.location.origin, {
-      modelId: session.node.kind === "tinfoil" ? model : "sim-echo-1",
-      nodeKind: session.node.kind,
+      modelId: model,
+      nodeKind: "tinfoil",
       messages,
       simContextTokens: messages.reduce(
         (sum, m) => sum + Math.max(1, Math.ceil(m.content.length / 4)),
@@ -524,29 +527,77 @@ export function Console() {
         blobId,
         freezeSecretHex,
       );
-      setKind(restored.nodeKind);
-      if (restored.nodeKind === "tinfoil") setModel(restored.modelId);
-      if (!session && registry) {
-        const chosen = pickNode(registry.nodes, restored.nodeKind);
-        if (chosen) {
-          setNode(chosen);
-          setPhase("verifying");
+      const targetModel =
+        restored.modelId && FRIENDLY_MODELS[restored.modelId]
+          ? restored.modelId
+          : model;
+      setModel(targetModel);
+
+      if (
+        registry &&
+        (!session ||
+          session.node.kind !== "tinfoil" ||
+          model !== targetModel)
+      ) {
+        const chosen = pickNode(registry.nodes, "tinfoil", targetModel);
+        if (!chosen) {
+          const noNodeErr = new Error(
+            "No available server was found in the directory.",
+          );
+          setSession(null);
+          setError(noNodeErr.message);
+          setPhase("error");
+          throw noNodeErr;
+        }
+        setNode(chosen);
+        setPhase("verifying");
+        setChecks([]);
+        setSession(null);
+        setError(null);
+        const seen = new Map<string, CheckResult>();
+        try {
           const active = await openSession(
             chosen,
             registry,
-            () => {},
-            restored.modelId,
+            (c) => {
+              seen.set(c.id, c);
+              setChecks([...seen.values()]);
+            },
+            targetModel,
           );
+          const failed = active.checks.filter((c) => c.status === "fail");
           setChecks(active.checks);
           setLastEvidence(active.evidence);
           setLastDeepBundle(active.deepBundle);
+          if (failed.length > 0) {
+            const failMsg = failed
+              .map((c) => `${c.id} (${c.label}): ${c.detail}`)
+              .join(" · ");
+            setSession(null);
+            setError(failMsg);
+            setPhase("error");
+            throw new Error(failMsg);
+          }
           setSession(active);
           setPhase("ready");
+        } catch (e) {
+          const err = e as Error & {
+            checks?: CheckResult[];
+            evidence?: Record<string, string>;
+            deepBundle?: DeepAttestationBundle;
+          };
+          if (err.checks?.length) setChecks(err.checks);
+          if (err.evidence) setLastEvidence(err.evidence);
+          if (err.deepBundle) setLastDeepBundle(err.deepBundle);
+          setSession(null);
+          setError(err.message);
+          setPhase("error");
+          throw err;
         }
       }
       setMessages(restored.messages);
     },
-    [registry, session],
+    [model, registry, session],
   );
 
   const activeEvidence = session?.evidence ?? lastEvidence;
@@ -559,7 +610,7 @@ export function Console() {
       <VisualTrustDashboard
         phase={phase}
         node={node}
-        model={kind === "tinfoil" ? model : "sim-echo-1"}
+        model={model}
         checks={checks}
         scrubEnabled={scrubEnabled}
         zeroTelemetry={zeroTelemetry}
@@ -590,61 +641,31 @@ export function Console() {
 
       {/* Main Conversation Card */}
       <div className="ep-card flex flex-col overflow-hidden">
-        {/* Top bar: Mode toggle, Friendly model picker, Seal check & End chat */}
+        {/* Top bar: Friendly model picker, Seal check & End chat */}
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-rule bg-paper-2 px-4 py-3">
-          <div className="flex flex-wrap items-center gap-3">
-            <div
-              className="inline-flex rounded border border-rule-2 bg-paper p-0.5 text-xs"
-              role="group"
-              aria-label="Connection mode"
+          <div className="flex flex-wrap items-center gap-2">
+            <label htmlFor="console-model-select" className="ep-label">
+              Assistant
+            </label>
+            <select
+              id="console-model-select"
+              value={model}
+              onChange={(e) => handleSwitchModel(e.target.value)}
+              disabled={phase === "streaming" || phase === "verifying"}
+              className="ep-input w-auto py-1 text-xs font-medium"
             >
-              {(["tinfoil", "sim"] as const).map((k) => (
-                <button
-                  key={k}
-                  type="button"
-                  onClick={() => handleSwitchKind(k)}
-                  disabled={phase === "verifying" || phase === "streaming"}
-                  className={`rounded px-2.5 py-1 font-medium transition-colors ${
-                    kind === k
-                      ? "bg-ink text-paper"
-                      : "text-ink-2 hover:text-ink"
-                  }`}
-                >
-                  {k === "tinfoil" ? "Sealed computer" : "Practice mode"}
-                </button>
-              ))}
-            </div>
-
-            {kind === "tinfoil" ? (
-              <div className="flex flex-wrap items-center gap-2">
-                <label htmlFor="console-model-select" className="ep-label">
-                  Assistant
-                </label>
-                <select
-                  id="console-model-select"
-                  value={model}
-                  onChange={(e) => handleSwitchModel(e.target.value)}
-                  disabled={phase === "streaming"}
-                  className="ep-input w-auto py-1 text-xs font-medium"
-                >
-                  {TINFOIL_MODELS.map((m) => {
-                    const info = describeModel(m.id);
-                    return (
-                      <option key={m.id} value={m.id}>
-                        {info.name}
-                      </option>
-                    );
-                  })}
-                </select>
-                <span className="text-xs text-ink-2">
-                  {currentModelInfo.summary}
-                </span>
-              </div>
-            ) : (
-              <span className="text-xs text-ink-2">
-                Practice assistant (instant echo replies for testing)
-              </span>
-            )}
+              {TINFOIL_MODELS.map((m) => {
+                const info = describeModel(m.id);
+                return (
+                  <option key={m.id} value={m.id}>
+                    {info.name}
+                  </option>
+                );
+              })}
+            </select>
+            <span className="text-xs text-ink-2">
+              {currentModelInfo.summary}
+            </span>
           </div>
 
           <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -676,17 +697,6 @@ export function Console() {
             )}
           </div>
         </div>
-
-        {kind === "sim" && (
-          <div className="border-b border-rule bg-paper-2 px-4 py-2 text-xs text-ink-2">
-            <strong className="font-medium text-ink">Practice mode:</strong>{" "}
-            You are connected to a software practice server. Your messages stay
-            in this practice sandbox and do not use a real sealed computer.
-            Switch to{" "}
-            <strong className="font-medium text-ink">Sealed computer</strong>{" "}
-            anytime for real private AI replies.
-          </div>
-        )}
 
         {/* Message thread */}
         <div
@@ -767,13 +777,7 @@ export function Console() {
                   }
                 >
                   <div className="ep-label mb-1">
-                    {m.role === "user"
-                      ? kind === "sim"
-                        ? "You (Practice mode)"
-                        : "You"
-                      : kind === "sim"
-                        ? "Practice assistant"
-                        : currentModelInfo.name}
+                    {m.role === "user" ? "You" : currentModelInfo.name}
                   </div>
                   <div>
                     {m.content ? (
@@ -788,7 +792,7 @@ export function Console() {
 
                 {m.role === "user" && m.privacyReport && (
                   <div
-                    className="mt-1.5 flex flex-col items-end gap-1 text-xs text-ink-3"
+                    className="mt-1 flex flex-col items-end text-xs text-ink-3"
                     data-testid="message-privacy-badge"
                   >
                     <span>
@@ -796,35 +800,6 @@ export function Console() {
                         m.privacyReport.redactions.length,
                       )}
                     </span>
-                    <TechDetails label="Show technical details">
-                      <div className="ep-inset mt-1 max-w-[60ch] p-2.5 text-left font-mono text-[11px] text-ink-2 space-y-1">
-                        <div>
-                          Hidden items: {m.privacyReport.redactions.length}
-                          {m.privacyReport.redactions.length > 0
-                            ? ` (${m.privacyReport.redactions
-                                .map((r) => `${r.placeholder}:${r.kind}`)
-                                .join(", ")})`
-                            : ""}
-                        </div>
-                        <div>
-                          Padded size:{" "}
-                          {m.privacyReport.bucketBytes.toLocaleString("en-US")}{" "}
-                          B · Risk score: {m.privacyReport.riskBefore}/100 -&gt;{" "}
-                          {m.privacyReport.riskAfter}/100
-                        </div>
-                        <div>
-                          Anonymous token:{" "}
-                          {m.privacyReport.creditAttached
-                            ? "x-drouter-credit attached"
-                            : "not attached (standard limit)"}
-                        </div>
-                        {m.privacyReport.outboundPreview && (
-                          <div className="border-t border-rule pt-1 text-ink">
-                            Sent text: {m.privacyReport.outboundPreview}
-                          </div>
-                        )}
-                      </div>
-                    </TechDetails>
                   </div>
                 )}
               </div>
@@ -857,19 +832,19 @@ export function Console() {
             disabled={!canSend}
             placeholder={
               canSend
-                ? "Type a message... (personal details are hidden automatically before sending)"
+                ? "Type a message... Personal details are hidden automatically."
                 : phase === "verifying"
                   ? "Checking the seal on the computer..."
                   : phase === "error" || hasFailedCheck
                     ? "Not safe to send right now (seal check did not pass)"
                     : "Check the seal first to unlock the chat"
             }
-            className="ep-input min-h-[3.25rem] min-w-0 flex-1 resize-y py-2.5 text-sm sm:text-base"
+            className="ep-input min-h-[3.5rem] min-w-0 flex-1 resize-y py-2.5 leading-snug text-sm sm:text-base"
           />
           <button
             type="submit"
             disabled={!canSend || !input.trim()}
-            className="ep-btn h-[3.25rem] px-6 text-sm font-medium"
+            className="ep-btn h-[3.5rem] px-6 text-sm font-medium"
           >
             Send
           </button>
@@ -897,6 +872,7 @@ export function Console() {
           draftText={input}
           creditBalance={creditBalance}
           onMintCredits={handleMintCredits}
+          onCreditBalanceChange={setCreditBalance}
           mintingCredits={mintingCredits}
           lastNullifier={lastNullifier}
           zeroTelemetry={zeroTelemetry}
@@ -915,7 +891,7 @@ export function Console() {
         initialTab={inspectorTab}
         onClose={() => setInspectorOpen(false)}
         node={node}
-        model={kind === "tinfoil" ? model : "sim-echo-1"}
+        model={model}
         checks={checks}
         evidence={activeEvidence}
         deepBundle={activeDeepBundle}

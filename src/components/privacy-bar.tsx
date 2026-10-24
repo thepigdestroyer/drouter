@@ -1,7 +1,13 @@
 "use client";
 
-import { useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ScrubResult } from "@/lib/types";
+import {
+  claimPaidCredits,
+  requestCreditInvoice,
+  storedCreditBalance,
+  type CreditInvoiceClientHandle,
+} from "@/lib/credits/client";
 import {
   previewDraftPrivacy,
   type MessagePrivacyReport,
@@ -19,15 +25,36 @@ export interface PrivacyBarProps {
   draftText: string;
   creditBalance: number | null;
   onMintCredits: () => Promise<void>;
+  onCreditBalanceChange?: (nextBalance: number) => void;
   mintingCredits?: boolean;
   lastNullifier?: string | null;
   zeroTelemetry?: boolean;
   onToggleZeroTelemetry?: (next: boolean) => void;
 }
 
+const TOKEN_PACKS: Array<{ denomination: 1 | 5 | 20; amountUsdc: string }> = [
+  { denomination: 1, amountUsdc: "0.0001" },
+  { denomination: 5, amountUsdc: "0.0005" },
+  { denomination: 20, amountUsdc: "0.002" },
+];
+
 function shortHex(hex: string, lead = 10, tail = 6): string {
   if (hex.length <= lead + tail + 2) return hex;
   return `${hex.slice(0, lead)}...${hex.slice(-tail)}`;
+}
+
+export function friendlyCreditFlowError(rawError?: string | null): string {
+  if (!rawError) return "";
+  if (/no confirmed usdc|transfer log|insufficient usdc/i.test(rawError)) {
+    return "We have not detected your USDC payment at this deposit address yet. Wait a few seconds after sending and click the button again.";
+  }
+  if (/expired|410/i.test(rawError)) {
+    return "This one-time deposit address has expired. Click New deposit address to get a fresh one.";
+  }
+  if (/already been claimed|409/i.test(rawError)) {
+    return "These tokens have already been claimed. Click New deposit address if you want to buy another pack.";
+  }
+  return "Could not complete token request right now. Please try again in a moment.";
 }
 
 export function PrivacyBar({
@@ -41,11 +68,116 @@ export function PrivacyBar({
   draftText,
   creditBalance,
   onMintCredits,
+  onCreditBalanceChange,
   mintingCredits = false,
   lastNullifier,
   zeroTelemetry = true,
   onToggleZeroTelemetry,
 }: PrivacyBarProps) {
+  const [buyTokensOpen, setBuyTokensOpen] = useState(false);
+  const [selectedPack, setSelectedPack] = useState<1 | 5 | 20>(5);
+  const [invoice, setInvoice] = useState<CreditInvoiceClientHandle | null>(null);
+  const [loadingInvoice, setLoadingInvoice] = useState(false);
+  const [claimingTokens, setClaimingTokens] = useState(false);
+  const [copiedAddress, setCopiedAddress] = useState(false);
+  const [creditFlowNotice, setCreditFlowNotice] = useState<string | null>(null);
+  const [creditFlowRawError, setCreditFlowRawError] = useState<string | null>(
+    null,
+  );
+
+  const loadInvoice = useCallback(async (pack: 1 | 5 | 20) => {
+    setLoadingInvoice(true);
+    setCreditFlowRawError(null);
+    setCreditFlowNotice(null);
+    setCopiedAddress(false);
+    try {
+      const origin =
+        typeof window !== "undefined" ? window.location.origin : "";
+      const nextInvoice = await requestCreditInvoice(origin, pack);
+      setInvoice(nextInvoice);
+    } catch (e) {
+      setCreditFlowRawError(
+        (e as Error).message || "Could not create deposit address",
+      );
+    } finally {
+      setLoadingInvoice(false);
+    }
+  }, []);
+
+  const handleToggleBuyTokens = useCallback(() => {
+    setBuyTokensOpen((prev) => !prev);
+  }, []);
+
+  useEffect(() => {
+    if (
+      buyTokensOpen &&
+      !invoice &&
+      !loadingInvoice &&
+      !creditFlowRawError &&
+      !creditFlowNotice
+    ) {
+      void loadInvoice(selectedPack);
+    }
+  }, [
+    buyTokensOpen,
+    creditFlowNotice,
+    creditFlowRawError,
+    invoice,
+    loadInvoice,
+    loadingInvoice,
+    selectedPack,
+  ]);
+
+  const handleSelectPack = useCallback(
+    (pack: 1 | 5 | 20) => {
+      setSelectedPack(pack);
+      void loadInvoice(pack);
+    },
+    [loadInvoice],
+  );
+
+  const handleCopyDepositAddress = useCallback(async () => {
+    if (!invoice?.depositAddress) return;
+    try {
+      await navigator.clipboard.writeText(invoice.depositAddress);
+      setCopiedAddress(true);
+      setTimeout(() => setCopiedAddress(false), 2000);
+    } catch {
+      setCopiedAddress(false);
+    }
+  }, [invoice]);
+
+  const handleClaimPaidTokens = useCallback(async () => {
+    if (!invoice || claimingTokens) return;
+    setClaimingTokens(true);
+    setCreditFlowRawError(null);
+    setCreditFlowNotice(null);
+    try {
+      const origin =
+        typeof window !== "undefined" ? window.location.origin : "";
+      await claimPaidCredits(origin, {
+        invoiceId: invoice.invoiceId,
+        claimSecret: invoice.claimSecret,
+        count: invoice.denomination,
+        denomination: 1,
+      });
+      const updated = storedCreditBalance();
+      onCreditBalanceChange?.(updated);
+      setCreditFlowNotice(
+        `Added ${invoice.denomination} anonymous token${
+          invoice.denomination === 1 ? "" : "s"
+        } to your browser wallet.`,
+      );
+      setInvoice(null);
+    } catch (e) {
+      setCreditFlowRawError(
+        (e as Error).message || "Could not claim paid tokens",
+      );
+    } finally {
+      setClaimingTokens(false);
+    }
+  }, [claimingTokens, invoice, onCreditBalanceChange]);
+
   const draftPrepared = useMemo(() => {
     const trimmed = draftText.trim();
     if (!trimmed) return null;
@@ -60,23 +192,23 @@ export function PrivacyBar({
 
   const activeRedactions = useMemo(() => {
     if (draftPrepared) {
-      return scrubEnabled ? draftPrepared.prepared.report.redactions : [];
+      return draftPrepared.prepared.report.redactions;
     }
     if (lastPrivacyReport) {
       return lastPrivacyReport.redactions;
     }
     return lastScrubbed?.replacements ?? [];
-  }, [draftPrepared, lastPrivacyReport, lastScrubbed, scrubEnabled]);
+  }, [draftPrepared, lastPrivacyReport, lastScrubbed]);
 
   const activeOutboundPreview = useMemo(() => {
     if (draftPrepared) {
-      return scrubEnabled ? draftPrepared.prepared.outboundText : draftText;
+      return draftPrepared.prepared.outboundText;
     }
     if (lastPrivacyReport) {
       return lastPrivacyReport.outboundPreview;
     }
     return lastScrubbed?.scrubbed ?? "";
-  }, [draftPrepared, draftText, lastPrivacyReport, lastScrubbed, scrubEnabled]);
+  }, [draftPrepared, lastPrivacyReport, lastScrubbed]);
 
   const activeBucketBytes =
     draftPrepared?.prepared.bucketBytes ??
@@ -90,9 +222,7 @@ export function PrivacyBar({
 
   const activeRiskAfter =
     draftPrepared !== null
-      ? scrubEnabled
-        ? draftPrepared.prepared.report.riskAfter
-        : draftPrepared.prepared.report.riskBefore
+      ? draftPrepared.prepared.report.riskAfter
       : (lastPrivacyReport?.riskAfter ?? null);
 
   const activeStyleChanges =
@@ -101,10 +231,10 @@ export function PrivacyBar({
     0;
 
   const creditLabel = mintingCredits
-    ? "Adding tokens..."
+    ? "Adding free tokens..."
     : creditBalance === null
       ? "Anonymous tokens: Loading"
-      : `Anonymous tokens: ${creditBalance} left (Add 5)`;
+      : `Anonymous tokens: ${creditBalance} left (Add 5 free)`;
 
   return (
     <div className="space-y-3 text-xs text-ink-2">
@@ -120,22 +250,26 @@ export function PrivacyBar({
               } from your account)`
             : ""}
           , make every message look the same size from outside, attach a prepaid
-          anonymous token that cannot be traced back to you, and lock your
-          message so only the sealed computer can open it.
+          anonymous token when available so requests cannot be linked to your
+          network address (at 0 tokens, chatting still works under the standard
+          daily limit), and lock your message so only the sealed computer can
+          open it.
         </p>
 
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
+            aria-pressed={scrubEnabled}
             onClick={() => onToggleScrub(!scrubEnabled)}
             className="ep-btn-ghost px-2.5 py-1 text-xs"
           >
-            Hide personal details: {scrubEnabled ? "On" : "Off"}
+            Hide personal details: Always on
           </button>
 
           {onToggleNormalizeStyle && (
             <button
               type="button"
+              aria-pressed={normalizeStyle}
               onClick={() => onToggleNormalizeStyle(!normalizeStyle)}
               className="ep-btn-ghost px-2.5 py-1 text-xs"
             >
@@ -146,10 +280,12 @@ export function PrivacyBar({
           {onToggleZeroTelemetry && (
             <button
               type="button"
+              aria-pressed={!zeroTelemetry}
               onClick={() => onToggleZeroTelemetry(!zeroTelemetry)}
               className="ep-btn-ghost px-2.5 py-1 text-xs"
+              title="When off, verification receipts stay only in your browser and are not published to the public receipt book"
             >
-              Private logs only: {zeroTelemetry ? "On" : "Off"}
+              Share receipts publicly: {zeroTelemetry ? "Off" : "On"}
             </button>
           )}
 
@@ -158,12 +294,191 @@ export function PrivacyBar({
             onClick={() => void onMintCredits()}
             disabled={mintingCredits}
             className="ep-btn-ghost px-2.5 py-1 text-xs"
-            title="Prepaid anonymous tokens cannot be traced back to you"
+            title="Claim your free daily allowance of prepaid anonymous tokens"
           >
             {creditLabel}
           </button>
+
+          <button
+            type="button"
+            aria-expanded={buyTokensOpen}
+            onClick={handleToggleBuyTokens}
+            className="ep-btn-ghost px-2.5 py-1 text-xs"
+          >
+            {buyTokensOpen ? "Hide token top-up" : "Get more anonymous tokens"}
+          </button>
         </div>
       </div>
+
+      {buyTokensOpen && (
+        <div
+          className="ep-inset space-y-3 p-3.5 text-xs text-ink"
+          data-testid="paid-credits-panel"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="space-y-0.5">
+              <div className="font-medium text-ink">
+                Get more anonymous tokens
+              </div>
+              <p className="text-xs text-ink-2">
+                Pay from any wallet. For best privacy use a fresh wallet. We
+                never ask for your address.
+              </p>
+            </div>
+
+            <div
+              className="inline-flex rounded border border-rule-2 bg-paper p-0.5 text-xs"
+              role="group"
+              aria-label="Choose token pack"
+            >
+              {TOKEN_PACKS.map((pack) => (
+                <button
+                  key={pack.denomination}
+                  type="button"
+                  aria-pressed={selectedPack === pack.denomination}
+                  disabled={loadingInvoice || claimingTokens}
+                  onClick={() => handleSelectPack(pack.denomination)}
+                  className={`rounded px-2.5 py-1 font-medium transition-colors ${
+                    selectedPack === pack.denomination
+                      ? "bg-ink text-paper"
+                      : "text-ink-2 hover:text-ink"
+                  }`}
+                >
+                  {pack.denomination}{" "}
+                  {pack.denomination === 1 ? "token" : "tokens"} (
+                  {pack.amountUsdc} USDC)
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {creditFlowNotice && (
+            <p className="rounded border border-rule bg-paper px-2.5 py-1.5 text-xs text-ink">
+              {creditFlowNotice}
+            </p>
+          )}
+
+          {creditFlowRawError && (
+            <p
+              role="alert"
+              className="rounded border border-accent bg-accent-soft px-2.5 py-1.5 text-xs text-accent"
+            >
+              {friendlyCreditFlowError(creditFlowRawError)}
+            </p>
+          )}
+
+          {loadingInvoice ? (
+            <p className="text-xs text-ink-2">
+              Generating a fresh one-time deposit address...
+            </p>
+          ) : invoice ? (
+            <div className="space-y-2.5">
+              <div className="grid grid-cols-1 gap-2 rounded border border-rule bg-paper p-2.5 sm:grid-cols-[1fr_auto] sm:items-center">
+                <div className="space-y-1">
+                  <div className="text-[11px] text-ink-3">
+                    Send exactly{" "}
+                    <strong className="font-semibold text-ink">
+                      {invoice.amountUsdc} USDC
+                    </strong>{" "}
+                    for{" "}
+                    <strong className="font-semibold text-ink">
+                      {invoice.denomination} anonymous{" "}
+                      {invoice.denomination === 1 ? "token" : "tokens"}
+                    </strong>{" "}
+                    to this one-time deposit address:
+                  </div>
+                  <div
+                    className="ep-mono break-all text-xs text-ink"
+                    data-testid="credit-deposit-address"
+                  >
+                    {invoice.depositAddress}
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyDepositAddress()}
+                    className="ep-btn-ghost px-2.5 py-1 text-xs"
+                  >
+                    {copiedAddress ? "Copied address" : "Copy address"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void loadInvoice(selectedPack)}
+                    disabled={loadingInvoice || claimingTokens}
+                    className="ep-btn-ghost px-2.5 py-1 text-xs"
+                  >
+                    New deposit address
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleClaimPaidTokens()}
+                  disabled={claimingTokens}
+                  className="ep-btn px-3.5 py-1.5 text-xs font-medium"
+                >
+                  {claimingTokens
+                    ? "Checking payment and minting tokens..."
+                    : "I have paid, give me my tokens"}
+                </button>
+                <span className="text-[11px] text-ink-3">
+                  Your secret claim key stays only in this browser.
+                </span>
+              </div>
+            </div>
+          ) : (
+            <div>
+              <button
+                type="button"
+                onClick={() => void loadInvoice(selectedPack)}
+                className="ep-btn-ghost px-3 py-1 text-xs"
+              >
+                Get a fresh deposit address
+              </button>
+            </div>
+          )}
+
+          <TechDetails label="Show technical details">
+            <div className="mt-2 space-y-1.5 border-t border-rule pt-2 font-mono text-[11px] text-ink-2">
+              <div>
+                Network: Circle Arc Testnet (chain ID{" "}
+                {invoice?.chainId ?? 5042002})
+              </div>
+              <div className="break-all">
+                USDC contract:{" "}
+                {invoice?.usdcContract ??
+                  "0x3600000000000000000000000000000000000000"}{" "}
+                (decimals: {invoice?.usdcDecimals ?? 6})
+              </div>
+              {invoice && (
+                <>
+                  <div className="break-all">
+                    Invoice ID: {invoice.invoiceId}
+                  </div>
+                  <div className="break-all">
+                    Claim hash (SHA-256 of browser-only secret):{" "}
+                    {invoice.claimHash}
+                  </div>
+                </>
+              )}
+              <div>
+                Protocol: 2048-bit RSA-FDH blind signatures. The server verifies
+                the ERC-20 Transfer log to the one-time child deposit address
+                without storing your sender wallet address, and signs your
+                blinded tokens so spent tokens cannot be linked to your payment.
+              </div>
+              {creditFlowRawError && (
+                <div className="text-accent">
+                  Raw error: {creditFlowRawError}
+                </div>
+              )}
+            </div>
+          </TechDetails>
+        </div>
+      )}
 
       {/* Live draft or last sent plain summary */}
       {(draftPrepared !== null || lastPrivacyReport !== null) && (
@@ -265,10 +580,6 @@ export function PrivacyBar({
             </li>
             <li>
               Token counts are measured inside the sealed computer for billing.
-            </li>
-            <li>
-              Practice mode servers (sim-1, sim-2, sim-3) run in software for
-              testing.
             </li>
             <li>
               The public receipt book (

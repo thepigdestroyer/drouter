@@ -3,7 +3,6 @@ import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 import { TinfoilAI } from "tinfoil";
 import type { CheckResult, NodeRecord, PopReceipt, QuorumTicket } from "@/lib/types";
 import { padJsonPayloadToBucket } from "@/lib/relay";
-import { toHex } from "@/lib/sim/bytes";
 import {
   checksFromDocument,
   openTinfoilSession,
@@ -15,8 +14,22 @@ import {
   type DeepAttestationBundle,
   type ModelEnclaveAttestation,
 } from "@/lib/tinfoil/deep-inspect";
-import { openSimSession } from "@/lib/sim/client";
 import type { MessagePrivacyReport } from "@/components/console/send-pipeline";
+
+export interface RegistryNodeRecord extends NodeRecord {
+  key?: string;
+  modelId?: string;
+  repo?: string;
+  releaseTag?: string;
+  hardwarePredicate?: string;
+  measurementRegisters?: string[];
+  hpkePublicKey?: string;
+  tlsKeyFp?: string;
+  enclaveHosts?: string[];
+  configuredHosts?: number;
+  verifiedHosts?: number;
+  healthyHosts?: number;
+}
 
 export interface RegistryResponse {
   source: "arc" | "fallback";
@@ -24,9 +37,11 @@ export interface RegistryResponse {
   address?: string;
   minStake?: string;
   error?: string;
-  nodes: NodeRecord[];
+  nodes: RegistryNodeRecord[];
   chainId: number;
   explorer: string;
+  proxyVersion?: string;
+  proxyUpdatedAt?: string;
 }
 
 export interface ChatMessage {
@@ -40,9 +55,9 @@ export interface SendOptions {
   creditHeader?: string | null;
 }
 
-/** A verified session with one node, regardless of whether the node is real or simulated. */
+/** A verified session with a real Tinfoil sealed computer node. */
 export interface ActiveSession {
-  node: NodeRecord;
+  node: RegistryNodeRecord;
   checks: CheckResult[];
   evidence: Record<string, string>;
   evidenceHash: string;
@@ -55,13 +70,29 @@ export interface ActiveSession {
   close?: () => Promise<PopReceipt>;
 }
 
-/** Weighted random choice by stake, using this browser's own randomness (operators can't steer it). */
+/**
+ * Picks an active real Tinfoil node from `/api/registry`.
+ * When `targetModel` matches a model-specific node (`modelId` or `tinfoil-<model>`),
+ * prefers that node; otherwise chooses weighted by stake using browser CSPRNG.
+ */
 export function pickNode(
-  nodes: NodeRecord[],
-  kind: NodeRecord["kind"],
-): NodeRecord | null {
-  const eligible = nodes.filter((n) => n.kind === kind && n.status === "active");
+  nodes: RegistryNodeRecord[],
+  kind: NodeRecord["kind"] = "tinfoil",
+  targetModel?: string,
+): RegistryNodeRecord | null {
+  if (kind !== "tinfoil") return null;
+  const eligible = nodes.filter(
+    (n) => n.kind === "tinfoil" && n.status === "active",
+  );
   if (eligible.length === 0) return null;
+  if (targetModel) {
+    const exact = eligible.find(
+      (n) =>
+        n.modelId === targetModel ||
+        n.key === `tinfoil-${targetModel}`,
+    );
+    if (exact) return exact;
+  }
   const weights = eligible.map((n) => Math.max(Number(n.stake) || 0, 0.0001));
   const total = weights.reduce((a, b) => a + b, 0);
   const r = (crypto.getRandomValues(new Uint32Array(1))[0] / 2 ** 32) * total;
@@ -77,9 +108,11 @@ export function hashHex(value: unknown): `0x${string}` {
   return `0x${bytesToHex(sha256(utf8ToBytes(JSON.stringify(value))))}`;
 }
 
-export function simIdFor(node: NodeRecord): string {
+export function simIdFor(node: RegistryNodeRecord): string {
+  if (node.key) return node.key;
+  if (node.modelId) return `tinfoil-${node.modelId}`;
   if (node.kind === "tinfoil") return "tinfoil-router";
-  return node.endpoint.split("/").filter(Boolean).pop() ?? "";
+  return "";
 }
 
 /** C6: checks both the on-chain Arc registry stake AND the verifier quorum ticket. */
@@ -162,11 +195,7 @@ let pendingCreditHeader: string | null = null;
 function isInferenceTurnRequest(urlStr: string, method?: string): boolean {
   const upper = (method ?? "GET").toUpperCase();
   if (upper !== "POST") return false;
-  return (
-    urlStr.includes("/api/relay/") && urlStr.includes("/v1/")
-  ) || (
-    urlStr.includes("/api/sim/") && urlStr.endsWith("/turn")
-  );
+  return urlStr.includes("/api/relay/") && urlStr.includes("/v1/");
 }
 
 function ensureFetchInterceptorInstalled(origin: string): void {
@@ -225,7 +254,7 @@ async function openLocalHttpTinfoilSession(
 
   const secretBytes = new Uint8Array(32);
   crypto.getRandomValues(secretBytes);
-  const userCacheSecret = toHex(secretBytes);
+  const userCacheSecret = bytesToHex(secretBytes);
 
   const baseURL = `${origin}/api/relay/v1/`;
 
@@ -566,61 +595,16 @@ export async function openSession(
     };
   }
 
-  const sim = await openSimSession(window.location.origin, simIdFor(node), {
-    onCheck: (c) => onCheck(c.id === "C6" ? c6 : c),
-  });
-  const checks = sim.checks.map((c) => (c.id === "C6" ? c6 : c));
   onCheck(c6);
-
-  const simChipId = sim.evidence.chipId
-    ? `${sim.evidence.chipId} (simulated)`
-    : "Unavailable (no simulated chip ID)";
-
-  const evidence: Record<string, string> = {
-    Mode: "Simulated in software (not real TEE hardware)",
-    "Simulated node": sim.simId,
-    Measurement: sim.evidence.measurement
-      ? `${sim.evidence.measurement} (simulated)`
-      : "Unavailable (no simulated measurement)",
-    "Chip ID": simChipId,
-    chipId: simChipId,
-    TCB: sim.evidence.tcb
-      ? `${typeof sim.evidence.tcb === "string" ? sim.evidence.tcb : JSON.stringify(sim.evidence.tcb)} (simulated)`
-      : "Unavailable (no simulated TCB)",
-    "GPUs attested":
-      sim.evidence.gpuCount !== undefined
-        ? `${sim.evidence.gpuCount} (simulated)`
-        : "Unavailable (simulated node)",
-    "Report data": sim.evidence.reportData
-      ? `${sim.evidence.reportData} (simulated)`
-      : "Unavailable (no simulated report data)",
-    "Guest policy": sim.evidence.policy
-      ? `${typeof sim.evidence.policy === "string" ? sim.evidence.policy : JSON.stringify(sim.evidence.policy)} (simulated)`
-      : "Unavailable (no simulated guest policy)",
-  };
-
-  const failed = checks.find((c) => c.status === "fail");
-  if (failed) {
-    throw Object.assign(
-      new Error(`${failed.id} (${failed.label}): ${failed.detail}`),
-      { checks, evidence },
-    );
-  }
-
-  return {
-    node,
-    checks,
-    evidence,
-    evidenceHash: hashHex(sim.evidence),
-    send: wrapSendWithCreditAndChecks(checks, async function* (history) {
-      const lastMsg = history[history.length - 1];
-      const text = lastMsg ? (lastMsg.wireContent ?? lastMsg.content) : "";
-      for await (const chunk of sim.send(text)) {
-        yield chunk.replace(/\bSimulated enclave\b/g, "Practice server");
-      }
-    }),
-    close: () => sim.close(),
-  };
+  const checks = [c6];
+  throw Object.assign(
+    new Error(
+      c6.status === "fail"
+        ? `${c6.id} (${c6.label}): ${c6.detail}`
+        : "Only real Tinfoil sealed computers are supported in production.",
+    ),
+    { checks, evidence: {} },
+  );
 }
 
 export async function postJson<T>(

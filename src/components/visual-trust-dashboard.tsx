@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import type { CheckResult, NodeRecord } from "@/lib/types";
 import { CheckList, EvidenceTable } from "@/components/trust-panel";
 import { TechDetails } from "@/components/ink/tech-details";
@@ -64,6 +64,23 @@ export function friendlyFailureReason(
     return "We could not finish checking the server seal. Sending is paused until the seal check passes.";
   }
   return "The seal check did not pass. Sending is paused until we can confirm the server is sealed.";
+}
+
+export function friendlyRuntimeError(errorMessage?: string | null): string {
+  if (!errorMessage) return "";
+  if (/allowance|402|invoice/i.test(errorMessage)) {
+    return "Your free daily anonymous token allowance has been used for today. You can still get more anonymous tokens below.";
+  }
+  if (/transfer|usdc|insufficient|deposit|claim/i.test(errorMessage)) {
+    return "We have not seen the payment on the network yet. Wait a few seconds after paying and try again.";
+  }
+  if (/seal check|exporting a proof/i.test(errorMessage)) {
+    return "Run the seal check first before exporting a proof receipt.";
+  }
+  if (/rate|429|quota/i.test(errorMessage)) {
+    return "Too many requests right now. Wait a moment or add anonymous tokens below.";
+  }
+  return "Something went wrong while completing your request. Open technical details below for the full message.";
 }
 
 function AnimatedInkSeal({
@@ -152,7 +169,32 @@ export function VisualTrustDashboard({
   publishingProof,
   onPublishProof,
 }: VisualTrustDashboardProps) {
+  void node;
   const [expertsMenuOpen, setExpertsMenuOpen] = useState(false);
+  const expertsMenuRef = useRef<HTMLDetailsElement>(null);
+
+  useEffect(() => {
+    if (!expertsMenuOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setExpertsMenuOpen(false);
+      }
+    };
+    const handlePointerDown = (e: MouseEvent) => {
+      if (
+        expertsMenuRef.current &&
+        !expertsMenuRef.current.contains(e.target as Node)
+      ) {
+        setExpertsMenuOpen(false);
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("mousedown", handlePointerDown);
+    };
+  }, [expertsMenuOpen]);
 
   const passedChecks = checks.filter((c) => c.status === "pass").length;
   const failedChecks = checks.filter((c) => c.status === "fail");
@@ -172,6 +214,7 @@ export function VisualTrustDashboard({
         : "Unavailable");
 
   const plainReason = friendlyFailureReason(errorMessage, failedChecks);
+  const plainRuntimeError = friendlyRuntimeError(errorMessage);
 
   const rawFailureDetail =
     errorMessage ||
@@ -215,9 +258,7 @@ export function VisualTrustDashboard({
                   className="ep-pass"
                   data-testid="attestation-status-badge"
                 >
-                  {node?.kind === "sim"
-                    ? "Practice mode ready"
-                    : "Sealed and private"}
+                  Sealed and private
                 </span>
               ) : (
                 <span
@@ -231,18 +272,13 @@ export function VisualTrustDashboard({
                       : "Getting ready"}
                 </span>
               )}
-              {node?.kind === "sim" && (
-                <span className="ep-muted-chip">Practice mode</span>
-              )}
             </div>
 
             <p className="text-sm font-medium text-ink sm:text-base">
               {hasFailure
                 ? `Not safe to send right now. ${plainReason}`
                 : isVerified
-                  ? node?.kind === "sim"
-                    ? "Practice mode active. Your messages stay in a safe practice sandbox and do not use real sealed computers."
-                    : "Sealed and private. Your messages can only be opened by a sealed computer."
+                  ? "Sealed and private. Your messages can only be opened by a sealed computer."
                   : phase === "verifying"
                     ? "We are checking that the sealed computer is genuine before opening your chat..."
                     : phase === "closed"
@@ -267,7 +303,7 @@ export function VisualTrustDashboard({
                 role="alert"
                 className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded border border-accent bg-accent-soft px-3 py-1.5 text-xs text-accent"
               >
-                <span>{errorMessage}</span>
+                <span>{plainRuntimeError}</span>
                 {onDismissError && (
                   <button
                     type="button"
@@ -285,6 +321,7 @@ export function VisualTrustDashboard({
         {/* Small "For experts" menu */}
         <div className="relative self-start sm:self-center shrink-0">
           <details
+            ref={expertsMenuRef}
             open={expertsMenuOpen}
             onToggle={(e) =>
               setExpertsMenuOpen((e.currentTarget as HTMLDetailsElement).open)
@@ -342,7 +379,7 @@ export function VisualTrustDashboard({
               <span>Chip ID: {chipIdValue}</span>
             </div>
 
-            {rawFailureDetail && hasFailure && (
+            {rawFailureDetail && (
               <div className="ep-inset p-2.5 font-mono text-xs text-accent">
                 {rawFailureDetail}
               </div>

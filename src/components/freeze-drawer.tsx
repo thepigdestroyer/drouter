@@ -450,9 +450,6 @@ export function FreezeDrawer({
                     ? "Chat paused and locked. Save your code to open it on another device."
                     : "A paused chat is saved on this browser and ready to reopen."}
                 </span>
-                {activeReceipt.storageMode === "simulated-memory" && (
-                  <span className="ml-2 ep-muted-chip">Practice memory</span>
-                )}
               </div>
               <div className="flex flex-wrap items-center gap-1.5">
                 <button

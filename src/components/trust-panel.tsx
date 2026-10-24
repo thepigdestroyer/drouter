@@ -112,12 +112,8 @@ export function EvidenceTable({
 }
 
 export function NodeBadge({ node }: { node: NodeRecord }) {
-  const real = node.kind === "tinfoil";
-  return (
-    <span className={real ? "ep-pass" : "ep-muted-chip"}>
-      {real ? "Sealed computer" : "Practice mode"}
-    </span>
-  );
+  void node;
+  return <span className="ep-pass">Sealed computer</span>;
 }
 
 export function ReceiptView({
@@ -129,10 +125,6 @@ export function ReceiptView({
   anchorUrl?: string | null;
   onExportProof?: () => void;
 }) {
-  const isSim =
-    Boolean((receipt as { simulated?: boolean }).simulated) ||
-    receipt.nodeId.startsWith("sim-");
-
   return (
     <div className="ep-inset p-3.5 text-xs text-ink">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
@@ -140,7 +132,6 @@ export function ReceiptView({
           <span className="font-medium text-ink">
             Chat closed and temporary keys cleared from your browser
           </span>
-          {isSim && <span className="ep-muted-chip">Practice mode</span>}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className={receipt.verified ? "ep-pass" : "ep-fail"}>
