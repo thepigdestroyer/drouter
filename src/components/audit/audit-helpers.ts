@@ -22,6 +22,16 @@ export interface VerifiableClaimRecord {
   liveSource: boolean;
 }
 
+export interface PlainTrustPoint {
+  id: string;
+  stepNumber: string;
+  title: string;
+  description: string;
+  badge: string;
+  href: string;
+  buttonLabel: string;
+}
+
 export interface TransparencyEntryView {
   index: number;
   imageId: string;
@@ -324,6 +334,56 @@ export function buildVerifiableClaims(params: {
         ? `tx ${shortHex(latestTx, 8, 6)}`
         : `chain 5042002 (${acc?.registryNodes?.length ?? 4} nodes)`,
       liveSource: Boolean(acc?.onChain),
+    },
+  ];
+}
+
+/**
+ * Builds the 3 plain-language points for "Why you can trust this" on /audit,
+ * each paired with a live external record URL for "Check it yourself".
+ */
+export function buildPlainTrustPoints(params: {
+  matrix: DeepAttestationBundle | null;
+  accountability: AccountabilityResponse | null;
+  transparency: TransparencyResponse | null;
+}): PlainTrustPoint[] {
+  const claims = buildVerifiableClaims(params);
+  const chipClaim = claims[2];
+  const releaseClaim = claims[0];
+  const receiptBookClaim = claims[4];
+
+  return [
+    {
+      id: "factory-seal",
+      stepNumber: "1",
+      title: "The sealed computer has a real factory seal from the chip maker",
+      description:
+        "Before your device sends a single word, we run a seal check to make sure the sealed computer is genuine and locked so only it can open your chat.",
+      badge: params.matrix ? "Seal checked live" : "Factory seal record",
+      href: chipClaim.href,
+      buttonLabel: "Check it yourself",
+    },
+    {
+      id: "public-blueprint",
+      stepNumber: "2",
+      title: "The software inside matches the public blueprint",
+      description:
+        "The code running inside the sealed computer is open and public. Anyone can open the exact software release to confirm no secret logging was added.",
+      badge: params.matrix ? "Public release matched" : "Open software release",
+      href: releaseClaim.href,
+      buttonLabel: "Check it yourself",
+    },
+    {
+      id: "public-receipt-book",
+      stepNumber: "3",
+      title: "Every check is written in a public receipt book",
+      description:
+        "When we check a server or catch a rule-breaker in practice mode, we write a permanent receipt into a public receipt book that nobody can secretly erase.",
+      badge: params.accountability?.onChain
+        ? "Live public receipt book"
+        : "Public receipt book",
+      href: receiptBookClaim.href,
+      buttonLabel: "Check it yourself",
     },
   ];
 }

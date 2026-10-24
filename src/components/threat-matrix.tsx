@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
+import { TechDetails } from "@/components/ink/tech-details";
 
 export interface ThreatDefenseTestRef {
   filePath: string;
@@ -33,6 +34,15 @@ export interface ThreatScenario {
   simulated?: boolean;
 }
 
+export interface VillainScenario {
+  id: string;
+  label: string;
+  shortTag: string;
+  whatTheyTry: string;
+  whatStopsThem: string;
+  scenarioIds: string[];
+}
+
 export const GITHUB_BLOB_BASE =
   "https://github.com/thepigdestroyer/drouter/blob/main";
 
@@ -40,6 +50,49 @@ export function githubBlobUrl(repoRelativePath: string): string {
   const clean = repoRelativePath.replace(/^\/+/, "");
   return `${GITHUB_BLOB_BASE}/${clean}`;
 }
+
+export const THREAT_VILLAINS: VillainScenario[] = [
+  {
+    id: "nosy-server-owner",
+    label: "A nosy server owner",
+    shortTag: "Middleman server",
+    whatTheyTry:
+      "They try to read your message as it passes through their web server or peek inside the computer while it works.",
+    whatStopsThem:
+      "We hide your personal details before anything leaves your device, make every message look the same size from outside, and lock your words so only the sealed computer can open them.",
+    scenarioIds: ["malicious-relay", "debug-mode-container"],
+  },
+  {
+    id: "hacker-with-probe",
+    label: "A hacker with a probe",
+    shortTag: "Physical wiretap",
+    whatTheyTry:
+      "They walk into the data center and clip a wire onto the memory chips or try to steal the computer's secret signing key in a lab.",
+    whatStopsThem:
+      "The computer scrambles its memory in hardware with a fresh lock on every step, and if a signing key is ever stolen, anyone can prove the break-in and flag that server in the public receipt book.",
+    scenarioIds: ["ddr5-interposer", "lab-key-extraction"],
+  },
+  {
+    id: "fake-server",
+    label: "A fake server",
+    shortTag: "Impostor or cheap brain",
+    whatTheyTry:
+      "They pretend to be a real sealed computer or quietly swap the smart AI brain for a cheaper, dumber one to save money.",
+    whatStopsThem:
+      "Your browser runs a seal check before sending a single word, and our secret shopper sends surprise test questions to catch any brain swap.",
+    scenarioIds: ["model-weight-swap", "colluding-verifiers"],
+  },
+  {
+    id: "leaky-company",
+    label: "A leaky company",
+    shortTag: "Database leak later",
+    whatTheyTry:
+      "Someone demands old chat logs from the company database or breaks into storage weeks after you finish talking.",
+    whatStopsThem:
+      "deRoute never saves your plain messages, wipes the temporary chat key when you finish, and keeps the only unlock key on your own device if you pause and lock a chat for later.",
+    scenarioIds: ["subpoena-post-session"],
+  },
+];
 
 export const THREAT_SCENARIOS: ThreatScenario[] = [
   {
@@ -122,7 +175,7 @@ export const THREAT_SCENARIOS: ThreatScenario[] = [
       {
         filePath: "tests/tinfoil/tinfoil.test.ts",
         testName:
-          "verifyModelEnclaveStatus passes when hosts are verified and GPUs are in CC mode, and fails on unverified hosts or 0 GPUs",
+          "verifyModelEnclaveStatus passes when hosts are verified and GPUs are in CC mode, and fails on unverified hosts, 0 GPUs, or unavailable status",
         githubUrl: githubBlobUrl("tests/tinfoil/tinfoil.test.ts"),
         codePath: "src/lib/tinfoil/deep-inspect.ts",
         codeUrl: githubBlobUrl("src/lib/tinfoil/deep-inspect.ts"),
@@ -248,7 +301,7 @@ export const THREAT_SCENARIOS: ThreatScenario[] = [
     defenseSummary:
       "Popping a bubble wipes ephemeral session keys in RAM, and frozen session blobs store only client-encrypted ciphertext.",
     plainExplanation:
-      "dRouter does not log plaintext prompts. When you pop a session bubble, ephemeral keys are zeroed. If you freeze a session to resume later, the decryption key stays in your browser.",
+      "deRoute does not log plaintext prompts. When you pop a session bubble, ephemeral keys are zeroed. If you freeze a session to resume later, the decryption key stays in your browser.",
     controls: [
       "Pop bubble session key zeroization",
       "Client-held freeze key (AES-256-GCM)",
@@ -385,155 +438,138 @@ export interface ThreatMatrixProps {
   defaultActiveIds?: string[];
 }
 
-export function ThreatMatrix({
-  className = "",
-  defaultActiveIds = ["malicious-relay"],
-}: ThreatMatrixProps) {
-  const [activeAttacks, setActiveAttacks] = useState<Record<string, boolean>>(
-    () => {
-      const initial: Record<string, boolean> = {};
-      for (const item of THREAT_SCENARIOS) {
-        initial[item.id] = defaultActiveIds.includes(item.id);
-      }
-      return initial;
-    },
+export function ThreatMatrix({ className = "" }: ThreatMatrixProps) {
+  const [selectedVillainId, setSelectedVillainId] = useState<string>(
+    THREAT_VILLAINS[0].id,
   );
 
-  const toggleAttack = (id: string) => {
-    setActiveAttacks((prev) => ({ ...prev, [id]: !prev[id] }));
-  };
+  const selectedVillain =
+    THREAT_VILLAINS.find((v) => v.id === selectedVillainId) ??
+    THREAT_VILLAINS[0];
 
-  const setAllAttacks = (enabled: boolean) => {
-    const next: Record<string, boolean> = {};
-    for (const item of THREAT_SCENARIOS) {
-      next[item.id] = enabled;
-    }
-    setActiveAttacks(next);
-  };
-
-  const activeCount = THREAT_SCENARIOS.filter(
-    (s) => activeAttacks[s.id],
-  ).length;
+  const matchingScenarios = THREAT_SCENARIOS.filter((s) =>
+    selectedVillain.scenarioIds.includes(s.id),
+  );
 
   return (
     <section
       aria-label="What if someone cheats?"
-      className={`ep-card p-5 sm:p-6 text-ink space-y-5 ${className}`}
+      className={`ep-card p-5 sm:p-6 text-ink space-y-6 ${className}`}
     >
-      {/* Header */}
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between border-b border-rule pb-4">
-        <div className="space-y-1">
-          <div className="ep-label">Threat scenarios</div>
-          <h2 className="font-serif text-xl sm:text-2xl text-ink">
-            Seven ways an operator or attacker could try to cheat
-          </h2>
-          <p className="max-w-[70ch] text-sm text-ink-2">
-            Select any scenario below to see what the attacker gets and which
-            technical check blocks the leak.
-          </p>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2 shrink-0">
-          <span className="ep-muted-chip">
-            {activeCount} of {THREAT_SCENARIOS.length} selected
-          </span>
-          <button
-            type="button"
-            onClick={() => setAllAttacks(true)}
-            className="ep-btn-ghost text-xs py-1.5 px-3 cursor-pointer"
-          >
-            Select all
-          </button>
-          <button
-            type="button"
-            onClick={() => setAllAttacks(false)}
-            className="ep-btn-ghost text-xs py-1.5 px-3 cursor-pointer"
-          >
-            Clear
-          </button>
-        </div>
+      <div className="space-y-1.5 border-b border-rule pb-4">
+        <div className="ep-label">Interactive check</div>
+        <h2 className="font-serif text-xl sm:text-2xl text-ink">
+          What if someone cheats?
+        </h2>
+        <p className="max-w-[65ch] text-sm text-ink-2">
+          Pick a villain below to see what they would try to do and what stops
+          them.
+        </p>
       </div>
 
-      {/* Scenario rows */}
-      <div className="divide-y divide-rule">
-        {THREAT_SCENARIOS.map((scenario) => {
-          const isSimulating = Boolean(activeAttacks[scenario.id]);
-
+      {/* Villain picker buttons */}
+      <div
+        role="group"
+        aria-label="Pick a villain"
+        className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4"
+      >
+        {THREAT_VILLAINS.map((villain) => {
+          const isSelected = villain.id === selectedVillain.id;
           return (
-            <div key={scenario.id} className="py-4 first:pt-0 last:pb-0 space-y-3">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                <div className="space-y-1 max-w-[70ch] min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="ep-label">
-                      {scenario.index}. {scenario.vectorCategory}
+            <button
+              key={villain.id}
+              type="button"
+              aria-pressed={isSelected}
+              onClick={() => setSelectedVillainId(villain.id)}
+              className={`text-left p-4 rounded border transition-colors cursor-pointer ${
+                isSelected
+                  ? "bg-ink text-paper border-ink"
+                  : "bg-paper hover:bg-paper-2 text-ink border-rule"
+              }`}
+            >
+              <div
+                className={`font-mono text-[11px] uppercase tracking-wider ${
+                  isSelected ? "text-paper/80" : "text-ink-3"
+                }`}
+              >
+                {villain.shortTag}
+              </div>
+              <div className="mt-1 font-serif text-base font-medium">
+                {villain.label}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Selected villain plain explanation */}
+      <div className="ep-inset p-5 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-rule pb-3">
+          <h3 className="font-serif text-lg font-medium text-ink">
+            {selectedVillain.label}
+          </h3>
+          <span className="ep-pass">Stopped before any leak</span>
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div className="ep-card p-4 space-y-1.5">
+            <div className="ep-label">What they would try</div>
+            <p className="text-sm sm:text-base text-ink leading-relaxed">
+              {selectedVillain.whatTheyTry}
+            </p>
+          </div>
+          <div className="ep-card p-4 space-y-1.5">
+            <div className="ep-label">What stops them</div>
+            <p className="text-sm sm:text-base text-ink leading-relaxed">
+              {selectedVillain.whatStopsThem}
+            </p>
+          </div>
+        </div>
+
+        <TechDetails label="Show technical details">
+          <div className="space-y-6 pt-2 text-xs">
+            <div className="space-y-3">
+              <div className="ep-label">
+                Technical defenses for {selectedVillain.label.toLowerCase()}
+              </div>
+              {matchingScenarios.map((scenario) => (
+                <div
+                  key={scenario.id}
+                  className="ep-card p-4 space-y-3 text-ink-2"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-serif text-sm font-medium text-ink">
+                      {scenario.index}. {scenario.attackTitle}
                     </span>
                     <span className="ep-pass">{scenario.neutralizingLayer}</span>
                   </div>
-                  <h3 className="font-serif text-base sm:text-lg font-medium text-ink break-words">
-                    {scenario.attackTitle}
-                  </h3>
-                  <p className="text-sm text-ink-2 break-words">
-                    {scenario.defenseSummary}
-                  </p>
-                </div>
-
-                <button
-                  type="button"
-                  aria-pressed={isSimulating}
-                  onClick={() => toggleAttack(scenario.id)}
-                  className={
-                    isSimulating
-                      ? "ep-btn text-xs py-1.5 px-3 shrink-0 self-start cursor-pointer"
-                      : "ep-btn-ghost text-xs py-1.5 px-3 shrink-0 self-start cursor-pointer"
-                  }
-                >
-                  {isSimulating ? "Hide breakdown" : "Inspect scenario"}
-                </button>
-              </div>
-
-              {isSimulating && (
-                <div className="ep-inset p-4 space-y-3 text-sm">
-                  <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                    <div>
-                      <div className="ep-label">Attacker goal</div>
-                      <p className="mt-1 text-xs text-ink-2 leading-relaxed">
-                        {scenario.attackerGoal}
-                      </p>
-                    </div>
-                    <div>
-                      <div className="ep-label">What the attacker gets</div>
-                      <p className="mt-1 text-xs text-ink-2 leading-relaxed">
-                        {scenario.whatAttackerSees}
-                      </p>
-                    </div>
-                    <div>
-                      <div className="ep-label">How it is stopped</div>
-                      <p className="mt-1 text-xs text-ink leading-relaxed">
-                        {scenario.plainExplanation}
-                      </p>
-                    </div>
+                  <p className="leading-relaxed">{scenario.plainExplanation}</p>
+                  <div className="font-mono text-[11px] text-ink-3">
+                    Controls: {scenario.controls.join(" | ")}
                   </div>
-
-                  <div className="border-t border-rule pt-2.5 space-y-1.5">
-                    <div className="ep-label">
-                      Defending checks and tests in repository
-                    </div>
-                    <ul className="space-y-1.5 text-xs">
+                  <div className="font-mono text-[11px] text-ink-3">
+                    {scenario.telemetryProof.metricLabel}:{" "}
+                    {scenario.telemetryProof.metricValue} (
+                    {scenario.telemetryProof.rawArtifact})
+                  </div>
+                  <div className="space-y-1.5 pt-1">
+                    <div className="ep-label">Repository tests and files</div>
+                    <ul className="space-y-1.5">
                       {scenario.defenseTests.map((t) => (
                         <li
                           key={`${t.filePath}:${t.testName}`}
-                          className="flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-1 bg-paper p-2 rounded border border-rule"
+                          className="flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-1 bg-paper-2 p-2 rounded border border-rule font-mono text-[11px]"
                         >
-                          <div className="space-y-0.5 min-w-0">
-                            <div className="font-mono text-[11px] text-ink">
+                          <div className="min-w-0">
+                            <div className="text-ink">
                               it(&quot;{t.testName}&quot;)
                             </div>
-                            <div className="font-mono text-[11px] text-ink-3 break-all">
+                            <div className="text-ink-3 break-all">
                               {t.filePath}
                               {t.codePath ? ` -> ${t.codePath}` : ""}
                             </div>
                           </div>
-                          <div className="flex flex-wrap items-center gap-3 shrink-0 font-mono text-[11px]">
+                          <div className="flex flex-wrap items-center gap-3 shrink-0">
                             <a
                               href={t.githubUrl}
                               target="_blank"
@@ -557,36 +593,52 @@ export function ThreatMatrix({
                       ))}
                     </ul>
                   </div>
-
-                  <details className="text-xs text-ink-3 border-t border-rule pt-2.5">
-                    <summary className="cursor-pointer font-mono text-ink-2 hover:text-ink select-none">
-                      Show technical controls and boundary notes
-                    </summary>
-                    <div className="mt-2 space-y-2 font-mono text-xs text-ink-2">
-                      <div>
-                        <span className="text-ink font-medium">Controls:</span>{" "}
-                        {scenario.controls.join(" | ")}
-                      </div>
-                      <div>
-                        <span className="text-ink font-medium">
-                          {scenario.telemetryProof.metricLabel}:
-                        </span>{" "}
-                        {scenario.telemetryProof.metricValue} (
-                        {scenario.telemetryProof.rawArtifact})
-                      </div>
-                      <div className="font-sans text-ink-3">
-                        <span className="font-mono text-ink-2">
-                          Boundary note:
-                        </span>{" "}
-                        {scenario.residualNote}
-                      </div>
-                    </div>
-                  </details>
+                  <div className="text-[11px] text-ink-3">
+                    Boundary note: {scenario.residualNote}
+                  </div>
                 </div>
-              )}
+              ))}
             </div>
-          );
-        })}
+
+            <div className="space-y-2 border-t border-rule pt-4">
+              <div className="ep-label">
+                Complete 7-scenario threat matrix and test index
+              </div>
+              <div className="space-y-2">
+                {THREAT_SCENARIOS.map((scenario) => (
+                  <div
+                    key={scenario.id}
+                    className="ep-card p-3 space-y-1.5 text-[11px]"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-medium text-ink">
+                        {scenario.index}. {scenario.attackTitle} (
+                        {scenario.specimenCode})
+                      </span>
+                      <span className="font-mono text-ink-3">
+                        {scenario.neutralizingLayer}
+                      </span>
+                    </div>
+                    <p className="text-ink-2">{scenario.defenseSummary}</p>
+                    <div className="flex flex-wrap gap-3 font-mono">
+                      {scenario.defenseTests.map((t) => (
+                        <a
+                          key={`${scenario.id}:${t.filePath}:${t.testName}`}
+                          href={t.githubUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="ep-link"
+                        >
+                          {t.filePath} -&gt;
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </TechDetails>
       </div>
     </section>
   );
