@@ -42,6 +42,13 @@ export function nodeKeyFor(id: Hex): string | undefined {
   return KEY_BY_ID.get(id.toLowerCase());
 }
 
+const ID_BY_KEY = new Map<string, Hex>(DEMO_NODES.map((n) => [n.key, n.id]));
+
+/** Registry bytes32 id for a node key ("sim-1", "tinfoil-router", ...), if it is one of the known demo nodes. */
+export function nodeIdFor(key: string): Hex | undefined {
+  return ID_BY_KEY.get(key);
+}
+
 const ZERO_ADDRESS: Hex = "0x0000000000000000000000000000000000000000";
 
 /** The demo nodes built locally, used when the registry is not configured or unreachable. */

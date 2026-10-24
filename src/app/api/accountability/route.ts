@@ -27,11 +27,24 @@ import {
   type HeartbeatEvent,
 } from "@/lib/accountability/ramp";
 import {
+  ARC_EXPLORER,
+  explorerAddress,
+  explorerTx,
+  hashEvidenceObject,
+  listNodes,
+  nodeIdFor,
+  readMinStakeUsdc,
+  readOnChainNode,
+  recordVerification,
+} from "@/lib/arc/registry";
+import {
   BodyTooLargeError,
   InvalidJsonBodyError,
+  createGlobalBucketLimiter,
   createTokenBucketLimiter,
   readBoundedJson,
 } from "@/lib/ratelimit";
+import type { Hex } from "@/lib/types";
 
 const MAX_ACCOUNTABILITY_BODY_BYTES = 8192;
 const MAX_RECENT_CLAIMS = 50;
@@ -43,11 +56,23 @@ const getLimiter = createTokenBucketLimiter({
   refillPerSec: 2,
 });
 
+// Strict per-IP rate limit for human-triggered accountability actions
 const postLimiter = createTokenBucketLimiter({
   name: "accountability-post",
-  capacity: 30,
-  refillPerSec: 1,
+  capacity: 6,
+  refillPerSec: 6 / 3600,
 });
+
+// Strict global rate limit to protect the Arc verifier wallet USDC gas
+const globalAccountabilityLimiter = createGlobalBucketLimiter({
+  name: "accountability-arc-global",
+  capacity: 12,
+  refillPerSec: 12 / 3600,
+});
+
+export function resetAccountabilityRateLimitForTests(): void {
+  globalAccountabilityLimiter.reset();
+}
 
 const DEMO_NODE_IDS = ["tinfoil-router", "sim-1", "sim-2", "sim-3"] as const;
 const BASE_NOW_SEC = 1760100000;
@@ -65,6 +90,10 @@ export interface RecordedClaimEvent {
   compensationPoolUsdc: number;
   summary: string;
   detail: unknown;
+  evidenceHash: Hex;
+  txHash: Hex | null;
+  explorerUrl: string | null;
+  onChain: boolean;
 }
 
 interface AccountabilityStore {
@@ -113,12 +142,69 @@ function computeRampStates(): Record<string, HeartbeatEvaluation & { nodeId: str
   return out;
 }
 
+async function resolveNodeStakeUsdc(nodeId: string): Promise<{
+  stakeUsdc: number;
+  onChainRead: boolean;
+}> {
+  const onChainNode = await readOnChainNode(nodeId);
+  if (onChainNode) {
+    const parsed = Number(onChainNode.stake);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return { stakeUsdc: parsed, onChainRead: true };
+    }
+  }
+  const minStake = await readMinStakeUsdc();
+  if (minStake !== null && minStake > 0) {
+    return { stakeUsdc: minStake, onChainRead: true };
+  }
+  return { stakeUsdc: DEFAULT_OPERATOR_STAKE_USDC, onChainRead: false };
+}
+
+async function recordAccountabilityEvidenceOnChain(
+  nodeId: string,
+  evidencePayload: unknown,
+): Promise<{
+  evidenceHash: Hex;
+  txHash: Hex | null;
+  explorerUrl: string | null;
+  onChain: boolean;
+}> {
+  const evidenceHash = hashEvidenceObject(evidencePayload);
+  const registryNodeId = nodeIdFor(nodeId);
+  if (!registryNodeId || process.env.DROUTER_STUB_UPSTREAM === "1") {
+    return {
+      evidenceHash,
+      txHash: null,
+      explorerUrl: null,
+      onChain: false,
+    };
+  }
+
+  const txHash = await recordVerification(registryNodeId, false, evidenceHash);
+  const explorerUrl = txHash ? explorerTx(txHash) : null;
+  return {
+    evidenceHash,
+    txHash,
+    explorerUrl,
+    onChain: Boolean(txHash),
+  };
+}
+
 export async function GET(request?: Request) {
   await connection();
   if (request) {
     const limited = getLimiter.check(request);
     if (limited) return limited;
   }
+
+  const registry = await listNodes();
+  const latestClaim = store.recentClaims[0];
+  const latestTx = latestClaim?.txHash ?? null;
+  const explorerUrl = latestTx
+    ? explorerTx(latestTx)
+    : registry.address
+      ? explorerAddress(registry.address)
+      : ARC_EXPLORER;
 
   return Response.json({
     manifests: defaultManifests(),
@@ -127,6 +213,12 @@ export async function GET(request?: Request) {
     recentClaims: store.recentClaims,
     forbiddenPrefix: FORBIDDEN_PREFIX_HEX,
     latencyTriangulations: defaultLatencyTriangulations(),
+    registrySource: registry.source,
+    registryNodes: registry.nodes,
+    minStakeUsdc: registry.minStake ?? String(DEFAULT_OPERATOR_STAKE_USDC),
+    txHash: latestTx,
+    explorerUrl,
+    onChain: registry.onChain,
   });
 }
 
@@ -168,8 +260,35 @@ export async function POST(request: Request) {
     return Response.json({ error: "Unknown nodeId" }, { status: 400 });
   }
 
+  if (
+    action !== "trigger-canary" &&
+    action !== "claim-key-bounty" &&
+    action !== "simulate-restart" &&
+    action !== "simulate-clone"
+  ) {
+    return Response.json(
+      {
+        error:
+          "Unsupported action. Expected trigger-canary, claim-key-bounty, simulate-restart, or simulate-clone.",
+      },
+      { status: 400 },
+    );
+  }
+
+  const globalCheck = globalAccountabilityLimiter.consume(1);
+  if (!globalCheck.allowed) {
+    return Response.json(
+      {
+        error: "Hourly on-chain accountability transaction cap reached.",
+        retryAfterSec: globalCheck.retryAfterSec,
+      },
+      { status: 429, headers: { "Retry-After": String(globalCheck.retryAfterSec) } },
+    );
+  }
+
   store.nowSec += 10;
   const { publicKeyHex } = deriveNodeIdentityKey(nodeId);
+  const { stakeUsdc } = await resolveNodeStakeUsdc(nodeId);
 
   if (action === "trigger-canary") {
     const canary =
@@ -181,8 +300,21 @@ export async function POST(request: Request) {
       nodeIdentityPk: publicKeyHex,
       epoch: store.epoch,
       commitment: canary.commitment,
-      stakeUsdc: DEFAULT_OPERATOR_STAKE_USDC,
+      stakeUsdc,
     });
+
+    const evidenceObj = {
+      kind: "canary-leak",
+      nodeId,
+      sessionId: canary.sessionId,
+      commitment: canary.commitment,
+      honeytokenHash: bytesToHex(sha256(utf8ToBytes(canary.honeytoken))),
+      salt: canary.salt,
+      epoch: store.epoch,
+      stakeUsdc,
+      valid: verdict.valid,
+    };
+    const chainRes = await recordAccountabilityEvidenceOnChain(nodeId, evidenceObj);
 
     const eventRecord: RecordedClaimEvent = {
       id: `claim-${store.epoch}-${store.recentClaims.length + 1}`,
@@ -193,7 +325,11 @@ export async function POST(request: Request) {
       bountyUsdc: verdict.reporterBountyUsdc,
       compensationPoolUsdc: verdict.compensationPoolUsdc,
       summary: verdict.reason,
-      detail: { canary, verdict },
+      detail: { canary, verdict, evidenceHash: chainRes.evidenceHash },
+      evidenceHash: chainRes.evidenceHash,
+      txHash: chainRes.txHash,
+      explorerUrl: chainRes.explorerUrl,
+      onChain: chainRes.onChain,
     };
     pushClaim(eventRecord);
     store.epoch += 1;
@@ -206,6 +342,10 @@ export async function POST(request: Request) {
       canary,
       verdict,
       event: eventRecord,
+      evidenceHash: chainRes.evidenceHash,
+      txHash: chainRes.txHash,
+      explorerUrl: chainRes.explorerUrl,
+      onChain: chainRes.onChain,
       rampStates: computeRampStates(),
       activeCanaries: store.activeCanaries,
       recentClaims: store.recentClaims,
@@ -222,8 +362,21 @@ export async function POST(request: Request) {
     const verdict: KeyCompromiseVerdict = verifyKeyCompromiseBounty(
       claim,
       APPROVED_MEASUREMENT_HEX,
-      DEFAULT_OPERATOR_STAKE_USDC,
+      stakeUsdc,
     );
+
+    const evidenceObj = {
+      kind: "key-compromise",
+      nodeId,
+      chipId: claim.chipId,
+      measurement: claim.measurement,
+      reportDataHex: claim.reportDataHex,
+      signatureHex: claim.signatureHex,
+      vcekPublicKeyHex: claim.vcekPublicKeyHex,
+      stakeUsdc,
+      valid: verdict.valid,
+    };
+    const chainRes = await recordAccountabilityEvidenceOnChain(nodeId, evidenceObj);
 
     const eventRecord: RecordedClaimEvent = {
       id: `claim-${store.epoch}-${store.recentClaims.length + 1}`,
@@ -232,9 +385,13 @@ export async function POST(request: Request) {
       timestamp: store.nowSec,
       slashUsdc: verdict.slashUsdc,
       bountyUsdc: verdict.submitterBountyUsdc,
-      compensationPoolUsdc: verdict.slashUsdc - verdict.submitterBountyUsdc,
+      compensationPoolUsdc: 0,
       summary: verdict.reason,
-      detail: { claim, verdict },
+      detail: { claim, verdict, evidenceHash: chainRes.evidenceHash },
+      evidenceHash: chainRes.evidenceHash,
+      txHash: chainRes.txHash,
+      explorerUrl: chainRes.explorerUrl,
+      onChain: chainRes.onChain,
     };
     pushClaim(eventRecord);
 
@@ -245,6 +402,10 @@ export async function POST(request: Request) {
       claim,
       verdict,
       event: eventRecord,
+      evidenceHash: chainRes.evidenceHash,
+      txHash: chainRes.txHash,
+      explorerUrl: chainRes.explorerUrl,
+      onChain: chainRes.onChain,
       rampStates: computeRampStates(),
       activeCanaries: store.activeCanaries,
       recentClaims: store.recentClaims,
@@ -268,6 +429,17 @@ export async function POST(request: Request) {
     store.heartbeatsByNode[nodeId] = events;
 
     const evaluation = evaluateHeartbeatWindow(events, store.nowSec);
+    const evidenceObj = {
+      kind: "restart",
+      nodeId,
+      rotatedIdentityPk: rotatedPk,
+      restartsIn30d: evaluation.restartsIn30d,
+      phase: evaluation.phase,
+      weightBps: evaluation.weightBps,
+      timestamp: store.nowSec,
+    };
+    const chainRes = await recordAccountabilityEvidenceOnChain(nodeId, evidenceObj);
+
     const eventRecord: RecordedClaimEvent = {
       id: `claim-${store.epoch}-${store.recentClaims.length + 1}`,
       kind: "restart",
@@ -277,7 +449,11 @@ export async function POST(request: Request) {
       bountyUsdc: 0,
       compensationPoolUsdc: 0,
       summary: evaluation.detail,
-      detail: evaluation,
+      detail: { ...evaluation, evidenceHash: chainRes.evidenceHash },
+      evidenceHash: chainRes.evidenceHash,
+      txHash: chainRes.txHash,
+      explorerUrl: chainRes.explorerUrl,
+      onChain: chainRes.onChain,
     };
     pushClaim(eventRecord);
 
@@ -287,59 +463,76 @@ export async function POST(request: Request) {
       nodeId,
       evaluation,
       event: eventRecord,
+      evidenceHash: chainRes.evidenceHash,
+      txHash: chainRes.txHash,
+      explorerUrl: chainRes.explorerUrl,
+      onChain: chainRes.onChain,
       rampStates: computeRampStates(),
       activeCanaries: store.activeCanaries,
       recentClaims: store.recentClaims,
     });
   }
 
-  if (action === "simulate-clone") {
-    const clonedPkA = bytesToHex(
-      sha256(utf8ToBytes(`clone-a/${nodeId}/${store.nowSec}`)),
-    );
-    const clonedPkB = bytesToHex(
-      sha256(utf8ToBytes(`clone-b/${nodeId}/${store.nowSec}`)),
-    );
-    const events = store.heartbeatsByNode[nodeId] ?? [];
-    events.push(
-      { nodeIdentityPk: clonedPkA, timestamp: store.nowSec - 5 },
-      { nodeIdentityPk: clonedPkB, timestamp: store.nowSec },
-    );
-    if (events.length > MAX_HEARTBEATS_PER_NODE) {
-      events.splice(0, events.length - MAX_HEARTBEATS_PER_NODE);
-    }
-    store.heartbeatsByNode[nodeId] = events;
-
-    const evaluation = evaluateHeartbeatWindow(events, store.nowSec);
-    const eventRecord: RecordedClaimEvent = {
-      id: `claim-${store.epoch}-${store.recentClaims.length + 1}`,
-      kind: "clone-detected",
-      nodeId,
-      timestamp: store.nowSec,
-      slashUsdc: DEFAULT_OPERATOR_STAKE_USDC,
-      bountyUsdc: 0,
-      compensationPoolUsdc: DEFAULT_OPERATOR_STAKE_USDC,
-      summary: evaluation.detail,
-      detail: evaluation,
-    };
-    pushClaim(eventRecord);
-
-    return Response.json({
-      ok: true,
-      action,
-      nodeId,
-      evaluation,
-      event: eventRecord,
-      rampStates: computeRampStates(),
-      activeCanaries: store.activeCanaries,
-      recentClaims: store.recentClaims,
-    });
-  }
-
-  return Response.json(
-    {
-      error: "Unsupported action. Expected trigger-canary, claim-key-bounty, simulate-restart, or simulate-clone.",
-    },
-    { status: 400 },
+  // action === "simulate-clone"
+  const clonedPkA = bytesToHex(
+    sha256(utf8ToBytes(`clone-a/${nodeId}/${store.nowSec}`)),
   );
+  const clonedPkB = bytesToHex(
+    sha256(utf8ToBytes(`clone-b/${nodeId}/${store.nowSec}`)),
+  );
+  const events = store.heartbeatsByNode[nodeId] ?? [];
+  events.push(
+    { nodeIdentityPk: clonedPkA, timestamp: store.nowSec - 5 },
+    { nodeIdentityPk: clonedPkB, timestamp: store.nowSec },
+  );
+  if (events.length > MAX_HEARTBEATS_PER_NODE) {
+    events.splice(0, events.length - MAX_HEARTBEATS_PER_NODE);
+  }
+  store.heartbeatsByNode[nodeId] = events;
+
+  const evaluation = evaluateHeartbeatWindow(events, store.nowSec);
+  const evidenceObj = {
+    kind: "clone-detected",
+    nodeId,
+    clonedPkA,
+    clonedPkB,
+    dualIdentityDetected: evaluation.dualIdentityDetected,
+    phase: evaluation.phase,
+    weightBps: evaluation.weightBps,
+    stakeUsdc,
+    timestamp: store.nowSec,
+  };
+  const chainRes = await recordAccountabilityEvidenceOnChain(nodeId, evidenceObj);
+
+  const eventRecord: RecordedClaimEvent = {
+    id: `claim-${store.epoch}-${store.recentClaims.length + 1}`,
+    kind: "clone-detected",
+    nodeId,
+    timestamp: store.nowSec,
+    slashUsdc: stakeUsdc,
+    bountyUsdc: 0,
+    compensationPoolUsdc: 0,
+    summary: evaluation.detail,
+    detail: { ...evaluation, evidenceHash: chainRes.evidenceHash },
+    evidenceHash: chainRes.evidenceHash,
+    txHash: chainRes.txHash,
+    explorerUrl: chainRes.explorerUrl,
+    onChain: chainRes.onChain,
+  };
+  pushClaim(eventRecord);
+
+  return Response.json({
+    ok: true,
+    action,
+    nodeId,
+    evaluation,
+    event: eventRecord,
+    evidenceHash: chainRes.evidenceHash,
+    txHash: chainRes.txHash,
+    explorerUrl: chainRes.explorerUrl,
+    onChain: chainRes.onChain,
+    rampStates: computeRampStates(),
+    activeCanaries: store.activeCanaries,
+    recentClaims: store.recentClaims,
+  });
 }

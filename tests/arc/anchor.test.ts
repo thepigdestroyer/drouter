@@ -1,7 +1,20 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { POST as postAnchor } from "@/app/api/anchor/route";
 import { createRateLimiter, isHex32, parseAnchorBody } from "@/lib/arc/anchor-input";
+import { nodeIdFor } from "@/lib/arc/nodes";
+import { setArcClientDepsForTests } from "@/lib/arc/registry";
+import { resetRateLimitStateForTests } from "@/lib/ratelimit";
 
 const h = (c: string) => `0x${c.repeat(64)}`;
+
+beforeEach(() => {
+  resetRateLimitStateForTests();
+});
+
+afterEach(() => {
+  setArcClientDepsForTests(null);
+  vi.unstubAllEnvs();
+});
 
 describe("isHex32", () => {
   it("accepts 32-byte hex in any case", () => {
@@ -57,5 +70,39 @@ describe("createRateLimiter", () => {
     expect(limit("2.2.2.2")).toBe(true);
     now += 60_001;
     expect(limit("1.1.1.1")).toBe(true);
+  });
+});
+
+describe("POST /api/anchor with mocked viem client", () => {
+  it("anchors receipt and records verification, returning txHash, explorerUrl, and onChain=true", async () => {
+    vi.stubEnv("ARC_REGISTRY_ADDRESS", "0xbc8085c2b6fe6e0db05f169925c0b841828f4481");
+    let seq = 0;
+    setArcClientDepsForTests({
+      readContract: vi.fn(async () => BigInt(0)),
+      writeContract: vi.fn(async () => {
+        seq += 1;
+        return `0x${String(seq).padStart(64, "a")}` as `0x${string}`;
+      }),
+    });
+
+    const req = new Request("http://localhost/api/anchor", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-forwarded-for": "203.0.113.5" },
+      body: JSON.stringify({
+        receiptHash: h("1"),
+        nodeId: nodeIdFor("sim-1"),
+        ok: true,
+        evidenceHash: h("2"),
+      }),
+    });
+
+    const res = await postAnchor(req);
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.onChain).toBe(true);
+    expect(json.anchorTx).toBe(`0x${"a".repeat(63)}1`);
+    expect(json.verificationTx).toBe(`0x${"a".repeat(63)}2`);
+    expect(json.txHash).toBe(json.verificationTx);
+    expect(json.explorerUrl).toContain(json.verificationTx);
   });
 });

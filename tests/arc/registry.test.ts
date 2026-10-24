@@ -4,14 +4,31 @@ import {
   DEMO_NODES,
   fallbackNodes,
   mapNode,
+  nodeIdFor,
   nodeKeyFor,
 } from "@/lib/arc/nodes";
-import { explorerAddress, explorerTx, listNodes } from "@/lib/arc/registry";
+import {
+  anchorReceipt,
+  explorerAddress,
+  explorerTx,
+  hashEvidenceObject,
+  listNodes,
+  readMinStakeUsdc,
+  readOnChainNode,
+  recordVerification,
+  setArcClientDepsForTests,
+} from "@/lib/arc/registry";
+import { GET as getRegistry } from "@/app/api/registry/route";
 import { DEMO_NODES as scriptNodes } from "../../scripts/arc-common.mjs";
+
+vi.mock("next/server", () => ({
+  connection: vi.fn(async () => undefined),
+}));
 
 const idOf = (key: string) => keccak256(toHex(key));
 
 afterEach(() => {
+  setArcClientDepsForTests(null);
   vi.unstubAllEnvs();
 });
 
@@ -21,10 +38,13 @@ describe("node ids", () => {
     for (const n of DEMO_NODES) expect(n.id).toBe(idOf(n.key));
   });
 
-  it("nodeKeyFor maps ids back to keys", () => {
+  it("nodeKeyFor and nodeIdFor map between ids and keys", () => {
     expect(nodeKeyFor(idOf("sim-2"))).toBe("sim-2");
     expect(nodeKeyFor(idOf("sim-2").toUpperCase().replace("0X", "0x") as `0x${string}`)).toBe("sim-2");
     expect(nodeKeyFor(idOf("nope"))).toBeUndefined();
+    expect(nodeIdFor("sim-1")).toBe(idOf("sim-1"));
+    expect(nodeIdFor("tinfoil-router")).toBe(idOf("tinfoil-router"));
+    expect(nodeIdFor("unknown")).toBeUndefined();
   });
 
   it("measurements are keccak256 of the image strings", () => {
@@ -96,11 +116,17 @@ describe("mapNode", () => {
   });
 });
 
-describe("listNodes", () => {
-  it("returns the fallback set when ARC_REGISTRY_ADDRESS is unset", async () => {
+describe("listNodes and mocked viem client", () => {
+  const operator = "0x1111111111111111111111111111111111111111" as const;
+  const registryAddr = "0xbc8085c2b6fe6e0db05f169925c0b841828f4481" as const;
+
+  it("returns the fallback set when ARC_REGISTRY_ADDRESS is unset, with explicit error and onChain: false", async () => {
     vi.stubEnv("ARC_REGISTRY_ADDRESS", "");
+    vi.stubEnv("NEXT_PUBLIC_ARC_REGISTRY_ADDRESS", "");
     const res = await listNodes();
     expect(res.source).toBe("fallback");
+    expect(res.onChain).toBe(false);
+    expect(res.error).toContain("not configured");
     expect(res.address).toBeUndefined();
     expect(res.nodes).toEqual(fallbackNodes());
     expect(res.nodes).toHaveLength(4);
@@ -112,12 +138,121 @@ describe("listNodes", () => {
     expect(res.nodes.map((n) => n.id)).toEqual(["tinfoil-router", "sim-1", "sim-2", "sim-3"].map(idOf));
   });
 
-  it("falls back when the RPC is unreachable", async () => {
-    vi.stubEnv("ARC_REGISTRY_ADDRESS", "0x2222222222222222222222222222222222222222");
-    vi.stubEnv("ARC_RPC_URL", "http://127.0.0.1:9");
+  it("falls back when the RPC is unreachable and explicitly sets source=fallback, onChain=false, and error", async () => {
+    vi.stubEnv("ARC_REGISTRY_ADDRESS", registryAddr);
+    setArcClientDepsForTests({
+      readContract: vi.fn(async () => {
+        throw new Error("Connection refused");
+      }),
+    });
     const res = await listNodes();
     expect(res.source).toBe("fallback");
+    expect(res.onChain).toBe(false);
+    expect(res.error).toContain("unreachable");
     expect(res.nodes).toHaveLength(4);
+  });
+
+  it("reads live nodes, stake, and minStake from mocked viem public client", async () => {
+    vi.stubEnv("ARC_REGISTRY_ADDRESS", registryAddr);
+    const readContractMock = vi.fn(async ({ functionName, args }) => {
+      if (functionName === "nodeCount") return BigInt(2);
+      if (functionName === "minStake") return BigInt(10_000_000_000_000_000);
+      if (functionName === "nodeIdAt") {
+        const idx = Number(args?.[0] ?? 0);
+        return idx === 0 ? idOf("tinfoil-router") : idOf("sim-1");
+      }
+      if (functionName === "getNode") {
+        const id = args?.[0];
+        if (id === idOf("tinfoil-router")) {
+          return {
+            operator,
+            kind: "tinfoil",
+            name: "Tinfoil confidential router",
+            endpoint: "inference.tinfoil.sh",
+            measurement: idOf("tinfoilsh/confidential-model-router"),
+            region: "us",
+            stake: BigInt(10_000_000_000_000_000),
+            status: 0,
+            registeredAt: BigInt(1700000000),
+            lastVerifiedAt: BigInt(1700000500),
+            lastVerifiedOk: true,
+          };
+        }
+        return {
+          operator,
+          kind: "sim",
+          name: "Simulated node 1",
+          endpoint: "/api/sim/sim-1",
+          measurement: idOf("drouter-sim-node-image/v0.1.0"),
+          region: "eu-west",
+          stake: BigInt(10_000_000_000_000_000),
+          status: 0,
+          registeredAt: BigInt(1700000000),
+          lastVerifiedAt: BigInt(1700000600),
+          lastVerifiedOk: false,
+        };
+      }
+      throw new Error(`Unexpected functionName: ${functionName}`);
+    });
+
+    setArcClientDepsForTests({ readContract: readContractMock });
+
+    const res = await listNodes();
+    expect(res.source).toBe("arc");
+    expect(res.onChain).toBe(true);
+    expect(res.address).toBe(registryAddr);
+    expect(res.minStake).toBe("0.01");
+    expect(res.nodes).toHaveLength(2);
+    expect(res.nodes[0].stake).toBe("0.01");
+    expect(res.nodes[1].lastVerifiedOk).toBe(false);
+
+    const node1 = await readOnChainNode("sim-1");
+    expect(node1?.stake).toBe("0.01");
+    expect(await readMinStakeUsdc()).toBe(0.01);
+
+    // Verify GET /api/registry route includes txHash, explorerUrl, onChain
+    const routeRes = await getRegistry();
+    const json = await routeRes.json();
+    expect(json.source).toBe("arc");
+    expect(json.onChain).toBe(true);
+    expect(json.txHash).toBeNull();
+    expect(json.explorerUrl).toBe(explorerAddress(registryAddr));
+  });
+
+  it("executes recordVerification and anchorReceipt via mocked viem wallet client", async () => {
+    vi.stubEnv("ARC_REGISTRY_ADDRESS", registryAddr);
+    const fakeTxHash = `0x${"ab".repeat(32)}` as const;
+    const writeContractMock = vi.fn(async () => fakeTxHash);
+
+    setArcClientDepsForTests({
+      readContract: vi.fn(async () => BigInt(0)),
+      estimateFeesPerGas: vi.fn(async () => ({ maxFeePerGas: BigInt(25_000_000_000) })),
+      writeContract: writeContractMock,
+    });
+
+    const evHash = hashEvidenceObject({ event: "canary-leak", node: "sim-1" });
+    expect(evHash).toMatch(/^0x[0-9a-f]{64}$/);
+
+    const tx1 = await recordVerification(idOf("sim-1"), false, evHash);
+    expect(tx1).toBe(fakeTxHash);
+    expect(writeContractMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        address: registryAddr,
+        functionName: "recordVerification",
+        args: [idOf("sim-1"), false, evHash],
+        maxFeePerGas: BigInt(25_000_000_000),
+      }),
+    );
+
+    const tx2 = await anchorReceipt(evHash);
+    expect(tx2).toBe(fakeTxHash);
+    expect(writeContractMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        address: registryAddr,
+        functionName: "anchorReceipt",
+        args: [evHash],
+      }),
+    );
   });
 });
 

@@ -1,8 +1,14 @@
 import { sha384 } from "@noble/hashes/sha2.js";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  GET as getAccountability,
+  POST as postAccountability,
+  resetAccountabilityRateLimitForTests,
+} from "@/app/api/accountability/route";
 import {
   createCompromiseClaimForDemo,
+  DEFAULT_OPERATOR_STAKE_USDC,
   FORBIDDEN_PREFIX_HEX,
   verifyKeyCompromiseBounty,
 } from "@/lib/accountability/bounty";
@@ -27,6 +33,22 @@ import {
   evaluateHeartbeatWindow,
   LINEAR_RAMP_HOURS,
 } from "@/lib/accountability/ramp";
+import { nodeIdFor, setArcClientDepsForTests } from "@/lib/arc/registry";
+import { resetRateLimitStateForTests } from "@/lib/ratelimit";
+
+vi.mock("next/server", () => ({
+  connection: vi.fn(async () => undefined),
+}));
+
+beforeEach(() => {
+  resetRateLimitStateForTests();
+  resetAccountabilityRateLimitForTests();
+});
+
+afterEach(() => {
+  setArcClientDepsForTests(null);
+  vi.unstubAllEnvs();
+});
 
 describe("Subsystem 3 — Remote Accountability Layer (Spec §8.1–8.7)", () => {
   describe("§8.1 Hardware Manifests", () => {
@@ -206,7 +228,7 @@ describe("Subsystem 3 — Remote Accountability Layer (Spec §8.1–8.7)", () =>
   });
 
   describe("§8.4 Canary Honeytokens", () => {
-    it("verifies a valid commitment reveal and splits 10% reporter bounty / 90% compensation pool", () => {
+    it("verifies a valid commitment reveal against real contract stake without fabricated percentage splits", () => {
       const nodeIdentityPk = deriveNodeIdentityKey("sim-1").publicKeyHex;
       const session = createCanarySession("sim-1", nodeIdentityPk, 42);
 
@@ -220,13 +242,13 @@ describe("Subsystem 3 — Remote Accountability Layer (Spec §8.1–8.7)", () =>
         nodeIdentityPk,
         epoch: 42,
         commitment: session.commitment,
-        stakeUsdc: 50000,
+        stakeUsdc: 0.01,
       });
 
       expect(verdict.valid).toBe(true);
-      expect(verdict.slashUsdc).toBe(50000);
-      expect(verdict.reporterBountyUsdc).toBe(5000);
-      expect(verdict.compensationPoolUsdc).toBe(45000);
+      expect(verdict.slashUsdc).toBe(0.01);
+      expect(verdict.reporterBountyUsdc).toBe(0);
+      expect(verdict.compensationPoolUsdc).toBe(0);
     });
 
     it("rejects canary reveals with wrong salt or wrong honeytoken", () => {
@@ -239,7 +261,7 @@ describe("Subsystem 3 — Remote Accountability Layer (Spec §8.1–8.7)", () =>
         nodeIdentityPk,
         epoch: 7,
         commitment: session.commitment,
-        stakeUsdc: 50000,
+        stakeUsdc: 0.01,
       });
       expect(badSalt.valid).toBe(false);
       expect(badSalt.slashUsdc).toBe(0);
@@ -251,7 +273,7 @@ describe("Subsystem 3 — Remote Accountability Layer (Spec §8.1–8.7)", () =>
         nodeIdentityPk,
         epoch: 7,
         commitment: session.commitment,
-        stakeUsdc: 50000,
+        stakeUsdc: 0.01,
       });
       expect(badToken.valid).toBe(false);
       expect(badToken.slashUsdc).toBe(0);
@@ -264,7 +286,7 @@ describe("Subsystem 3 — Remote Accountability Layer (Spec §8.1–8.7)", () =>
       sha384(utf8ToBytes("drouter-sim-node-image/v0.1.0")),
     );
 
-    it("accepts a validly signed forbidden-prefix attestation report and awards 50% bounty", () => {
+    it("accepts a validly signed forbidden-prefix attestation report and uses contract stake without fabricated percentage splits", () => {
       const [manifest] = defaultManifests();
       const claim = createCompromiseClaimForDemo(
         manifest.nodeId,
@@ -274,11 +296,12 @@ describe("Subsystem 3 — Remote Accountability Layer (Spec §8.1–8.7)", () =>
 
       expect(claim.reportDataHex.startsWith(FORBIDDEN_PREFIX_HEX)).toBe(true);
       expect(FORBIDDEN_PREFIX_HEX).toHaveLength(64);
+      expect(DEFAULT_OPERATOR_STAKE_USDC).toBe(0.01);
 
-      const verdict = verifyKeyCompromiseBounty(claim, approvedMeasurement, 50000);
+      const verdict = verifyKeyCompromiseBounty(claim, approvedMeasurement, 0.01);
       expect(verdict.valid).toBe(true);
-      expect(verdict.slashUsdc).toBe(50000);
-      expect(verdict.submitterBountyUsdc).toBe(25000);
+      expect(verdict.slashUsdc).toBe(0.01);
+      expect(verdict.submitterBountyUsdc).toBe(0);
     });
 
     it("rejects claims without FORBIDDEN_PREFIX_HEX, with wrong measurement, or with a bad signature", () => {
@@ -293,7 +316,7 @@ describe("Subsystem 3 — Remote Accountability Layer (Spec §8.1–8.7)", () =>
       const wrongMeasurement = verifyKeyCompromiseBounty(
         claim,
         "aa".repeat(48),
-        50000,
+        0.01,
       );
       expect(wrongMeasurement.valid).toBe(false);
       expect(wrongMeasurement.submitterBountyUsdc).toBe(0);
@@ -305,7 +328,7 @@ describe("Subsystem 3 — Remote Accountability Layer (Spec §8.1–8.7)", () =>
           reportDataHex: "11".repeat(64),
         },
         approvedMeasurement,
-        50000,
+        0.01,
       );
       expect(nonForbidden.valid).toBe(false);
       expect(nonForbidden.submitterBountyUsdc).toBe(0);
@@ -320,7 +343,7 @@ describe("Subsystem 3 — Remote Accountability Layer (Spec §8.1–8.7)", () =>
           signatureHex: badSigHex,
         },
         approvedMeasurement,
-        50000,
+        0.01,
       );
       expect(badSig.valid).toBe(false);
       expect(badSig.submitterBountyUsdc).toBe(0);
@@ -348,6 +371,120 @@ describe("Subsystem 3 — Remote Accountability Layer (Spec §8.1–8.7)", () =>
       expect(relayed.consistent).toBe(false);
       expect(relayed.relayedSuspected).toBe(true);
       expect(relayed.reasons.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe("§8.7 On-Chain Arc Integration via /api/accountability (mocked viem)", () => {
+    const registryAddr = "0xbc8085c2b6fe6e0db05f169925c0b841828f4481" as const;
+    const operator = "0x1111111111111111111111111111111111111111" as const;
+
+    it("records canary-leak, key-compromise, restart, and clone events on chain with real evidence hashes and live stake", async () => {
+      vi.stubEnv("ARC_REGISTRY_ADDRESS", registryAddr);
+
+      let txSeq = 0;
+      const writeCalls: { functionName: string; args: readonly unknown[] }[] = [];
+
+      setArcClientDepsForTests({
+        readContract: vi.fn(async ({ functionName, args }) => {
+          if (functionName === "nodeCount") return BigInt(1);
+          if (functionName === "minStake") return BigInt(10_000_000_000_000_000);
+          if (functionName === "nodeIdAt") return nodeIdFor("sim-1")!;
+          if (functionName === "getNode") {
+            return {
+              operator,
+              kind: "sim",
+              name: "Simulated node",
+              endpoint: "/api/sim/sim-1",
+              measurement: `0x${"11".repeat(32)}`,
+              region: "eu-west",
+              stake: BigInt(10_000_000_000_000_000), // 0.01 USDC on chain
+              status: 0,
+              registeredAt: BigInt(1700000000),
+              lastVerifiedAt: BigInt(0),
+              lastVerifiedOk: false,
+            };
+          }
+          throw new Error(`Unexpected readContract: ${functionName}`);
+        }),
+        writeContract: vi.fn(async ({ functionName, args }) => {
+          txSeq += 1;
+          writeCalls.push({ functionName, args });
+          return `0x${String(txSeq).padStart(64, "0")}` as `0x${string}`;
+        }),
+      });
+
+      const makePost = (action: string, nodeId: string) =>
+        postAccountability(
+          new Request("http://localhost/api/accountability", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-forwarded-for": "198.51.100.42",
+            },
+            body: JSON.stringify({ action, nodeId }),
+          }),
+        );
+
+      // 1. Canary leak on sim-1
+      const res1 = await makePost("trigger-canary", "sim-1");
+      expect(res1.status).toBe(200);
+      const data1 = await res1.json();
+      expect(data1.ok).toBe(true);
+      expect(data1.onChain).toBe(true);
+      expect(data1.txHash).toBe(`0x${"0".repeat(63)}1`);
+      expect(data1.explorerUrl).toContain(data1.txHash);
+      expect(data1.evidenceHash).toMatch(/^0x[0-9a-f]{64}$/);
+      expect(data1.verdict.slashUsdc).toBe(0.01);
+      expect(data1.verdict.reporterBountyUsdc).toBe(0);
+      expect(writeCalls[0]).toEqual({
+        functionName: "recordVerification",
+        args: [nodeIdFor("sim-1"), false, data1.evidenceHash],
+      });
+
+      // 2. Key-compromise bounty on sim-2
+      const res2 = await makePost("claim-key-bounty", "sim-2");
+      expect(res2.status).toBe(200);
+      const data2 = await res2.json();
+      expect(data2.onChain).toBe(true);
+      expect(data2.txHash).toBe(`0x${"0".repeat(63)}2`);
+      expect(data2.verdict.slashUsdc).toBe(0.01);
+      expect(data2.verdict.submitterBountyUsdc).toBe(0);
+      expect(writeCalls[1]).toEqual({
+        functionName: "recordVerification",
+        args: [nodeIdFor("sim-2"), false, data2.evidenceHash],
+      });
+
+      // 3. Unannounced restart on sim-3
+      const res3 = await makePost("simulate-restart", "sim-3");
+      expect(res3.status).toBe(200);
+      const data3 = await res3.json();
+      expect(data3.onChain).toBe(true);
+      expect(data3.txHash).toBe(`0x${"0".repeat(63)}3`);
+      expect(data3.evaluation.phase).toBe("canary-only");
+      expect(writeCalls[2]).toEqual({
+        functionName: "recordVerification",
+        args: [nodeIdFor("sim-3"), false, data3.evidenceHash],
+      });
+
+      // 4. Clone detection on sim-3
+      const res4 = await makePost("simulate-clone", "sim-3");
+      expect(res4.status).toBe(200);
+      const data4 = await res4.json();
+      expect(data4.onChain).toBe(true);
+      expect(data4.txHash).toBe(`0x${"0".repeat(63)}4`);
+      expect(data4.evaluation.dualIdentityDetected).toBe(true);
+      expect(data4.event.slashUsdc).toBe(0.01);
+      expect(writeCalls[3]).toEqual({
+        functionName: "recordVerification",
+        args: [nodeIdFor("sim-3"), false, data4.evidenceHash],
+      });
+
+      // 5. GET /api/accountability returns onChain, txHash, explorerUrl
+      const getRes = await getAccountability();
+      const getJson = await getRes.json();
+      expect(getJson.onChain).toBe(true);
+      expect(getJson.txHash).toBe(`0x${"0".repeat(63)}4`);
+      expect(getJson.explorerUrl).toContain(getJson.txHash);
     });
   });
 });

@@ -7,7 +7,12 @@ export const FORBIDDEN_PREFIX_HEX = bytesToHex(
   sha256(utf8ToBytes("drouter/forbidden-report-data/v1")),
 );
 
-export const DEFAULT_OPERATOR_STAKE_USDC = 50000;
+/**
+ * Minimum stake enforced by the deployed DRouterRegistry contract on Arc Testnet
+ * (0.01 USDC = 10_000_000_000_000_000 wei, 18 decimals). Live callers read the actual
+ * staked balance from `getNode(id).stake` or `minStake()` on chain.
+ */
+export const DEFAULT_OPERATOR_STAKE_USDC = 0.01;
 
 export interface KeyCompromiseClaim {
   nodeId: string;
@@ -37,7 +42,7 @@ function deriveDemoBountyVcek(nodeId: string): {
     72,
   );
   const secretKey = p384.utils.randomSecretKey(keyMaterial);
-  const publicKey = p384.getPublicKey(secretKey);
+  const publicKey = p384.getPublicKey(keyMaterial ? secretKey : secretKey);
   return { secretKey, publicKey };
 }
 
@@ -114,14 +119,14 @@ export function verifyKeyCompromiseBounty(
     };
   }
 
-  const slashUsdc = stakeUsdc;
-  const submitterBountyUsdc = Number((slashUsdc * 0.5).toFixed(6));
+  const slashUsdc = Number(stakeUsdc.toFixed(6));
 
   return {
     valid: true,
     slashUsdc,
-    submitterBountyUsdc,
-    reason:
-      "Valid key-compromise proof: approved measurement + forbidden REPORT_DATA prefix signed by chip VCEK; 100% stake slashed (50% submitter bounty)",
+    // DRouterRegistry.slash(id, to) transfers 100% of the node's staked USDC to `to`;
+    // partial percentage bounty splits are not enforced by the contract.
+    submitterBountyUsdc: 0,
+    reason: `Valid key-compromise proof: approved measurement and forbidden REPORT_DATA prefix signed by chip VCEK; ${slashUsdc} USDC on-chain stake eligible for full slash via DRouterRegistry`,
   };
 }

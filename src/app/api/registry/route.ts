@@ -1,5 +1,5 @@
-import { cacheLife } from "next/cache";
-import { ARC_CHAIN_ID, ARC_EXPLORER, listNodes } from "@/lib/arc/registry";
+import { connection } from "next/server";
+import { ARC_CHAIN_ID, ARC_EXPLORER, explorerAddress, listNodes } from "@/lib/arc/registry";
 import { createTokenBucketLimiter } from "@/lib/ratelimit";
 
 const registryLimiter = createTokenBucketLimiter({
@@ -8,19 +8,18 @@ const registryLimiter = createTokenBucketLimiter({
   refillPerSec: 4,
 });
 
-// With cacheComponents enabled, `revalidate` and `runtime` segment configs are not allowed;
-// cacheLife gives the 15 s revalidation and route handlers already run on Node.js.
-async function loadRegistry(addressKey: string) {
-  "use cache";
-  void addressKey;
-  cacheLife({ stale: 15, revalidate: 15, expire: 60 });
-  return { ...(await listNodes()), chainId: ARC_CHAIN_ID, explorer: ARC_EXPLORER };
-}
-
 export async function GET(request?: Request) {
+  await connection();
   if (request) {
     const limited = registryLimiter.check(request);
     if (limited) return limited;
   }
-  return Response.json(await loadRegistry(process.env.ARC_REGISTRY_ADDRESS ?? ""));
+  const result = await listNodes();
+  return Response.json({
+    ...result,
+    txHash: null,
+    explorerUrl: result.address ? explorerAddress(result.address) : ARC_EXPLORER,
+    chainId: ARC_CHAIN_ID,
+    explorer: ARC_EXPLORER,
+  });
 }

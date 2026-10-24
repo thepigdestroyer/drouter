@@ -55,11 +55,16 @@ export async function POST(req: Request) {
   const normalizedReceipt = receiptHash.toLowerCase();
   const cached = recentReceipts.get(normalizedReceipt);
   if (cached && Date.now() - cached.at < 3_600_000) {
+    const primaryTx = cached.verificationTx ?? cached.anchorTx ?? null;
+    const primaryUrl = primaryTx ? explorerTx(primaryTx) : null;
     return Response.json({
       anchorTx: cached.anchorTx,
       verificationTx: cached.verificationTx,
       anchorUrl: cached.anchorTx ? explorerTx(cached.anchorTx) : null,
       verificationUrl: cached.verificationTx ? explorerTx(cached.verificationTx) : null,
+      txHash: primaryTx,
+      explorerUrl: primaryUrl,
+      onChain: Boolean(primaryTx),
       deduplicated: true,
     });
   }
@@ -79,12 +84,17 @@ export async function POST(req: Request) {
       verificationTx: null,
       anchorUrl: null,
       verificationUrl: null,
+      txHash: null,
+      explorerUrl: null,
+      onChain: false,
       stubbed: true,
     });
   }
 
   const anchorTx = await anchorReceipt(receiptHash);
   const verificationTx = evidenceHash ? await recordVerification(nodeId, ok ?? true, evidenceHash) : null;
+  const primaryTx = verificationTx ?? anchorTx ?? null;
+  const primaryUrl = primaryTx ? explorerTx(primaryTx) : null;
 
   if (recentReceipts.size > 500) {
     const firstKey = recentReceipts.keys().next().value;
@@ -97,5 +107,8 @@ export async function POST(req: Request) {
     verificationTx,
     anchorUrl: anchorTx ? explorerTx(anchorTx) : null,
     verificationUrl: verificationTx ? explorerTx(verificationTx) : null,
+    txHash: primaryTx,
+    explorerUrl: primaryUrl,
+    onChain: Boolean(primaryTx),
   });
 }

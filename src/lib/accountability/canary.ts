@@ -120,16 +120,15 @@ export function verifyCanaryLeak(reveal: CanaryRevealInput): CanaryLeakVerdict {
     };
   }
 
-  const slashUsdc = reveal.stakeUsdc;
-  const reporterBountyUsdc = Number((slashUsdc * 0.1).toFixed(6));
-  const compensationPoolUsdc = Number((slashUsdc * 0.9).toFixed(6));
+  const slashUsdc = Number(reveal.stakeUsdc.toFixed(6));
 
   return {
     valid: true,
     slashUsdc,
-    reporterBountyUsdc,
-    compensationPoolUsdc,
-    reason:
-      "Canary honeytoken leak verified against on-chain commitment: 100% stake slashed (10% reporter bounty, 90% user compensation pool)",
+    // DRouterRegistry.slash transfers 100% of staked USDC to a single recipient address;
+    // percentage splits (reporter bounty vs compensation pool) are not enforced by the contract.
+    reporterBountyUsdc: 0,
+    compensationPoolUsdc: 0,
+    reason: `Canary honeytoken leak verified against commitment: ${slashUsdc} USDC on-chain stake eligible for full slash via DRouterRegistry`,
   };
 }
