@@ -6,7 +6,7 @@ import {
 } from "@/lib/providers/catalog";
 
 describe("Frontier Confidential Provider Directory & Spec v2 Roadmap", () => {
-  it("contains all 10 confidential TEE providers with complete metadata and no em dashes", () => {
+  it("contains all 10 confidential TEE providers with complete metadata, sourceUrl, verification status, and no em dashes", () => {
     expect(CONFIDENTIAL_PROVIDERS).toHaveLength(10);
 
     const ids = CONFIDENTIAL_PROVIDERS.map((p) => p.id);
@@ -27,19 +27,24 @@ describe("Frontier Confidential Provider Directory & Spec v2 Roadmap", () => {
       expect(provider.name.length).toBeGreaterThan(1);
       expect(provider.url).toMatch(/^https:\/\//);
       expect(provider.docsUrl).toMatch(/^https:\/\//);
+      expect(provider.sourceUrl).toMatch(/^https:\/\/confidentialinference\.net\/providers\//);
+      expect(typeof provider.verified).toBe("boolean");
+      expect(provider.verificationSummary.length).toBeGreaterThan(20);
       expect(provider.cpuTee.length).toBeGreaterThan(2);
       expect(provider.gpuTee.length).toBeGreaterThan(2);
       expect(provider.frontierModels.length).toBeGreaterThanOrEqual(3);
       expect(provider.inputUsdPerM).toMatch(/^\$\d+\.\d+\+\/M$/);
       expect(provider.trustNotes.length).toBeGreaterThan(40);
       expect(provider.trustNotes).not.toContain("\u2014");
+      expect(provider.verificationSummary).not.toContain("\u2014");
     }
   });
 
-  it("marks Tinfoil as live-integrated and separates E2EE vs gateway-tee-only providers", () => {
+  it("marks Tinfoil as live-integrated and verified, and separates E2EE vs gateway-tee-only providers", () => {
     const tinfoil = CONFIDENTIAL_PROVIDERS.find((p) => p.id === "tinfoil");
     expect(tinfoil).toBeDefined();
     expect(tinfoil?.statusInDrouter).toBe("live-integrated");
+    expect(tinfoil?.verified).toBe(true);
     expect(tinfoil?.channelSecurity).toBe(
       "HPKE Encrypted HTTP Body (EHBP, RFC 9180) + Attested TLS",
     );
@@ -67,8 +72,12 @@ describe("Frontier Confidential Provider Directory & Spec v2 Roadmap", () => {
     expect(pqcProviders.map((p) => p.id)).toEqual([
       "tinfoil",
       "phala-redpill",
+      "venice-ai",
+      "prem-ai",
       "ppq-ai",
       "confidential-ai",
+      "privatemode-cosmian",
+      "nanogpt",
     ]);
 
     const kimiE2eePqc = filterProviders({
@@ -76,7 +85,11 @@ describe("Frontier Confidential Provider Directory & Spec v2 Roadmap", () => {
       requireE2ee: true,
       requirePqc: true,
     });
-    expect(kimiE2eePqc.map((p) => p.id)).toEqual(["tinfoil", "ppq-ai"]);
+    expect(kimiE2eePqc.map((p) => p.id)).toEqual([
+      "tinfoil",
+      "venice-ai",
+      "ppq-ai",
+    ]);
   });
 
   it("exports 5 complete SPEC_V2_ROADMAP architectural proposals without em dashes", () => {

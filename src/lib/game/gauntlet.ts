@@ -661,7 +661,7 @@ export function judgeCandidateNodes(): CandidateEnclaveNode[] {
     quorumThreshold: 7,
     isAuthentic: true,
     defectCode: "NONE",
-    defectHeadline: "Verified: All 7 hardware and transparency invariants passed",
+    defectHeadline: "Verified: All 5 hardware and transparency checks passed",
     defectExplanation:
       "Node Charlie carries a genuine AMD Genoa VCEK signature, enforces POLICY[19] = 0 (debug off, SMT controlled), boots the exact dm-verity root hash published in the Sigstore transparency log, binds 8 Confidential H100 GPUs over SPDM, and holds 6/7 quorum signatures.",
     checks: [

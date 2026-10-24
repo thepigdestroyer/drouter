@@ -1,174 +1,295 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { AuthPill } from "@/components/auth-pill";
 import { EnclaveGauntlet } from "@/components/game/enclave-gauntlet";
+import { PacketSniffer } from "@/components/packet-sniffer";
+import { SpecimenFooter, SpecimenHeader } from "@/components/specimen-chrome";
 
 export const metadata: Metadata = {
-  title: "How dRouter Works · Four Interactive Experiments",
+  title: "How it works · dRouter",
   description:
-    "Play through four interactive security exhibits to see how dRouter protects AI prompts against memory-bus probes, billing correlation, forged enclaves, and server subpoenas.",
+    "How your browser verifies confidential hardware, encrypts your prompt, runs the model inside sealed memory, and destroys the session key when you leave.",
 };
 
 export default function ExplainPage() {
   return (
-    <main
-      className="min-h-screen w-full text-[#ece7da]"
-      style={{ backgroundColor: "#050706" }}
-    >
-      <div className="mx-auto max-w-[1380px] px-4 py-8 md:px-8 md:py-12">
-        {/* Specimen-Cabinet Header & Navigation */}
-        <header
-          className="flex flex-wrap items-end justify-between gap-4 border-b pb-6"
-          style={{ borderColor: "rgba(236, 231, 218, 0.12)" }}
-        >
-          <div>
-            <div
-              className="font-mono text-xs uppercase tracking-widest"
-              style={{ color: "#a6ff72" }}
-            >
-              dRouter Specimen Cabinet · Interactive Field Guide
-            </div>
-            <h1 className="mt-2 font-serif text-3xl italic tracking-tight text-[#ece7da] md:text-4xl">
-              How dRouter Works · Four Interactive Experiments
-            </h1>
-            <p className="mt-2 max-w-3xl text-sm leading-relaxed text-[#ece7da]/80">
-              Most AI routers ask you to trust their privacy policy. dRouter replaces legal promises with verifiable hardware physics and browser-side cryptography. Poke the four interactive exhibits below to test every claim yourself.
-            </p>
-          </div>
+    <div className="min-h-screen flex flex-col bg-paper text-ink">
+      <SpecimenHeader activePath="/explain" rightSlot={<AuthPill />} />
 
-          <nav className="flex flex-wrap items-center gap-2.5 font-mono text-xs">
-            <Link
-              href="/"
-              className="rounded border px-3 py-1.5 transition-colors hover:bg-white/5"
-              style={{
-                backgroundColor: "#090d0b",
-                borderColor: "rgba(236, 231, 218, 0.12)",
-                color: "#ece7da",
-              }}
-            >
-              Console (/)
+      <main className="mx-auto w-full max-w-5xl flex-1 space-y-12 px-4 py-10 sm:px-6">
+        {/* Hero */}
+        <section className="space-y-4 border-b border-rule pb-8">
+          <div className="ep-label">How it works</div>
+          <h1 className="ep-display text-3xl sm:text-4xl">
+            Four steps from your browser to sealed hardware and back.
+          </h1>
+          <p className="max-w-[68ch] text-base leading-relaxed text-ink-2">
+            Instead of trusting a cloud privacy policy, your browser checks a signed hardware report and encrypts your prompt directly to the enclave before sending a single word.
+          </p>
+          <div className="flex flex-wrap items-center gap-3 pt-1">
+            <Link href="/" className="ep-btn">
+              Open console
             </Link>
-            <Link
-              href="/audit"
-              className="rounded border px-3 py-1.5 transition-colors hover:bg-white/5"
-              style={{
-                backgroundColor: "#090d0b",
-                borderColor: "rgba(236, 231, 218, 0.12)",
-                color: "#ece7da",
-              }}
-            >
-              Security Lab (/audit)
+            <Link href="/about" className="ep-btn-ghost">
+              Limits &amp; provider directory
             </Link>
-            <Link
-              href="/about"
-              className="rounded border px-3 py-1.5 transition-colors hover:bg-white/5"
-              style={{
-                backgroundColor: "#090d0b",
-                borderColor: "rgba(236, 231, 218, 0.12)",
-                color: "#ece7da",
-              }}
-            >
-              Architecture &amp; Providers (/about)
-            </Link>
-            <Link
-              href="/login"
-              className="rounded border px-3 py-1.5 transition-colors hover:bg-white/5"
-              style={{
-                backgroundColor: "#090d0b",
-                borderColor: "rgba(166, 255, 114, 0.35)",
-                color: "#a6ff72",
-              }}
-            >
-              Zero-Knowledge Vault (/login)
-            </Link>
-          </nav>
-        </header>
-
-        {/* Plain-English Visual Guide to the 4 Stages of a dRouter Request */}
-        <section className="mt-8">
-          <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <h2 className="font-serif text-xl italic text-[#ece7da]">
-              Anatomy of a private prompt from your browser to the GPU die
-            </h2>
-            <span className="font-mono text-xs text-[#ece7da]/60">
-              Zero plaintext on the relay · Zero wallet-to-prompt link
-            </span>
-          </div>
-
-          <div className="mt-4 grid gap-4 md:grid-cols-4">
-            {[
-              {
-                tag: "Stage 01 · Verify",
-                accent: "#a6ff72",
-                title: "Verify the enclave in your browser",
-                body: "Before sending a single word, your browser checks the AMD SEV-SNP hardware signature, verifies guest policy debug bit 19 is 0, and matches the container root hash against Sigstore.",
-              },
-              {
-                tag: "Stage 02 · Pay blindly",
-                accent: "#ffb85c",
-                title: "Spend an unblinded Chaumian credit",
-                body: "You buy credits with a public wallet using a blinded envelope, then unblind the token locally. When you spend the credit, the billing server cannot link your wallet to your chat session.",
-              },
-              {
-                tag: "Stage 03 · Compute in HBM",
-                accent: "#a6ff72",
-                title: "Keep weights and KV inside GPU HBM",
-                body: "Your prompt decrypts only inside the attested enclave and runs inside on-package GPU HBM. Any host bus transfer uses fresh monotonic AES-256-GCM nonces to defeat DDR5 interposers.",
-              },
-              {
-                tag: "Stage 04 · Freeze or pop",
-                accent: "#ff6d4d",
-                title: "Pop the bubble when you finish",
-                body: "Save an optional zero-knowledge backup encrypted under your local key, then pop the enclave bubble to overwrite GPU HBM pages and session keys with 0x00.",
-              },
-            ].map((card) => (
-              <div
-                key={card.tag}
-                className="rounded-lg border p-4"
-                style={{
-                  backgroundColor: "#090d0b",
-                  borderColor: "rgba(236, 231, 218, 0.12)",
-                }}
-              >
-                <div
-                  className="font-mono text-xs uppercase tracking-wider"
-                  style={{ color: card.accent }}
-                >
-                  {card.tag}
-                </div>
-                <h3 className="mt-1.5 font-serif text-lg italic text-[#ece7da]">
-                  {card.title}
-                </h3>
-                <p className="mt-2 text-xs leading-relaxed text-[#ece7da]/80">
-                  {card.body}
-                </p>
-              </div>
-            ))}
           </div>
         </section>
 
-        {/* Interactive Game Component */}
-        <div className="mt-8">
-          <EnclaveGauntlet />
-        </div>
+        {/* 4-Step Story with Inline Ink SVG Diagrams */}
+        <section className="space-y-4">
+          <div className="ep-label">The four steps</div>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {/* Step 1 */}
+            <div className="ep-card p-4 flex flex-col justify-between gap-4">
+              <div className="space-y-2">
+                <div className="ep-label">Step 1 · Verify</div>
+                <svg
+                  viewBox="0 0 120 64"
+                  className="h-14 w-full text-ink"
+                  fill="none"
+                  aria-hidden="true"
+                >
+                  <rect
+                    x="8"
+                    y="12"
+                    width="38"
+                    height="40"
+                    rx="3"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                  />
+                  <line
+                    x1="15"
+                    y1="23"
+                    x2="39"
+                    y2="23"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                  />
+                  <line
+                    x1="15"
+                    y1="31"
+                    x2="34"
+                    y2="31"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                  />
+                  <path
+                    d="M48 32 H74"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                    strokeDasharray="3 3"
+                  />
+                  <circle
+                    cx="92"
+                    cy="32"
+                    r="16"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                  />
+                  <path
+                    d="M85 32 L90 37 L100 26"
+                    stroke="var(--color-accent)"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+                <p className="text-sm leading-relaxed text-ink">
+                  Your browser checks the hardware&apos;s signed report before sending anything.
+                </p>
+              </div>
+            </div>
 
-        {/* Footer */}
-        <footer
-          className="mt-10 flex flex-wrap items-center justify-between gap-4 border-t pt-6 font-mono text-xs text-[#ece7da]/60"
-          style={{ borderColor: "rgba(236, 231, 218, 0.12)" }}
-        >
-          <div>
-            The Enclave Gauntlet · Built with real AES-256-GCM, RSA blind signatures, and SEV-SNP register checks.
+            {/* Step 2 */}
+            <div className="ep-card p-4 flex flex-col justify-between gap-4">
+              <div className="space-y-2">
+                <div className="ep-label">Step 2 · Scrub &amp; Encrypt</div>
+                <svg
+                  viewBox="0 0 120 64"
+                  className="h-14 w-full text-ink"
+                  fill="none"
+                  aria-hidden="true"
+                >
+                  <rect
+                    x="8"
+                    y="18"
+                    width="34"
+                    height="28"
+                    rx="3"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                  />
+                  <line
+                    x1="14"
+                    y1="28"
+                    x2="36"
+                    y2="28"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                  />
+                  <line
+                    x1="14"
+                    y1="36"
+                    x2="30"
+                    y2="36"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                  />
+                  <path
+                    d="M46 32 H72"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                  />
+                  <path
+                    d="M68 28 L73 32 L68 36"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <rect
+                    x="78"
+                    y="26"
+                    width="28"
+                    height="22"
+                    rx="3"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                  />
+                  <path
+                    d="M84 26 V20 C84 15.5 100 15.5 100 20 V26"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                  />
+                  <circle cx="92" cy="37" r="2" fill="currentColor" />
+                </svg>
+                <p className="text-sm leading-relaxed text-ink">
+                  It scrubs personal details and encrypts the message to that hardware&apos;s key.
+                </p>
+              </div>
+            </div>
+
+            {/* Step 3 */}
+            <div className="ep-card p-4 flex flex-col justify-between gap-4">
+              <div className="space-y-2">
+                <div className="ep-label">Step 3 · Run in Enclave</div>
+                <svg
+                  viewBox="0 0 120 64"
+                  className="h-14 w-full text-ink"
+                  fill="none"
+                  aria-hidden="true"
+                >
+                  <rect
+                    x="24"
+                    y="10"
+                    width="72"
+                    height="44"
+                    rx="4"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeDasharray="4 2"
+                  />
+                  <rect
+                    x="38"
+                    y="18"
+                    width="44"
+                    height="28"
+                    rx="2"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                  />
+                  <line
+                    x1="46"
+                    y1="27"
+                    x2="74"
+                    y2="27"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                  />
+                  <line
+                    x1="46"
+                    y1="35"
+                    x2="66"
+                    y2="35"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                  />
+                </svg>
+                <p className="text-sm leading-relaxed text-ink">
+                  The sealed hardware runs the model and nobody outside can read memory.
+                </p>
+              </div>
+            </div>
+
+            {/* Step 4 */}
+            <div className="ep-card p-4 flex flex-col justify-between gap-4">
+              <div className="space-y-2">
+                <div className="ep-label">Step 4 · Destroy Key</div>
+                <svg
+                  viewBox="0 0 120 64"
+                  className="h-14 w-full text-ink"
+                  fill="none"
+                  aria-hidden="true"
+                >
+                  <circle
+                    cx="40"
+                    cy="32"
+                    r="10"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                  />
+                  <path
+                    d="M50 32 H86 M76 32 V40 M84 32 V38"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                  />
+                  <line
+                    x1="28"
+                    y1="16"
+                    x2="92"
+                    y2="48"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                  />
+                </svg>
+                <p className="text-sm leading-relaxed text-ink">
+                  The session key is destroyed when you leave.
+                </p>
+              </div>
+            </div>
           </div>
-          <div className="flex gap-4">
-            <Link href="/" className="hover:text-[#a6ff72]">
-              Launch Console →
-            </Link>
-            <Link href="/audit" className="hover:text-[#ffb85c]">
-              Open Security Lab →
-            </Link>
+        </section>
+
+        {/* Interactive 4-round Game */}
+        <section className="space-y-3">
+          <div className="space-y-1">
+            <div className="ep-label">Interactive Walkthrough</div>
+            <h2 className="ep-display text-2xl">Test each guarantee in four quick rounds</h2>
+            <p className="max-w-[68ch] text-sm text-ink-2">
+              Play through the four rounds below to see how hardware attestation, blind credits, and memory wiping work in practice.
+            </p>
           </div>
-        </footer>
-      </div>
-    </main>
+          <EnclaveGauntlet />
+        </section>
+
+        {/* What each party sees */}
+        <section className="space-y-3">
+          <div className="space-y-1">
+            <div className="ep-label">Wire Inspection</div>
+            <h2 className="ep-display text-2xl">What each party sees</h2>
+            <p className="max-w-[68ch] text-sm text-ink-2">
+              Type any sample message below to compare what stays on your device, what crosses the network relay, and what enters enclave memory.
+            </p>
+          </div>
+          <PacketSniffer />
+        </section>
+      </main>
+
+      <SpecimenFooter />
+    </div>
   );
 }
