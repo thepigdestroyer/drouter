@@ -26,6 +26,7 @@ import {
   type RekorLookupEntry,
   type TransparencySnapshot,
 } from "@/components/inspector/live-records";
+import { InkModal, MODAL_PLAIN_SUMMARY } from "@/components/modal/ink-modal";
 
 export type InspectorTabId =
   | "overview"
@@ -363,55 +364,20 @@ export function RecordInspectorModal({
   ];
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="record-inspector-title"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 p-2 sm:p-4"
+    <InkModal<InspectorTabId>
+      open={open}
+      onClose={onClose}
+      titleId="record-inspector-title"
+      eyebrow="Attestation & Provenance"
+      title="Raw Hardware & Cryptographic Records"
+      tabs={tabs}
+      activeTab={activeTab}
+      onSelectTab={setActiveTab}
+      tabListLabel="Hardware and cryptographic record sections"
+      maxWidthClass="max-w-5xl"
+      summaryText={MODAL_PLAIN_SUMMARY}
     >
-      <div className="ep-card flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden bg-paper text-ink">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-rule bg-paper-2 px-3 py-3 sm:px-5 sm:py-4">
-          <div className="min-w-0">
-            <div className="ep-label">Attestation &amp; Provenance</div>
-            <h2
-              id="record-inspector-title"
-              className="ep-display mt-0.5 text-lg sm:text-2xl"
-            >
-              Raw Hardware &amp; Cryptographic Records
-            </h2>
-          </div>
-
-          <button
-            type="button"
-            onClick={onClose}
-            className="ep-btn-ghost shrink-0 px-3 py-1 text-xs"
-          >
-            Close
-          </button>
-        </div>
-
-        <div className="flex gap-1 overflow-x-auto border-b border-rule bg-paper px-2 pt-2 sm:px-4">
-          {tabs.map((t) => {
-            const active = activeTab === t.id;
-            return (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => setActiveTab(t.id)}
-                className={`whitespace-nowrap border-b-2 px-2.5 py-2 text-xs font-medium transition-colors sm:px-3 ${
-                  active
-                    ? "border-ink bg-paper-2 text-ink"
-                    : "border-transparent text-ink-3 hover:text-ink"
-                }`}
-              >
-                {t.label}
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="flex-1 space-y-5 overflow-y-auto p-3 text-sm sm:p-5">
-          {activeTab === "overview" && (
+      {activeTab === "overview" && (
             <div className="space-y-4">
               <p className="max-w-[70ch] text-sm text-ink-2">
                 Before your browser sends a prompt, it runs 7 checks (C1 to C7) against the enclave hardware report, the Sigstore transparency log, the model enclave table, and the Circle Arc testnet registry.
@@ -1246,7 +1212,7 @@ export function RecordInspectorModal({
                 <div className="ep-label">What is protected</div>
                 <ul className="mt-2 list-disc space-y-1.5 pl-4 text-xs text-ink-2">
                   <li>
-                    <strong className="text-ink">Relay blindness:</strong> Your browser encrypts prompts with HPKE (RFC 9180) to the enclave&apos;s attested public key. The dRouter relay only forwards ciphertext.
+                    <strong className="text-ink">Relay blindness:</strong> Your browser encrypts prompts with HPKE (RFC 9180) to the enclave&apos;s attested public key. The deRoute relay only forwards ciphertext.
                   </li>
                   <li>
                     <strong className="text-ink">Local PII scrubbing:</strong> Emails, phone numbers, API keys, IPv4 addresses, and hex addresses are replaced with placeholders in browser memory before encryption and restored locally when the stream returns.
@@ -1282,8 +1248,6 @@ export function RecordInspectorModal({
               </div>
             </div>
           )}
-        </div>
-      </div>
-    </div>
+    </InkModal>
   );
 }

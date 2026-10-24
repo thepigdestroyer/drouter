@@ -47,7 +47,7 @@ export function buildTerminalSnippets(
   "provider": {
     "drouter-confidential": {
       "npm": "@ai-sdk/openai-compatible",
-      "name": "dRouter Confidential TEE (Attested)",
+      "name": "deRoute Confidential TEE (Attested)",
       "options": {
         "baseURL": "${prodV1}",
         "apiKey": "any-value"
@@ -121,7 +121,7 @@ import OpenAI from "openai";
 
 const client = new OpenAI({
   baseURL: "${prodV1}", // or "${gatewayV1}" or "http://127.0.0.1:4141/v1"
-  apiKey: "any-value", // OpenAI SDK requires a non-empty string; dRouter accepts any value (x-drouter-credit header optional)
+  apiKey: "any-value", // OpenAI SDK requires a non-empty string; deRoute accepts any value (x-drouter-credit header optional)
 });
 
 const response = await client.chat.completions.create({

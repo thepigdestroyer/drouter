@@ -1,3 +1,5 @@
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import {
   buildAmdKdsVcekUrl,
@@ -23,6 +25,13 @@ import {
   REPO_CLONE_URL,
   resolveCliUpstreamUrl,
 } from "@/components/inspector/terminal-snippets";
+import {
+  MODAL_PLAIN_SUMMARY,
+  resolveFocusTrapTarget,
+  resolveNextTabId,
+} from "@/components/modal/modal-a11y";
+import { RecordInspectorModal } from "@/components/record-inspector-modal";
+import { TerminalModal } from "@/components/terminal-modal";
 
 describe("Record Inspector live URL & record helpers", () => {
   it("builds exact GitHub release tag, tinfoil-deployment.json, and tinfoil.hash URLs", () => {
@@ -215,7 +224,7 @@ describe("Terminal modal verbatim commands & snippets", () => {
     );
   });
 
-  it("builds verbatim commands that work without an npm CLI package", () => {
+  it("builds verbatim commands that work without an npm CLI package and uses deRoute user-visible branding", () => {
     const snippets = buildTerminalSnippets(
       "http://localhost:3000",
       "kimi-k3",
@@ -230,6 +239,8 @@ describe("Terminal modal verbatim commands & snippets", () => {
       `baseURL: "${PRODUCTION_BASE_URL}/v1"`,
     );
     expect(snippets.sdkSnippet).toContain("x-drouter-credit");
+    expect(snippets.sdkSnippet).toContain("deRoute accepts any value");
+    expect(snippets.sdkSnippet).not.toContain("dRouter");
     const parsedOpencode = JSON.parse(snippets.opencodeConfig);
     expect(
       parsedOpencode.provider["drouter-confidential"].options.baseURL,
@@ -237,5 +248,84 @@ describe("Terminal modal verbatim commands & snippets", () => {
     expect(
       parsedOpencode.provider["drouter-confidential"].options.apiKey,
     ).toBe("any-value");
+    expect(parsedOpencode.provider["drouter-confidential"].name).toBe(
+      "deRoute Confidential TEE (Attested)",
+    );
+  });
+});
+
+describe("Shared InkModal accessibility, layout, summary, and deRoute branding", () => {
+  it("exposes exact verbatim plain-language summary text", () => {
+    expect(MODAL_PLAIN_SUMMARY).toBe(
+      "What this shows: the sealed computer's signed proof that it runs the published code. You do not need to read this; it is here so experts can check our work.",
+    );
+  });
+
+  it("traps focus at first and last focusable elements on Tab and Shift+Tab", () => {
+    const items = ["close-btn", "tab-1", "tab-2", "copy-btn"] as const;
+    // Forward Tab from last item wraps to first
+    expect(resolveFocusTrapTarget(items, "copy-btn", false)).toBe("close-btn");
+    // Forward Tab when focus is outside modal wraps to first
+    expect(resolveFocusTrapTarget(items, null, false)).toBe("close-btn");
+    // Forward Tab from interior item allows native Tab (returns null)
+    expect(resolveFocusTrapTarget(items, "tab-1", false)).toBeNull();
+    // Shift+Tab from first item wraps to last
+    expect(resolveFocusTrapTarget(items, "close-btn", true)).toBe("copy-btn");
+    // Shift+Tab when focus is outside modal wraps to last
+    expect(resolveFocusTrapTarget(items, null, true)).toBe("copy-btn");
+    // Shift+Tab from interior item allows native Shift+Tab (returns null)
+    expect(resolveFocusTrapTarget(items, "tab-2", true)).toBeNull();
+  });
+
+  it("computes keyboard tablist navigation for ArrowRight, ArrowLeft, Home, and End", () => {
+    const tabs = ["overview", "silicon", "gpu", "provenance", "onchain", "privacy"] as const;
+    expect(resolveNextTabId(tabs, "overview", "ArrowRight")).toBe("silicon");
+    expect(resolveNextTabId(tabs, "privacy", "ArrowRight")).toBe("overview");
+    expect(resolveNextTabId(tabs, "overview", "ArrowLeft")).toBe("privacy");
+    expect(resolveNextTabId(tabs, "gpu", "Home")).toBe("overview");
+    expect(resolveNextTabId(tabs, "gpu", "End")).toBe("privacy");
+    expect(resolveNextTabId(tabs, "gpu", "Enter")).toBeNull();
+  });
+
+  it("renders RecordInspectorModal and TerminalModal with non-shrinking header, non-clipping tablist, plain summary, reduced-motion bloom CSS, and deRoute branding", () => {
+    const inspectorHtml = renderToStaticMarkup(
+      React.createElement(RecordInspectorModal, {
+        open: true,
+        initialTab: "privacy",
+        onClose: () => {},
+        node: null,
+        model: "kimi-k3",
+        checks: [],
+        evidence: {},
+      }),
+    );
+
+    expect(inspectorHtml).toContain('role="dialog"');
+    expect(inspectorHtml).toContain('aria-modal="true"');
+    expect(inspectorHtml).toContain('data-testid="ink-modal-header"');
+    expect(inspectorHtml).toContain('data-testid="ink-modal-tabbar"');
+    expect(inspectorHtml).toContain('role="tablist"');
+    expect(inspectorHtml).toContain('data-testid="ink-modal-body"');
+    expect(inspectorHtml).toContain(
+      "What this shows: the sealed computer&#x27;s signed proof that it runs the published code. You do not need to read this; it is here so experts can check our work.",
+    );
+    expect(inspectorHtml).toContain("prefers-reduced-motion: reduce");
+    expect(inspectorHtml).toContain("The deRoute relay only forwards ciphertext.");
+    expect(inspectorHtml).not.toContain("dRouter");
+
+    const terminalHtml = renderToStaticMarkup(
+      React.createElement(TerminalModal, {
+        open: true,
+        onClose: () => {},
+      }),
+    );
+
+    expect(terminalHtml).toContain("Use deRoute from Terminal, OpenCode, or Cursor");
+    expect(terminalHtml).toContain(
+      "What this shows: the sealed computer&#x27;s signed proof that it runs the published code. You do not need to read this; it is here so experts can check our work.",
+    );
+    expect(terminalHtml).toContain("https://drouter-demo.vercel.app/v1");
+    expect(terminalHtml).toContain("scripts/drouter-cli.mjs verify");
+    expect(terminalHtml).not.toContain("dRouter");
   });
 });
