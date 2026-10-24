@@ -41,13 +41,21 @@ export function CheckList({
                 <span className="ep-fail">Fail</span>
               ) : (
                 <span className="ep-muted-chip">
-                  {pending ? "Checking" : status === "skip" ? "Skipped" : "Waiting"}
+                  {pending
+                    ? "Loading"
+                    : status === "skip"
+                      ? "Skipped"
+                      : "Unavailable"}
                 </span>
               )}
             </div>
-            {check?.detail && (
-              <p className="mt-1 pl-7 text-xs text-ink-2">{check.detail}</p>
-            )}
+            <p className="mt-1 pl-7 text-xs text-ink-2">
+              {check?.detail
+                ? check.detail
+                : pending
+                  ? "Loading hardware check..."
+                  : "Unavailable (verification has not run for this check)"}
+            </p>
           </li>
         );
       })}
@@ -74,7 +82,11 @@ export function EvidenceTable({
   );
 
   if (entries.length === 0) {
-    return <p className="text-xs text-ink-3">No hardware registers loaded yet.</p>;
+    return (
+      <p className="text-xs text-ink-3">
+        Unavailable (no hardware registers loaded yet).
+      </p>
+    );
   }
 
   return (
@@ -87,7 +99,11 @@ export function EvidenceTable({
           <dt className="font-mono text-[11px] uppercase tracking-wider text-ink-3">
             {key}
           </dt>
-          <dd className="ep-mono">{value || "Unavailable"}</dd>
+          <dd className="ep-mono">
+            {value && value.trim() !== ""
+              ? value
+              : "Unavailable (not reported by node)"}
+          </dd>
         </div>
       ))}
     </dl>
@@ -106,26 +122,48 @@ export function NodeBadge({ node }: { node: NodeRecord }) {
 export function ReceiptView({
   receipt,
   anchorUrl,
+  onExportProof,
 }: {
   receipt: PopReceipt;
   anchorUrl?: string | null;
+  onExportProof?: () => void;
 }) {
+  const isSim =
+    Boolean((receipt as { simulated?: boolean }).simulated) ||
+    receipt.nodeId.startsWith("sim-");
+
   return (
     <div className="ep-inset p-3.5 text-xs text-ink">
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <span className="font-medium text-ink">
-          Session closed and ephemeral keys cleared
-        </span>
-        <span className={receipt.verified ? "ep-pass" : "ep-fail"}>
-          {receipt.verified ? "Signed receipt" : "Invalid signature"}
-        </span>
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-medium text-ink">
+            Session closed and ephemeral keys cleared
+          </span>
+          {isSim && <span className="ep-muted-chip">Simulated node</span>}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className={receipt.verified ? "ep-pass" : "ep-fail"}>
+            {receipt.verified ? "Signed receipt" : "Invalid signature"}
+          </span>
+          {onExportProof && (
+            <button
+              type="button"
+              onClick={onExportProof}
+              className="ep-btn-ghost px-2.5 py-0.5 text-[11px]"
+            >
+              Export proof
+            </button>
+          )}
+        </div>
       </div>
       <EvidenceTable
         evidence={{
-          "Session hash": receipt.sessionIdHash,
-          "Time": new Date(receipt.time * 1000).toISOString(),
-          "Measurement": receipt.measurement,
-          "Signed by": receipt.signerPublicKey,
+          "Session hash": receipt.sessionIdHash || "Unavailable",
+          Time: Number.isFinite(receipt.time)
+            ? new Date(receipt.time * 1000).toISOString()
+            : "Unavailable",
+          Measurement: receipt.measurement || "Unavailable",
+          "Signed by": receipt.signerPublicKey || "Unavailable",
         }}
       />
       {anchorUrl && (

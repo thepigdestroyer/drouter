@@ -9,9 +9,13 @@ import type {
   ScrubResult,
 } from "@/lib/types";
 import { TINFOIL_MODELS } from "@/lib/tinfoil/client";
+import type { DeepAttestationBundle } from "@/lib/tinfoil/deep-inspect";
+import {
+  getActiveCustomScrubTerms,
+  subscribeVaultSession,
+} from "@/lib/auth/vault";
 import {
   mintCredits,
-  spendOneCredit,
   storedCreditBalance,
 } from "@/lib/credits/client";
 import { downloadAndResume, freezeAndUpload } from "@/lib/freeze/client";
@@ -25,6 +29,15 @@ import {
   type ChatMessage,
   type RegistryResponse,
 } from "@/components/session";
+import {
+  prepareOutboundTurn,
+  type MessagePrivacyReport,
+} from "@/components/console/send-pipeline";
+import {
+  ForensicProofCard,
+  exportSessionProof,
+  type ExportedSessionProof,
+} from "@/components/console/proof-exporter";
 import { NodeBadge, ReceiptView } from "@/components/trust-panel";
 import { PrivacyBar } from "@/components/privacy-bar";
 import { FreezeDrawer } from "@/components/freeze-drawer";
@@ -52,6 +65,10 @@ export function Console() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [checks, setChecks] = useState<CheckResult[]>([]);
   const [session, setSession] = useState<ActiveSession | null>(null);
+  const [lastEvidence, setLastEvidence] = useState<Record<string, string>>({});
+  const [lastDeepBundle, setLastDeepBundle] = useState<
+    DeepAttestationBundle | undefined
+  >(undefined);
   const [error, setError] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -60,11 +77,17 @@ export function Console() {
   const [receipt, setReceipt] = useState<PopReceipt | null>(null);
   const [receiptAnchor, setReceiptAnchor] = useState<string | null>(null);
   const [scrubEnabled, setScrubEnabled] = useState(true);
+  const [normalizeStyle, setNormalizeStyle] = useState(false);
   const [zeroTelemetry, setZeroTelemetry] = useState(true);
   const [lastScrubbed, setLastScrubbed] = useState<ScrubResult | null>(null);
-  const [creditBalance, setCreditBalance] = useState(0);
+  const [lastPrivacyReport, setLastPrivacyReport] =
+    useState<MessagePrivacyReport | null>(null);
+  const [customTermsCount, setCustomTermsCount] = useState(0);
+  const [creditBalance, setCreditBalance] = useState<number | null>(null);
   const [mintingCredits, setMintingCredits] = useState(false);
   const [lastNullifier, setLastNullifier] = useState<string | null>(null);
+  const [exportedProof, setExportedProof] =
+    useState<ExportedSessionProof | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("overview");
   const [terminalModalOpen, setTerminalModalOpen] = useState(false);
@@ -74,10 +97,19 @@ export function Console() {
 
   useEffect(() => {
     setCreditBalance(storedCreditBalance());
+    setCustomTermsCount(getActiveCustomScrubTerms().length);
+    const unsub = subscribeVaultSession(() => {
+      setCustomTermsCount(getActiveCustomScrubTerms().length);
+      setCreditBalance(storedCreditBalance());
+    });
     fetch("/api/registry")
       .then((r) => r.json())
       .then(setRegistry)
-      .catch(() => setError("Could not load the node registry"));
+      .catch(() => {
+        setError("Could not load the node registry from /api/registry.");
+        setPhase("error");
+      });
+    return unsub;
   }, []);
 
   useEffect(() => {
@@ -143,7 +175,8 @@ export function Console() {
       if (!registry) return;
       const chosen = pickNode(registry.nodes, targetKind);
       if (!chosen) {
-        setError("No active node of that kind in the registry");
+        setError(`No active ${targetKind} node found in the registry.`);
+        setSession(null);
         setPhase("error");
         return;
       }
@@ -151,11 +184,15 @@ export function Console() {
       setPhase("verifying");
       setChecks([]);
       setSession(null);
+      setLastEvidence({});
+      setLastDeepBundle(undefined);
       setMessages([]);
       setReceipt(null);
       setReceiptAnchor(null);
       setVerifyAnchor(null);
       setLastScrubbed(null);
+      setLastPrivacyReport(null);
+      setExportedProof(null);
       setError(null);
       scrubberRef.current.clear();
       const seen = new Map<string, CheckResult>();
@@ -169,15 +206,33 @@ export function Console() {
           },
           targetModel,
         );
+        const failed = active.checks.filter((c) => c.status === "fail");
         setChecks(active.checks);
+        setLastEvidence(active.evidence);
+        setLastDeepBundle(active.deepBundle);
+        if (failed.length > 0) {
+          setSession(null);
+          setError(
+            failed.map((c) => `${c.id} (${c.label}): ${c.detail}`).join(" · "),
+          );
+          setPhase("error");
+          return;
+        }
         setSession(active);
         setPhase("ready");
         if (!zeroTelemetry) {
           void publishVerificationProof(active);
         }
       } catch (e) {
-        const err = e as Error & { checks?: CheckResult[] };
+        const err = e as Error & {
+          checks?: CheckResult[];
+          evidence?: Record<string, string>;
+          deepBundle?: DeepAttestationBundle;
+        };
         if (err.checks?.length) setChecks(err.checks);
+        if (err.evidence) setLastEvidence(err.evidence);
+        if (err.deepBundle) setLastDeepBundle(err.deepBundle);
+        setSession(null);
         setError(err.message);
         setPhase("error");
       }
@@ -221,64 +276,92 @@ export function Console() {
     [connectWith, kind, messages.length, phase, registry],
   );
 
+  const hasFailedCheck = checks.some((c) => c.status === "fail");
+  const canSend =
+    phase === "ready" &&
+    Boolean(session) &&
+    !hasFailedCheck &&
+    checks.length > 0;
+
   const send = useCallback(async () => {
     const text = input.trim();
-    if (!session || !text || phase !== "ready") return;
+    if (!session || !text || !canSend) return;
     setInput("");
+    setError(null);
 
-    try {
-      if (storedCreditBalance() === 0) {
-        await mintCredits(window.location.origin, 5, 1);
-      }
-      const spent = await spendOneCredit(
-        window.location.origin,
-        session.node.id,
-      );
-      setCreditBalance(spent.remaining);
-      if (spent.nullifier) setLastNullifier(spent.nullifier);
-    } catch {
-      // Non-fatal if credit endpoint is unreachable
+    const turnPrepared = await prepareOutboundTurn(text, {
+      scrubEnabled,
+      normalizeStyle,
+      scrubber: scrubberRef.current,
+    });
+
+    setCreditBalance(turnPrepared.creditBalanceAfter);
+    if (turnPrepared.report.creditNullifier) {
+      setLastNullifier(turnPrepared.report.creditNullifier);
     }
+    setLastPrivacyReport(turnPrepared.report);
+    setLastScrubbed({
+      scrubbed: turnPrepared.outboundText,
+      replacements: turnPrepared.report.redactions,
+    });
 
-    const scrubRes = scrubEnabled
-      ? scrubberRef.current.scrub(text)
-      : { scrubbed: text, replacements: [] };
-    setLastScrubbed(scrubRes);
+    const userMsg: ChatMessage = {
+      role: "user",
+      content: text,
+      wireContent: turnPrepared.outboundText,
+      privacyReport: turnPrepared.report,
+    };
 
-    const displayHistory: ChatMessage[] = [
-      ...messages,
-      { role: "user", content: text },
-    ];
+    const displayHistory: ChatMessage[] = [...messages, userMsg];
     const wireHistory: ChatMessage[] = displayHistory.map((m) => ({
       role: m.role,
-      content: scrubEnabled
-        ? scrubberRef.current.scrub(m.content).scrubbed
-        : m.content,
+      content:
+        m.wireContent ??
+        (scrubEnabled
+          ? scrubberRef.current.scrub(m.content).scrubbed
+          : m.content),
+      wireContent:
+        m.wireContent ??
+        (scrubEnabled
+          ? scrubberRef.current.scrub(m.content).scrubbed
+          : m.content),
     }));
 
     setMessages([...displayHistory, { role: "assistant", content: "" }]);
     setPhase("streaming");
+    let wireReply = "";
     try {
-      let wireReply = "";
-      for await (const delta of session.send(wireHistory, model)) {
+      for await (const delta of session.send(wireHistory, model, {
+        creditHeader: turnPrepared.creditHeader,
+      })) {
         wireReply += delta;
-        const restored = scrubEnabled
-          ? scrubberRef.current.restore(wireReply)
-          : wireReply;
+        const restored = turnPrepared.restore(wireReply);
         setMessages([
           ...displayHistory,
-          { role: "assistant", content: restored },
+          {
+            role: "assistant",
+            content: restored,
+            wireContent: wireReply,
+          },
         ]);
       }
       setPhase("ready");
     } catch (e) {
-      setError((e as Error).message);
+      const msg = (e as Error).message || "Failed to stream response from node.";
+      setError(msg);
+      if (!wireReply) {
+        // Recoverable error: restore user prompt to input if no reply tokens arrived
+        setMessages(messages);
+        setInput(text);
+      }
       setPhase("ready");
     }
-  }, [input, messages, model, phase, scrubEnabled, session]);
+  }, [canSend, input, messages, model, normalizeStyle, scrubEnabled, session]);
 
   const pop = useCallback(async () => {
     if (!session) return;
+    setLastEvidence(session.evidence);
+    setLastDeepBundle(session.deepBundle);
     if (session.close) {
       const r = await session.close();
       setReceipt(r);
@@ -302,6 +385,45 @@ export function Console() {
     setSession(null);
     setPhase("closed");
   }, [session, zeroTelemetry]);
+
+  const handleExportProof = useCallback(() => {
+    const activeNode = session?.node ?? node;
+    const activeEvidence = session?.evidence ?? lastEvidence;
+    if (!activeNode || checks.length === 0) {
+      setError("Verify hardware first before exporting a forensic proof bundle.");
+      return;
+    }
+    try {
+      const exported = exportSessionProof({
+        session: session ?? {
+          node: activeNode,
+          checks,
+          evidence: activeEvidence,
+          deepBundle: lastDeepBundle,
+        },
+        node: activeNode,
+        model: activeNode.kind === "tinfoil" ? model : "sim-echo-1",
+        checks,
+        evidence: activeEvidence,
+        receipt,
+        verifyAnchorUrl: verifyAnchor,
+        receiptAnchorUrl: receiptAnchor,
+      });
+      setExportedProof(exported);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }, [
+    checks,
+    lastDeepBundle,
+    lastEvidence,
+    model,
+    node,
+    receipt,
+    receiptAnchor,
+    session,
+    verifyAnchor,
+  ]);
 
   const handleFreeze = useCallback(async (): Promise<FreezeReceipt | null> => {
     if (!session) return null;
@@ -341,6 +463,8 @@ export function Console() {
             restored.modelId,
           );
           setChecks(active.checks);
+          setLastEvidence(active.evidence);
+          setLastDeepBundle(active.deepBundle);
           setSession(active);
           setPhase("ready");
         }
@@ -349,6 +473,10 @@ export function Console() {
     },
     [registry, session],
   );
+
+  const activeEvidence = session?.evidence ?? lastEvidence;
+  const activeDeepBundle = session?.deepBundle ?? lastDeepBundle;
+  const canExportProof = Boolean(node && checks.length > 0);
 
   return (
     <div className="flex flex-col gap-5">
@@ -361,9 +489,13 @@ export function Console() {
         zeroTelemetry={zeroTelemetry}
         onToggleZeroTelemetry={setZeroTelemetry}
         creditBalance={creditBalance}
-        evidence={session?.evidence ?? {}}
+        evidence={activeEvidence}
         onOpenInspector={openInspector}
         onOpenTerminalModal={() => setTerminalModalOpen(true)}
+        onExportProof={handleExportProof}
+        canExportProof={canExportProof}
+        onRetryVerify={() => void connect()}
+        onDismissError={() => setError(null)}
         errorMessage={error}
         verifyAnchorUrl={verifyAnchor}
         publishingProof={publishingProof}
@@ -372,9 +504,17 @@ export function Console() {
         }
       />
 
+      {exportedProof && (
+        <ForensicProofCard
+          exportedProof={exportedProof}
+          onDismiss={() => setExportedProof(null)}
+          onRedownload={handleExportProof}
+        />
+      )}
+
       {/* Chat Card */}
       <div className="ep-card flex flex-col overflow-hidden">
-        {/* Top bar: Model picker, Node mode, Re-verify */}
+        {/* Top bar: Model picker, Node mode, Re-verify, Export proof */}
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-rule bg-paper-2 px-4 py-3">
           <div className="flex flex-wrap items-center gap-3">
             <div
@@ -401,10 +541,7 @@ export function Console() {
 
             {kind === "tinfoil" ? (
               <div className="flex items-center gap-2">
-                <label
-                  htmlFor="console-model-select"
-                  className="ep-label"
-                >
+                <label htmlFor="console-model-select" className="ep-label">
                   Model
                 </label>
                 <select
@@ -423,7 +560,7 @@ export function Console() {
               </div>
             ) : (
               <span className="font-mono text-xs text-ink-2">
-                Model: sim-echo-1 (Simulated)
+                Model: sim-echo-1 (Simulated in software)
               </span>
             )}
           </div>
@@ -453,6 +590,16 @@ export function Console() {
                   : "Verify hardware"}
             </button>
 
+            <button
+              type="button"
+              onClick={handleExportProof}
+              disabled={!canExportProof}
+              className="ep-btn-ghost px-2.5 py-1 text-xs disabled:opacity-45"
+              title="Export signed forensic proof (.drouter-proof.json)"
+            >
+              Export proof
+            </button>
+
             {session && (
               <button
                 type="button"
@@ -467,6 +614,18 @@ export function Console() {
           </div>
         </div>
 
+        {kind === "sim" && (
+          <div className="border-b border-rule bg-paper-2 px-4 py-2 text-xs text-ink-2">
+            <strong className="font-medium text-ink">Simulated mode:</strong>{" "}
+            Connected to software simulation ({node?.name ?? "sim node"}).
+            Hardware roots are derived from{" "}
+            <code className="font-mono">SIM_HARDWARE_SEED</code> and replies come
+            from a fixed echo template. Switch to{" "}
+            <strong className="font-medium text-ink">Real enclave</strong> to
+            query Tinfoil confidential GPUs.
+          </div>
+        )}
+
         {/* Message thread */}
         <div
           ref={scrollRef}
@@ -477,17 +636,22 @@ export function Console() {
               <p className="text-sm text-ink-2">
                 {phase === "verifying"
                   ? "Checking enclave hardware before opening your encrypted session..."
-                  : session
-                    ? "Session verified and encrypted. Type a prompt below. If you include an email like alice@example.com or a secret like sk-demo123456, your browser replaces it with a placeholder before encryption."
-                    : "Click Verify hardware above to establish an attested session."}
+                  : phase === "error" || hasFailedCheck
+                    ? `Not verified. ${
+                        error ||
+                        "Hardware attestation failed. Sending is blocked until verification passes."
+                      }`
+                    : session
+                      ? "Session verified and encrypted. Type a prompt below. If you include an email like dana.reyes@example.com or a secret like sk-demo123456, your browser replaces it with a placeholder before encryption."
+                      : "Click Verify hardware above to establish an attested session."}
               </p>
-              {session && (
+              {session && canSend && (
                 <div className="mt-4 flex flex-wrap justify-center gap-2">
                   <button
                     type="button"
                     onClick={() =>
                       setInput(
-                        "Draft a short note to alice@example.com about rotating key sk-prod987654.",
+                        "Draft a short note to Dana Reyes at dana.reyes@example.com about rotating key sk-prod987654.",
                       )
                     }
                     className="ep-btn-ghost px-3 py-1 text-xs"
@@ -512,8 +676,8 @@ export function Console() {
             messages.map((m, i) => (
               <div
                 key={i}
-                className={`flex ${
-                  m.role === "user" ? "justify-end" : "justify-start"
+                className={`flex flex-col ${
+                  m.role === "user" ? "items-end" : "items-start"
                 }`}
               >
                 <div
@@ -524,12 +688,50 @@ export function Console() {
                   }
                 >
                   <div className="ep-label mb-1">
-                    {m.role === "user" ? "You (HPKE sealed)" : model}
+                    {m.role === "user"
+                      ? kind === "sim"
+                        ? "You (AEAD sealed · Simulated)"
+                        : "You (HPKE sealed)"
+                      : kind === "sim"
+                        ? "sim-echo-1 (Simulated)"
+                        : model}
                   </div>
                   <div>
                     {m.content || (phase === "streaming" ? "Thinking..." : "")}
                   </div>
                 </div>
+
+                {m.role === "user" && m.privacyReport && (
+                  <div
+                    className="mt-1 flex flex-wrap items-center justify-end gap-2 font-mono text-[11px] text-ink-3"
+                    data-testid="message-privacy-badge"
+                  >
+                    <span>
+                      Redactions: {m.privacyReport.redactions.length}
+                      {m.privacyReport.redactions.length > 0
+                        ? ` (${m.privacyReport.redactions
+                            .map((r) => r.placeholder)
+                            .join(", ")})`
+                        : ""}
+                    </span>
+                    <span>·</span>
+                    <span>
+                      Bucket:{" "}
+                      {m.privacyReport.bucketBytes.toLocaleString("en-US")} B
+                    </span>
+                    <span>·</span>
+                    <span>
+                      Risk: {m.privacyReport.riskBefore}/100 -&gt;{" "}
+                      {m.privacyReport.riskAfter}/100
+                    </span>
+                    <span>·</span>
+                    <span>
+                      {m.privacyReport.creditAttached
+                        ? "x-drouter-credit attached"
+                        : "free tier (no credit attached)"}
+                    </span>
+                  </div>
+                )}
               </div>
             ))
           )}
@@ -550,19 +752,21 @@ export function Console() {
             id="console-prompt-input"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            disabled={phase !== "ready"}
+            disabled={!canSend}
             placeholder={
-              phase === "ready"
+              canSend
                 ? "Write your prompt (scrubbed locally, then encrypted to enclave)..."
                 : phase === "verifying"
                   ? "Verifying enclave hardware..."
-                  : "Verify hardware first to unlock input"
+                  : phase === "error" || hasFailedCheck
+                    ? "Not verified: hardware attestation failed (sending blocked)"
+                    : "Verify hardware first to unlock input"
             }
             className="ep-input min-w-0 flex-1"
           />
           <button
             type="submit"
-            disabled={phase !== "ready" || !input.trim()}
+            disabled={!canSend || !input.trim()}
             className="ep-btn px-5"
           >
             Send
@@ -571,7 +775,11 @@ export function Console() {
       </div>
 
       {receipt && (
-        <ReceiptView receipt={receipt} anchorUrl={receiptAnchor} />
+        <ReceiptView
+          receipt={receipt}
+          anchorUrl={receiptAnchor}
+          onExportProof={handleExportProof}
+        />
       )}
 
       {/* Plain-language Privacy Summary, Freeze/Resume, and Disclosures */}
@@ -579,7 +787,11 @@ export function Console() {
         <PrivacyBar
           scrubEnabled={scrubEnabled}
           onToggleScrub={setScrubEnabled}
+          normalizeStyle={normalizeStyle}
+          onToggleNormalizeStyle={setNormalizeStyle}
           lastScrubbed={lastScrubbed}
+          lastPrivacyReport={lastPrivacyReport}
+          customTermsCount={customTermsCount}
           draftText={input}
           creditBalance={creditBalance}
           onMintCredits={handleMintCredits}
@@ -590,9 +802,7 @@ export function Console() {
         />
 
         <FreezeDrawer
-          canFreeze={
-            Boolean(session) && phase === "ready" && messages.length > 0
-          }
+          canFreeze={Boolean(session) && canSend && messages.length > 0}
           onFreeze={handleFreeze}
           onResume={handleResume}
         />
@@ -605,8 +815,8 @@ export function Console() {
         node={node}
         model={kind === "tinfoil" ? model : "sim-echo-1"}
         checks={checks}
-        evidence={session?.evidence ?? {}}
-        deepBundle={session?.deepBundle}
+        evidence={activeEvidence}
+        deepBundle={activeDeepBundle}
         verifyAnchorUrl={verifyAnchor}
         registryAddress={registry?.address ?? null}
       />

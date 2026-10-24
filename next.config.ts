@@ -41,7 +41,14 @@ const nextConfig: NextConfig = {
   cacheComponents: true,
   partialPrefetching: true,
   poweredByHeader: false,
-  serverExternalPackages: ["@vercel/sandbox"],
+  serverExternalPackages: ["@vercel/sandbox", "node-seal"],
+  // node-seal loads its WebAssembly binary from a computed path that file tracing
+  // cannot see, so ship it explicitly with the routes that run SEAL.
+  outputFileTracingIncludes: {
+    "/api/ashi": ["./node_modules/node-seal/dist/*.wasm"],
+    "/api/tiers": ["./node_modules/node-seal/dist/*.wasm"],
+    "/about": ["./node_modules/node-seal/dist/*.wasm"],
+  },
   turbopack: {
     resolveAlias: {
       "@vercel/sandbox": { browser: "./src/lib/types.ts" },
