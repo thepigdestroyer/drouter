@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { RELAY_HOPS, pacedStream, padJsonPayloadToBucket } from "@/lib/relay";
 import { toHex } from "@/lib/sim/bytes";
 import { SIM_TCB } from "@/lib/sim/constants";
 import { encodeReport, REPORT_SIZE, SIM_POLICY, tcbToU64, type SnpReportFields } from "@/lib/sim/snp";
-import { checksFromDocument } from "@/lib/tinfoil/client";
+import { checksFromDocument, RELAY_HOPS as CLIENT_RELAY_HOPS } from "@/lib/tinfoil/client";
 import {
   decodeSnpReportBytes,
   parseDeploymentConfigYaml,
@@ -229,5 +230,61 @@ describe("Two-Hop Enclave & GPU Trust Verifier", () => {
     expect(c5?.detail).toContain("8× NVIDIA confidential GPUs attested by router");
     expect(c7?.status).toBe("pass");
     expect(c7?.detail).toContain("Pinned weight package mpk-58d5e74b…");
+  });
+
+  it("padJsonPayloadToBucket pads a 180-byte JSON payload to 4,096 B and a 5,000-byte payload to 8,192 B while preserving JSON.parse equivalence", () => {
+    const baseObj = {
+      model: "kimi-k3",
+      stream: true,
+      messages: [{ role: "user", content: "x".repeat(105) }],
+    };
+    const json180 = JSON.stringify(baseObj);
+    expect(new TextEncoder().encode(json180).byteLength).toBe(180);
+
+    const padded180 = padJsonPayloadToBucket(json180);
+    expect(padded180.originalBytes).toBe(180);
+    expect(padded180.bucketBytes).toBe(4096);
+    expect(new TextEncoder().encode(padded180.paddedJson).byteLength).toBe(4096);
+    expect(JSON.parse(padded180.paddedJson)).toEqual(baseObj);
+
+    const largeObj = {
+      model: "kimi-k3",
+      stream: true,
+      messages: [{ role: "user", content: "y".repeat(4925) }],
+    };
+    const json5000 = JSON.stringify(largeObj);
+    expect(new TextEncoder().encode(json5000).byteLength).toBe(5000);
+
+    const padded5000 = padJsonPayloadToBucket(json5000);
+    expect(padded5000.originalBytes).toBe(5000);
+    expect(padded5000.bucketBytes).toBe(8192);
+    expect(new TextEncoder().encode(padded5000.paddedJson).byteLength).toBe(8192);
+    expect(JSON.parse(padded5000.paddedJson)).toEqual(largeObj);
+  });
+
+  it("RELAY_HOPS defines 3 independent regional oblivious relays and pacedStream preserves full byte stream", async () => {
+    expect(RELAY_HOPS).toHaveLength(3);
+    expect(CLIENT_RELAY_HOPS).toEqual(RELAY_HOPS);
+    const regions = new Set(RELAY_HOPS.map((h) => h.region));
+    const operators = new Set(RELAY_HOPS.map((h) => h.operator));
+    expect(regions.size).toBe(3);
+    expect(operators.size).toBe(3);
+
+    const chunks = [new Uint8Array([1, 2, 3]), new Uint8Array([4, 5])];
+    const src = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const c of chunks) controller.enqueue(c);
+        controller.close();
+      },
+    });
+    const paced = pacedStream(src, 10);
+    const reader = paced.getReader();
+    const out: number[] = [];
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) out.push(...Array.from(value));
+    }
+    expect(out).toEqual([1, 2, 3, 4, 5]);
   });
 });

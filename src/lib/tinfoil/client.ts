@@ -1,4 +1,5 @@
 import { TinfoilAI, type VerificationDocument } from "tinfoil";
+import { RELAY_HOPS, padJsonPayloadToBucket } from "@/lib/relay";
 import { toHex } from "@/lib/sim/bytes";
 import {
   verifyModelEnclaveStatus,
@@ -6,6 +7,8 @@ import {
   type ModelEnclaveAttestation,
 } from "@/lib/tinfoil/deep-inspect";
 import type { CheckResult } from "@/lib/types";
+
+export { RELAY_HOPS };
 
 /** Models served inside Tinfoil's attested enclaves that the demo offers. */
 export const TINFOIL_MODELS = [
@@ -26,6 +29,8 @@ export interface TinfoilEvidence {
   hpkePublicKey: string;
   configRepo: string;
   verifiedAt?: string;
+  relayHop?: string;
+  lastBucketBytes?: number;
   chipId?: string;
   tcb?: string;
   guestPolicy?: string;
@@ -40,11 +45,15 @@ export interface TinfoilEvidence {
   "GPU VM shape"?: string;
   "Pinned weights"?: string;
   "dm-verity root"?: string;
+  "Relay hop"?: string;
+  "Padded upload bucket"?: string;
 }
 
 export interface TinfoilSession {
   checks: CheckResult[];
   evidence: TinfoilEvidence;
+  relayHop: string;
+  lastBucketBytes?: number;
   deepBundle?: DeepAttestationBundle;
   selectedModelAttestation?: ModelEnclaveAttestation;
   send(model: string, messages: { role: "user" | "assistant"; content: string }[]): AsyncIterable<string>;
@@ -144,6 +153,7 @@ function evidenceFromDocument(
   doc: VerificationDocument,
   deepBundle?: DeepAttestationBundle,
   modelAttestation?: ModelEnclaveAttestation,
+  relayHop?: string,
 ): TinfoilEvidence {
   const snp = deepBundle?.routerSnpReport;
   const chipId = snp ? `${snp.chipIdHex.slice(0, 16)}…${snp.chipIdHex.slice(-8)}` : undefined;
@@ -176,6 +186,7 @@ function evidenceFromDocument(
     hpkePublicKey: doc.hpkePublicKey,
     configRepo: doc.configRepo,
     verifiedAt: doc.verifiedAt,
+    ...(relayHop ? { relayHop, "Relay hop": relayHop } : {}),
     ...(chipId ? { chipId, "Chip ID": chipId } : {}),
     ...(tcb ? { tcb, TCB: tcb } : {}),
     ...(guestPolicy ? { guestPolicy, "Guest policy": guestPolicy } : {}),
@@ -191,16 +202,27 @@ function evidenceFromDocument(
  * to that enclave and sent through the dRouter relay. The relay adds the API key but cannot read
  * prompts or completions.
  */
-export async function openTinfoilSession(selectedModel = "kimi-k3"): Promise<TinfoilSession> {
+export async function openTinfoilSession(
+  selectedModel = "kimi-k3",
+  opts?: { relayId?: string; rotateRelayPerTurn?: boolean },
+): Promise<TinfoilSession> {
   const origin = window.location.origin;
   const secretBytes = new Uint8Array(32);
   crypto.getRandomValues(secretBytes);
   const userCacheSecret = toHex(secretBytes);
 
+  const initialRelayId = opts?.relayId;
+  const baseURL = initialRelayId
+    ? `${origin}/api/relay/${initialRelayId}/v1/`
+    : `${origin}/api/relay/v1/`;
+  const attestationBundleURL = initialRelayId
+    ? `${origin}/api/relay/${initialRelayId}`
+    : `${origin}/api/relay`;
+
   const client = new TinfoilAI({
     bearerToken: "drouter-demo",
-    baseURL: `${origin}/api/relay/v1/`,
-    attestationBundleURL: `${origin}/api/relay`,
+    baseURL,
+    attestationBundleURL,
     userCacheSecret,
   });
 
@@ -232,15 +254,75 @@ export async function openTinfoilSession(selectedModel = "kimi-k3"): Promise<Tin
   const selectedModelAttestation =
     deepBundle?.models[selectedModel] ?? deepBundle?.models["kimi-k3"];
 
-  return {
+  let activeRelayHop: string = initialRelayId ?? RELAY_HOPS[0].id;
+  let turnCounter = Math.max(
+    0,
+    RELAY_HOPS.findIndex((h) => h.id === activeRelayHop),
+  );
+
+  // Intercept the internal encrypted transport fetch so that:
+  // 1. Plaintext JSON bodies are padded to a power-of-two byte bucket (RFC 8259 trailing spaces)
+  //    immediately before HPKE sealing.
+  // 2. Multi-relay hop rotation rewrites the relay hop route per turn when enabled.
+  const internalTransport = (
+    client as unknown as {
+      secureClient?: { _transport?: { fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> } };
+    }
+  ).secureClient?._transport;
+  if (internalTransport && typeof internalTransport.fetch === "function") {
+    const origFetch = internalTransport.fetch.bind(internalTransport);
+    internalTransport.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      let nextInput = input;
+      if (opts?.rotateRelayPerTurn && typeof input === "string") {
+        nextInput = input.replace(
+          /\/api\/relay\/(?:[^/]+\/)?v1\//,
+          `/api/relay/${activeRelayHop}/v1/`,
+        );
+      }
+      if (init && typeof init.body === "string") {
+        try {
+          const parsed = JSON.parse(init.body) as Record<string, unknown>;
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            if (!parsed.user_cache_secret) {
+              parsed.user_cache_secret = userCacheSecret;
+            }
+            const { paddedJson } = padJsonPayloadToBucket(JSON.stringify(parsed));
+            init = { ...init, body: paddedJson };
+          }
+        } catch {
+          // Non-JSON body; leave unchanged.
+        }
+      }
+      return origFetch(nextInput, init);
+    };
+  }
+
+  const evidence = evidenceFromDocument(doc, deepBundle, selectedModelAttestation, activeRelayHop);
+
+  const session: TinfoilSession = {
     checks: checksFromDocument(doc, selectedModelAttestation),
-    evidence: evidenceFromDocument(doc, deepBundle, selectedModelAttestation),
+    evidence,
+    relayHop: activeRelayHop,
     deepBundle,
     selectedModelAttestation,
     async *send(model, messages) {
+      if (opts?.rotateRelayPerTurn) {
+        turnCounter = (turnCounter + 1) % RELAY_HOPS.length;
+        activeRelayHop = RELAY_HOPS[turnCounter].id;
+        session.relayHop = activeRelayHop;
+        evidence.relayHop = activeRelayHop;
+        evidence["Relay hop"] = activeRelayHop;
+      }
+      const { bucketBytes } = padJsonPayloadToBucket(
+        JSON.stringify({ model, messages, stream: true }),
+      );
+      session.lastBucketBytes = bucketBytes;
+      evidence.lastBucketBytes = bucketBytes;
+      evidence["Padded upload bucket"] = `${bucketBytes.toLocaleString("en-US")} B (RFC 8259 padded)`;
+
       const stream = await client.chat.completions.create(
         { model, messages, stream: true },
-        { headers: { "X-Tinfoil-Model": model } },
+        { headers: { "X-Tinfoil-Model": model, "X-DRouter-Cadence-Ms": "50" } },
       );
       for await (const chunk of stream) {
         const delta = chunk.choices[0]?.delta?.content;
@@ -248,4 +330,6 @@ export async function openTinfoilSession(selectedModel = "kimi-k3"): Promise<Tin
       }
     },
   };
+
+  return session;
 }

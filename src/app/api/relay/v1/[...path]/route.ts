@@ -5,6 +5,7 @@ import {
   FORWARD_RESPONSE_HEADERS,
   countingStream,
   isAllowedEnclave,
+  pacedStream,
   pickHeaders,
 } from "@/lib/relay";
 
@@ -53,7 +54,16 @@ export async function POST(request: Request, ctx: { params: Promise<{ path: stri
     reportBytes(0);
     return new Response(null, { status: upstream.status, headers: responseHeaders });
   }
-  return new Response(countingStream(upstream.body, reportBytes), {
+  const rawCadence = request.headers.get("x-drouter-cadence-ms");
+  const cadenceMs =
+    rawCadence !== null
+      ? Number.isFinite(Number(rawCadence)) && Number(rawCadence) > 0
+        ? Number(rawCadence)
+        : 50
+      : 0;
+  const counted = countingStream(upstream.body, reportBytes);
+  const stream = cadenceMs > 0 ? pacedStream(counted, cadenceMs) : counted;
+  return new Response(stream, {
     status: upstream.status,
     headers: responseHeaders,
   });
