@@ -74,7 +74,7 @@ describe("createRateLimiter", () => {
 });
 
 describe("POST /api/anchor with mocked viem client", () => {
-  it("anchors receipt and records verification, returning txHash, explorerUrl, and onChain=true", async () => {
+  it("anchors receipt and records verification for a real Tinfoil node, returning txHash, explorerUrl, and onChain=true", async () => {
     vi.stubEnv("ARC_REGISTRY_ADDRESS", "0xbc8085c2b6fe6e0db05f169925c0b841828f4481");
     let seq = 0;
     setArcClientDepsForTests({
@@ -90,7 +90,7 @@ describe("POST /api/anchor with mocked viem client", () => {
       headers: { "content-type": "application/json", "x-forwarded-for": "203.0.113.5" },
       body: JSON.stringify({
         receiptHash: h("1"),
-        nodeId: nodeIdFor("sim-1"),
+        nodeId: nodeIdFor("tinfoil-kimi-k3"),
         ok: true,
         evidenceHash: h("2"),
       }),

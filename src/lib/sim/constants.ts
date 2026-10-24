@@ -2,7 +2,6 @@ import { sha256, sha384 } from "@noble/hashes/sha2.js";
 import { utf8 } from "./bytes";
 
 export const SESSION_LABEL = "drouter/v1/session";
-/** Launch-time binding label. Part of the protocol constants; the sim session flow does not use it. */
 export const LAUNCH_LABEL = "drouter/v1/launch";
 
 /** REPORT_DATA values starting with this prefix must never be signed by a node. */
@@ -13,11 +12,8 @@ export interface SimNodeSpec {
   region: string;
 }
 
-export const SIM_NODES: readonly SimNodeSpec[] = [
-  { id: "sim-1", region: "eu-west" },
-  { id: "sim-2", region: "us-east" },
-  { id: "sim-3", region: "ap-south" },
-];
+/** Practice nodes (sim-1, sim-2, sim-3) have been removed from all production paths. */
+export const SIM_NODES: readonly SimNodeSpec[] = [];
 
 export const SIM_MODEL_ID = "sim-echo-1";
 export const SIM_MODEL_ROOT: Uint8Array = sha256(utf8("sim-echo-1-weights"));
@@ -43,5 +39,4 @@ export const SIM_TCB: Tcb = { fmc: 2, bootloader: 3, tee: 1, snp: 4, microcode: 
 
 export const TICKET_IDLE_MS = 30 * 60 * 1000;
 
-/** Bound on session context so a sealed ticket stays small. */
 export const MAX_CONTEXT_TOKENS = 16384;

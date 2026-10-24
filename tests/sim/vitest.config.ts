@@ -1,17 +1,11 @@
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import { defineConfig } from "vitest/config";
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-
 export default defineConfig({
-  root: repoRoot,
   resolve: {
-    alias: [{ find: /^@\//, replacement: path.join(repoRoot, "src") + "/" }],
+    alias: { "@": resolve(__dirname, "../../src") },
   },
   test: {
-    environment: "node",
     include: ["tests/sim/**/*.test.ts"],
-    setupFiles: ["tests/sim/setup.ts"],
   },
 });
