@@ -47,15 +47,11 @@ function whenHour(value: unknown): string {
   return `${coarsened.toISOString().replace("T", " ").slice(0, 13)}:00 UTC`;
 }
 
-interface RegistryNodeView extends EnrichedNodeRecord {
-  enclaveHostCount?: number;
-}
-
 interface RegistryApiPayload {
   source: "arc" | "fallback";
   onChain?: boolean;
   address?: Hex;
-  nodes: RegistryNodeView[];
+  nodes: EnrichedNodeRecord[];
   chainId?: number;
   explorer?: string;
 }
@@ -108,7 +104,6 @@ async function WhoRunsDeRouteSection() {
           <div className="grid grid-cols-1 gap-4">
             {realNodes.map((n) => {
               const hostCount =
-                n.enclaveHostCount ??
                 n.healthyHosts ??
                 n.verifiedHosts ??
                 n.configuredHosts ??
@@ -182,7 +177,7 @@ async function WhoRunsDeRouteSection() {
                 className="ep-link"
                 href={`${ARC_EXPLORER}/address/${contractAddress}`}
                 target="_blank"
-                rel="noreferrer"
+                rel="noopener noreferrer"
               >
                 Contract {short(contractAddress, 8)} -&gt;
               </a>
@@ -365,7 +360,7 @@ async function PublicReceiptBookSection() {
             <a
               href={receiptBookHref}
               target="_blank"
-              rel="noreferrer"
+              rel="noopener noreferrer"
               className="ep-btn ep-ink-button ep-ink-button-primary text-xs py-2.5 px-4 inline-flex items-center gap-2"
             >
               <span className="ep-ink-button-label">

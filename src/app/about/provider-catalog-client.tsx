@@ -189,7 +189,7 @@ export function ProviderCatalogClient({
                 <a
                   href={provider.url}
                   target="_blank"
-                  rel="noreferrer"
+                  rel="noopener noreferrer"
                   className="ep-link"
                 >
                   Website -&gt;
@@ -197,7 +197,7 @@ export function ProviderCatalogClient({
                 <a
                   href={provider.docsUrl}
                   target="_blank"
-                  rel="noreferrer"
+                  rel="noopener noreferrer"
                   className="ep-link"
                 >
                   Docs -&gt;
@@ -281,7 +281,7 @@ export function ProviderCatalogClient({
                       <a
                         href={provider.url}
                         target="_blank"
-                        rel="noreferrer"
+                        rel="noopener noreferrer"
                         className="ep-link"
                       >
                         Website
@@ -289,7 +289,7 @@ export function ProviderCatalogClient({
                       <a
                         href={provider.docsUrl}
                         target="_blank"
-                        rel="noreferrer"
+                        rel="noopener noreferrer"
                         className="ep-link"
                       >
                         Docs
@@ -316,7 +316,7 @@ export function ProviderCatalogClient({
               <a
                 href="https://confidentialinference.net"
                 target="_blank"
-                rel="noreferrer"
+                rel="noopener noreferrer"
                 className="ep-link"
               >
                 confidentialinference.net
@@ -345,7 +345,7 @@ export function ProviderCatalogClient({
                     <a
                       href={provider.sourceUrl}
                       target="_blank"
-                      rel="noreferrer"
+                      rel="noopener noreferrer"
                       className="ep-link font-mono text-[11px]"
                     >
                       Audit record -&gt;
@@ -402,7 +402,7 @@ export function ProviderCatalogClient({
                           <a
                             href={claimObj.sourceUrl}
                             target="_blank"
-                            rel="noreferrer"
+                            rel="noopener noreferrer"
                             className="ep-link"
                           >
                             source ({claimObj.verifiedOn})

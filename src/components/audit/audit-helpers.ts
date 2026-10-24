@@ -175,10 +175,11 @@ export interface AccountabilityResponse {
   signedTreeHead?: SignedTreeHead;
   rampStates: Record<string, RampEvaluationView>;
   routerLatency?: {
-    rttMs: number | null;
     host: string;
-    measuredAt: string;
-  };
+    vantage: string;
+    bestRttMs: number;
+    samplesMs: number[];
+  } | null;
   registrySource?: "arc" | "fallback";
   registryNodes?: NodeRecord[];
   minStakeUsdc?: string;

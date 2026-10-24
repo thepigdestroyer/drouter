@@ -572,7 +572,7 @@ export function ThreatMatrix({ className = "" }: ThreatMatrixProps) {
                             <a
                               href={t.githubUrl}
                               target="_blank"
-                              rel="noreferrer"
+                              rel="noopener noreferrer"
                               className="ep-link"
                             >
                               {t.filePath} -&gt;
@@ -581,7 +581,7 @@ export function ThreatMatrix({ className = "" }: ThreatMatrixProps) {
                               <a
                                 href={t.codeUrl}
                                 target="_blank"
-                                rel="noreferrer"
+                                rel="noopener noreferrer"
                                 className="ep-link"
                               >
                                 {t.codePath} -&gt;
@@ -625,7 +625,7 @@ export function ThreatMatrix({ className = "" }: ThreatMatrixProps) {
                           key={`${scenario.id}:${t.filePath}:${t.testName}`}
                           href={t.githubUrl}
                           target="_blank"
-                          rel="noreferrer"
+                          rel="noopener noreferrer"
                           className="ep-link"
                         >
                           {t.filePath} -&gt;

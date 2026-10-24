@@ -249,6 +249,20 @@ export default function AuditLabPage() {
         evidenceHash: releaseDigest ? `0x${releaseDigest}` : null,
         payload: verifyRes ?? matrixRes ?? { ok: true, host, releaseTag },
       });
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Live seal check failed.";
+      setActionResult({
+        title: "Live seal check could not complete",
+        plainSummary:
+          "We could not complete the live seal check right now. Please try again in a moment.",
+        verdictSummary: message,
+        txHash: null,
+        explorerUrl: null,
+        onChain: false,
+        evidenceHash: null,
+        payload: { error: message },
+      });
     } finally {
       setBusyAction(null);
     }
@@ -261,7 +275,20 @@ export default function AuditLabPage() {
         transparency?.signedTreeHead?.rootHash ??
         transparency?.verificationLog?.root ??
         "";
-      if (!rootHex) return;
+      if (!rootHex) {
+        setActionResult({
+          title: "Public receipt book stamp unavailable",
+          plainSummary:
+            "The latest summary of server seal checks is still loading. Please refresh records and try again.",
+          verdictSummary: "No signed tree head rootHash available to anchor.",
+          txHash: null,
+          explorerUrl: null,
+          onChain: false,
+          evidenceHash: null,
+          payload: { error: "Missing rootHex" },
+        });
+        return;
+      }
 
       const receiptHash = rootHex.startsWith("0x") ? rootHex : `0x${rootHex}`;
       const routerNode = accountability?.registryNodes?.find(
@@ -279,7 +306,10 @@ export default function AuditLabPage() {
           nodeId: nodeIdHex,
         }),
       });
-      const data = (await res.json()) as Record<string, unknown>;
+      const data = (await res.json().catch(() => ({}))) as Record<
+        string,
+        unknown
+      >;
       const txHash =
         typeof data.txHash === "string"
           ? data.txHash
@@ -295,14 +325,17 @@ export default function AuditLabPage() {
       const onChain = Boolean(data.onChain ?? txHash);
 
       setActionResult({
-        title: "Public receipt book stamp",
-        plainSummary:
-          "We stamped the latest summary of server seal checks into the public receipt book.",
+        title: res.ok
+          ? "Public receipt book stamp"
+          : "Public receipt book stamp could not complete",
+        plainSummary: res.ok
+          ? "We stamped the latest summary of server seal checks into the public receipt book."
+          : "We could not stamp the public receipt book right now. Please try again in a moment.",
         verdictSummary: txHash
           ? `Anchored Merkle root ${shortHex(receiptHash, 12, 8)} on Circle Arc Testnet in transaction ${shortHex(txHash, 12, 8)}.`
           : typeof data.error === "string"
             ? data.error
-            : `Submitted Merkle root ${shortHex(receiptHash, 12, 8)} to /api/anchor.`,
+            : `Submitted Merkle root ${shortHex(receiptHash, 12, 8)} to /api/anchor (HTTP ${res.status}).`,
         txHash,
         explorerUrl,
         onChain,
@@ -316,6 +349,22 @@ export default function AuditLabPage() {
       if (refreshedTrans) {
         setTransparency(refreshedTrans as TransparencyResponse);
       }
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : "Failed to stamp the public receipt book.";
+      setActionResult({
+        title: "Public receipt book stamp could not complete",
+        plainSummary:
+          "We could not stamp the public receipt book right now. Please try again in a moment.",
+        verdictSummary: message,
+        txHash: null,
+        explorerUrl: null,
+        onChain: false,
+        evidenceHash: null,
+        payload: { error: message },
+      });
     } finally {
       setBusyAction(null);
     }
@@ -329,14 +378,24 @@ export default function AuditLabPage() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ nodeId: "tinfoil-router" }),
       });
-      const data = (await res.json()) as Record<string, unknown>;
+      const data = (await res.json().catch(() => ({}))) as Record<
+        string,
+        unknown
+      >;
       const batchHash =
         typeof data.batchHash === "string" ? data.batchHash : "";
       setActionResult({
-        title: "Anonymous token batch settlement",
-        plainSummary:
-          "We settled used anonymous tokens in a single batch without linking any token back to a person.",
-        verdictSummary: `Settled ${String(data.redeemedCount ?? 0)} unredeemed nullifier(s) (${String(data.totalCredits ?? 0)} credits) into batch digest ${shortHex(batchHash, 14, 10)}.`,
+        title: res.ok
+          ? "Anonymous token batch settlement"
+          : "Anonymous token settlement could not complete",
+        plainSummary: res.ok
+          ? "We settled used anonymous tokens in a single batch without linking any token back to a person."
+          : "We could not clear used anonymous tokens right now. Please try again in a moment.",
+        verdictSummary: res.ok
+          ? `Settled ${String(data.redeemedCount ?? 0)} unredeemed nullifier(s) (${String(data.totalCredits ?? 0)} credits) into batch digest ${shortHex(batchHash, 14, 10)}.`
+          : typeof data.error === "string"
+            ? data.error
+            : `Token settlement returned HTTP ${res.status}.`,
         txHash: typeof data.txHash === "string" ? data.txHash : null,
         explorerUrl:
           typeof data.explorerUrl === "string" ? data.explorerUrl : null,
@@ -348,6 +407,22 @@ export default function AuditLabPage() {
         .then((r) => (r.ok ? r.json() : null))
         .catch(() => null);
       if (refreshed) setCredits(refreshed as CreditsResponse);
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : "Failed to settle anonymous tokens.";
+      setActionResult({
+        title: "Anonymous token settlement could not complete",
+        plainSummary:
+          "We could not clear used anonymous tokens right now. Please try again in a moment.",
+        verdictSummary: message,
+        txHash: null,
+        explorerUrl: null,
+        onChain: false,
+        evidenceHash: null,
+        payload: { error: message },
+      });
     } finally {
       setBusyAction(null);
     }
@@ -430,7 +505,7 @@ export default function AuditLabPage() {
                         <a
                           href={point.href}
                           target="_blank"
-                          rel="noreferrer"
+                          rel="noopener noreferrer"
                           className="ep-btn ep-ink-button ep-ink-button-primary w-full justify-center text-center text-sm py-2.5 px-4 inline-flex items-center gap-2"
                         >
                           <span className="ep-ink-button-label">
@@ -466,7 +541,7 @@ export default function AuditLabPage() {
                             <a
                               href={latestClaimWithTx.explorerUrl}
                               target="_blank"
-                              rel="noreferrer"
+                              rel="noopener noreferrer"
                               className="ep-link font-mono"
                             >
                               Open public receipt -&gt;
@@ -568,7 +643,7 @@ export default function AuditLabPage() {
                               <a
                                 href={item.href}
                                 target="_blank"
-                                rel="noreferrer"
+                                rel="noopener noreferrer"
                                 className="ep-link break-all"
                               >
                                 {item.linkLabel} -&gt;
@@ -577,7 +652,7 @@ export default function AuditLabPage() {
                                 <a
                                   href={item.secondaryHref}
                                   target="_blank"
-                                  rel="noreferrer"
+                                  rel="noopener noreferrer"
                                   className="ep-link text-ink-3 break-all"
                                 >
                                   {item.secondaryLabel} -&gt;
@@ -708,7 +783,7 @@ export default function AuditLabPage() {
                     <a
                       href={latestExplorerUrl}
                       target="_blank"
-                      rel="noreferrer"
+                      rel="noopener noreferrer"
                       className="ep-btn-ghost text-xs py-1.5 px-3 shrink-0 self-start sm:self-center"
                     >
                       Check receipt yourself -&gt;
@@ -826,7 +901,7 @@ export default function AuditLabPage() {
                         <a
                           href={actionResult.explorerUrl}
                           target="_blank"
-                          rel="noreferrer"
+                          rel="noopener noreferrer"
                           className="ep-btn text-xs py-2 px-3.5 inline-flex items-center gap-2"
                         >
                           <span>Open receipt in public receipt book</span>
@@ -1206,7 +1281,7 @@ export default function AuditLabPage() {
                                     <a
                                       href={f.explorerUrl}
                                       target="_blank"
-                                      rel="noreferrer"
+                                      rel="noopener noreferrer"
                                       className="ep-link"
                                     >
                                       Arc receipt -&gt;

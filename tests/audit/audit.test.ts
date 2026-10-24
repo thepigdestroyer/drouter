@@ -288,6 +288,8 @@ describe("buildVerifiableClaims and buildPlainTrustPoints live record links", ()
       expect(source).not.toMatch(/\bsim-/);
       expect(source).not.toMatch(/\bquorumSimulated\b/);
       expect(source).not.toMatch(/\bPractice\b/);
+      expect(source).not.toMatch(/\benclaveHostCount\b/);
+      expect(source).not.toContain('rel="noreferrer"');
 
       // Strip <TechDetails ...>...</TechDetails> blocks first, then inspect top-level component JSX
       const withoutTechDetails = source.replace(
