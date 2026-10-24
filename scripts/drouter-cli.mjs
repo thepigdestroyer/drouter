@@ -426,12 +426,16 @@ async function runCli() {
       { headers: { "X-Tinfoil-Model": args.model } },
     );
 
+    const restorer = createStreamRestorer(scrubber);
     for await (const chunk of stream) {
       const delta = chunk.choices?.[0]?.delta?.content;
       if (delta) {
-        process.stdout.write(scrubber ? scrubber.restore(delta) : delta);
+        const text = restorer.push(delta);
+        if (text) process.stdout.write(text);
       }
     }
+    const tail = restorer.flush();
+    if (tail) process.stdout.write(tail);
     process.stdout.write("\n");
     return;
   }
