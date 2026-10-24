@@ -186,6 +186,31 @@ function deriveDeterministicPrime(seedHex: string, label: string): bigint {
   }
 }
 
+/**
+ * Production issuers set CREDITS_ISSUER_RSA_PQ="<p hex>:<q hex>" (two 1024-bit
+ * primes, giving a 2048-bit modulus). Without it, a 1024-bit key is derived
+ * from the seed, which is only suitable for tests and local development.
+ */
+function readEnvIssuerPrimes(): { p: bigint; q: bigint } | null {
+  const raw =
+    typeof process !== "undefined" ? process.env?.CREDITS_ISSUER_RSA_PQ?.trim() : undefined;
+  if (!raw) return null;
+  const [pHex, qHex] = raw.split(":");
+  if (!pHex || !qHex) throw new Error("CREDITS_ISSUER_RSA_PQ must be <p hex>:<q hex>");
+  const p = BigInt("0x" + cleanHex(pHex));
+  const q = BigInt("0x" + cleanHex(qHex));
+  if (
+    p === q ||
+    !isCoprimeToAllExponents(p - ONE) ||
+    !isCoprimeToAllExponents(q - ONE) ||
+    !isProbablePrime(p) ||
+    !isProbablePrime(q)
+  ) {
+    throw new Error("CREDITS_ISSUER_RSA_PQ is not a valid prime pair for the credit exponents");
+  }
+  return { p, q };
+}
+
 function deriveFullIssuerKey(seedHex: string): {
   n: string;
   e: string;
@@ -193,11 +218,13 @@ function deriveFullIssuerKey(seedHex: string): {
   dByDenom: Record<number, string>;
 } {
   const normalizedSeed = cleanHex(seedHex);
-  const cached = keyCache.get(normalizedSeed);
+  const envPrimes = readEnvIssuerPrimes();
+  const cacheKey = envPrimes ? "env:CREDITS_ISSUER_RSA_PQ" : normalizedSeed;
+  const cached = keyCache.get(cacheKey);
   if (cached) return cached;
 
-  const p = deriveDeterministicPrime(normalizedSeed, "p");
-  let q = deriveDeterministicPrime(normalizedSeed, "q");
+  const p = envPrimes ? envPrimes.p : deriveDeterministicPrime(normalizedSeed, "p");
+  let q = envPrimes ? envPrimes.q : deriveDeterministicPrime(normalizedSeed, "q");
   while (q === p) {
     q += TWO;
     while (!isCoprimeToAllExponents(q - ONE) || !isProbablePrime(q)) {
@@ -220,7 +247,7 @@ function deriveFullIssuerKey(seedHex: string): {
     d: bigIntToHex(d),
     dByDenom,
   };
-  keyCache.set(normalizedSeed, key);
+  keyCache.set(cacheKey, key);
   return key;
 }
 

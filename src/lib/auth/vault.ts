@@ -4,6 +4,7 @@ import { hkdf } from "@noble/hashes/hkdf.js";
 import { pbkdf2 } from "@noble/hashes/pbkdf2.js";
 import { sha256, sha384, sha512 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
+import { wordlist as bip39EnglishWordlist } from "@scure/bip39/wordlists/english";
 
 export const VAULT_STORAGE_KEY = "drouter.zkvault.v1";
 
@@ -13,45 +14,11 @@ export const VAULT_STORAGE_KEY = "drouter.zkvault.v1";
 export const VAULT_PBKDF2_ITERATIONS = 210_000;
 
 /**
- * Built-in 256-word wordlist (8 bits of entropy per word).
- * Note: A 6-word passphrase from a 256-word list carries 48 bits of raw selection entropy
- * (8 bits/word), which is stretched with 210,000 rounds of PBKDF2-HMAC-SHA-512.
- * Use 10+ words (80+ bits) for high-value offline archives.
+ * BIP39 English wordlist (2,048 words, 11 bits per word). A 6-word passphrase
+ * carries about 66 bits of selection entropy, stretched with 210,000 rounds of
+ * PBKDF2-HMAC-SHA-512.
  */
-export const VAULT_WORDLIST: readonly string[] = [
-  "abacus", "admiral", "agate", "alchemy", "almanac", "amber", "amethyst", "anchor",
-  "anemone", "anvil", "aperture", "apogee", "aqueduct", "arbor", "archive", "argon",
-  "armada", "arrow", "artifact", "aspen", "astrolabe", "atlas", "atoll", "aurora",
-  "avalanche", "axiom", "azalea", "azimuth", "badger", "ballast", "alsam", "balsa",
-  "banister", "baritone", "basalt", "bastion", "beacon", "bellows", "beryl", "bison",
-  "bitumen", "blizzard", "bobcat", "bolide", "bonfire", "boulder", "bramble", "breaker",
-  "brigade", "brimstone", "bronze", "buckler", "bulwark", "burrow", "buttress", "caboose",
-  "cadence", "cairn", "caliper", "calyx", "camber", "canopy", "canton", "canyon",
-  "capstan", "caravan", "caravel", "carbon", "cardinal", "caribou", "cascade", "cassette",
-  "catalyst", "cathedral", "cauldron", "cavern", "cedar", "celadon", "cenotaph", "centaur",
-  "ceramic", "chalice", "chamber", "chamois", "channel", "chariot", "charter", "chasm",
-  "chevron", "chimera", "chisel", "chronicle", "cinder", "cipher", "cirrus", "citadel",
-  "clarin", "cleaver", "clement", "cloister", "cobalt", "cobble", "codex", "coffer",
-  "colossus", "column", "comet", "compass", "conduit", "conifer", "console", "copper",
-  "coral", "cordial", "coronet", "corsair", "cortex", "corvette", "cosmos", "cougar",
-  "covenant", "crater", "crenel", "crescent", "cricket", "crimson", "crucible", "crystal",
-  "culvert", "cumulus", "cupola", "curator", "current", "cutlass", "cyclone", "cypress",
-  "dagger", "dahlia", "damask", "dapper", "daybreak", "decagon", "delta", "demijohn",
-  "derrick", "desert", "diagram", "diadem", "diamond", "diopside", "diorama", "dolphin",
-  "dolmen", "domino", "dormer", "doublet", "dragon", "drapery", "dredger", "driftwood",
-  "droplet", "drumlin", "dynamo", "eclipse", "edifice", "egret", "eider", "electron",
-  "element", "elixir", "embank", "emblem", "emerald", "emery", "empidon", "enclave",
-  "endive", "engine", "enigma", "ensign", "entropy", "epaulet", "equinox", "ermine",
-  "estuary", "etching", "eucalypt", "excalibur", "exodus", "falcon", "fathom", "feldspar",
-  "fennel", "ferrule", "filament", "filigree", "finial", "fissure", "fjord", "flagon",
-  "flannel", "flicker", "flint", "flotilla", "fluorite", "flywheel", "foliage", "forage",
-  "fortress", "fossil", "foundry", "fountain", "foxglove", "fractal", "fragment", "fresco",
-  "frigate", "frontier", "fulcrum", "fumarole", "furnace", "fuselage", "gabbro", "galleon",
-  "gallery", "gambit", "gannet", "garnet", "garrison", "gazelle", "gazebo", "geode",
-  "geyser", "glacier", "glider", "glimmer", "granite", "graphite", "griffin", "grotto",
-  "guillemot", "gyroscope", "halberd", "halcyon", "halite", "halyard", "hammer", "harbor",
-  "harrow", "harvest", "hawthorn", "hearth", "heather", "hedgehog", "ashima", "heliotrope",
-] as const;
+export const VAULT_WORDLIST: readonly string[] = bip39EnglishWordlist;
 
 export interface VaultIdentity {
   vaultId: string;
@@ -170,7 +137,7 @@ function deriveVaultIdFromVaultKey(vaultKeyBytes: Uint8Array): string {
   const derived = hkdf(sha384, vaultKeyBytes, VAULT_PBKDF2_SALT, utf8ToBytes("drouter/v1/vault-id"), 32);
   const digest = sha256(derived);
   derived.fill(0);
-  return `zk-${bytesToHex(digest).slice(0, 10)}`;
+  return `vault-${bytesToHex(digest).slice(0, 10)}`;
 }
 
 /**
@@ -181,11 +148,12 @@ export function generatePassphrase(wordCount = 6): string {
     throw new Error("wordCount must be a finite number");
   }
   const count = Math.max(4, Math.min(24, Math.floor(wordCount)));
-  const randomBytes = new Uint8Array(count);
+  // The wordlist length is a power of two, so masking 16-bit values is unbiased.
+  const randomBytes = new Uint16Array(count);
   globalThis.crypto.getRandomValues(randomBytes);
   const words: string[] = [];
   for (let i = 0; i < count; i++) {
-    words.push(VAULT_WORDLIST[randomBytes[i] % VAULT_WORDLIST.length]);
+    words.push(VAULT_WORDLIST[randomBytes[i] & (VAULT_WORDLIST.length - 1)]);
   }
   randomBytes.fill(0);
   return words.join(" ");

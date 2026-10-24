@@ -34,9 +34,20 @@ Scope: `src/lib/{auth,threshold,ohttp,forensics,credits,freeze,symmetry,stylomet
 ## 2. What This Code Does NOT Protect Against
 
 1. **Compromised client device or browser XSS**: All keys, passphrases, scrubbers, and plaintext prompts live in browser JavaScript memory. A malicious browser extension, XSS payload, or OS-level malware can read every prompt and key directly.
-2. **Low-entropy 6-word passphrases against dedicated offline GPU clusters**: A 6-word passphrase from the 256-word list has 48 bits of raw entropy. Even with 210,000 rounds of PBKDF2-HMAC-SHA512 and a static salt, an attacker who captures an exported `.drouter-vault.json` file can mount an offline dictionary/brute-force attack unless the user chooses a longer passphrase (10+ words).
+2. **Offline guessing of vault passphrases**: Passphrases are 6 words from the 2,048-word BIP39 list (about 66 bits), stretched with 210,000 rounds of PBKDF2-HMAC-SHA512. The salt is static so that unlocking works on a new device without a file; at 66 bits this does not make offline guessing practical, but users protecting high-value archives should still choose 8 or more words.
 3. **Regex-based PII/secret scrubbing misses novel or unstructured context**: `scrubber.ts`, `symmetry/homomorphism.ts`, and `risk/analyzer.ts` use deterministic regular expressions and dictionaries. They do not run a local NER or LLM model and will miss paraphrased secrets, uncommon names not in `customTerms`, or domain-specific confidential facts.
-4. **Demo RSA-1024 blind credit modulus**: `credits/blind.ts` uses a 1024-bit RSA modulus so deterministic key generation runs quickly in pure JavaScript. A 1024-bit RSA modulus is below the 2048-bit / 3072-bit production floor.
+4. **Blind credit key size outside production**: Production loads a 2048-bit issuer key from `CREDITS_ISSUER_RSA_PQ`. When that variable is unset (tests, local development), `credits/blind.ts` falls back to a seed-derived 1024-bit key, which is below the production floor.
 5. **Deterministic demo seeds in simulated verifiers and gateways**: Modules such as `getDefaultOhttpGatewayKeypair`, `authorizeThresholdKeyRelease`, and `deriveProviderSigningKeypair` derive keys from hardcoded demo strings when no external HSM or remote verifier service is configured. Anyone reading the source code can recompute those demo keys.
 6. **Tinfoil router sidecars and 256K context limit**: When routing live traffic to Tinfoil (`router-0.tinfoil.sh`), the router enclave runs an acceptable-use classifier sidecar (`gpt-oss-safeguard-120b` with `kimi-k3` review) that reports policy violations to `https://api.tinfoil.sh`, plus a usage reporter. In addition, the live Kimi K3 enclave runs with `max-model-len` 262,144 tokens, not 1M.
 7. **In-memory state resets on serverless cold starts**: When `MONGODB_URI` is not set or unreachable, `credits/ledger.ts` and `freeze/store.ts` fall back to process memory, which resets across serverless cold starts.
+
+## 3. Follow-up Fixes After Publication
+
+| Area | Change | Evidence |
+|---|---|---|
+| Vault passphrases | Moved from a 256-word list (48 bits for 6 words) to the 2,048-word BIP39 English list (about 66 bits), with unbiased 11-bit word selection. Vault IDs now use a `vault-` prefix instead of `zk-`. | `src/lib/auth/vault.ts`, `tests/auth/auth.test.ts` |
+| Blind credits | Production issuer key is now 2,048-bit RSA from `CREDITS_ISSUER_RSA_PQ`, validated at load. Seeded 1,024-bit keys remain only as the test and local fallback. | `src/lib/credits/blind.ts`, `tests/credits/credits.test.ts` |
+| CLI checks | `drouter-cli.mjs verify` no longer hardcodes C6 and C7 as passing. C6 reads the live Arc registry; C3, C5 and C7 use the same labels as the web client. | `scripts/drouter-cli.mjs` |
+| Verifier quorum | The console labels the 5-of-7 quorum as simulated, because all verifier keys are derived from one demo server seed. | `src/components/session.ts` |
+| Secret scanning | AWS-format test fixtures are now built at runtime so they no longer match provider patterns. No real credential was ever committed. | `tests/privacy/privacy.test.ts`, `tests/risk/risk.test.ts` |
+| MongoDB | The application user has `readWrite` on the `drouter` database only. The `0.0.0.0/0` access list remains because Vercel functions have no fixed egress IPs. | Atlas `connectionStatus` |

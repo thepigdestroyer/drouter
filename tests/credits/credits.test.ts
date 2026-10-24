@@ -1,3 +1,4 @@
+import { generatePrimeSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   blindToken,
@@ -51,6 +52,32 @@ describe("Subsystem 1: Unlinkable Blind-Signed Credits (Spec §7)", () => {
       denomination,
     };
     expect(verifyTokenSignature(token, pub)).toBe(true);
+  });
+
+  it("uses a 2048-bit issuer key from CREDITS_ISSUER_RSA_PQ and completes the blind round-trip", () => {
+    const exps = [BigInt(65537), BigInt(65539), BigInt(65543)];
+    const usable = (p: bigint) => exps.every((e) => (p - BigInt(1)) % e !== BigInt(0));
+    let p = BigInt(0);
+    let q = BigInt(0);
+    for (;;) {
+      p = generatePrimeSync(1024, { bigint: true });
+      q = generatePrimeSync(1024, { bigint: true });
+      if (p !== q && usable(p) && usable(q) && (p * q).toString(2).length === 2048) break;
+    }
+    process.env.CREDITS_ISSUER_RSA_PQ = `${p.toString(16)}:${q.toString(16)}`;
+    try {
+      const pub = getPublicKey(TEST_SEED);
+      expect(BigInt("0x" + pub.n).toString(2).length).toBe(2048);
+      for (const denomination of [1, 5, 20]) {
+        const tokenHex = "a1b2c3d4".repeat(8);
+        const { blindedHex, rHex } = blindToken(tokenHex, denomination, pub);
+        const signature = unblindSignature(signBlinded(blindedHex, denomination, TEST_SEED), rHex, pub);
+        expect(verifyTokenSignature({ token: tokenHex, signature, denomination }, pub)).toBe(true);
+        expect(verifyTokenSignature({ token: tokenHex, signature, denomination: denomination === 1 ? 20 : 1 }, pub)).toBe(false);
+      }
+    } finally {
+      delete process.env.CREDITS_ISSUER_RSA_PQ;
+    }
   });
 
   it("rejects forged signatures and denomination tampering", () => {

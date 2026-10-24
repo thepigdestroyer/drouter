@@ -82,7 +82,7 @@ export async function registryAndQuorumCheck(node: NodeRecord, registry: Registr
       if (ticket) {
         const sigs = ticket.signatures?.length ?? 0;
         quorumOk = sigs >= threshold && ticket.status !== "suspended" && ticket.weight > 0;
-        quorumDetail = ` · ${sigs}/${total} verifier quorum signatures (${ticket.status}, weight ${(ticket.weight / 100).toFixed(0)}%)`;
+        quorumDetail = ` · simulated quorum: ${sigs}/${total} verifier signatures, all keys held by our demo server (${ticket.status}, weight ${(ticket.weight / 100).toFixed(0)}%)`;
       }
     }
   } catch {
@@ -92,7 +92,7 @@ export async function registryAndQuorumCheck(node: NodeRecord, registry: Registr
   if (registry.source !== "arc") {
     return {
       id: "C6",
-      label: "Registry & quorum admission",
+      label: "Registry admission",
       status: quorumDetail && quorumOk ? "pass" : "skip",
       detail: `Built-in node list${quorumDetail}`,
     };
@@ -101,7 +101,7 @@ export async function registryAndQuorumCheck(node: NodeRecord, registry: Registr
   const ok = arcOk && quorumOk;
   return {
     id: "C6",
-    label: "Registry & quorum admission",
+    label: "Registry admission",
     status: ok ? "pass" : "fail",
     detail: ok
       ? `Arc staked (${node.stake} USDC by ${node.operator.slice(0, 10)}…)${quorumDetail}`

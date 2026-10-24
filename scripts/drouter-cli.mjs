@@ -19,30 +19,50 @@ import {
 } from "../src/lib/gateway/harness-config.ts";
 import { createSessionScrubber } from "../src/lib/privacy/scrubber.ts";
 
-function checksFromDocument(doc, gpuModelInfo) {
+function registryCheck(registry) {
+  if (!registry || !Array.isArray(registry.nodes)) {
+    return { id: "C6", label: "Registry admission", status: "skip", detail: "Arc registry unreachable" };
+  }
+  const node = registry.nodes.find((n) => n.kind === "tinfoil");
+  if (!node) {
+    return { id: "C6", label: "Registry admission", status: "fail", detail: "Tinfoil router is not in the registry" };
+  }
+  const onChain = registry.source === "arc";
+  const ok = onChain && node.status === "active" && Number(node.stake) > 0;
+  return {
+    id: "C6",
+    label: "Registry admission",
+    status: !onChain ? "skip" : ok ? "pass" : "fail",
+    detail: onChain
+      ? `${node.status} on Circle Arc testnet registry ${registry.address?.slice(0, 10)}… with ${node.stake} USDC stake`
+      : "Built-in node list only (Arc registry not read)",
+  };
+}
+
+function checksFromDocument(doc, gpuModelInfo, registry) {
   const s = doc.steps || {};
   const st = (step) => (!step ? "skip" : step.status === "success" ? "pass" : step.status === "failed" ? "fail" : "skip");
   return [
     { id: "C1", label: "Hardware signature chain", status: st(s.verifyEnclave), detail: `AMD SEV-SNP report verified to AMD root (${doc.enclaveMeasurement?.measurement?.type ?? "sev-snp"})` },
     { id: "C2", label: "Approved software", status: st(s.verifyCode), detail: `Signed release ${doc.releaseTag ?? doc.releaseDigest?.slice(0, 12)} of ${doc.configRepo} in Sigstore Rekor` },
-    { id: "C3", label: "Fresh & bound to session", status: st(s.verifyCertificate), detail: "HPKE key committed in attestation; request body encrypted to it" },
+    { id: "C3", label: "HPKE key bound to enclave report", status: st(s.verifyCertificate), detail: "HPKE key committed in attestation; request body encrypted to it" },
     { id: "C4", label: "Running code = released code", status: st(s.compareMeasurements), detail: "Launch measurement matches signed release predicate" },
     {
       id: "C5",
-      label: "GPUs in confidential mode",
+      label: "Router-attested confidential GPU pool",
       status: gpuModelInfo ? "pass" : "skip",
       detail: gpuModelInfo
-        ? `${gpuModelInfo.vmShape?.gpus ?? 8}× confidential GPUs attested (${gpuModelInfo.healthyHosts}/${gpuModelInfo.configuredHosts} hosts healthy, VLLM_DISABLE_UVA=1)`
-        : "Router enclave attests upstream GPU model enclaves",
+        ? `${gpuModelInfo.vmShape?.gpus ?? "unknown number of"} confidential GPUs per host listed by the attested router (${gpuModelInfo.healthyHosts}/${gpuModelInfo.configuredHosts} hosts healthy)`
+        : "Model enclave table unavailable",
     },
-    { id: "C6", label: "Registry & quorum admission", status: "pass", detail: "Registered on Circle Arc Testnet + 5-of-7 verifier quorum" },
+    registryCheck(registry),
     {
       id: "C7",
-      label: "Committed model weights",
-      status: "pass",
+      label: "Manifest-pinned model & dm-verity root",
+      status: gpuModelInfo ? "pass" : "skip",
       detail: gpuModelInfo
         ? `Pinned ${gpuModelInfo.weightRepoCommit} (${gpuModelInfo.weightMpkHash?.slice(0, 16)}…) on dm-verity root ${gpuModelInfo.dmVerityRootHash?.slice(0, 16)}…`
-        : "Model enforced via X-Tinfoil-Model inside attested enclave",
+        : "Model enclave table unavailable",
     },
   ];
 }
@@ -130,8 +150,8 @@ export function createStreamRestorer(scrubber) {
   };
 }
 
-export function formatChecklistReport(doc, gpuModelInfo) {
-  const checks = checksFromDocument(doc, gpuModelInfo);
+export function formatChecklistReport(doc, gpuModelInfo, registry) {
+  const checks = checksFromDocument(doc, gpuModelInfo, registry);
   const lines = [
     `=== dRouter Zero-Trust Enclave Attestation ===`,
     `Enclave Host      : ${doc.enclaveHost}`,
@@ -147,7 +167,7 @@ export function formatChecklistReport(doc, gpuModelInfo) {
 
   for (const c of checks) {
     const badge = c.status === "pass" ? "[PASS]" : c.status === "fail" ? "[FAIL]" : "[SKIP]";
-    lines.push(`  ${badge} ${c.id} ${c.label} — ${c.detail}`);
+    lines.push(`  ${badge} ${c.id} ${c.label}: ${c.detail}`);
   }
   return lines.join("\n");
 }
@@ -389,13 +409,14 @@ async function runCli() {
 
   if (args.command === "verify") {
     const client = createZeroTrustClient(args.upstream);
-    const [, matrix] = await Promise.all([
+    const [, matrix, registry] = await Promise.all([
       client.ready(),
       fetch(`${args.upstream}/api/relay/enclave-matrix`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+      fetch(`${args.upstream}/api/registry`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
     ]);
     const doc = await client.getVerificationDocument();
     const gpuModelInfo = matrix?.models?.[args.model] ?? matrix?.models?.["kimi-k3"];
-    console.log(formatChecklistReport(doc, gpuModelInfo));
+    console.log(formatChecklistReport(doc, gpuModelInfo, registry));
     if (!doc.securityVerified) {
       process.exit(1);
     }
@@ -452,7 +473,7 @@ async function runCli() {
 
   console.log(
     [
-      "dRouter CLI — Terminal & Coding-Harness Enclave Helper",
+      "dRouter CLI: terminal and coding-harness enclave helper",
       "",
       "Commands:",
       "  node scripts/drouter-cli.mjs verify [--upstream https://drouter-demo.vercel.app]",

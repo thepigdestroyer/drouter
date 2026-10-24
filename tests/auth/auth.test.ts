@@ -20,8 +20,8 @@ describe("dRouter Zero-Knowledge Client Vault", () => {
     wipeLocalVault();
   });
 
-  it("generates a 6-word high-entropy passphrase from the 256-word list by default", () => {
-    expect(VAULT_WORDLIST.length).toBe(256);
+  it("generates a 6-word high-entropy passphrase from the 2048-word BIP39 list by default", () => {
+    expect(VAULT_WORDLIST.length).toBe(2048);
     const p1 = generatePassphrase();
     const p2 = generatePassphrase();
     const words1 = p1.split(" ");
@@ -38,7 +38,7 @@ describe("dRouter Zero-Knowledge Client Vault", () => {
     const idB = deriveVaultIdentity("aurora cobalt falcon glacier monolith ember");
 
     expect(idA).toEqual(idNormalized);
-    expect(idA.vaultId).toMatch(/^zk-[0-9a-f]{10}$/);
+    expect(idA.vaultId).toMatch(/^vault-[0-9a-f]{10}$/);
     expect(idA.ed25519PublicKeyHex).toMatch(/^[0-9a-f]{64}$/);
     expect(idA.ed25519PrivateKeyHex).toMatch(/^[0-9a-f]{64}$/);
     expect(idA.x25519PublicKeyHex).toMatch(/^[0-9a-f]{64}$/);

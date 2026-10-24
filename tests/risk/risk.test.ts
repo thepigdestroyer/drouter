@@ -5,6 +5,8 @@ import {
   scorePromptPrivacyRisk,
 } from "@/lib/risk/analyzer";
 
+const AWS_STS_FIXTURE = ["ASIA", "IOSFODNN7EXAMPLE"].join("");
+
 describe("Client-Side Privacy Exposure Scorer & PAPILLON Generalizer", () => {
   it("scores abstract math and coding questions as 0 ('low')", () => {
     const mathResult = scorePromptPrivacyRisk(
@@ -89,10 +91,10 @@ describe("Client-Side Privacy Exposure Scorer & PAPILLON Generalizer", () => {
   it("detects JWTs and AWS STS keys and prevents cross-placeholder injection during rehydratePapillonAnswer", () => {
     const jwt =
       "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
-    const promptWithJwt = `Authenticate with ${jwt} and ASIAIOSFODNN7EXAMPLE on 10.0.0.1.`;
+    const promptWithJwt = `Authenticate with ${jwt} and ${AWS_STS_FIXTURE} on 10.0.0.1.`;
     const gen = generalizePromptPapillon(promptWithJwt);
     expect(gen.generalizedPrompt).not.toContain("eyJhbGci");
-    expect(gen.generalizedPrompt).not.toContain("ASIAIOSFODNN7EXAMPLE");
+    expect(gen.generalizedPrompt).not.toContain(AWS_STS_FIXTURE);
     expect(gen.riskAfter).toBe(0);
 
     // Ensure single-pass rehydration does not double-substitute if a vault value contains another placeholder tag

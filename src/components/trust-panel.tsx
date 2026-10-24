@@ -7,9 +7,9 @@ const DEFAULT_CHECK_LABELS: Record<string, string> = {
   C2: "Approved open-source release",
   C3: "Session key bound to hardware",
   C4: "Running code matches release",
-  C5: "GPUs in confidential mode",
-  C6: "Registry and quorum admission",
-  C7: "Committed model weights",
+  C5: "Router-attested confidential GPUs",
+  C6: "Registry admission",
+  C7: "Pinned model and disk image",
 };
 
 export function CheckList({

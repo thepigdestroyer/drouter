@@ -480,7 +480,7 @@ export default function LoginPage() {
                     type="text"
                     value={existingPassphrase}
                     onChange={(e) => setExistingPassphrase(e.target.value)}
-                    placeholder="e.g. aurora cobalt falcon glacier monolith quartz"
+                    placeholder="e.g. orbit maple cable harvest velvet lunar"
                     className="ep-input font-mono"
                   />
                 </div>
@@ -714,7 +714,7 @@ export default function LoginPage() {
             {/* Technical KDF note */}
             <div className="border-t border-rule pt-4 text-xs text-ink-3 flex flex-wrap items-center justify-between gap-2">
               <span>
-                Key derivation: PBKDF2-HMAC-SHA-512 (10,000 rounds) + HKDF-SHA-384 (AES-256-GCM, Ed25519, X25519).
+                Key derivation: PBKDF2-HMAC-SHA-512 (210,000 rounds) + HKDF-SHA-384 (AES-256-GCM, Ed25519, X25519).
               </span>
               <Link href="/" className="ep-link">
                 Return to console

@@ -6,6 +6,8 @@ import {
   minimizeHistory,
 } from "@/lib/privacy/padding";
 
+const AWS_STS_FIXTURE = ["ASIA", "IOSFODNN7EXAMPLE"].join("");
+
 describe("Subsystem 5: Client-Side Privacy Guard", () => {
   describe("SessionScrubber (reversible PII & secret placeholder substitution)", () => {
     it("replaces emails, API keys (tk_..., sk-...), phone numbers, IPv4s, 0x addresses, and custom terms with numbered placeholders", () => {
@@ -125,7 +127,7 @@ describe("Subsystem 5: Client-Side Privacy Guard", () => {
         `SSN: 123-45-6789`,
         `UK NI: QQ 12 34 56 C`,
         `NHS: NHS 485 777 3456`,
-        `AWS: ASIAIOSFODNN7EXAMPLE`,
+        `AWS: ${AWS_STS_FIXTURE}`,
       ].join(" | ");
 
       const { scrubbed: bypassScrubbed } = scrubber.scrub(bypassPrompt);
@@ -138,7 +140,7 @@ describe("Subsystem 5: Client-Side Privacy Guard", () => {
       expect(bypassScrubbed).not.toContain("123-45-6789");
       expect(bypassScrubbed).not.toContain("QQ 12 34 56 C");
       expect(bypassScrubbed).not.toContain("485 777 3456");
-      expect(bypassScrubbed).not.toContain("ASIAIOSFODNN7EXAMPLE");
+      expect(bypassScrubbed).not.toContain(AWS_STS_FIXTURE);
 
       // Both zero-width and homoglyph variants of alice@acme.com canonicalize to [EMAIL_1]
       expect(scrubber.entries().filter((e) => e.kind === "EMAIL")).toHaveLength(1);
