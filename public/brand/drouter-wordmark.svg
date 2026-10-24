@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 340 72" width="680" height="144" fill="none">
-  <rect width="340" height="72" rx="8" fill="#f3f1ec"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 352 72" width="704" height="144" fill="none">
+  <rect width="352" height="72" rx="8" fill="#f3f1ec"/>
   <!-- Mark (56x56 at x=8, y=8) -->
   <g transform="translate(8, 8) scale(0.875)">
     <rect x="3" y="3" width="58" height="58" rx="13" fill="#f3f1ec" stroke="#151515" stroke-width="2.5"/>
@@ -11,10 +11,10 @@
   </g>
 
   <!-- Wordmark -->
-  <text x="80" y="47" fill="#151515" font-family="'Iowan Old Style', 'Charter', 'Palatino', Georgia, serif" font-size="42" font-weight="600" letter-spacing="-0.8">deRoute</text>
+  <text x="80" y="47" fill="#151515" font-family="'Iowan Old Style', 'Charter', 'Palatino', Georgia, serif" font-size="42" font-weight="600" letter-spacing="-0.8" textLength="158" lengthAdjust="spacing">deRoute</text>
 
   <!-- Subtle vertical rule and mono tag -->
-  <line x1="238" y1="21" x2="238" y2="51" stroke="#d6d2c8" stroke-width="1.5"/>
-  <text x="250" y="33" fill="#595752" font-family="'SF Mono', Menlo, monospace" font-size="9.5" letter-spacing="1.2">PRIVATE</text>
-  <text x="250" y="47" fill="#595752" font-family="'SF Mono', Menlo, monospace" font-size="9.5" letter-spacing="1.2">AI ROUTE</text>
+  <line x1="250" y1="21" x2="250" y2="51" stroke="#d6d2c8" stroke-width="1.5"/>
+  <text x="262" y="33" fill="#595752" font-family="'SF Mono', Menlo, monospace" font-size="9.5" letter-spacing="1.2">PRIVATE</text>
+  <text x="262" y="47" fill="#595752" font-family="'SF Mono', Menlo, monospace" font-size="9.5" letter-spacing="1.2">AI ROUTE</text>
 </svg>

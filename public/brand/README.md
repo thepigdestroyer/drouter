@@ -28,3 +28,10 @@ Visual system for **deRoute** (short for decentralized-encrypted route), a priva
   - `drouter-mark.svg`: `16 x 16 px` minimum for digital UI and favicons.
   - `drouter-wordmark.svg`: `140 px` minimum width so the monospace tag remains legible (below `140 px`, use `drouter-mark.svg` alone).
 - **Stroke & color discipline**: Never add gradients, drop shadows, glows, or a second orange accent to any composition.
+
+## PNG exports
+
+- `drouter-mark.png`: 1024 x 1024, transparent outside the tile.
+- `drouter-wordmark.png`: 2112 x 432 (3x of the 704 x 144 SVG), transparent corners.
+
+Re-export from the SVGs with headless Chrome if either SVG changes.
