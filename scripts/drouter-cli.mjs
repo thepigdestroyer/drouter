@@ -9,15 +9,25 @@
  *   node scripts/drouter-cli.mjs config [--upstream https://drouter-demo.vercel.app]
  */
 
-import http from "node:http";
 import { pathToFileURL } from "node:url";
-import { TinfoilAI } from "tinfoil";
 import {
-  SUPPORTED_GATEWAY_MODELS,
-  buildHarnessConfigs,
-  parseGatewayChatRequest,
-} from "../src/lib/gateway/harness-config.ts";
-import { createSessionScrubber } from "../src/lib/privacy/scrubber.ts";
+  DEFAULT_MODEL,
+  DEFAULT_PORT,
+  DEFAULT_UPSTREAM,
+  PlaceholderVault,
+  createProxyServer,
+  createStreamRestorer,
+  createZeroTrustClient,
+} from "./drouter-proxy.mjs";
+
+export {
+  DEFAULT_MODEL,
+  DEFAULT_PORT,
+  DEFAULT_UPSTREAM,
+  createProxyServer as createZeroTrustProxyServer,
+  createStreamRestorer,
+  createZeroTrustClient,
+};
 
 function registryCheck(registry) {
   if (!registry || !Array.isArray(registry.nodes)) {
@@ -43,10 +53,30 @@ function checksFromDocument(doc, gpuModelInfo, registry) {
   const s = doc.steps || {};
   const st = (step) => (!step ? "skip" : step.status === "success" ? "pass" : step.status === "failed" ? "fail" : "skip");
   return [
-    { id: "C1", label: "Hardware signature chain", status: st(s.verifyEnclave), detail: `AMD SEV-SNP report verified to AMD root (${doc.enclaveMeasurement?.measurement?.type ?? "sev-snp"})` },
-    { id: "C2", label: "Approved software", status: st(s.verifyCode), detail: `Signed release ${doc.releaseTag ?? doc.releaseDigest?.slice(0, 12)} of ${doc.configRepo} in Sigstore Rekor` },
-    { id: "C3", label: "HPKE key bound to enclave report", status: st(s.verifyCertificate), detail: "HPKE key committed in attestation; request body encrypted to it" },
-    { id: "C4", label: "Running code = released code", status: st(s.compareMeasurements), detail: "Launch measurement matches signed release predicate" },
+    {
+      id: "C1",
+      label: "Hardware signature chain",
+      status: st(s.verifyEnclave),
+      detail: `AMD SEV-SNP report verified to AMD root (${doc.enclaveMeasurement?.measurement?.type ?? "sev-snp"})`,
+    },
+    {
+      id: "C2",
+      label: "Approved software",
+      status: st(s.verifyCode),
+      detail: `Signed release ${doc.releaseTag ?? doc.releaseDigest?.slice(0, 12)} of ${doc.configRepo} in Sigstore Rekor`,
+    },
+    {
+      id: "C3",
+      label: "HPKE key bound to enclave report",
+      status: st(s.verifyCertificate),
+      detail: "HPKE key committed in attestation; request body encrypted to it",
+    },
+    {
+      id: "C4",
+      label: "Running code = released code",
+      status: st(s.compareMeasurements),
+      detail: "Launch measurement matches signed release predicate",
+    },
     {
       id: "C5",
       label: "Router-attested confidential GPU pool",
@@ -67,9 +97,52 @@ function checksFromDocument(doc, gpuModelInfo, registry) {
   ];
 }
 
-export const DEFAULT_UPSTREAM = "https://drouter-demo.vercel.app";
-export const DEFAULT_PORT = 4141;
-export const DEFAULT_MODEL = "kimi-k3";
+export function buildCliHarnessConfigs(baseUrl) {
+  const cleanBase = (baseUrl || DEFAULT_UPSTREAM).replace(/\/+$/, "");
+  const gatewayUrl = `${cleanBase}/api/v1`;
+
+  const opencodeConfig = {
+    $schema: "https://opencode.ai/config.json",
+    provider: {
+      drouter: {
+        npm: "@ai-sdk/openai-compatible",
+        name: "dRouter Attested Enclave Gateway",
+        options: {
+          baseURL: gatewayUrl,
+          apiKey: "drouter-anonymous",
+          _authNote:
+            "any apiKey value works, auth is the blind credit header (x-drouter-credit) with per-IP free-tier fallback",
+          headers: {
+            "x-drouter-credit": "${DROUTER_CREDIT_TOKEN}",
+          },
+        },
+        models: {
+          "kimi-k3": { name: "Kimi K3 (Attested Enclave)" },
+          "glm-5-3": { name: "GLM-5.3 (Attested Enclave)" },
+          "deepseek-v4-1-flash": { name: "DeepSeek V4.1 Flash (Attested Enclave)" },
+          "gpt-oss-120b": { name: "GPT-OSS 120B (Attested Enclave)" },
+          "llama3-3-70b": { name: "Llama 3.3 70B (Attested Enclave)" },
+          "gemma4-31b": { name: "Gemma 4 31B (Attested Enclave)" },
+        },
+      },
+    },
+    model: "drouter/kimi-k3",
+  };
+
+  return {
+    opencodeJson: JSON.stringify(opencodeConfig, null, 2),
+    curlCommand: [
+      `# Note: any Bearer apiKey value works (required by OpenAI SDKs); auth is the blind credit header (x-drouter-credit)`,
+      `curl -sS ${gatewayUrl}/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer drouter-anonymous" -H "x-drouter-credit: \${DROUTER_CREDIT_TOKEN:-}" -d '{"model":"kimi-k3","messages":[{"role":"user","content":"Verify enclave connectivity in one sentence."}]}'`,
+    ].join("\n"),
+    openaiEnvExports: [
+      `# Any OPENAI_API_KEY value works; auth is the blind credit header (x-drouter-credit) or per-IP free tier`,
+      `export OPENAI_BASE_URL="${gatewayUrl}"`,
+      `export OPENAI_API_KEY="drouter-anonymous"`,
+    ].join("\n"),
+    localProxyCommand: `node scripts/drouter-cli.mjs proxy --port 4141 --upstream ${cleanBase}`,
+  };
+}
 
 export function parseDrouterCliArgs(argv = process.argv.slice(2)) {
   let command = "help";
@@ -78,12 +151,13 @@ export function parseDrouterCliArgs(argv = process.argv.slice(2)) {
   let upstream = process.env.DROUTER_UPSTREAM || DEFAULT_UPSTREAM;
   let port = Number(process.env.DROUTER_PROXY_PORT || DEFAULT_PORT);
   let scrubPii = true;
+  let credit = process.env.DROUTER_CREDIT || "";
 
   const positional = [];
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--help" || arg === "-h") {
-      return { command: "help", prompt, model, upstream, port, scrubPii };
+      return { command: "help", prompt, model, upstream, port, scrubPii, credit };
     } else if (arg === "--model" && argv[i + 1]) {
       model = argv[i + 1];
       i += 1;
@@ -99,6 +173,11 @@ export function parseDrouterCliArgs(argv = process.argv.slice(2)) {
       i += 1;
     } else if (arg.startsWith("--port=")) {
       port = Number(arg.slice("--port=".length));
+    } else if (arg === "--credit" && argv[i + 1]) {
+      credit = argv[i + 1];
+      i += 1;
+    } else if (arg.startsWith("--credit=")) {
+      credit = arg.slice("--credit=".length);
     } else if (arg === "--no-scrub") {
       scrubPii = false;
     } else {
@@ -112,42 +191,7 @@ export function parseDrouterCliArgs(argv = process.argv.slice(2)) {
   }
 
   upstream = upstream.replace(/\/+$/, "");
-  return { command, prompt, model, upstream, port, scrubPii };
-}
-
-export function createZeroTrustClient(upstream = DEFAULT_UPSTREAM) {
-  const cleanUpstream = upstream.replace(/\/+$/, "");
-  return new TinfoilAI({
-    bearerToken: "drouter-demo",
-    baseURL: `${cleanUpstream}/api/relay/v1/`,
-    attestationBundleURL: `${cleanUpstream}/api/relay`,
-  });
-}
-
-export function createStreamRestorer(scrubber) {
-  let pending = "";
-  return {
-    push(chunk) {
-      if (!scrubber) return chunk;
-      pending += chunk;
-      const openIdx = pending.lastIndexOf("[");
-      const closeIdx = pending.lastIndexOf("]");
-      if (openIdx !== -1 && openIdx > closeIdx && pending.length - openIdx < 24) {
-        const ready = pending.slice(0, openIdx);
-        pending = pending.slice(openIdx);
-        return scrubber.restore(ready);
-      }
-      const out = scrubber.restore(pending);
-      pending = "";
-      return out;
-    },
-    flush() {
-      if (!pending) return "";
-      const out = scrubber ? scrubber.restore(pending) : pending;
-      pending = "";
-      return out;
-    },
-  };
+  return { command, prompt, model, upstream, port, scrubPii, credit };
 }
 
 export function formatChecklistReport(doc, gpuModelInfo, registry) {
@@ -172,230 +216,11 @@ export function formatChecklistReport(doc, gpuModelInfo, registry) {
   return lines.join("\n");
 }
 
-function readJsonBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
-    req.on("end", () => {
-      try {
-        const raw = Buffer.concat(chunks).toString("utf8");
-        resolve(raw ? JSON.parse(raw) : {});
-      } catch (err) {
-        reject(err);
-      }
-    });
-    req.on("error", reject);
-  });
-}
-
-function sendJson(res, statusCode, payload, extraHeaders = {}) {
-  const body = JSON.stringify(payload);
-  res.writeHead(statusCode, {
-    "content-type": "application/json; charset=utf-8",
-    "access-control-allow-origin": "*",
-    "content-length": Buffer.byteLength(body),
-    ...extraHeaders,
-  });
-  res.end(body);
-}
-
-export function createZeroTrustProxyServer({
-  upstream = DEFAULT_UPSTREAM,
-  clientFactory,
-} = {}) {
-  const cleanUpstream = upstream.replace(/\/+$/, "");
-  const makeClient = clientFactory ?? (() => createZeroTrustClient(cleanUpstream));
-
-  let cachedClient = null;
-  let cachedDoc = null;
-
-  async function ensureVerifiedClient() {
-    if (cachedClient && cachedDoc) {
-      return { client: cachedClient, doc: cachedDoc };
-    }
-    const client = makeClient();
-    await client.ready();
-    const doc = await client.getVerificationDocument();
-    if (doc?.securityVerified === false) {
-      throw new Error("Enclave attestation failed: securityVerified is false");
-    }
-    cachedClient = client;
-    cachedDoc = doc;
-    return { client, doc };
-  }
-
-  return http.createServer(async (req, res) => {
-    const url = new URL(req.url ?? "/", "http://127.0.0.1");
-
-    if (req.method === "OPTIONS") {
-      res.writeHead(204, {
-        "access-control-allow-origin": "*",
-        "access-control-allow-headers": "Authorization, Content-Type, X-DRouter-Scrub-PII",
-        "access-control-allow-methods": "GET, POST, OPTIONS",
-      });
-      res.end();
-      return;
-    }
-
-    if (req.method === "GET" && (url.pathname === "/v1/models" || url.pathname === "/api/v1/models")) {
-      sendJson(res, 200, {
-        object: "list",
-        data: SUPPORTED_GATEWAY_MODELS.map((m) => ({
-          id: m.id,
-          object: "model",
-          created: 1792800000,
-          owned_by: m.provider,
-          enclave_attested: true,
-        })),
-      });
-      return;
-    }
-
-    if (req.method === "GET" && url.pathname === "/health") {
-      sendJson(res, 200, {
-        ok: true,
-        upstream: cleanUpstream,
-        enclaveVerified: Boolean(cachedDoc?.securityVerified),
-        enclaveHost: cachedDoc?.enclaveHost ?? null,
-      });
-      return;
-    }
-
-    if (
-      req.method === "POST" &&
-      (url.pathname === "/v1/chat/completions" || url.pathname === "/api/v1/chat/completions")
-    ) {
-      let body;
-      try {
-        body = await readJsonBody(req);
-      } catch {
-        sendJson(res, 400, {
-          error: { message: "Invalid JSON body", type: "invalid_request_error" },
-        });
-        return;
-      }
-
-      const parsed = parseGatewayChatRequest(body);
-      if (!parsed.ok) {
-        sendJson(res, 400, {
-          error: { message: parsed.error, type: "invalid_request_error" },
-        });
-        return;
-      }
-
-      const scrubber = createSessionScrubber();
-      const scrubbedMessages = parsed.messages.map((m) => ({
-        role: m.role,
-        content: scrubber.scrub(m.content).scrubbed,
-      }));
-
-      try {
-        const { client, doc } = await ensureVerifiedClient();
-        const enclaveHeaders = {
-          "X-DRouter-Attested": "true",
-          "X-DRouter-Enclave-Host": String(doc?.enclaveHost ?? ""),
-          "X-DRouter-Release": String(doc?.releaseTag || doc?.releaseDigest || ""),
-          "X-DRouter-Code-Fingerprint": String(doc?.codeFingerprint ?? ""),
-          "X-DRouter-Enclave-Fingerprint": String(doc?.enclaveFingerprint ?? ""),
-        };
-
-        if (parsed.stream) {
-          const stream = await client.chat.completions.create(
-            {
-              model: parsed.model,
-              messages: scrubbedMessages,
-              stream: true,
-              ...(parsed.temperature !== undefined ? { temperature: parsed.temperature } : {}),
-              ...(parsed.max_tokens !== undefined ? { max_tokens: parsed.max_tokens } : {}),
-            },
-            { headers: { "X-Tinfoil-Model": parsed.model } },
-          );
-
-          res.writeHead(200, {
-            "content-type": "text/event-stream; charset=utf-8",
-            "cache-control": "no-cache",
-            connection: "keep-alive",
-            "access-control-allow-origin": "*",
-            ...enclaveHeaders,
-          });
-
-          for await (const chunk of stream) {
-            if (chunk?.choices?.[0]?.delta?.content) {
-              chunk.choices[0].delta.content = scrubber.restore(
-                chunk.choices[0].delta.content,
-              );
-            }
-            res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-          }
-          res.write("data: [DONE]\n\n");
-          res.end();
-          return;
-        }
-
-        const completion = await client.chat.completions.create(
-          {
-            model: parsed.model,
-            messages: scrubbedMessages,
-            stream: false,
-            ...(parsed.temperature !== undefined ? { temperature: parsed.temperature } : {}),
-            ...(parsed.max_tokens !== undefined ? { max_tokens: parsed.max_tokens } : {}),
-          },
-          { headers: { "X-Tinfoil-Model": parsed.model } },
-        );
-
-        const choices = Array.isArray(completion?.choices)
-          ? completion.choices.map((c) => {
-              if (typeof c?.message?.content === "string") {
-                return {
-                  ...c,
-                  message: {
-                    ...c.message,
-                    content: scrubber.restore(c.message.content),
-                  },
-                };
-              }
-              return c;
-            })
-          : [];
-
-        sendJson(
-          res,
-          200,
-          {
-            ...completion,
-            choices,
-            drouter_attestation: {
-              securityVerified: doc.securityVerified,
-              enclaveHost: doc.enclaveHost,
-              releaseTag: doc.releaseTag,
-              codeFingerprint: doc.codeFingerprint,
-              enclaveFingerprint: doc.enclaveFingerprint,
-            },
-          },
-          enclaveHeaders,
-        );
-      } catch (err) {
-        sendJson(res, 502, {
-          error: {
-            message: err instanceof Error ? err.message : String(err),
-            type: "enclave_proxy_error",
-          },
-        });
-      }
-      return;
-    }
-
-    sendJson(res, 404, {
-      error: { message: `Not found: ${req.method} ${url.pathname}`, type: "not_found_error" },
-    });
-  });
-}
-
 async function runCli() {
   const args = parseDrouterCliArgs(process.argv.slice(2));
 
   if (args.command === "config") {
-    const configs = buildHarnessConfigs(args.upstream);
+    const configs = buildCliHarnessConfigs(args.upstream);
     console.log("=== OpenCode Configuration (opencode.json) ===");
     console.log(configs.opencodeJson);
     console.log("\n=== Environment Variables (Claude Code / Codex / OpenAI SDK) ===");
@@ -411,8 +236,12 @@ async function runCli() {
     const client = createZeroTrustClient(args.upstream);
     const [, matrix, registry] = await Promise.all([
       client.ready(),
-      fetch(`${args.upstream}/api/relay/enclave-matrix`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
-      fetch(`${args.upstream}/api/registry`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+      fetch(`${args.upstream}/api/relay/enclave-matrix`)
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null),
+      fetch(`${args.upstream}/api/registry`)
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null),
     ]);
     const doc = await client.getVerificationDocument();
     const gpuModelInfo = matrix?.models?.[args.model] ?? matrix?.models?.["kimi-k3"];
@@ -435,8 +264,8 @@ async function runCli() {
       `[dRouter Attested] host=${doc.enclaveHost} release=${doc.releaseTag ?? doc.releaseDigest} code=${doc.codeFingerprint.slice(0, 16)}...`,
     );
 
-    const scrubber = args.scrubPii ? createSessionScrubber() : null;
-    const scrubbedPrompt = scrubber ? scrubber.scrub(args.prompt).scrubbed : args.prompt;
+    const vault = args.scrubPii ? new PlaceholderVault() : null;
+    const scrubbedPrompt = vault ? vault.scrub(args.prompt) : args.prompt;
 
     const stream = await client.chat.completions.create(
       {
@@ -444,10 +273,15 @@ async function runCli() {
         messages: [{ role: "user", content: scrubbedPrompt }],
         stream: true,
       },
-      { headers: { "X-Tinfoil-Model": args.model } },
+      {
+        headers: {
+          "X-Tinfoil-Model": args.model,
+          ...(args.credit ? { "x-drouter-credit": args.credit } : {}),
+        },
+      },
     );
 
-    const restorer = createStreamRestorer(scrubber);
+    const restorer = createStreamRestorer(vault);
     for await (const chunk of stream) {
       const delta = chunk.choices?.[0]?.delta?.content;
       if (delta) {
@@ -462,7 +296,7 @@ async function runCli() {
   }
 
   if (args.command === "proxy") {
-    const server = createZeroTrustProxyServer({ upstream: args.upstream });
+    const server = createProxyServer({ upstream: args.upstream });
     server.listen(args.port, "127.0.0.1", () => {
       console.log(
         `[drouter-cli proxy] Zero-trust HPKE proxy listening on http://127.0.0.1:${args.port}/v1 (upstream: ${args.upstream})`,
