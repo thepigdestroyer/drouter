@@ -1,8 +1,12 @@
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
-import { sha256, sha384 } from "@noble/hashes/sha2.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 
+/**
+ * Legacy type kept only until UI components (`src/app/network/page.tsx`) finish cleanup.
+ * Simulated builder/reviewer release entries are removed from all production APIs.
+ */
 export interface BuilderSignature {
   builderId: string;
   publicKey: string;
@@ -34,16 +38,71 @@ export interface TransparencyEntry {
  */
 export interface VerificationLogEvent {
   index: number;
-  kind: "verification_event" | "release_approval";
+  kind: "verification_event" | "release_approval" | "independent_verification";
   nodeId: string;
-  nodeKind: "tinfoil" | "sim";
+  nodeKind: "tinfoil";
   ok: boolean;
   measurement: string;
   evidenceHash: string;
   releaseDigest?: string;
   enclaveHost?: string;
+  verifierFingerprint?: string;
   /** Coarsened UTC hour timestamp in seconds (divisible by 3600). */
   epochHourSec: number;
+  leafHash: string;
+}
+
+export const VERIFIER_CHECK_IDS = ["C1", "C2", "C3", "C4", "C5", "C6", "C7"] as const;
+export type VerifierCheckId = (typeof VERIFIER_CHECK_IDS)[number];
+
+export interface VerifierCheckStatus {
+  id: VerifierCheckId;
+  status: "pass" | "fail" | "skip";
+}
+
+export interface VerifierModelClaim {
+  id: string;
+  repo: string;
+  tag: string;
+  measurement: string;
+  dmVerityRootHash?: string;
+  weightRepoCommit?: string;
+  ok: boolean;
+}
+
+export interface VerifierRouterClaim {
+  nodeId: string;
+  enclaveHost: string;
+  configRepo: string;
+  releaseDigest: string;
+  measurement: string;
+}
+
+export const VERIFICATION_CLAIM_DOMAIN = "drouter/transparency/verification-claim/v1" as const;
+
+export interface VerifierSubmissionClaim {
+  domain: typeof VERIFICATION_CLAIM_DOMAIN;
+  /** Coarsened UTC hour timestamp in seconds (divisible by 3600). */
+  epochHourSec: number;
+  router: VerifierRouterClaim;
+  models: VerifierModelClaim[];
+  checks: VerifierCheckStatus[];
+  overallOk: boolean;
+}
+
+/**
+ * Privacy-preserving record stored in MongoDB `verifier_submissions`.
+ * Contains only the verifier key fingerprint, verification result, and coarse UTC hour (never IP or sub-hour timestamp).
+ */
+export interface VerifierSubmissionRecord {
+  verifierFingerprint: string;
+  epochHourSec: number;
+  overallOk: boolean;
+  checks: VerifierCheckStatus[];
+  router: VerifierRouterClaim;
+  models: VerifierModelClaim[];
+  evidenceHash: string;
+  leafIndex: number;
   leafHash: string;
 }
 
@@ -78,22 +137,6 @@ export interface ConsistencyProof {
   secondRoot: string;
   consistencyPath: string[];
 }
-
-// Simulated reproducible builders. These are not real organizations.
-export const BUILDER_IDS = ["sim-builder-1", "sim-builder-2", "sim-builder-3"] as const;
-export const REVIEWER_IDS = [
-  "reviewer-1",
-  "reviewer-2",
-  "reviewer-3",
-  "reviewer-4",
-  "reviewer-5",
-  "reviewer-6",
-  "reviewer-7",
-] as const;
-
-const NORMAL_REVIEW_WINDOW_DAYS = 14;
-const EMERGENCY_REVIEW_WINDOW_DAYS = 2; // 48 hours
-const SECONDS_PER_DAY = 86400;
 
 type JsonValue =
   | null
@@ -155,14 +198,6 @@ export function deriveEd25519Key(info: string): {
   };
 }
 
-function builderKey(builderId: string) {
-  return deriveEd25519Key(`transparency/builder/${builderId}`);
-}
-
-function reviewerKey(reviewerId: string) {
-  return deriveEd25519Key(`transparency/reviewer/${reviewerId}`);
-}
-
 function concatBytes(...arrays: Uint8Array[]): Uint8Array {
   const total = arrays.reduce((acc, a) => acc + a.length, 0);
   const out = new Uint8Array(total);
@@ -172,25 +207,6 @@ function concatBytes(...arrays: Uint8Array[]): Uint8Array {
     offset += a.length;
   }
   return out;
-}
-
-export function entrySigningPayload(
-  entry: Pick<
-    TransparencyEntry,
-    "index" | "imageId" | "version" | "measurement" | "approvedAt" | "reviewWindowDays" | "emergency"
-  >,
-): Uint8Array {
-  return utf8ToBytes(
-    canonicalJson({
-      approvedAt: entry.approvedAt,
-      emergency: entry.emergency,
-      imageId: entry.imageId,
-      index: entry.index,
-      measurement: entry.measurement,
-      reviewWindowDays: entry.reviewWindowDays,
-      version: entry.version,
-    }),
-  );
 }
 
 /** RFC 6962 raw byte leaf hash: sha256(0x00 || rawLeafBytes) */
@@ -346,7 +362,6 @@ export function verifyInclusionProofClient(proof: InclusionProof): {
       return { ok: false, computedRoot: "", detail: "Invalid leafHash or root hex format" };
     }
 
-    // If leafIndex and treeSize are provided, also verify RFC 6962 Section 2.1.1 index/treeSize structure
     if (proof.leafIndex !== undefined && proof.treeSize !== undefined) {
       let fn = proof.leafIndex;
       let sn = proof.treeSize - 1;
@@ -655,14 +670,15 @@ export function verifyTransparencyProofBundleClient(params: {
 
 export function createVerificationLogEvent(params: {
   index: number;
-  kind?: "verification_event" | "release_approval";
+  kind?: "verification_event" | "release_approval" | "independent_verification";
   nodeId: string;
-  nodeKind: "tinfoil" | "sim";
+  nodeKind?: "tinfoil";
   ok: boolean;
   measurement: string;
   evidenceHash: string;
   releaseDigest?: string;
   enclaveHost?: string;
+  verifierFingerprint?: string;
   timestampSec?: number;
 }): VerificationLogEvent {
   const epochHourSec = coarsenEpochSecToHour(params.timestampSec ?? Math.floor(Date.now() / 1000));
@@ -670,12 +686,13 @@ export function createVerificationLogEvent(params: {
     index: params.index,
     kind: params.kind ?? "verification_event",
     nodeId: String(params.nodeId).slice(0, 80),
-    nodeKind: params.nodeKind === "tinfoil" ? ("tinfoil" as const) : ("sim" as const),
+    nodeKind: "tinfoil" as const,
     ok: Boolean(params.ok),
     measurement: String(params.measurement).slice(0, 256),
     evidenceHash: String(params.evidenceHash).slice(0, 128),
     ...(params.releaseDigest ? { releaseDigest: String(params.releaseDigest).slice(0, 128) } : {}),
     ...(params.enclaveHost ? { enclaveHost: String(params.enclaveHost).slice(0, 128) } : {}),
+    ...(params.verifierFingerprint ? { verifierFingerprint: String(params.verifierFingerprint).slice(0, 64) } : {}),
     epochHourSec,
   };
   const leafHash = bytesToHex(computeLeafHash(core));
@@ -685,249 +702,177 @@ export function createVerificationLogEvent(params: {
   };
 }
 
-export function createSignedTransparencyEntry(params: {
-  index: number;
-  imageId: string;
-  version: string;
-  measurement: string;
-  approvedAt: number;
-  reviewWindowDays?: number;
-  emergency?: boolean;
-  builderCount?: number;
-  reviewerCount?: number;
-}): TransparencyEntry {
-  const emergency = params.emergency ?? false;
-  const reviewWindowDays =
-    params.reviewWindowDays ?? (emergency ? EMERGENCY_REVIEW_WINDOW_DAYS : NORMAL_REVIEW_WINDOW_DAYS);
-  const builderCount = Math.min(Math.max(params.builderCount ?? 3, 0), BUILDER_IDS.length);
-  const defaultReviewers = emergency ? 7 : 5;
-  const reviewerCount = Math.min(Math.max(params.reviewerCount ?? defaultReviewers, 0), REVIEWER_IDS.length);
-
-  const core = {
-    index: params.index,
-    imageId: params.imageId,
-    version: params.version,
-    measurement: params.measurement,
-    approvedAt: params.approvedAt,
-    reviewWindowDays,
-    emergency,
-  };
-  const payload = entrySigningPayload(core);
-
-  const builderSignatures: BuilderSignature[] = BUILDER_IDS.slice(0, builderCount).map((builderId) => {
-    const key = builderKey(builderId);
-    return {
-      builderId,
-      publicKey: key.publicKeyHex,
-      signature: bytesToHex(ed25519.sign(payload, key.secretKey)),
-    };
-  });
-
-  const reviewerSignatures: ReviewerSignature[] = REVIEWER_IDS.slice(0, reviewerCount).map((reviewerId) => {
-    const key = reviewerKey(reviewerId);
-    return {
-      reviewerId,
-      publicKey: key.publicKeyHex,
-      signature: bytesToHex(ed25519.sign(payload, key.secretKey)),
-    };
-  });
-
-  return {
-    ...core,
-    builderSignatures,
-    reviewerSignatures,
-  };
-}
-
-function buildEntries(): TransparencyEntry[] {
-  // Approved dates in early 2025 so the 14-day / 48-hour review windows have elapsed.
-  return [
-    createSignedTransparencyEntry({
-      index: 0,
-      imageId: "tinfoilsh/confidential-model-router",
-      version: "v0.0.167",
-      measurement: bytesToHex(sha384(utf8ToBytes("tinfoilsh/confidential-model-router@v0.0.167"))),
-      approvedAt: 1735689600, // 2025-01-01T00:00:00Z
-      reviewWindowDays: 14,
-      emergency: false,
-      builderCount: 3,
-      reviewerCount: 5,
-    }),
-    createSignedTransparencyEntry({
-      index: 1,
-      imageId: "drouter-sim-node-image/v0.1.0",
-      version: "v0.1.0",
-      measurement: bytesToHex(sha384(utf8ToBytes("drouter-sim-node-image/v0.1.0"))),
-      approvedAt: 1738368000, // 2025-02-01T00:00:00Z
-      reviewWindowDays: 14,
-      emergency: false,
-      builderCount: 3,
-      reviewerCount: 5,
-    }),
-    createSignedTransparencyEntry({
-      index: 2,
-      imageId: "drouter-monitor-svsm/v0.1.0",
-      version: "v0.1.0",
-      measurement: bytesToHex(sha384(utf8ToBytes("drouter-monitor-svsm/v0.1.0"))),
-      approvedAt: 1740787200, // 2025-03-01T00:00:00Z
-      reviewWindowDays: 14,
-      emergency: false,
-      builderCount: 3,
-      reviewerCount: 5,
-    }),
-  ];
-}
-
-export function getTransparencyLog(): { root: string; entries: TransparencyEntry[] } {
-  const entries = buildEntries();
-  const leaves = entries.map(computeLeafHash);
-  const root = bytesToHex(computeMerkleRootFromLeaves(leaves));
-  return { root, entries };
-}
-
-export function proveInclusion(index: number): InclusionProof {
-  const entries = buildEntries();
-  if (index < 0 || index >= entries.length) {
-    throw new Error(`Transparency log index out of range: ${index}`);
+/**
+ * Computes the SHA-256 fingerprint (64 lowercase hex chars) of an Ed25519 public key.
+ */
+export function computeVerifierFingerprint(publicKeyHexOrBytes: string | Uint8Array): string {
+  const pubBytes =
+    typeof publicKeyHexOrBytes === "string"
+      ? hexToBytes(publicKeyHexOrBytes.replace(/^0x/i, ""))
+      : publicKeyHexOrBytes;
+  if (pubBytes.length !== 32) {
+    throw new Error("Ed25519 public key must be 32 bytes");
   }
-  const leaves = entries.map(computeLeafHash);
-  const root = bytesToHex(computeMerkleRootFromLeaves(leaves));
-  const auditPath = computeAuditPathFromLeaves(leaves, index);
+  return bytesToHex(sha256(pubBytes)).toLowerCase();
+}
+
+/**
+ * Canonicalizes a `VerifierSubmissionClaim` so models are sorted by ID, checks are ordered C1..C7,
+ * hex digests are lowercased, and `epochHourSec` is coarsened to the UTC hour.
+ */
+export function normalizeVerificationClaim(claim: VerifierSubmissionClaim): VerifierSubmissionClaim {
+  const checkMap = new Map<string, "pass" | "fail" | "skip">();
+  if (Array.isArray(claim.checks)) {
+    for (const c of claim.checks) {
+      if (c && typeof c.id === "string" && (c.status === "pass" || c.status === "fail" || c.status === "skip")) {
+        checkMap.set(c.id, c.status);
+      }
+    }
+  }
+  const checks: VerifierCheckStatus[] = VERIFIER_CHECK_IDS.map((id) => ({
+    id,
+    status: checkMap.get(id) ?? "skip",
+  }));
+
+  const models: VerifierModelClaim[] = Array.isArray(claim.models)
+    ? [...claim.models]
+        .map((m) => ({
+          id: String(m.id ?? "").trim(),
+          repo: String(m.repo ?? "").trim(),
+          tag: String(m.tag ?? "").trim(),
+          measurement: String(m.measurement ?? "").trim().toLowerCase(),
+          ...(m.dmVerityRootHash ? { dmVerityRootHash: String(m.dmVerityRootHash).trim().toLowerCase() } : {}),
+          ...(m.weightRepoCommit ? { weightRepoCommit: String(m.weightRepoCommit).trim() } : {}),
+          ok: Boolean(m.ok),
+        }))
+        .sort((a, b) => a.id.localeCompare(b.id))
+    : [];
+
   return {
-    leafHash: bytesToHex(leaves[index]),
-    root,
-    auditPath,
-    leafIndex: index,
-    treeSize: entries.length,
+    domain: VERIFICATION_CLAIM_DOMAIN,
+    epochHourSec: coarsenEpochSecToHour(claim.epochHourSec),
+    router: {
+      nodeId: String(claim.router?.nodeId ?? "tinfoil-router").trim(),
+      enclaveHost: String(claim.router?.enclaveHost ?? "").trim().toLowerCase(),
+      configRepo: String(claim.router?.configRepo ?? "").trim(),
+      releaseDigest: String(claim.router?.releaseDigest ?? "").trim().toLowerCase(),
+      measurement: String(claim.router?.measurement ?? "").trim().toLowerCase(),
+    },
+    models,
+    checks,
+    overallOk: Boolean(claim.overallOk),
   };
 }
 
-export function proveConsistency(firstSize: number, secondSize?: number): ConsistencyProof {
-  const entries = buildEntries();
-  const leaves = entries.map(computeLeafHash);
-  return proveConsistencyFromLeaves(leaves, firstSize, secondSize ?? leaves.length);
+export function verificationClaimSigningPayload(claim: VerifierSubmissionClaim): Uint8Array {
+  return utf8ToBytes(canonicalJson(normalizeVerificationClaim(claim)));
 }
 
-export function verifyInclusion(
-  entry: TransparencyEntry,
-  proof: { root: string; auditPath: { side: "left" | "right"; hash: string }[] },
-  nowSec?: number,
+export function computeVerificationClaimEvidenceHash(claim: VerifierSubmissionClaim): string {
+  return bytesToHex(sha256(verificationClaimSigningPayload(claim))).toLowerCase();
+}
+
+export function signVerificationClaim(
+  claim: VerifierSubmissionClaim,
+  secretKeyHexOrBytes: string | Uint8Array,
 ): {
+  publicKey: string;
+  verifierFingerprint: string;
+  signature: string;
+  claim: VerifierSubmissionClaim;
+  evidenceHash: string;
+} {
+  const secretKey =
+    typeof secretKeyHexOrBytes === "string"
+      ? hexToBytes(secretKeyHexOrBytes.replace(/^0x/i, ""))
+      : secretKeyHexOrBytes;
+  if (secretKey.length !== 32) {
+    throw new Error("Ed25519 secret key must be 32 bytes");
+  }
+  const normalized = normalizeVerificationClaim(claim);
+  const publicKeyBytes = ed25519.getPublicKey(secretKey);
+  const publicKey = bytesToHex(publicKeyBytes).toLowerCase();
+  const verifierFingerprint = computeVerifierFingerprint(publicKeyBytes);
+  const payload = verificationClaimSigningPayload(normalized);
+  const signature = bytesToHex(ed25519.sign(payload, secretKey)).toLowerCase();
+  const evidenceHash = bytesToHex(sha256(payload)).toLowerCase();
+  return {
+    publicKey,
+    verifierFingerprint,
+    signature,
+    claim: normalized,
+    evidenceHash,
+  };
+}
+
+export function verifyVerificationClaimSignature(params: {
+  publicKey: string;
+  signature: string;
+  claim: VerifierSubmissionClaim;
+}): {
   ok: boolean;
-  builderCount: number;
-  reviewerCount: number;
-  reviewWindowPassed: boolean;
+  verifierFingerprint: string;
+  evidenceHash: string;
+  normalizedClaim?: VerifierSubmissionClaim;
   detail: string;
 } {
-  const now = nowSec ?? Math.floor(Date.now() / 1000);
-  const payload = entrySigningPayload(entry);
-
-  // 1. Verify builder signatures (need >= 3 reproducible builders, no invalid/duplicate signatures)
-  const validBuilders = new Set<string>();
-  let allBuilderSigsValid = true;
-  for (const sig of entry.builderSignatures) {
-    if (!BUILDER_IDS.includes(sig.builderId as (typeof BUILDER_IDS)[number]) || validBuilders.has(sig.builderId)) {
-      allBuilderSigsValid = false;
-      continue;
-    }
-    try {
-      const expected = builderKey(sig.builderId);
-      if (sig.publicKey.toLowerCase() !== expected.publicKeyHex.toLowerCase()) {
-        allBuilderSigsValid = false;
-        continue;
-      }
-      const sigBytes = hexToBytes(sig.signature);
-      if (ed25519.verify(sigBytes, payload, expected.publicKey)) {
-        validBuilders.add(sig.builderId);
-      } else {
-        allBuilderSigsValid = false;
-      }
-    } catch {
-      allBuilderSigsValid = false;
-    }
-  }
-  const builderCount = validBuilders.size;
-
-  // 2. Verify reviewer signatures (need >= 4 of 7 for normal, or 7 of 7 for emergency)
-  const validReviewers = new Set<string>();
-  let allReviewerSigsValid = true;
-  for (const sig of entry.reviewerSignatures) {
-    if (!REVIEWER_IDS.includes(sig.reviewerId as (typeof REVIEWER_IDS)[number]) || validReviewers.has(sig.reviewerId)) {
-      allReviewerSigsValid = false;
-      continue;
-    }
-    try {
-      const expected = reviewerKey(sig.reviewerId);
-      if (sig.publicKey.toLowerCase() !== expected.publicKeyHex.toLowerCase()) {
-        allReviewerSigsValid = false;
-        continue;
-      }
-      const sigBytes = hexToBytes(sig.signature);
-      if (ed25519.verify(sigBytes, payload, expected.publicKey)) {
-        validReviewers.add(sig.reviewerId);
-      } else {
-        allReviewerSigsValid = false;
-      }
-    } catch {
-      allReviewerSigsValid = false;
-    }
-  }
-  const reviewerCount = validReviewers.size;
-  const requiredReviewers = entry.emergency ? 7 : 4;
-
-  // 3. Verify review window elapsed (14 days normal, 48h emergency)
-  const minWindowDays = entry.emergency ? EMERGENCY_REVIEW_WINDOW_DAYS : NORMAL_REVIEW_WINDOW_DAYS;
-  const effectiveWindowDays = Math.max(entry.reviewWindowDays, minWindowDays);
-  const reviewWindowPassed =
-    entry.reviewWindowDays >= minWindowDays && now - entry.approvedAt >= effectiveWindowDays * SECONDS_PER_DAY;
-
-  // 4. Verify RFC 6962 Merkle path from leaf hash to proof.root
-  let merkleOk = false;
   try {
-    let current = computeLeafHash(entry);
-    let pathValid = true;
-    for (const step of proof.auditPath) {
-      if (!/^[0-9a-fA-F]{64}$/.test(step.hash)) {
-        pathValid = false;
-        break;
-      }
-      const sibling = hexToBytes(step.hash);
-      if (step.side === "left") {
-        current = computeNodeHash(sibling, current);
-      } else if (step.side === "right") {
-        current = computeNodeHash(current, sibling);
-      } else {
-        pathValid = false;
-        break;
+    const cleanPub = String(params.publicKey ?? "").replace(/^0x/i, "").toLowerCase();
+    const cleanSig = String(params.signature ?? "").replace(/^0x/i, "").toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(cleanPub)) {
+      return { ok: false, verifierFingerprint: "", evidenceHash: "", detail: "Invalid Ed25519 publicKey hex (expected 64 hex chars)" };
+    }
+    if (!/^[0-9a-f]{128}$/.test(cleanSig)) {
+      return { ok: false, verifierFingerprint: "", evidenceHash: "", detail: "Invalid Ed25519 signature hex (expected 128 hex chars)" };
+    }
+    if (!params.claim || typeof params.claim !== "object" || params.claim.domain !== VERIFICATION_CLAIM_DOMAIN) {
+      return { ok: false, verifierFingerprint: "", evidenceHash: "", detail: `Invalid claim domain (expected ${VERIFICATION_CLAIM_DOMAIN})` };
+    }
+    if (!Number.isInteger(params.claim.epochHourSec) || params.claim.epochHourSec <= 0 || params.claim.epochHourSec % 3600 !== 0) {
+      return { ok: false, verifierFingerprint: "", evidenceHash: "", detail: "claim.epochHourSec must be a positive integer divisible by 3600" };
+    }
+    if (!Array.isArray(params.claim.checks) || params.claim.checks.length !== VERIFIER_CHECK_IDS.length) {
+      return { ok: false, verifierFingerprint: "", evidenceHash: "", detail: "claim.checks must contain C1 through C7" };
+    }
+    for (let i = 0; i < VERIFIER_CHECK_IDS.length; i++) {
+      const c = params.claim.checks[i];
+      if (!c || c.id !== VERIFIER_CHECK_IDS[i] || (c.status !== "pass" && c.status !== "fail" && c.status !== "skip")) {
+        return {
+          ok: false,
+          verifierFingerprint: "",
+          evidenceHash: "",
+          detail: `claim.checks[${i}] must be ${VERIFIER_CHECK_IDS[i]} with status pass, fail, or skip`,
+        };
       }
     }
-    merkleOk = pathValid && bytesToHex(current).toLowerCase() === proof.root.toLowerCase();
+
+    const normalized = normalizeVerificationClaim(params.claim);
+    const payload = verificationClaimSigningPayload(normalized);
+    const pubBytes = hexToBytes(cleanPub);
+    const sigBytes = hexToBytes(cleanSig);
+    const verified = ed25519.verify(sigBytes, payload, pubBytes);
+    if (!verified) {
+      return {
+        ok: false,
+        verifierFingerprint: computeVerifierFingerprint(pubBytes),
+        evidenceHash: bytesToHex(sha256(payload)).toLowerCase(),
+        detail: "Ed25519 signature verification failed over canonical verification claim",
+      };
+    }
+
+    return {
+      ok: true,
+      verifierFingerprint: computeVerifierFingerprint(pubBytes),
+      evidenceHash: bytesToHex(sha256(payload)).toLowerCase(),
+      normalizedClaim: normalized,
+      detail: "Ed25519 signature verified over canonical C1-C7 verification claim",
+    };
   } catch {
-    merkleOk = false;
+    return {
+      ok: false,
+      verifierFingerprint: "",
+      evidenceHash: "",
+      detail: "Failed to verify verification claim signature",
+    };
   }
-
-  const reasons: string[] = [];
-  if (!merkleOk) {
-    reasons.push("Merkle inclusion proof does not match transparency log root");
-  }
-  if (!allBuilderSigsValid || builderCount < 3) {
-    reasons.push(`requires 3 valid builder signatures (got ${builderCount})`);
-  }
-  if (!allReviewerSigsValid || reviewerCount < requiredReviewers) {
-    reasons.push(`requires ${requiredReviewers} valid reviewer signatures (got ${reviewerCount})`);
-  }
-  if (!reviewWindowPassed) {
-    reasons.push(`review window (${minWindowDays}d minimum) has not elapsed`);
-  }
-
-  const ok = reasons.length === 0;
-  return {
-    ok,
-    builderCount,
-    reviewerCount,
-    reviewWindowPassed,
-    detail: ok
-      ? `Merkle inclusion verified under root ${proof.root.slice(0, 16)}…; ${builderCount}/3 builders, ${reviewerCount}/7 reviewers, ${entry.reviewWindowDays}d review window passed.`
-      : reasons.join("; "),
-  };
 }

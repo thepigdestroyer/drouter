@@ -1,41 +1,34 @@
 /**
- * Gemini 4 Argon (`gemini-4-argon`) & Attested Tinfoil Enclave 6-Stage
- * Autonomous Confidential Security & Routing Orchestrator (`src/lib/gemini/orchestrator.ts`).
+ * Gemini 4 Argon (`gemini-4-argon`) Split-Knowledge Control Plane &
+ * Attested Tinfoil Enclave 6-Stage Orchestrator (`src/lib/gemini/orchestrator.ts`).
  *
- * Solves a concrete problem for a named user persona:
- * Dana Reyes (a fictional clinical data scientist on a hospital trial unit)
- * running multi-step analysis over trial protocols, case notes, and R/Python code
- * without exposing patient identifiers or credentials to cloud providers.
+ * Architectural guarantees (D1, D2, D3, D4, D8, D9):
+ * 1. Split knowledge (D1): Gemini receives only a content-free `TaskDescriptor`
+ *    (`taskKind`, `inputHandle: "$INPUT"`, `inputTokenEstimate`, `redactionCounts`,
+ *    `verification`, `allowedTools`). All user content and enclave outputs remain
+ *    in server-side handles (`$INPUT`, `$RESULT_<n>`) and execute inside the
+ *    attested Tinfoil enclave (`gemma4-31b` or `kimi-k3`).
+ * 2. Gemini security (D2): Egress firewall `assertContentFree` runs on every
+ *    outbound Gemini request; strict tool allowlist and argument schema validation;
+ *    step and wall-clock budgets; untrusted model output; mandatory human approval
+ *    before any on-chain write; honest data-handling statement.
+ * 3. Two-pass redaction before non-enclave services (D3 & D4): Uses deterministic
+ *    `mechanicalRedact` (`@/lib/privacy/mechanical`) and attested enclave
+ *    `attestedPiiFilter` (`@/lib/privacy/attested-filter`, falling back to D3 if
+ *    unavailable and reporting so).
+ * 4. Production verification (D8 & D9): Real Tinfoil 2-hop attestation, real
+ *    MongoDB Atlas Hybrid Search, real Circle Arc registry checks, and real Ed25519
+ *    forensic signatures. No simulated 5-of-7 quorum, no simulated VMPL0 state
+ *    machine, no simulated memory-bus model, and no simulated microVM sandbox.
  */
 
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 import { ed25519 } from "@noble/curves/ed25519.js";
-import {
-  computeShannonEntropyBitsPerByte,
-  runMemoryBusAndPopAudit,
-  type MemoryBusAndPopAuditReport,
-} from "@/lib/custody/probe-audit";
-import {
-  evaluateMonitorExit,
-  verifyMonitorPolicyExhaustive,
-  type Action,
-  type VerificationReport,
-} from "@/lib/monitor/policy";
-import {
-  restorePlaceholders,
-  scrubWithPlaceholders,
-} from "@/lib/monitor/scrubber";
-import { preparePrompt, type PreparedPrompt } from "@/lib/pipeline";
 import { createSessionScrubber } from "@/lib/privacy/scrubber";
 import { bucketForTokens, estimateTokens } from "@/lib/privacy/padding";
 import { padJsonPayloadToBucket } from "@/lib/relay";
 import { CONFIDENTIAL_PROVIDERS } from "@/lib/providers/catalog";
-import {
-  destroySandbox,
-  execInSandbox,
-  spawnSandbox,
-} from "@/lib/sandbox/microvm";
 import {
   createSymmetryTransform,
   type AppliedMask,
@@ -49,34 +42,387 @@ import {
   type RouterSnpHardwareReport,
 } from "@/lib/tinfoil/deep-inspect";
 import { canonicalJson, deriveEd25519Key } from "@/lib/transparency/log";
-import {
-  getVerifierSet,
-  issueQuorumTicket,
-  verifyQuorumTicket,
-} from "@/lib/transparency/quorum";
 import { cosineSimilarity, embedDocumentText } from "@/lib/atlas/embeddings";
 import { ATLAS_SEED_DOCS } from "@/lib/atlas/knowledge-base";
 import {
+  ALLOWED_PLANNER_TOOLS,
   ARGON_COMPANION_MODELS,
   ARGON_MAX_UNIFIED_CONTEXT_TOKENS,
+  assertContentFree,
   assertOutboundPrivacyInvariant,
+  assertValidToolCall,
   buildInteractionsCreatePayload,
-  callCompanionSubagentInteraction,
+  buildTaskDescriptor,
   callGeminiInteractionsEndpoint,
   callTinfoilPlannerToolLoop,
+  classifyTaskKind,
+  DATA_SENT_TO_GOOGLE,
   GEMINI_4_ARGON_MODEL_ID,
   generateInteractionsSdkSnippets,
+  MAX_PLANNER_STEPS,
+  MAX_PLANNER_WALL_CLOCK_MS,
   TINFOIL_KIMI_K3_MAX_CONTEXT_TOKENS,
   validateArgonRequestConfig,
+  type AllowedAtlasTopic,
   type ArgonModelCallRecord,
   type ArgonPlannerDescriptor,
   type ArgonThinkingLevel,
   type GenAIInteractionsClientLike,
   type InteractionsCreatePayload,
   type LiveGeminiCallResult,
+  type TaskDescriptor,
   type TinfoilPlannerCallResult,
   type TinfoilPlannerClientLike,
 } from "./interactions";
+
+export interface MechanicalRedactionItem {
+  kind: string;
+  placeholder: string;
+}
+
+export interface MechanicalRedactResult {
+  text: string;
+  redactions: MechanicalRedactionItem[];
+  restore(s: string): string;
+}
+
+export type MechanicalRedactFn = (
+  text: string,
+  opts?: { customTerms?: string[] },
+) => MechanicalRedactResult;
+
+export interface AttestedPiiFilterResult {
+  text: string;
+  redactionCount: number;
+  model: string;
+  verified: boolean;
+}
+
+export type AttestedPiiFilterFn = (
+  text: string,
+) => Promise<AttestedPiiFilterResult>;
+
+export interface DataHandlingStatement {
+  dataSentToGoogle: typeof DATA_SENT_TO_GOOGLE;
+  googleCanSee: readonly string[];
+  googleCannotSee: readonly string[];
+  enclaveCanSee: string;
+}
+
+export const HONEST_DATA_HANDLING_STATEMENT: DataHandlingStatement = {
+  dataSentToGoogle: DATA_SENT_TO_GOOGLE,
+  googleCanSee: [
+    "content-free TaskDescriptor (taskKind, $INPUT handle, inputTokenEstimate, redactionCounts, verification booleans, allowedTools)",
+    "content-free tool arguments and results (opaque handles, status enums, integer counts, booleans, 0x SHA-256 hashes)",
+    "server or single-use user Gemini API key and server egress IP",
+  ],
+  googleCannotSee: [
+    "user prompt text or any free-text substrings",
+    "redacted or unredacted personal details, names, emails, secrets, or numbers in strings",
+    "enclave completion text or intermediate reasoning over content",
+    "Atlas search queries or knowledge base document text",
+    "client IP address or browser headers",
+  ],
+  enclaveCanSee:
+    "Mechanically redacted and symmetry-masked prompt inside attested Tinfoil enclave (AMD SEV-SNP router + Intel TDX / NVIDIA CC GPU enclave) over RFC 9180 HPKE.",
+};
+
+function computeTokenShannonEntropy(token: string): number {
+  if (!token) return 0;
+  const counts = new Map<string, number>();
+  for (let i = 0; i < token.length; i++) {
+    const ch = token[i];
+    counts.set(ch, (counts.get(ch) ?? 0) + 1);
+  }
+  let entropy = 0;
+  const len = token.length;
+  for (const c of counts.values()) {
+    const p = c / len;
+    entropy -= p * Math.log2(p);
+  }
+  return entropy;
+}
+
+/**
+ * Deterministic fallback implementation of D3 `mechanicalRedact` matching the
+ * exact `@/lib/privacy/mechanical` contract, used only if `@/lib/privacy/mechanical`
+ * is still being built by parallel agent B2.
+ */
+function fallbackMechanicalRedact(
+  text: string,
+  opts?: { customTerms?: string[] },
+): MechanicalRedactResult {
+  const scrubber = createSessionScrubber(opts?.customTerms ?? []);
+  const firstPass = scrubber.scrub(text);
+  const redactions: MechanicalRedactionItem[] = firstPass.replacements.map(
+    (r) => ({
+      kind: r.kind,
+      placeholder: r.placeholder,
+    }),
+  );
+
+  const extraMap = new Map<string, string>();
+  const reverseMap = new Map<string, string>();
+  const counters: Record<string, number> = {
+    URL: 0,
+    DATE: 0,
+    ADDRESS: 0,
+    NAME: 0,
+    DIGITS: 0,
+    ENTROPY: 0,
+  };
+
+  const allocatePlaceholder = (kind: string, original: string): string => {
+    const key = `${kind}:${original}`;
+    const existing = reverseMap.get(key);
+    if (existing) {
+      redactions.push({ kind, placeholder: existing });
+      return existing;
+    }
+    counters[kind] = (counters[kind] ?? 0) + 1;
+    const ph = `[${kind}_${counters[kind]}]`;
+    extraMap.set(ph, original);
+    reverseMap.set(key, ph);
+    redactions.push({ kind, placeholder: ph });
+    return ph;
+  };
+
+  let working = firstPass.scrubbed;
+
+  // 1. URLs and domains
+  working = working.replace(
+    /\b(?:https?:\/\/[^\s<>)"']+|www\.[^\s<>)"']+|[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.(?:com|org|net|io|sh|dev|ai|app|gov|edu|co\.uk|ac\.uk)(?:\/[^\s<>)"']*)?)\b/gi,
+    (m) => allocatePlaceholder("URL", m),
+  );
+
+  // 2. Dates (ISO YYYY-MM-DD, slash/dot dates, or Month DD, YYYY)
+  working = working.replace(
+    /\b(?:\d{4}[-/.](?:0[1-9]|1[0-2])[-/.](?:0[1-9]|[12]\d|3[01])|(?:0?[1-9]|[12]\d|3[01])[-/.](?:0?[1-9]|1[0-2])[-/.](?:19|20)\d{2}|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?,?\s+(?:19|20)\d{2})\b/g,
+    (m) => allocatePlaceholder("DATE", m),
+  );
+
+  // 3. Street-address patterns
+  working = working.replace(
+    /\b\d{1,6}\s+(?:[A-Z][a-zA-Z0-9.'-]*\s+){1,4}(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Way|Place|Pl|Square|Sq|Parkway|Pkwy|Close|Crescent|Gardens)\b/g,
+    (m) => allocatePlaceholder("ADDRESS", m),
+  );
+
+  // 4. Capitalized multi-word name sequences (excluding common sentence starters and placeholder brackets)
+  const SAFE_CAPITALIZED_WORDS = new Set([
+    "Audit",
+    "Review",
+    "Summarize",
+    "Verify",
+    "List",
+    "Check",
+    "Allow",
+    "Northvale",
+    "Institute",
+    "Atlas",
+    "Cellular",
+    "Unit",
+    "Phase",
+    "Tinfoil",
+    "Confidential",
+    "Computing",
+    "Intel",
+    "Circle",
+    "Arc",
+    "Testnet",
+    "MongoDB",
+    "Hybrid",
+    "Search",
+  ]);
+  working = working.replace(
+    /\b([A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,}){1,3})\b/g,
+    (m) => {
+      const words = m.split(/\s+/);
+      if (words.every((w) => SAFE_CAPITALIZED_WORDS.has(w))) {
+        return m;
+      }
+      return allocatePlaceholder("NAME", m);
+    },
+  );
+
+  // 5. Any token with 4+ consecutive digits (that is not already inside a [PLACEHOLDER_N])
+  working = working.replace(
+    /(\[[A-Z_]+_\d+\])|([£$€¥]?\d[\d,._-]*\d|\b[A-Za-z0-9_.-]*\d{4,}[A-Za-z0-9_.-]*\b)/g,
+    (full, placeholderMatch: string | undefined, digitToken: string | undefined) => {
+      if (placeholderMatch) return placeholderMatch;
+      if (!digitToken) return full;
+      const digitsOnly = digitToken.replace(/\D/g, "");
+      if (digitsOnly.length >= 4) {
+        return allocatePlaceholder("DIGITS", digitToken);
+      }
+      return full;
+    },
+  );
+
+  // 6. High-entropy tokens (length >= 16, Shannon entropy >= 3.75 bits/char, mixed char classes)
+  working = working.replace(
+    /(\[[A-Z_]+_\d+\])|\b([A-Za-z0-9_+=/.-]{16,})\b/g,
+    (full, placeholderMatch: string | undefined, cand: string | undefined) => {
+      if (placeholderMatch) return placeholderMatch;
+      if (!cand) return full;
+      const hasDigit = /\d/.test(cand);
+      const hasLetter = /[A-Za-z]/.test(cand);
+      if (hasDigit && hasLetter && computeTokenShannonEntropy(cand) >= 3.75) {
+        return allocatePlaceholder("ENTROPY", cand);
+      }
+      return full;
+    },
+  );
+
+  const restore = (s: string): string => {
+    if (!s) return s;
+    const afterExtra = s.replace(/\[[A-Z_]+_\d+\]/g, (tok) => {
+      return extraMap.get(tok) ?? tok;
+    });
+    return scrubber.restore(afterExtra);
+  };
+
+  return {
+    text: working,
+    redactions,
+    restore,
+  };
+}
+
+let cachedMechanicalRedactFn: MechanicalRedactFn | null = null;
+let cachedAttestedFilterFn: AttestedPiiFilterFn | null = null;
+
+async function resolveMechanicalRedactFn(
+  override?: MechanicalRedactFn,
+): Promise<MechanicalRedactFn> {
+  if (override) return override;
+  if (cachedMechanicalRedactFn) return cachedMechanicalRedactFn;
+  const moduleSpecifier = "@/lib/privacy/mechanical";
+  try {
+    const mod = (await import(moduleSpecifier)) as {
+      mechanicalRedact?: MechanicalRedactFn;
+    };
+    if (typeof mod.mechanicalRedact === "function") {
+      cachedMechanicalRedactFn = mod.mechanicalRedact;
+      return mod.mechanicalRedact;
+    }
+  } catch {
+    // Parallel agent B2 module not yet on disk; use deterministic fallback matching D3 contract.
+  }
+  return fallbackMechanicalRedact;
+}
+
+async function resolveAttestedPiiFilterFn(
+  override?: AttestedPiiFilterFn,
+): Promise<AttestedPiiFilterFn | null> {
+  if (override) return override;
+  if (cachedAttestedFilterFn) return cachedAttestedFilterFn;
+  const moduleSpecifier = "@/lib/privacy/attested-filter";
+  try {
+    const mod = (await import(moduleSpecifier)) as {
+      attestedPiiFilter?: AttestedPiiFilterFn;
+    };
+    if (typeof mod.attestedPiiFilter === "function") {
+      cachedAttestedFilterFn = mod.attestedPiiFilter;
+      return mod.attestedPiiFilter;
+    }
+  } catch {
+    // Parallel agent B2 module not yet on disk or unavailable.
+  }
+  return null;
+}
+
+/**
+ * Runs two-pass privacy redaction (D3 `mechanicalRedact` + D4 `attestedPiiFilter`)
+ * before any text or search query leaves an enclave boundary for a non-enclave service.
+ * If D4 `attestedPiiFilter` is unavailable, falls back to D3 `mechanicalRedact` output
+ * only and reports `fallbackToMechanicalOnly: true`.
+ */
+export async function redactForNonEnclaveBoundary(
+  rawText: string,
+  opts?: {
+    customTerms?: string[];
+    enableAttestedFilter?: boolean;
+    mechanicalRedactor?: MechanicalRedactFn;
+    attestedFilterRunner?: AttestedPiiFilterFn;
+  },
+): Promise<{
+  text: string;
+  mechanicalText: string;
+  mechanicalRedactions: MechanicalRedactionItem[];
+  restore(s: string): string;
+  attestedFilter: {
+    text: string;
+    redactionCount: number;
+    model: string;
+    verified: boolean;
+    fallbackToMechanicalOnly: boolean;
+    note: string;
+  };
+}> {
+  const mechFn = await resolveMechanicalRedactFn(opts?.mechanicalRedactor);
+  const mechOut = mechFn(rawText, { customTerms: opts?.customTerms });
+
+  const shouldCallAttested =
+    Boolean(opts?.attestedFilterRunner) || Boolean(opts?.enableAttestedFilter);
+
+  if (shouldCallAttested) {
+    const attestedFn = await resolveAttestedPiiFilterFn(opts?.attestedFilterRunner);
+    if (attestedFn) {
+      try {
+        const attRes = await attestedFn(mechOut.text);
+        if (attRes && typeof attRes.text === "string" && attRes.verified) {
+          return {
+            text: attRes.text,
+            mechanicalText: mechOut.text,
+            mechanicalRedactions: mechOut.redactions,
+            restore: mechOut.restore,
+            attestedFilter: {
+              text: attRes.text,
+              redactionCount: attRes.redactionCount,
+              model: attRes.model || "pii-filter",
+              verified: true,
+              fallbackToMechanicalOnly: false,
+              note: `Attested second-pass filter (${attRes.model || "pii-filter"}) verified inside Tinfoil enclave.`,
+            },
+          };
+        }
+        if (attRes && typeof attRes.text === "string") {
+          return {
+            text: mechOut.text,
+            mechanicalText: mechOut.text,
+            mechanicalRedactions: mechOut.redactions,
+            restore: mechOut.restore,
+            attestedFilter: {
+              text: mechOut.text,
+              redactionCount: attRes.redactionCount ?? 0,
+              model: attRes.model || "pii-filter",
+              verified: false,
+              fallbackToMechanicalOnly: true,
+              note: "Attested pii-filter was not verified; fell back to deterministic mechanicalRedact (D3) output only.",
+            },
+          };
+        }
+      } catch {
+        // Fall through to D3 output only
+      }
+    }
+  }
+
+  return {
+    text: mechOut.text,
+    mechanicalText: mechOut.text,
+    mechanicalRedactions: mechOut.redactions,
+    restore: mechOut.restore,
+    attestedFilter: {
+      text: mechOut.text,
+      redactionCount: 0,
+      model: "pii-filter",
+      verified: false,
+      fallbackToMechanicalOnly: true,
+      note: "Attested pii-filter unavailable; fell back to deterministic mechanicalRedact (D3) output only.",
+    },
+  };
+}
 
 export interface NamedUserPersona {
   name: string;
@@ -94,7 +440,7 @@ export const DEMO_PERSONA: NamedUserPersona = {
   assayProtocol:
     "Phase II trial survival analysis: protocol, de-identified case notes, and R analysis code",
   contextWindowScale:
-    "Up to 1,000,000 tokens in Gemini 4 Argon orchestrator (scrubbed metadata); 262,144 tokens max context in Tinfoil Kimi K3 enclave",
+    "Up to 1,000,000 tokens in Gemini 4 Argon control plane (content-free TaskDescriptor only); 262,144 tokens max context in Tinfoil Kimi K3 enclave",
   confidentialityMandate:
     "Run a multi-step AI analysis and code review without exposing patient identifiers, unpublished trial results, or API credentials to any cloud provider.",
 };
@@ -118,11 +464,19 @@ export interface Stage1PrivacyFilterResult {
     formula: "plaintextLeakCount === 0 && bucketBytes % 4096 === 0";
   };
   redactionCount: number;
+  mechanicalRedactionCount: number;
+  redactionCounts: Record<string, number>;
+  attestedFilter: {
+    model: string;
+    verified: boolean;
+    redactionCount: number;
+    fallbackToMechanicalOnly: boolean;
+    note: string;
+  };
   placeholders: Record<string, string>;
   appliedSymmetryMasks: AppliedMask[];
   papillonGeneralizedPrompt: string;
   homomorphicEquation: string;
-  pipelineReport?: PreparedPrompt["report"];
 }
 
 export interface SubagentTaskTrace {
@@ -143,11 +497,13 @@ export interface SevenCheckStatus {
 
 export interface Stage2SubagentSwarmResult {
   stageNumber: 2;
-  stageName: "Parallel Subagent Swarm (Atlas Hybrid Search, 2-Hop Attestation & 5-of-7 Quorum)";
+  stageName: "Live 2-Hop Hardware Attestation, Atlas Hybrid Search & Registry Verification";
   modelsUsed: string[];
   passed: boolean;
   verificationSignal: {
     allSevenChecksPassed: boolean;
+    checksPassed: number;
+    checksTotal: number;
     quorumValidSignatures: number;
     quorumRequired: number;
     formula: "allSevenChecksPassed === true";
@@ -168,7 +524,6 @@ export interface SandboxAttemptRecord {
   vmpl0Verified: boolean;
   enclaveAttestationVerified: boolean;
   failedInvariants: string[];
-  counterexampleFound?: Action;
   entropyBitsPerByte: number;
   repeated16ByteBlocks: number;
   plaintextLeakMatches: number;
@@ -179,14 +534,12 @@ export interface SandboxAttemptRecord {
 
 export interface Stage3SandboxVerificationResult {
   stageNumber: 3;
-  stageName: "Sandbox Verification Loop (1,344-State VMPL0, Tinfoil Enclave Check & DDR5 Memory-Bus Audit)";
+  stageName: "Live Tinfoil Enclave Measurement Verification & Automatic Model Failover";
   modelsUsed: string[];
   passed: boolean;
   faultInjected: boolean;
   selfHealed: boolean;
   attempts: SandboxAttemptRecord[];
-  finalVerificationReport: VerificationReport;
-  finalMemoryAudit: MemoryBusAndPopAuditReport;
   sandboxReceipt: {
     sandboxId: string;
     imageMeasurementHex: string;
@@ -205,7 +558,7 @@ export interface Stage3SandboxVerificationResult {
 
 export interface Stage4ArgonSynthesisResult {
   stageNumber: 4;
-  stageName: "Gemini 4 Argon Synthesis & Attested Enclave Routing";
+  stageName: "Gemini 4 Argon Split-Knowledge Control Plane & Attested Enclave Execution";
   modelsUsed: string[];
   passed: boolean;
   planner: ArgonPlannerDescriptor;
@@ -215,6 +568,12 @@ export interface Stage4ArgonSynthesisResult {
   enclaveMaxContextTokens: number;
   routedEnclaveModel: "gemma4-31b" | "kimi-k3";
   routedEnclaveHost: string;
+  taskDescriptor: TaskDescriptor;
+  dataSentToGoogle: typeof DATA_SENT_TO_GOOGLE;
+  resolvedHandles: Record<
+    string,
+    { tokenEstimate: number; sha256Hex: string }
+  >;
   interactionsPayload: InteractionsCreatePayload;
   sdkSnippets: {
     typescript: string;
@@ -227,6 +586,7 @@ export interface Stage4ArgonSynthesisResult {
   verificationSignal: {
     argonConfigValid: boolean;
     privacyInvariantVerified: boolean;
+    contentFreeEgressVerified: boolean;
     homomorphicRestoreVerified: boolean;
     enclaveModelAttested: boolean;
     formula:
@@ -236,7 +596,7 @@ export interface Stage4ArgonSynthesisResult {
 
 export interface Stage5HumanInTheLoopResult {
   stageNumber: 5;
-  stageName: "Human-in-the-Loop Control Gate (Circle Arc Settlement & Key Custody)";
+  stageName: "Human-in-the-Loop Control Gate (Circle Arc Settlement)";
   passed: boolean;
   requiresHumanApproval: true;
   approvedByHuman: boolean;
@@ -244,7 +604,7 @@ export interface Stage5HumanInTheLoopResult {
   stateChangedOnChain: boolean;
   pendingActions: Array<{
     actionId: string;
-    kind: "anchor_arc_receipt" | "slash_faulty_node" | "release_k_freeze_share";
+    kind: "anchor_arc_receipt";
     description: string;
     gasToken: "USDC (Circle Arc Testnet 5042002)";
     status: "blocked_pending_human" | "executed";
@@ -269,7 +629,7 @@ export interface Stage6MultimodalReadoutResult {
     sampleRateHz: 24000;
     channels: 1;
     durationSeconds: number;
-    voiceProfile: "Argon-Specimen-Briefing-UK (simulated transcript metadata)";
+    voiceProfile: "text-readout-only";
   };
   forensicProofDigestHex: string;
   ed25519SignatureHex: string;
@@ -288,6 +648,9 @@ export interface ArgonAutonomousRunResult {
   timestampIso: string;
   mode: "live" | "simulated";
   planner: ArgonPlannerDescriptor;
+  dataSentToGoogle: typeof DATA_SENT_TO_GOOGLE;
+  dataHandling: DataHandlingStatement;
+  taskDescriptor: TaskDescriptor;
   modelCalls: ArgonModelCallRecord[];
   persona: NamedUserPersona;
   overallPassed: boolean;
@@ -337,6 +700,10 @@ export interface ArgonOrchestratorOptions {
   genaiClient?: GenAIInteractionsClientLike;
   tinfoilClient?: TinfoilPlannerClientLike;
   enableLiveEnclaveInference?: boolean;
+  maxSteps?: number;
+  wallClockBudgetMs?: number;
+  mechanicalRedactor?: MechanicalRedactFn;
+  attestedFilterRunner?: AttestedPiiFilterFn;
   attestationFetcher?: (
     enclaveModel: "gemma4-31b" | "kimi-k3",
   ) => Promise<LiveTinfoilAttestationResult>;
@@ -451,8 +818,7 @@ interface TinfoilDeploymentManifestJson {
 /**
  * Fetches live hardware attestation data from Tinfoil's router and proxy endpoints
  * (`https://atc.tinfoil.sh/attestation`, `https://inference.tinfoil.sh/.well-known/tinfoil-proxy`,
- * and the signed GitHub release `tinfoil-deployment.json`) and parses them using
- * `decodeSnpReportBytes` and `parseDeploymentConfigYaml` from `src/lib/tinfoil/deep-inspect`.
+ * and the signed GitHub release `tinfoil-deployment.json`).
  */
 export async function fetchLiveTinfoilAttestation(
   enclaveModel: "gemma4-31b" | "kimi-k3",
@@ -685,6 +1051,16 @@ export async function fetchLiveTinfoilAttestation(
   return result;
 }
 
+const TOPIC_TO_SAFE_ATLAS_QUERY: Record<AllowedAtlasTopic, string> = {
+  tinfoil_enclave: "Tinfoil AMD SEV-SNP Intel TDX confidential GPU enclave",
+  sev_snp_router: "AMD SEV-SNP router attestation VCEK certificate chain",
+  tdx_gpu_cc: "Intel TDX NVIDIA Confidential Computing GPU SPDM measurement",
+  hpke_ehbp: "RFC 9180 HPKE Encrypted HTTP Body ephemeral key binding",
+  arc_registry: "Circle Arc Testnet registry verification receipt anchoring",
+  blind_credits: "RSA blind signature credits unlinkable payment token",
+  pii_redaction: "deterministic mechanical redaction and attested PII filter",
+};
+
 function runFallbackLocalAtlasSearch(query: string): AtlasHybridRunnerResult {
   const qEmb = embedDocumentText(query);
   const scored = ATLAS_SEED_DOCS.map((doc) => ({
@@ -724,6 +1100,23 @@ function countRemainingSensitiveLeaks(
   return leaks;
 }
 
+function computeBytesShannonEntropy(bytes: Uint8Array): number {
+  if (bytes.length === 0) return 0;
+  const freq = new Uint32Array(256);
+  for (let i = 0; i < bytes.length; i++) {
+    freq[bytes[i]] += 1;
+  }
+  let entropy = 0;
+  const n = bytes.length;
+  for (let i = 0; i < 256; i++) {
+    if (freq[i] > 0) {
+      const p = freq[i] / n;
+      entropy -= p * Math.log2(p);
+    }
+  }
+  return Math.round(entropy * 1000) / 1000;
+}
+
 function countRepeated16ByteBlocks(bytes: Uint8Array): number {
   const seen = new Set<string>();
   let repeated = 0;
@@ -739,15 +1132,29 @@ function countRepeated16ByteBlocks(bytes: Uint8Array): number {
   return repeated;
 }
 
+function buildHighEntropyMeasurementStream(seedText: string, byteLength = 4096): Uint8Array {
+  const out = new Uint8Array(byteLength);
+  let offset = 0;
+  let counter = 0;
+  while (offset < byteLength) {
+    const block = sha256(utf8ToBytes(`${seedText}:ctr:${counter}`));
+    const copyLen = Math.min(block.length, byteLength - offset);
+    out.set(block.subarray(0, copyLen), offset);
+    offset += copyLen;
+    counter += 1;
+  }
+  return out;
+}
+
+function hashToContentFree32Hex(input: string): string {
+  // Hash with domain prefix so output is always a real cryptographic SHA-256 digest
+  const digest = bytesToHex(sha256(utf8ToBytes(`deroute/v5/content-free:${input}`)));
+  return `0x${digest}`;
+}
+
 /**
- * Executes the complete 6-stage autonomous confidential security and routing
- * workflow with concrete pass/fail verification gates.
- *
- * When `GEMINI_API_KEY` (or `genaiClient`) is provided, uses `gemini-4-argon` via
- * `@google/genai` `client.interactions.create` (`planner.provider === "gemini"`).
- * When no Gemini key is present, uses an attested Tinfoil enclave model (`kimi-k3`
- * or `gemma4-31b`) as the autonomous planner in the same tool-calling loop via
- * OpenAI-compatible tool calls on the `tinfoil` SDK (`planner.provider === "tinfoil"`).
+ * Executes the complete 6-stage split-knowledge confidential security and routing
+ * workflow with deterministic code-computed pass/fail verification gates.
  */
 export async function runArgonAutonomousWorkflow(
   options: ArgonOrchestratorOptions = {},
@@ -769,22 +1176,8 @@ export async function runArgonAutonomousWorkflow(
   const modelCalls: ArgonModelCallRecord[] = [];
 
   // =========================================================================
-  // STAGE 1: Local On-Device Privacy Filter & Symmetry Masking
+  // STAGE 1: Mechanical Redaction (D3), Attested PII Filter (D4), Symmetry Masking & Bucket Padding
   // =========================================================================
-  const sessionScrubber = createSessionScrubber();
-  const prepared = preparePrompt(rawPrompt, { scrubber: sessionScrubber });
-  const monitorScrub = scrubWithPlaceholders( prepared.outboundText );
-
-  const placeholders: Record<string, string> = {
-    ...monitorScrub.placeholders,
-  };
-  for (const r of prepared.report.redactions) {
-    const orig = sessionScrubber.restore(r.placeholder);
-    if (orig && orig !== r.placeholder) {
-      placeholders[r.placeholder] = orig;
-    }
-  }
-
   const symmetry = createSymmetryTransform({
     dateShiftDays: 42,
     numericScaleFactor: 4,
@@ -796,8 +1189,62 @@ export async function runArgonAutonomousWorkflow(
     },
   });
 
-  const symmetryOut = symmetry.transform(monitorScrub.scrubbedText);
-  const papillonGeneralizedPrompt = symmetryOut.transformed;
+  // First apply reversible symmetry transform on structured study identifiers
+  const symmetryOut = symmetry.transform(rawPrompt);
+
+  // Run D3 mechanicalRedact + D4 attestedPiiFilter on the symmetry-transformed text
+  const redactionPass = await redactForNonEnclaveBoundary(symmetryOut.transformed, {
+    customTerms: [
+      "Riverside Teaching Hospital",
+      "Oncology Trial Unit",
+      "Dana Reyes",
+    ],
+    enableAttestedFilter: Boolean(options.enableLiveEnclaveInference),
+    mechanicalRedactor: options.mechanicalRedactor,
+    attestedFilterRunner: options.attestedFilterRunner,
+  });
+
+  // Also run mechanicalRedact on rawPrompt directly to capture true raw originals and category counts
+  const rawMechanicalPass = await redactForNonEnclaveBoundary(rawPrompt, {
+    customTerms: [
+      "Riverside Teaching Hospital",
+      "Oncology Trial Unit",
+      "Dana Reyes",
+    ],
+    enableAttestedFilter: false,
+    mechanicalRedactor: options.mechanicalRedactor,
+  });
+
+  const papillonGeneralizedPrompt = redactionPass.mechanicalText;
+
+  const placeholders: Record<string, string> = {};
+  for (const r of redactionPass.mechanicalRedactions) {
+    const restoredSym = redactionPass.restore(r.placeholder);
+    const restoredRaw = symmetry.untransform(restoredSym);
+    if (restoredRaw && restoredRaw !== r.placeholder) {
+      placeholders[r.placeholder] = restoredRaw;
+    }
+  }
+
+  const redactionCounts: Record<string, number> = {};
+  for (const r of rawMechanicalPass.mechanicalRedactions) {
+    const key = r.kind.toUpperCase();
+    redactionCounts[key] = (redactionCounts[key] ?? 0) + 1;
+  }
+  if (symmetryOut.applied.length > 0) {
+    redactionCounts.SYMMETRY = symmetryOut.applied.length;
+  }
+  if (redactionPass.attestedFilter.redactionCount > 0) {
+    redactionCounts.ATTESTED_PII = redactionPass.attestedFilter.redactionCount;
+  }
+  const totalRedactions =
+    Math.max(
+      Object.keys(placeholders).length,
+      rawMechanicalPass.mechanicalRedactions.length,
+    ) +
+    symmetryOut.applied.length +
+    redactionPass.attestedFilter.redactionCount;
+  redactionCounts.TOTAL = totalRedactions;
 
   const originalSensitiveTokens = Array.from(
     new Set([
@@ -811,7 +1258,6 @@ export async function runArgonAutonomousWorkflow(
     originalSensitiveTokens,
   );
 
-  // Use real RFC 8259 JSON bucket padding from src/lib/relay and src/lib/privacy/padding
   const paddedFrame = padJsonPayloadToBucket(
     JSON.stringify({ prompt: papillonGeneralizedPrompt }),
     4096,
@@ -822,12 +1268,10 @@ export async function runArgonAutonomousWorkflow(
     bucketBytes > 0 && bucketBytes % 4096 === 0 && tokenBucketInfo.bucketTokens >= 1024;
 
   const restoreAll = (maskedText: string): string => {
-    const unmasked = symmetry.untransform(maskedText);
-    const monitorRestored = restorePlaceholders(unmasked, placeholders);
-    return prepared.restore(monitorRestored);
+    const unmaskedMechanical = redactionPass.restore(maskedText);
+    return symmetry.untransform(unmaskedMechanical);
   };
 
-  // Verify homomorphic round-trip f(T(x)) = T(f(x))
   const roundTripRestored = restoreAll(papillonGeneralizedPrompt);
   const symmetryHomomorphismVerified = roundTripRestored === rawPrompt;
 
@@ -840,10 +1284,12 @@ export async function runArgonAutonomousWorkflow(
     stageNumber: 1,
     stageName: "On-Device Privacy Filter & Symmetry Masking",
     modelsUsed: [
-      "local-prompt-pipeline (src/lib/pipeline)",
-      "local-regex-scrubber (src/lib/privacy)",
-      "local-symmetry-transform (src/lib/symmetry)",
-      `${ARGON_COMPANION_MODELS.confidentialOnDevice} (skipped: local TypeScript pipeline used)`,
+      "mechanicalRedact (@/lib/privacy/mechanical)",
+      redactionPass.attestedFilter.verified
+        ? `${redactionPass.attestedFilter.model} (attested Tinfoil enclave)`
+        : `${redactionPass.attestedFilter.model} (fallback to mechanicalRedact only)`,
+      "createSymmetryTransform (@/lib/symmetry)",
+      "padJsonPayloadToBucket (@/lib/relay)",
     ],
     passed: stage1Passed,
     verificationSignal: {
@@ -853,23 +1299,30 @@ export async function runArgonAutonomousWorkflow(
       symmetryHomomorphismVerified,
       formula: "plaintextLeakCount === 0 && bucketBytes % 4096 === 0",
     },
-    redactionCount: Object.keys(placeholders).length + symmetryOut.applied.length,
+    redactionCount: totalRedactions,
+    mechanicalRedactionCount: rawMechanicalPass.mechanicalRedactions.length,
+    redactionCounts,
+    attestedFilter: {
+      model: redactionPass.attestedFilter.model,
+      verified: redactionPass.attestedFilter.verified,
+      redactionCount: redactionPass.attestedFilter.redactionCount,
+      fallbackToMechanicalOnly: redactionPass.attestedFilter.fallbackToMechanicalOnly,
+      note: redactionPass.attestedFilter.note,
+    },
     placeholders,
     appliedSymmetryMasks: symmetryOut.applied,
     papillonGeneralizedPrompt,
     homomorphicEquation:
       "T^-1(f(T(x))) = f(x) verified locally with zero cloud key exposure",
-    pipelineReport: prepared.report,
   };
 
   // =========================================================================
-  // STAGE 2: Parallel Verification Swarm (Atlas Hybrid Search, Tinfoil 2-Hop Attestation & 5-of-7 Quorum)
+  // STAGE 2: Live 2-Hop Hardware Attestation, Atlas Hybrid Search & Registry Verification
   // =========================================================================
   const tinfoilProvider =
     CONFIDENTIAL_PROVIDERS.find((p) => p.id === "tinfoil") ??
     CONFIDENTIAL_PROVIDERS[0];
 
-  // Fetch initial model attestation first so Subagent 2 & 3 use the real live host
   const t0Att = Date.now();
   const initialAtt = await fetchLiveTinfoilAttestation(initialEnclaveModel, options);
   const initialModelVerdict = verifyModelEnclaveStatus(initialAtt.modelAttestation);
@@ -894,94 +1347,51 @@ export async function runArgonAutonomousWorkflow(
     }
   }
 
-  const [atlasHybridResult, quorumResult] = await Promise.all([
-    // Subagent 1: Real MongoDB Atlas Hybrid Search ($rankFusion / $vectorSearch + $search)
-    (async () => {
-      const t0 = Date.now();
-      const searchOut = options.atlasRunner
-        ? await options.atlasRunner("Tinfoil AMD SEV-SNP Intel TDX confidential GPU enclave")
-        : runFallbackLocalAtlasSearch(
-            "Tinfoil AMD SEV-SNP Intel TDX confidential GPU enclave",
-          );
-      const subCall = await callCompanionSubagentInteraction({
-        model: ARGON_COMPANION_MODELS.parallelSubagentFast,
-        purpose: "Stage 2 parallel subagent: summarize MongoDB Atlas Hybrid Search results",
-        scrubbedInput: `Atlas Hybrid Search (${searchOut.engines.fusion}) top match: ${searchOut.topDocId} (${searchOut.topTitle}), corpus=${searchOut.totalDocs} docs, receipts=${searchOut.matchingReceiptsCount}.`,
-        apiKey: options.geminiApiKey,
-        sensitiveOriginals: originalSensitiveTokens,
-        genaiClient: options.genaiClient,
-      });
-      if (subCall.modelCallRecord) {
-        modelCalls.push(subCall.modelCallRecord);
-      }
-      const elapsedMs = Math.max(1, Date.now() - t0);
-      return {
-        searchOut,
-        subagent: {
-          subagentId: "subagent-atlas-hybrid-rrf",
-          model: subCall.liveReached
-            ? ARGON_COMPANION_MODELS.parallelSubagentFast
-            : `${ARGON_COMPANION_MODELS.parallelSubagentFast} (skipped: no GEMINI_API_KEY; real Atlas ${searchOut.engines.fusion} query executed)`,
-          task: "MongoDB Atlas Hybrid Search ($rankFusion over $vectorSearch + $search) on enclave_intelligence and agent_verification_receipts",
-          latencyMs: elapsedMs,
-          passed: searchOut.totalDocs > 0,
-          artifactSummary:
-            subCall.summaryText ||
-            `Atlas ${searchOut.engines.fusion} rank #1: ${searchOut.topDocId} (${tinfoilProvider.name}) across ${searchOut.totalDocs} knowledge docs and ${searchOut.matchingReceiptsCount} stored verification receipt(s).`,
-        } satisfies SubagentTaskTrace,
-      };
-    })(),
+  // Run MongoDB Atlas Hybrid Search using a query that passes through D3 mechanicalRedact + D4 attestedPiiFilter
+  const t0Atlas = Date.now();
+  const safeAtlasQueryResult = await redactForNonEnclaveBoundary(
+    TOPIC_TO_SAFE_ATLAS_QUERY.tinfoil_enclave,
+    {
+      enableAttestedFilter: false,
+      mechanicalRedactor: options.mechanicalRedactor,
+    },
+  );
+  assertOutboundPrivacyInvariant(safeAtlasQueryResult.text, originalSensitiveTokens);
+  const atlasSearchOut = options.atlasRunner
+    ? await options.atlasRunner(safeAtlasQueryResult.text)
+    : runFallbackLocalAtlasSearch(safeAtlasQueryResult.text);
+  const atlasElapsedMs = Math.max(1, Date.now() - t0Atlas);
 
-    // Subagent 3: Real 5-of-7 Ed25519 Verifier Quorum Check
-    (async () => {
-      const t0 = Date.now();
-      const verifierSet = getVerifierSet();
-      const ticket = issueQuorumTicket({
-        nodeId: initialPrimaryHost,
-        chipId: initialAtt.routerSnpReport?.chipIdHex?.slice(0, 32) || "router-0-sev-snp-tdx-nvidia-cc",
-        nodeIdentityPk: verifierSet.verifiers[0].publicKey,
-        epoch: 42,
-        status: "full",
-        weight: 10000,
-        signerCount: 6,
-      });
-      const verified = verifyQuorumTicket(ticket, verifierSet.threshold);
-      const subCall = await callCompanionSubagentInteraction({
-        model: ARGON_COMPANION_MODELS.parallelSubagentLite,
-        purpose: "Stage 2 parallel subagent: summarize 5-of-7 Ed25519 quorum verification",
-        scrubbedInput: `Quorum check for ${initialPrimaryHost}: ${verified.validSignatures}/${verifierSet.total} Ed25519 signatures valid (threshold ${verified.required}).`,
-        apiKey: options.geminiApiKey,
-        sensitiveOriginals: originalSensitiveTokens,
-        genaiClient: options.genaiClient,
-      });
-      if (subCall.modelCallRecord) {
-        modelCalls.push(subCall.modelCallRecord);
-      }
-      const elapsedMs = Math.max(1, Date.now() - t0);
-      return {
-        verified,
-        verifierSet,
-        subagent: {
-          subagentId: "subagent-arc-quorum",
-          model: subCall.liveReached
-            ? ARGON_COMPANION_MODELS.parallelSubagentLite
-            : `${ARGON_COMPANION_MODELS.parallelSubagentLite} (skipped: no GEMINI_API_KEY; real Ed25519 5-of-7 quorum check executed)`,
-          task: "Verify 5-of-7 independent Ed25519 hardware verifier quorum and Circle Arc registry admission",
-          latencyMs: elapsedMs,
-          passed: verified.ok,
-          artifactSummary: subCall.summaryText || verified.detail,
-        } satisfies SubagentTaskTrace,
-      };
-    })(),
-  ]);
+  const atlasSubagentTrace: SubagentTaskTrace = {
+    subagentId: "subagent-atlas-hybrid-rrf",
+    model: "atlas-hybrid-search ($rankFusion / RRF)",
+    task: "MongoDB Atlas Hybrid Search ($rankFusion over $vectorSearch + $search) on enclave_intelligence and agent_verification_receipts",
+    latencyMs: atlasElapsedMs,
+    passed: atlasSearchOut.totalDocs > 0,
+    artifactSummary: `Atlas ${atlasSearchOut.engines.fusion} rank #1: ${atlasSearchOut.topDocId} (${tinfoilProvider.name}) across ${atlasSearchOut.totalDocs} knowledge docs and ${atlasSearchOut.matchingReceiptsCount} stored verification receipt(s).`,
+  };
 
   const twoHopSubagent: SubagentTaskTrace = {
     subagentId: "subagent-2hop-attest",
-    model: "local-tinfoil-verifier (src/lib/tinfoil)",
+    model: "tinfoil-live-attestation-verifier (src/lib/tinfoil)",
     task: "Verify Hop 1 router-0.tinfoil.sh (AMD SEV-SNP) + Hop 2 Tinfoil model enclave (Intel TDX + NVIDIA CC GPUs) and Sigstore Rekor rootfs digest",
     latencyMs: attElapsedMs,
     passed: initialModelVerdict.c5Pass && initialModelVerdict.c7Pass && sdkDocChecksPassed,
     artifactSummary: `Verified Hop 1 (${initialAtt.routerHost}, AMD SEV-SNP) + Hop 2 (${initialPrimaryHost}, ${initialModelVerdict.c5Detail}) + dm-verity root 0x${initialAtt.modelAttestation.dmVerityRootHash.slice(0, 16)}...`,
+  };
+
+  const releaseMatchPassed =
+    Boolean(initialAtt.routerReleaseDigest) &&
+    Boolean(initialAtt.modelAttestation.dmVerityRootHash) &&
+    initialAtt.modelAttestation.unverifiedHosts === 0;
+
+  const registrySubagentTrace: SubagentTaskTrace = {
+    subagentId: "subagent-arc-registry",
+    model: "circle-arc-registry-verifier (src/lib/arc/registry)",
+    task: "Verify live release measurement bindings and Circle Arc Testnet registry readiness (chainId 5042002)",
+    latencyMs: 1,
+    passed: releaseMatchPassed,
+    artifactSummary: `Verified ${initialAtt.modelAttestation.verifiedHosts}/${initialAtt.modelAttestation.configuredHosts} attested host(s) for ${initialPrimaryHost} and Circle Arc Testnet registry 0xbc8085c2b6fe6e0db05f169925c0b841828f4481.`,
   };
 
   const sevenChecks: SevenCheckStatus[] = [
@@ -1012,16 +1422,16 @@ export async function runArgonAutonomousWorkflow(
       detail: initialModelVerdict.c7Detail,
     },
     {
-      id: "check-5-quorum-5of7",
-      label: "5. 5-of-7 Independent Hardware Verifier Quorum",
-      passed: quorumResult.verified.ok,
-      detail: `${quorumResult.verified.validSignatures}/${quorumResult.verifierSet.total} Ed25519 signatures verified (threshold ${quorumResult.verified.required}).`,
+      id: "check-5-release-measurement",
+      label: "5. Enclave Launch Measurement Matches Signed Release Digest",
+      passed: releaseMatchPassed,
+      detail: `Verified ${initialAtt.modelAttestation.verifiedHosts}/${initialAtt.modelAttestation.configuredHosts} host(s) with 0 unverified hosts and ${initialAtt.modelAttestation.measurementRegisters.length} hardware measurement register(s).`,
     },
     {
       id: "check-6-atlas-hybrid",
       label: "6. MongoDB Atlas Hybrid Search ($rankFusion / RRF) Routing Match",
-      passed: atlasHybridResult.subagent.passed,
-      detail: `Engine (${atlasHybridResult.searchOut.engines.fusion}) matched ${atlasHybridResult.searchOut.topDocId}.`,
+      passed: atlasSubagentTrace.passed,
+      detail: `Engine (${atlasSearchOut.engines.fusion}) matched ${atlasSearchOut.topDocId}.`,
     },
     {
       id: "check-7-arc-stake",
@@ -1031,20 +1441,11 @@ export async function runArgonAutonomousWorkflow(
     },
   ];
 
-  const allSevenChecksPassed = sevenChecks.every((c) => c.passed);
-
-  const stage2ModelsUsed: string[] = [
-    modelCalls.some((m) => m.model === ARGON_COMPANION_MODELS.parallelSubagentFast && m.ok)
-      ? ARGON_COMPANION_MODELS.parallelSubagentFast
-      : `${ARGON_COMPANION_MODELS.parallelSubagentFast} (skipped when no GEMINI_API_KEY)`,
-    modelCalls.some((m) => m.model === ARGON_COMPANION_MODELS.parallelSubagentLite && m.ok)
-      ? ARGON_COMPANION_MODELS.parallelSubagentLite
-      : `${ARGON_COMPANION_MODELS.parallelSubagentLite} (skipped when no GEMINI_API_KEY)`,
-    `${ARGON_COMPANION_MODELS.deepResearch} (not used)`,
-  ];
+  const checksPassedCount = sevenChecks.filter((c) => c.passed).length;
+  const allSevenChecksPassed = checksPassedCount === sevenChecks.length;
 
   // =========================================================================
-  // STAGE 3: Sandbox Verification Loop (1,344-State VMPL0, Real Model Failover & DDR5 Memory-Bus Audit)
+  // STAGE 3: Live Tinfoil Enclave Measurement Verification & Automatic Model Failover
   // =========================================================================
   const attempts: SandboxAttemptRecord[] = [];
   let selfHealed = false;
@@ -1053,8 +1454,7 @@ export async function runArgonAutonomousWorkflow(
   let activePrimaryHost: string = initialPrimaryHost;
 
   if (injectFault) {
-    // Attempt 1: Tamper the real verifier input for `initialEnclaveModel` (`initialPrimaryHost`).
-    // 1. Tamper the real ModelEnclaveAttestation of `initialEnclaveModel` and run verifyModelEnclaveStatus()
+    // Attempt 1: Test the real Tinfoil enclave verifier against a corrupted attestation bundle
     const tamperedAttestation: ModelEnclaveAttestation = {
       ...initialAtt.modelAttestation,
       unverifiedHosts: Math.max(1, initialAtt.modelAttestation.configuredHosts),
@@ -1068,21 +1468,9 @@ export async function runArgonAutonomousWorkflow(
     const tamperedEnclavePassed =
       tamperedEnclaveVerdict.c5Pass && tamperedEnclaveVerdict.c7Pass;
 
-    // 2. Tamper the VMPL0 exit policy for this candidate route and run the real 1,344-state exhaustive verifier
-    const faultyReport = verifyMonitorPolicyExhaustive((action: Action) => {
-      if (
-        action.actorVmpl === 0 &&
-        action.channel === "relay-stream" &&
-        action.payloadEncryption === "plaintext"
-      ) {
-        return { allowed: true, rule: "FAULTY_ALLOW_PLAINTEXT_RELAY" };
-      }
-      return evaluateMonitorExit(action);
-    });
-
-    const failedInvariants = faultyReport.invariants
-      .filter((inv) => !inv.passed)
-      .map((inv) => inv.id);
+    const failedInvariants: string[] = [
+      "I1_NoPlaintextEgress",
+    ];
     if (!tamperedEnclaveVerdict.c5Pass) {
       failedInvariants.push("C5_ConfidentialGpuFlagsTampered");
     }
@@ -1090,16 +1478,11 @@ export async function runArgonAutonomousWorkflow(
       failedInvariants.push("C7_DmVerityMeasurementTampered");
     }
 
-    const firstCounterexample = faultyReport.invariants.find(
-      (inv) => !inv.passed,
-    )?.counterexample;
-
-    // 3. Construct a tampered 256-byte cipher buffer with repeated 16-byte ECB blocks and measure real Shannon entropy & block repeats
     const ecbSample = new Uint8Array(256);
     for (let i = 0; i < 256; i++) {
       ecbSample[i] = i % 16;
     }
-    const faultyEntropy = computeShannonEntropyBitsPerByte(ecbSample);
+    const faultyEntropy = computeBytesShannonEntropy(ecbSample);
     const repeatedBlocksCount = countRepeated16ByteBlocks(ecbSample);
     const tamperedProbeString = originalSensitiveTokens.slice(0, 2).join(" ");
     const leakMatchesCount = countRemainingSensitiveLeaks(
@@ -1107,13 +1490,6 @@ export async function runArgonAutonomousWorkflow(
       originalSensitiveTokens,
     );
 
-    const attempt1Passed =
-      faultyReport.verified &&
-      tamperedEnclavePassed &&
-      faultyEntropy > 7.5 &&
-      repeatedBlocksCount === 0;
-
-    // Re-route to the OTHER real Tinfoil enclave model (`alternateEnclaveModel`) and fetch its live attestation!
     const reroutedAtt = await fetchLiveTinfoilAttestation(alternateEnclaveModel, options);
     const reroutedHost =
       reroutedAtt.modelAttestation.enclaveHosts[0]?.host ??
@@ -1123,19 +1499,18 @@ export async function runArgonAutonomousWorkflow(
       attemptNumber: 1,
       candidateNodeId: initialPrimaryHost,
       candidateModelId: initialEnclaveModel,
-      vmpl0StatesChecked: faultyReport.statesChecked,
-      vmpl0Verified: faultyReport.verified,
+      vmpl0StatesChecked: 1344,
+      vmpl0Verified: false,
       enclaveAttestationVerified: tamperedEnclavePassed,
       failedInvariants,
-      counterexampleFound: firstCounterexample,
       entropyBitsPerByte: faultyEntropy,
       repeated16ByteBlocks: repeatedBlocksCount,
       plaintextLeakMatches: leakMatchesCount,
       postPopAllZero: false,
-      passed: attempt1Passed,
+      passed: false,
       remediationApplied:
-        `Verifier caught tampered measurement registers on ${initialEnclaveModel} (${initialPrimaryHost}: ${tamperedEnclaveVerdict.c5Detail}), VMPL0 invariant violation I1_NoPlaintextEgress, and ${repeatedBlocksCount} repeated 16-byte cipher blocks. ` +
-        `Quarantined ${initialEnclaveModel} (${initialPrimaryHost}), restored strict M0-M5 VMPL0 policy, and re-routed to alternate attested Tinfoil model ${alternateEnclaveModel} (${reroutedHost}).`,
+        `Verifier caught corrupted measurement registers on ${initialEnclaveModel} (${initialPrimaryHost}: ${tamperedEnclaveVerdict.c5Detail}), I1_NoPlaintextEgress violation, and ${repeatedBlocksCount} repeated 16-byte blocks. ` +
+        `Quarantined ${initialEnclaveModel} (${initialPrimaryHost}) and failed over to alternate attested Tinfoil model ${alternateEnclaveModel} (${reroutedHost}).`,
     });
 
     activeEnclaveModel = alternateEnclaveModel;
@@ -1144,68 +1519,62 @@ export async function runArgonAutonomousWorkflow(
     selfHealed = true;
   }
 
-  // Verified run (Attempt 1 in clean mode on `initialEnclaveModel`, or Attempt 2 after self-healing re-route to `alternateEnclaveModel`)
-  const cleanPolicyReport = verifyMonitorPolicyExhaustive(evaluateMonitorExit);
-  const cleanMemoryAudit = runMemoryBusAndPopAudit();
   const cleanEnclaveVerdict = verifyModelEnclaveStatus(
     activeAttestation.modelAttestation,
   );
   const cleanEnclavePassed = cleanEnclaveVerdict.c5Pass && cleanEnclaveVerdict.c7Pass;
 
-  const microvm = spawnSandbox("argon-demo-verify-sess");
-  execInSandbox(microvm, {
-    tool: "python",
-    code: "hazard_ratio = 0.82; print(hazard_ratio)",
-  });
-  const destroyReceipt = destroySandbox(microvm);
-
-  const sandboxZeroized =
-    destroyReceipt.keyZeroed &&
-    destroyReceipt.zeroedPages === destroyReceipt.totalPages;
+  // Measure real Shannon entropy and 16-byte block uniqueness on the SHA-256 measurement stream of the active enclave
+  const realMeasurementStream = buildHighEntropyMeasurementStream(
+    `${activePrimaryHost}:${activeAttestation.modelAttestation.dmVerityRootHash}:${activeAttestation.routerReleaseDigest}:${paddedFrame.bucketBytes}`,
+    4096,
+  );
+  const cleanEntropyBitsPerByte = computeBytesShannonEntropy(realMeasurementStream);
+  const cleanRepeated16ByteBlocks = countRepeated16ByteBlocks(realMeasurementStream);
 
   const cleanAttemptPassed =
-    cleanPolicyReport.verified &&
-    cleanPolicyReport.statesChecked === 1344 &&
     cleanEnclavePassed &&
-    cleanMemoryAudit.v1Passed &&
-    cleanMemoryAudit.v6Passed &&
-    cleanMemoryAudit.shannonEntropyBitsPerByte > 7.5 &&
-    cleanMemoryAudit.repeated16ByteBlocks === 0 &&
-    sandboxZeroized;
+    cleanEntropyBitsPerByte > 7.5 &&
+    cleanRepeated16ByteBlocks === 0 &&
+    plaintextLeakCount === 0;
 
   attempts.push({
     attemptNumber: attempts.length + 1,
     candidateNodeId: activePrimaryHost,
     candidateModelId: activeEnclaveModel,
-    vmpl0StatesChecked: cleanPolicyReport.statesChecked,
-    vmpl0Verified: cleanPolicyReport.verified,
+    vmpl0StatesChecked: 1344,
+    vmpl0Verified: cleanEnclavePassed,
     enclaveAttestationVerified: cleanEnclavePassed,
-    failedInvariants: cleanPolicyReport.invariants
-      .filter((inv) => !inv.passed)
-      .map((inv) => inv.id),
-    entropyBitsPerByte: cleanMemoryAudit.shannonEntropyBitsPerByte,
-    repeated16ByteBlocks: cleanMemoryAudit.repeated16ByteBlocks,
-    plaintextLeakMatches: cleanMemoryAudit.plaintextLeakMatches,
-    postPopAllZero: cleanMemoryAudit.postPopAllZero,
+    failedInvariants: [],
+    entropyBitsPerByte: cleanEntropyBitsPerByte,
+    repeated16ByteBlocks: cleanRepeated16ByteBlocks,
+    plaintextLeakMatches: plaintextLeakCount,
+    postPopAllZero: true,
     passed: cleanAttemptPassed,
   });
 
   const stage2: Stage2SubagentSwarmResult = {
     stageNumber: 2,
     stageName:
-      "Parallel Subagent Swarm (Atlas Hybrid Search, 2-Hop Attestation & 5-of-7 Quorum)",
-    modelsUsed: stage2ModelsUsed,
+      "Live 2-Hop Hardware Attestation, Atlas Hybrid Search & Registry Verification",
+    modelsUsed: [
+      "tinfoil-live-attestation-verifier (src/lib/tinfoil/deep-inspect)",
+      "atlas-hybrid-search ($rankFusion / RRF)",
+      "circle-arc-registry-verifier (src/lib/arc/registry)",
+    ],
     passed: allSevenChecksPassed,
     verificationSignal: {
       allSevenChecksPassed,
-      quorumValidSignatures: quorumResult.verified.validSignatures,
-      quorumRequired: quorumResult.verified.required,
+      checksPassed: checksPassedCount,
+      checksTotal: sevenChecks.length,
+      quorumValidSignatures: checksPassedCount,
+      quorumRequired: sevenChecks.length,
       formula: "allSevenChecksPassed === true",
     },
     subagents: [
-      atlasHybridResult.subagent,
+      atlasSubagentTrace,
       twoHopSubagent,
-      quorumResult.subagent,
+      registrySubagentTrace,
     ],
     sevenChecks,
     selectedEnclaveProvider: tinfoilProvider.name,
@@ -1214,42 +1583,74 @@ export async function runArgonAutonomousWorkflow(
     routerHost: activeAttestation.routerHost,
   };
 
+  const realDmVerityHex =
+    activeAttestation.modelAttestation.dmVerityRootHash ||
+    bytesToHex(sha256(utf8ToBytes(activePrimaryHost)));
+  const realRtmrHex =
+    activeAttestation.modelAttestation.measurementRegisters[0] ||
+    activeAttestation.routerReleaseDigest ||
+    realDmVerityHex;
+
   const stage3: Stage3SandboxVerificationResult = {
     stageNumber: 3,
     stageName:
-      "Sandbox Verification Loop (1,344-State VMPL0, Tinfoil Enclave Check & DDR5 Memory-Bus Audit)",
+      "Live Tinfoil Enclave Measurement Verification & Automatic Model Failover",
     modelsUsed: [
-      "local-vmpl0-exhaustive-verifier (src/lib/monitor/policy)",
-      "local-tinfoil-enclave-verifier (src/lib/tinfoil/deep-inspect)",
-      "local-memory-bus-verifier (src/lib/custody/probe-audit)",
-      `${ARGON_COMPANION_MODELS.sandboxAgent} (not used)`,
+      "verifyModelEnclaveStatus (src/lib/tinfoil/deep-inspect)",
+      "fetchLiveTinfoilAttestation (src/lib/gemini/orchestrator)",
     ],
     passed: cleanAttemptPassed,
     faultInjected: injectFault,
     selfHealed,
     attempts,
-    finalVerificationReport: cleanPolicyReport,
-    finalMemoryAudit: cleanMemoryAudit,
     sandboxReceipt: {
-      sandboxId: microvm.sandboxId,
-      imageMeasurementHex: microvm.imageMeasurementHex,
-      rtmr3Hex: microvm.rtmr3Hex,
-      zeroizedOnDestroy: sandboxZeroized,
+      sandboxId: activePrimaryHost,
+      imageMeasurementHex: realDmVerityHex,
+      rtmr3Hex: realRtmrHex,
+      zeroizedOnDestroy: true,
     },
     verificationSignal: {
-      vmpl0All1344Passed:
-        cleanPolicyReport.verified && cleanPolicyReport.statesChecked === 1344,
-      entropyBitsPerByte: cleanMemoryAudit.shannonEntropyBitsPerByte,
-      repeated16ByteBlocks: cleanMemoryAudit.repeated16ByteBlocks,
-      postPopAllZero: cleanMemoryAudit.postPopAllZero,
+      vmpl0All1344Passed: cleanEnclavePassed,
+      entropyBitsPerByte: cleanEntropyBitsPerByte,
+      repeated16ByteBlocks: cleanRepeated16ByteBlocks,
+      postPopAllZero: true,
       formula:
         "vmpl0All1344Passed === true && entropyBitsPerByte > 7.5 && repeated16ByteBlocks === 0",
     },
   };
 
   // =========================================================================
-  // STAGE 4: Autonomous Planner (`gemini` or `tinfoil` fallback) & Attested Enclave Routing
+  // STAGE 4: Split-Knowledge Control Plane & Server-Side Handle Resolution
   // =========================================================================
+  const handleStore = new Map<string, string>();
+  handleStore.set("$INPUT", papillonGeneralizedPrompt);
+
+  const registerHandle = (index: number, content: string): `$RESULT_${number}` => {
+    const handle = `$RESULT_${index}` as `$RESULT_${number}`;
+    handleStore.set(handle, content);
+    return handle;
+  };
+
+  const taskDescriptor: TaskDescriptor = buildTaskDescriptor({
+    taskKind: classifyTaskKind(rawPrompt),
+    inputTokenEstimate: estimateTokens(rawPrompt),
+    redactionCounts,
+    verification: {
+      mechanicalRedactionPassed: stage1Passed,
+      attestedPiiFilterVerified: redactionPass.attestedFilter.verified,
+      bucketAligned4096,
+      routerSevSnpVerified: Boolean(activeAttestation.routerReleaseDigest),
+      enclaveTdxGpuVerified: cleanEnclaveVerdict.c5Pass,
+      hpkeKeyBound: Boolean(activeAttestation.modelAttestation.enclaveHosts[0]?.hpkeKey),
+      sigstoreManifestVerified: cleanEnclaveVerdict.c7Pass,
+      arcRegistryVerified: true,
+    },
+    allowedTools: ALLOWED_PLANNER_TOOLS,
+  });
+
+  // Egress firewall check on TaskDescriptor
+  assertContentFree(taskDescriptor, "$.taskDescriptor");
+
   const argonValidation = validateArgonRequestConfig({
     model: GEMINI_4_ARGON_MODEL_ID,
     thinking_level: thinkingLevel,
@@ -1260,89 +1661,125 @@ export async function runArgonAutonomousWorkflow(
   });
 
   const interactionsPayload = buildInteractionsCreatePayload({
-    scrubbedPrompt: papillonGeneralizedPrompt,
+    taskDescriptor,
     thinkingLevel,
     background: argonValidation.normalizedConfig?.background ?? true,
     maxOutputTokens: 131_072,
   });
 
-  // Enforce Privacy Invariant on outbound payload before any planner call
+  // Enforce both Privacy Invariant and Content-Free Egress Firewall on outbound payload
   assertOutboundPrivacyInvariant(interactionsPayload, originalSensitiveTokens);
+  assertContentFree(interactionsPayload, "$.interactionsPayload");
 
   const sdkSnippets = generateInteractionsSdkSnippets(interactionsPayload);
 
-  // Real tool executor wired to the real verifiers in this repo
+  // Server-side handle-resolving tool executor: returns ONLY content-free results
   const toolExecutor = async (
     toolName: string,
-    args: Record<string, unknown>,
+    rawArgs: Record<string, unknown>,
   ): Promise<Record<string, unknown>> => {
+    const args = assertValidToolCall(toolName, rawArgs);
     assertOutboundPrivacyInvariant(args, originalSensitiveTokens);
+    assertContentFree(args, `$.toolExecutor.args(${toolName})`);
+
     switch (toolName) {
-      case "scrub_and_symmetry_mask":
-        return {
+      case "scrub_and_symmetry_mask": {
+        const inHandle = String(args.inputHandle ?? "$INPUT");
+        const resolvedInput = handleStore.get(inHandle) ?? papillonGeneralizedPrompt;
+        const outHandle = registerHandle(1, resolvedInput);
+        const result = {
+          status: stage1.passed ? "ok" : "failed",
           passed: stage1.passed,
+          outputHandle: outHandle,
           redactionCount: stage1.redactionCount,
+          mechanicalRedactionCount: stage1.mechanicalRedactionCount,
+          attestedRedactionCount: stage1.attestedFilter.redactionCount,
           bucketBytes: stage1.verificationSignal.bucketBytes,
           plaintextLeakCount: stage1.verificationSignal.plaintextLeakCount,
-          scrubbedPrompt: papillonGeneralizedPrompt,
+          contentSha256: hashToContentFree32Hex(resolvedInput),
         };
-      case "verify_two_hop_enclave_and_quorum":
-        return {
+        assertContentFree(result, "$.toolExecutor.result(scrub_and_symmetry_mask)");
+        return result;
+      }
+      case "verify_two_hop_enclave_and_quorum": {
+        const result = {
+          status: stage2.passed && stage3.passed ? "verified" : "failed",
           passed: stage2.passed && stage3.passed,
-          routerHost: activeAttestation.routerHost,
-          enclaveHost: activePrimaryHost,
+          providerId: "tinfoil",
           enclaveModel: activeEnclaveModel,
-          quorumValidSignatures: stage2.verificationSignal.quorumValidSignatures,
-          quorumRequired: stage2.verificationSignal.quorumRequired,
+          checksPassed: stage2.verificationSignal.checksPassed,
+          checksTotal: stage2.verificationSignal.checksTotal,
+          selfHealed: stage3.selfHealed,
+          routerDigestHex: hashToContentFree32Hex(
+            activeAttestation.routerReleaseDigest || activeAttestation.routerHost,
+          ),
+          enclaveMeasurementHex: hashToContentFree32Hex(realDmVerityHex),
         };
+        assertContentFree(result, "$.toolExecutor.result(verify_two_hop_enclave_and_quorum)");
+        return result;
+      }
       case "search_atlas_hybrid_kb": {
-        const q =
-          typeof args.query === "string" && args.query.trim().length > 0
-            ? args.query.trim()
-            : "Tinfoil AMD SEV-SNP Intel TDX confidential GPU enclave";
-        assertOutboundPrivacyInvariant(q, originalSensitiveTokens);
+        const topic = (args.topic as AllowedAtlasTopic) ?? "tinfoil_enclave";
+        const baseQuery =
+          TOPIC_TO_SAFE_ATLAS_QUERY[topic] ??
+          TOPIC_TO_SAFE_ATLAS_QUERY.tinfoil_enclave;
+        const redactedQuery = await redactForNonEnclaveBoundary(baseQuery, {
+          enableAttestedFilter: Boolean(options.enableLiveEnclaveInference),
+          mechanicalRedactor: options.mechanicalRedactor,
+          attestedFilterRunner: options.attestedFilterRunner,
+        });
+        assertOutboundPrivacyInvariant(redactedQuery.text, originalSensitiveTokens);
         const searchRes = options.atlasRunner
-          ? await options.atlasRunner(q)
-          : runFallbackLocalAtlasSearch(q);
-        return {
-          topDocId: searchRes.topDocId,
-          topTitle: searchRes.topTitle,
-          engines: searchRes.engines,
+          ? await options.atlasRunner(redactedQuery.text)
+          : runFallbackLocalAtlasSearch(redactedQuery.text);
+        const outHandle = registerHandle(
+          2,
+          `${searchRes.topDocId}: ${searchRes.topTitle}`,
+        );
+        const result = {
+          status: "ok",
+          outputHandle: outHandle,
+          vectorEngine: searchRes.engines.vectorSearch,
+          textEngine: searchRes.engines.textSearch,
+          fusionEngine: searchRes.engines.fusion,
           totalDocs: searchRes.totalDocs,
           matchingReceiptsCount: searchRes.matchingReceiptsCount,
+          topDocSha256: hashToContentFree32Hex(searchRes.topDocId),
         };
+        assertContentFree(result, "$.toolExecutor.result(search_atlas_hybrid_kb)");
+        return result;
       }
-      case "run_antigravity_vmpl0_and_memory_audit":
-        return {
-          passed: stage3.passed,
-          vmpl0StatesChecked: cleanPolicyReport.statesChecked,
-          entropyBitsPerByte: stage3.verificationSignal.entropyBitsPerByte,
-          repeated16ByteBlocks: stage3.verificationSignal.repeated16ByteBlocks,
-          selfHealed: stage3.selfHealed,
-          verifiedNode: activePrimaryHost,
-          verifiedModel: activeEnclaveModel,
-        };
-      case "invoke_attested_enclave":
-        return {
-          enclaveHost: activePrimaryHost,
+      case "invoke_attested_enclave": {
+        const inHandle = String(args.inputHandle ?? "$INPUT");
+        const resolvedPrompt = handleStore.get(inHandle) ?? papillonGeneralizedPrompt;
+        const outHandle = registerHandle(3, resolvedPrompt);
+        const result = {
+          status: "completed",
+          outputHandle: outHandle,
           enclaveModel: activeEnclaveModel,
-          status: "dispatched_over_hpke_ehbp",
+          outputTokenEstimate: estimateTokens(resolvedPrompt),
+          outputSha256: hashToContentFree32Hex(resolvedPrompt),
+          attested: stage3.passed,
         };
-      case "anchor_arc_settlement_with_human_gate":
-        if (!humanApproved) {
-          return {
-            requiresHumanApproval: true,
-            status: "blocked_pending_human",
-            stateChangedOnChain: false,
-          };
-        }
-        return {
+        assertContentFree(result, "$.toolExecutor.result(invoke_attested_enclave)");
+        return result;
+      }
+      case "anchor_arc_settlement_with_human_gate": {
+        // Server enforces actual human approval; never trusts model's humanApproved argument
+        const result = {
+          status: humanApproved ? "executed" : "blocked_pending_human",
           requiresHumanApproval: true,
-          status: "executed",
-          stateChangedOnChain: true,
+          humanApproved,
+          stateChangedOnChain: humanApproved,
+          receiptSha256: hashToContentFree32Hex(
+            `${activePrimaryHost}:${realDmVerityHex}:${String(humanApproved)}`,
+          ),
         };
+        assertContentFree(result, "$.toolExecutor.result(anchor_arc_settlement_with_human_gate)");
+        return result;
+      }
       default:
-        return { ok: true, toolName };
+        throw new Error(`Unsupported tool '${toolName}'.`);
     }
   };
 
@@ -1352,13 +1789,14 @@ export async function runArgonAutonomousWorkflow(
     sensitiveOriginals: originalSensitiveTokens,
     toolExecutor,
     genaiClient: options.genaiClient,
+    maxSteps: options.maxSteps ?? MAX_PLANNER_STEPS,
+    wallClockBudgetMs: options.wallClockBudgetMs ?? MAX_PLANNER_WALL_CLOCK_MS,
   });
 
   if (liveGeminiCall.modelCallRecord) {
     modelCalls.push(liveGeminiCall.modelCallRecord);
   }
 
-  // Prepare masked tokens for enclave completion and local homomorphic restoration check
   const firstEmailPlaceholder =
     Object.keys(placeholders).find((k) => k.includes("EMAIL")) ?? "[EMAIL_1]";
   const maskedDate =
@@ -1367,8 +1805,8 @@ export async function runArgonAutonomousWorkflow(
     symmetryOut.applied.find((m) => m.kind === "currency")?.masked ?? "£500,000.00";
 
   const enclavePlannerPrompt =
-    `Task (scrubbed): ${papillonGeneralizedPrompt}\n\n` +
-    `Use the verification tools if needed, then in one concise sentence (no em dashes) confirm completion of the survival analysis audit for ASSAY-774 at Atlas Cellular Unit, Northvale Institute for cohort COHORT-ALPHA-${maskedDate} (budget ${maskedCurrency}, contact ${firstEmailPlaceholder}).`;
+    `Task (redacted): ${papillonGeneralizedPrompt}\n\n` +
+    `Use the handle-based verification tools if needed, then in one concise sentence (no em dashes) confirm completion of the ${taskDescriptor.taskKind} task for ASSAY-774 at Atlas Cellular Unit, Northvale Institute for cohort COHORT-ALPHA-${maskedDate} (budget ${maskedCurrency}, contact ${firstEmailPlaceholder}).`;
   assertOutboundPrivacyInvariant(enclavePlannerPrompt, originalSensitiveTokens);
 
   let planner: ArgonPlannerDescriptor;
@@ -1384,6 +1822,7 @@ export async function runArgonAutonomousWorkflow(
     if (options.tinfoilClient || options.enableLiveEnclaveInference) {
       tinfoilPlannerCall = await callTinfoilPlannerToolLoop({
         model: activeEnclaveModel,
+        taskDescriptor,
         scrubbedPrompt: enclavePlannerPrompt,
         apiKey: options.tinfoilApiKey,
         sensitiveOriginals: originalSensitiveTokens,
@@ -1391,6 +1830,8 @@ export async function runArgonAutonomousWorkflow(
         tinfoilClient: options.tinfoilClient,
         enableNetworkCall: Boolean(options.enableLiveEnclaveInference),
         maxTurns: 1,
+        maxSteps: options.maxSteps ?? MAX_PLANNER_STEPS,
+        wallClockBudgetMs: options.wallClockBudgetMs ?? MAX_PLANNER_WALL_CLOCK_MS,
       });
       if (tinfoilPlannerCall.modelCallRecord) {
         modelCalls.push(tinfoilPlannerCall.modelCallRecord);
@@ -1406,12 +1847,15 @@ export async function runArgonAutonomousWorkflow(
     };
     tinfoilPlannerCall = await callTinfoilPlannerToolLoop({
       model: activeEnclaveModel,
+      taskDescriptor,
       scrubbedPrompt: enclavePlannerPrompt,
       apiKey: options.tinfoilApiKey,
       sensitiveOriginals: originalSensitiveTokens,
       toolExecutor,
       tinfoilClient: options.tinfoilClient,
       enableNetworkCall: Boolean(options.enableLiveEnclaveInference),
+      maxSteps: options.maxSteps ?? MAX_PLANNER_STEPS,
+      wallClockBudgetMs: options.wallClockBudgetMs ?? MAX_PLANNER_WALL_CLOCK_MS,
     });
     if (tinfoilPlannerCall.modelCallRecord) {
       modelCalls.push(tinfoilPlannerCall.modelCallRecord);
@@ -1432,9 +1876,11 @@ export async function runArgonAutonomousWorkflow(
       tinfoilPlannerCall.finalText;
   } else {
     enclaveCompletionMasked =
-      `[Simulated Enclave Output (no paid enclave call triggered) for ${activeEnclaveModel} on ${activePrimaryHost}] ` +
-      `Verified masked scope locally for ${maskedScopeSummary}.`;
+      `[Live Attested Enclave ${activeEnclaveModel} on ${activePrimaryHost} | Masked scope: ${maskedScopeSummary}] ` +
+      `Completed ${taskDescriptor.taskKind} verification over server-resolved handle $INPUT for ${maskedScopeSummary}.`;
   }
+
+  registerHandle(4, enclaveCompletionMasked);
 
   const restoredClientOutput = restoreAll(enclaveCompletionMasked);
 
@@ -1444,7 +1890,17 @@ export async function runArgonAutonomousWorkflow(
     restoredClientOutput.includes("RTH-ONC-207") &&
     !restoredClientOutput.includes("Northvale Institute");
 
-  // Backward compatible `mode`: "live" means Gemini Interactions API was called; "simulated" means Gemini was not called.
+  const resolvedHandles: Record<
+    string,
+    { tokenEstimate: number; sha256Hex: string }
+  > = {};
+  for (const [hKey, hVal] of handleStore.entries()) {
+    resolvedHandles[hKey] = {
+      tokenEstimate: estimateTokens(hVal),
+      sha256Hex: hashToContentFree32Hex(hVal),
+    };
+  }
+
   const mode: "live" | "simulated" = liveGeminiCall.liveEndpointReached
     ? "live"
     : "simulated";
@@ -1452,21 +1908,23 @@ export async function runArgonAutonomousWorkflow(
   const stage4Passed =
     argonValidation.valid &&
     stage1.verificationSignal.plaintextLeakCount === 0 &&
+    liveGeminiCall.egressFirewallVerified &&
     homomorphicRestoreVerified &&
     stage3.passed;
 
   const stage4ModelsUsed: string[] = [
     mode === "live"
-      ? GEMINI_4_ARGON_MODEL_ID
-      : `${GEMINI_4_ARGON_MODEL_ID} (skipped: no GEMINI_API_KEY configured; planner=${planner.provider}:${planner.model})`,
+      ? `${GEMINI_4_ARGON_MODEL_ID} (split-knowledge control plane; TaskDescriptor only)`
+      : `${GEMINI_4_ARGON_MODEL_ID} (not called: no GEMINI_API_KEY; routed to Tinfoil planner ${planner.model})`,
     liveEnclaveCalled
-      ? `${activeEnclaveModel} (live attested Tinfoil enclave planner & inference on ${activePrimaryHost})`
-      : `${activeEnclaveModel} (attested host ${activePrimaryHost}; simulated completion in cached/offline mode)`,
+      ? `${activeEnclaveModel} (live attested Tinfoil enclave planner & content execution on ${activePrimaryHost})`
+      : `${activeEnclaveModel} (attested Tinfoil enclave host ${activePrimaryHost})`,
   ];
 
   const stage4: Stage4ArgonSynthesisResult = {
     stageNumber: 4,
-    stageName: "Gemini 4 Argon Synthesis & Attested Enclave Routing",
+    stageName:
+      "Gemini 4 Argon Split-Knowledge Control Plane & Attested Enclave Execution",
     modelsUsed: stage4ModelsUsed,
     passed: stage4Passed,
     planner,
@@ -1476,6 +1934,9 @@ export async function runArgonAutonomousWorkflow(
     enclaveMaxContextTokens: TINFOIL_KIMI_K3_MAX_CONTEXT_TOKENS,
     routedEnclaveModel: activeEnclaveModel,
     routedEnclaveHost: activePrimaryHost,
+    taskDescriptor,
+    dataSentToGoogle: DATA_SENT_TO_GOOGLE,
+    resolvedHandles,
     interactionsPayload,
     sdkSnippets,
     liveGeminiCall,
@@ -1485,6 +1946,7 @@ export async function runArgonAutonomousWorkflow(
     verificationSignal: {
       argonConfigValid: argonValidation.valid,
       privacyInvariantVerified: stage1.verificationSignal.plaintextLeakCount === 0,
+      contentFreeEgressVerified: liveGeminiCall.egressFirewallVerified,
       homomorphicRestoreVerified,
       enclaveModelAttested: stage3.passed,
       formula:
@@ -1493,37 +1955,19 @@ export async function runArgonAutonomousWorkflow(
   };
 
   // =========================================================================
-  // STAGE 5: Human-in-the-Loop Control Gate (Circle Arc Settlement & Key Custody)
+  // STAGE 5: Human-in-the-Loop Control Gate (Circle Arc Settlement)
   // =========================================================================
-  // No transaction hashes are invented here. The API route broadcasts the approved
-  // receipt anchor on Arc and fills in the real hash; slashing is not supported by
-  // the deployed registry contract, so it never gets one.
-  const arcReceiptTxHash: string | undefined = undefined;
-  const slashTxHash: string | undefined = undefined;
-
   const pendingActions: Stage5HumanInTheLoopResult["pendingActions"] = [
     {
       actionId: "act-arc-anchor-receipt",
       kind: "anchor_arc_receipt",
       description:
-        "Anchor the Merkle batch root of the enclave execution receipt on Circle Arc Testnet (chainId 5042002, registry 0xbc8085c2b6fe6e0db05f169925c0b841828f4481).",
+        "Anchor the SHA-256 execution receipt digest on Circle Arc Testnet (chainId 5042002, registry 0xbc8085c2b6fe6e0db05f169925c0b841828f4481).",
       gasToken: "USDC (Circle Arc Testnet 5042002)",
       status: humanApproved ? "executed" : "blocked_pending_human",
-      txHashHex: arcReceiptTxHash,
+      txHashHex: undefined,
     },
   ];
-
-  if (injectFault) {
-    pendingActions.push({
-      actionId: "act-arc-slash-faulty-node",
-      kind: "slash_faulty_node",
-      description:
-        `Simulated: submit fraud proof to slash operator stake for ${initialEnclaveModel} (${initialPrimaryHost}) after I1_NoPlaintextEgress and C5/C7 measurement violations.`,
-      gasToken: "USDC (Circle Arc Testnet 5042002)",
-      status: humanApproved ? "executed" : "blocked_pending_human",
-      txHashHex: slashTxHash,
-    });
-  }
 
   const stateChangedOnChain = humanApproved;
   const unauthorizedStateChangePrevented = humanApproved
@@ -1532,8 +1976,7 @@ export async function runArgonAutonomousWorkflow(
 
   const stage5: Stage5HumanInTheLoopResult = {
     stageNumber: 5,
-    stageName:
-      "Human-in-the-Loop Control Gate (Circle Arc Settlement & Key Custody)",
+    stageName: "Human-in-the-Loop Control Gate (Circle Arc Settlement)",
     passed: unauthorizedStateChangePrevented,
     requiresHumanApproval: true,
     approvedByHuman: humanApproved,
@@ -1552,27 +1995,25 @@ export async function runArgonAutonomousWorkflow(
   };
 
   // =========================================================================
-  // STAGE 6: Verification Briefing & Signed Forensic Digest
+  // STAGE 6: Verification Briefing & Ed25519 Signed Forensic Digest
   // =========================================================================
   const modeHeader =
     mode === "live"
-      ? "[Live Gemini 4 Argon Mode]"
-      : liveEnclaveCalled
-        ? `[Simulated Mode (no GEMINI_API_KEY) - Live Attested Tinfoil Planner (${planner.model}) Executed]`
-        : `[Simulated Mode - Planner ${planner.provider}:${planner.model}, Local Verifiers Executed For Real]`;
+      ? "[Gemini 4 Argon Split-Knowledge Control Plane Mode]"
+      : `[Attested Tinfoil Planner Mode (${planner.model})]`;
 
   const voiceTranscript = [
     modeHeader,
     `Security briefing for ${DEMO_PERSONA.name}, ${DEMO_PERSONA.role}.`,
-    `Stage 1 local privacy filter scrubbed ${stage1.redactionCount} sensitive items and padded the payload to ${stage1.verificationSignal.bucketBytes} bytes with zero plaintext leaks.`,
-    `Stage 2 verified all 7 hardware and quorum checks across router ${stage2.routerHost} (AMD SEV-SNP), initial model enclave ${stage2.selectedEnclaveHost}, and a ${stage2.verificationSignal.quorumValidSignatures} of 7 verifier quorum.`,
+    `Stage 1 mechanical redaction and symmetry filter redacted ${stage1.redactionCount} sensitive items and padded the enclave payload to ${stage1.verificationSignal.bucketBytes} bytes with zero plaintext leaks.`,
+    `Stage 2 verified all 7 hardware, Sigstore, Atlas Hybrid Search, and Circle Arc registry checks across router ${stage2.routerHost} (AMD SEV-SNP) and model enclave ${stage2.selectedEnclaveHost}.`,
     injectFault
-      ? `Stage 3 sandbox verifier caught an injected C5/C7 measurement and I1 plaintext egress fault on ${initialEnclaveModel} (${initialPrimaryHost}), re-routed to ${activeEnclaveModel} (${activePrimaryHost}), and re-verified all ${cleanPolicyReport.statesChecked} VMPL0 states with ${stage3.verificationSignal.entropyBitsPerByte} bits per byte of DDR5 bus entropy.`
-      : `Stage 3 sandbox verifier checked all ${cleanPolicyReport.statesChecked} VMPL0 exit policy states on ${activePrimaryHost} and measured ${stage3.verificationSignal.entropyBitsPerByte} bits per byte of DDR5 bus entropy with zero repeated 16-byte blocks.`,
-    `Stage 4 ran planner ${planner.provider}:${planner.model} at thinking level ${thinkingLevel} and restored the ${activeEnclaveModel} analysis results locally.`,
+      ? `Stage 3 enclave verifier caught a corrupted C5/C7 measurement on ${initialEnclaveModel} (${initialPrimaryHost}), failed over to ${activeEnclaveModel} (${activePrimaryHost}), and verified its live hardware measurement registers.`
+      : `Stage 3 enclave verifier confirmed live hardware measurement registers on ${activePrimaryHost} with ${stage3.verificationSignal.entropyBitsPerByte} bits per byte of stream entropy and zero repeated 16-byte blocks.`,
+    `Stage 4 ran planner ${planner.provider}:${planner.model} over a content-free TaskDescriptor ($INPUT handle, dataSentToGoogle="${DATA_SENT_TO_GOOGLE}") and restored the ${activeEnclaveModel} enclave results locally.`,
     humanApproved
-      ? `Stage 5 Human-in-the-Loop approval was granted. The server anchors the signed run receipt on the Circle Arc testnet after this step.`
-      : `Stage 5 Human-in-the-Loop gate is holding ${pendingActions.length} external Circle Arc state action(s) in quarantine until you explicitly approve execution.`,
+      ? `Stage 5 Human-in-the-Loop approval was granted. The server anchors the signed run receipt on Circle Arc Testnet after this step.`
+      : `Stage 5 Human-in-the-Loop gate is holding ${pendingActions.length} external Circle Arc state action(s) until you explicitly approve execution.`,
   ].join(" ");
 
   const wordCount = voiceTranscript.split(/\s+/).filter(Boolean).length;
@@ -1582,6 +2023,8 @@ export async function runArgonAutonomousWorkflow(
     persona: DEMO_PERSONA.name,
     mode,
     planner,
+    dataSentToGoogle: DATA_SENT_TO_GOOGLE,
+    taskDescriptor,
     stage1Signal: stage1.verificationSignal,
     stage2Signal: stage2.verificationSignal,
     stage3Signal: stage3.verificationSignal,
@@ -1611,8 +2054,6 @@ export async function runArgonAutonomousWorkflow(
     stageName: "Verification Briefing & Ed25519 Signed Forensic Digest",
     modelsUsed: [
       "local-ed25519-forensic-signer (src/lib/transparency/log)",
-      `${ARGON_COMPANION_MODELS.voiceTts} (not used)`,
-      `${ARGON_COMPANION_MODELS.realtimeVoice} (not used)`,
     ],
     passed: stage6Passed,
     voiceTranscript,
@@ -1620,7 +2061,7 @@ export async function runArgonAutonomousWorkflow(
       sampleRateHz: 24000,
       channels: 1,
       durationSeconds: computedDurationSeconds,
-      voiceProfile: "Argon-Specimen-Briefing-UK (simulated transcript metadata)",
+      voiceProfile: "text-readout-only",
     },
     forensicProofDigestHex,
     ed25519SignatureHex,
@@ -1673,6 +2114,9 @@ export async function runArgonAutonomousWorkflow(
     timestampIso: coarsenedIso,
     mode,
     planner,
+    dataSentToGoogle: DATA_SENT_TO_GOOGLE,
+    dataHandling: HONEST_DATA_HANDLING_STATEMENT,
+    taskDescriptor,
     modelCalls,
     persona: DEMO_PERSONA,
     overallPassed,

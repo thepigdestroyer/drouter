@@ -1,6 +1,3 @@
-import { hkdf } from "@noble/hashes/hkdf.js";
-import { sha256 } from "@noble/hashes/sha2.js";
-import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 import { connection } from "next/server";
 import {
   BodyTooLargeError,
@@ -9,19 +6,11 @@ import {
   createTokenBucketLimiter,
   readBoundedJson,
 } from "@/lib/ratelimit";
-import { SYNTHETIC_CHIP_ID_HEX_PREFIX } from "@/lib/sim/hardware";
-import {
-  deriveEd25519Key,
-  getOperatorPublicKey,
-  getSeedBytes,
-  getTransparencyLog,
-  proveConsistency,
-  proveInclusion,
-} from "@/lib/transparency/log";
-import { getVerifierSet, issueQuorumTicket } from "@/lib/transparency/quorum";
+import { getOperatorPublicKey } from "@/lib/transparency/log";
 import {
   appendVerificationEventToLog,
   getPersistedTransparencyLog,
+  getVerifierSubmissionsSummary,
 } from "@/lib/transparency/store";
 
 const transparencyGetLimiter = createTokenBucketLimiter({
@@ -44,14 +33,6 @@ const transparencyGlobalLimiter = createGlobalBucketLimiter({
 
 const MAX_TRANSPARENCY_BODY_BYTES = 16_384;
 const HEX_RE = /^(0x)?[0-9a-fA-F]{1,256}$/;
-
-function deriveNodeChipAndIdentity(nodeId: string): { chipId: string; nodeIdentityPk: string } {
-  const seed = getSeedBytes();
-  const tail = bytesToHex(hkdf(sha256, seed, undefined, utf8ToBytes(`sim/chip/${nodeId}`), 48));
-  const chipId = `${SYNTHETIC_CHIP_ID_HEX_PREFIX}${tail}`;
-  const nodeIdentityPk = deriveEd25519Key(`sim/identity/${nodeId}`).publicKeyHex;
-  return { chipId, nodeIdentityPk };
-}
 
 function parseIntParam(url: URL, name: string): number | undefined {
   const raw = url.searchParams.get(name);
@@ -84,44 +65,18 @@ export async function GET(request?: Request) {
     }
   }
 
-  const log = getTransparencyLog();
-  const proofs = [proveInclusion(0), proveInclusion(1), proveInclusion(2)];
-  const releaseConsistencyProof = proveConsistency(
-    firstSize !== undefined ? Math.min(firstSize, log.entries.length) : 1,
-    secondSize !== undefined ? Math.min(secondSize, log.entries.length) : log.entries.length,
-  );
-  const verifierSet = getVerifierSet();
-  const operatorPublicKey = getOperatorPublicKey();
-
-  const nodeIds = ["tinfoil-router", "sim-1", "sim-2", "sim-3"] as const;
-  const tickets = Object.fromEntries(
-    nodeIds.map((nodeId) => {
-      const { chipId, nodeIdentityPk } = deriveNodeChipAndIdentity(nodeId);
-      return [
-        nodeId,
-        issueQuorumTicket({
-          nodeId,
-          chipId,
-          nodeIdentityPk,
-          epoch: 1,
-          status: "full",
-          weight: 10000,
-          signerCount: 5,
-        }),
-      ];
+  const [persistedLog, verifications] = await Promise.all([
+    getPersistedTransparencyLog({
+      leafIndex,
+      firstTreeSize: firstSize,
+      secondTreeSize: secondSize,
+      anchorIfDue,
     }),
-  );
-
-  const persistedLog = await getPersistedTransparencyLog({
-    leafIndex,
-    firstTreeSize: firstSize,
-    secondTreeSize: secondSize,
-    anchorIfDue,
-  });
+    getVerifierSubmissionsSummary({ limit: 20 }),
+  ]);
 
   return Response.json({
-    quorumSimulated: true,
-    operatorPublicKey,
+    operatorPublicKey: persistedLog.operatorPublicKey,
     signedTreeHead: persistedLog.signedTreeHead,
     anchorExplorerUrl: persistedLog.anchorExplorerUrl,
     persisted: persistedLog.persisted,
@@ -133,11 +88,14 @@ export async function GET(request?: Request) {
       consistencyProof: persistedLog.consistencyProof,
     },
     consistencyProof: persistedLog.consistencyProof,
-    releaseConsistencyProof,
-    log,
-    proofs,
-    verifierSet,
-    tickets,
+    distinctVerifierCount: verifications.distinctVerifierCount,
+    totalSubmissions: verifications.totalSubmissions,
+    recentSubmissions: verifications.recentSubmissions,
+    verifications: {
+      distinctVerifierCount: verifications.distinctVerifierCount,
+      totalSubmissions: verifications.totalSubmissions,
+      recentSubmissions: verifications.recentSubmissions,
+    },
   });
 }
 
@@ -171,13 +129,14 @@ export async function POST(request: Request) {
   }
 
   const nodeId = typeof body.nodeId === "string" && body.nodeId.trim().length > 0 ? body.nodeId.trim().slice(0, 80) : null;
-  const nodeKind = body.nodeKind === "tinfoil" || body.kind === "tinfoil" ? "tinfoil" : body.nodeKind === "sim" || body.kind === "sim" ? "sim" : null;
+  const rawKind = body.nodeKind ?? body.kind ?? "tinfoil";
+  const isTinfoil = rawKind === "tinfoil" && Boolean(nodeId && !nodeId.toLowerCase().startsWith("sim-"));
   const measurement = typeof body.measurement === "string" && body.measurement.trim().length > 0 ? body.measurement.trim().slice(0, 256) : null;
   const evidenceHash = typeof body.evidenceHash === "string" && HEX_RE.test(body.evidenceHash) ? body.evidenceHash : null;
 
-  if (!nodeId || !nodeKind || !measurement || !evidenceHash) {
+  if (!nodeId || !isTinfoil || !measurement || !evidenceHash) {
     return Response.json(
-      { error: "nodeId, nodeKind ('tinfoil'|'sim'), measurement, and hex evidenceHash are required" },
+      { error: "Real enclave nodeId, nodeKind ('tinfoil'), measurement, and hex evidenceHash are required" },
       { status: 400 },
     );
   }
@@ -185,7 +144,7 @@ export async function POST(request: Request) {
   const appended = await appendVerificationEventToLog({
     kind: body.eventKind === "release_approval" ? "release_approval" : "verification_event",
     nodeId,
-    nodeKind,
+    nodeKind: "tinfoil",
     ok: body.ok !== false,
     measurement,
     evidenceHash,
@@ -196,7 +155,6 @@ export async function POST(request: Request) {
 
   return Response.json({
     ok: true,
-    quorumSimulated: true,
     operatorPublicKey: getOperatorPublicKey(),
     persisted: appended.persisted,
     event: appended.event,

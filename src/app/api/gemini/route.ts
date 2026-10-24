@@ -6,12 +6,18 @@ import {
 import {
   ARGON_COMPANION_MODELS,
   ARGON_TOOLKIT_MANIFEST,
+  ContentFreeEgressError,
+  DATA_SENT_TO_GOOGLE,
   DEFAULT_TASK_PROMPT,
+  DEMO_PERSONA,
   FORBIDDEN_ARGON_PARAMETERS,
   GEMINI_4_ARGON_MODEL_ID,
-  DEMO_PERSONA,
+  HONEST_DATA_HANDLING_STATEMENT,
+  PlannerBudgetExceededError,
   PrivacyInvariantViolationError,
+  redactForNonEnclaveBoundary,
   runArgonAutonomousWorkflow,
+  ToolPolicyViolationError,
   validateArgonRequestConfig,
   type ArgonThinkingLevel,
   type AtlasHybridRunnerResult,
@@ -38,6 +44,7 @@ const arcAnchorGlobalLimiter = createGlobalBucketLimiter({
 });
 
 const MAX_TASK_PROMPT_CHARS = 32_768;
+const MAX_EPHEMERAL_API_KEY_CHARS = 256;
 
 // GET is hit on every /argon page load, so it serves a cached run
 // without triggering paid inference calls and never records receipts.
@@ -45,7 +52,10 @@ const GET_CACHE_MS = 10 * 60_000;
 let cachedGet: { atMs: number; body: unknown } | null = null;
 
 async function serverAtlasRunner(query: string): Promise<AtlasHybridRunnerResult> {
-  const res = await runAtlasHybridSearch(query, { limit: 5 });
+  const redacted = await redactForNonEnclaveBoundary(query, {
+    enableAttestedFilter: false,
+  });
+  const res = await runAtlasHybridSearch(redacted.text, { limit: 5 });
   const top = res.results[0];
   return {
     topDocId: top?.docId ?? "provider-tinfoil",
@@ -94,8 +104,11 @@ export async function GET() {
     ok: true,
     mode: preVerifiedRun.mode,
     planner: preVerifiedRun.planner,
+    dataSentToGoogle: DATA_SENT_TO_GOOGLE,
+    dataHandling: HONEST_DATA_HANDLING_STATEMENT,
+    taskDescriptor: preVerifiedRun.taskDescriptor,
     modelCalls: preVerifiedRun.modelCalls,
-    track: "Google DeepMind Encode London Hackathon - Gemini 4 Argon Autonomous Agent",
+    track: "Google DeepMind Encode London Hackathon - Gemini 4 Argon Split-Knowledge Agent",
     primaryModel: GEMINI_4_ARGON_MODEL_ID,
     companionModels: ARGON_COMPANION_MODELS,
     toolkitManifest: ARGON_TOOLKIT_MANIFEST,
@@ -135,6 +148,16 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       { ok: false, error: "TASK_PROMPT_TOO_LONG", maxChars: MAX_TASK_PROMPT_CHARS },
       { status: 413 },
+    );
+  }
+
+  if (
+    typeof body.geminiApiKey === "string" &&
+    body.geminiApiKey.length > MAX_EPHEMERAL_API_KEY_CHARS
+  ) {
+    return NextResponse.json(
+      { ok: false, error: "INVALID_GEMINI_API_KEY" },
+      { status: 400 },
     );
   }
 
@@ -204,12 +227,36 @@ export async function POST(request: NextRequest) {
       receiptRecorder: serverReceiptRecorder,
     });
   } catch (err) {
-    if (err instanceof PrivacyInvariantViolationError) {
+    if (
+      err instanceof ContentFreeEgressError ||
+      err instanceof PrivacyInvariantViolationError
+    ) {
       return NextResponse.json(
         {
           ok: false,
           error: "PRIVACY_INVARIANT_VIOLATION",
-          message: "Outbound planner payload contained unredacted sensitive data; request aborted.",
+          message:
+            "Outbound planner payload violated the content-free egress firewall; request aborted.",
+        },
+        { status: 422 },
+      );
+    }
+    if (err instanceof ToolPolicyViolationError) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "TOOL_POLICY_VIOLATION",
+          message: "Planner tool call violated allowlist or argument schema.",
+        },
+        { status: 422 },
+      );
+    }
+    if (err instanceof PlannerBudgetExceededError) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "PLANNER_BUDGET_EXCEEDED",
+          message: "Planner exceeded step or wall-clock budget.",
         },
         { status: 422 },
       );
@@ -217,8 +264,8 @@ export async function POST(request: NextRequest) {
     throw err;
   }
 
-  // The human approved the external action, so anchor the signed run digest on
-  // Arc for real. Everything else in Stage 5 stays simulated and is labelled so.
+  // Only when the human explicitly approved the external action do we anchor the
+  // signed run digest on Circle Arc Testnet for real.
   let arcAnchor:
     | { broadcast: true; txHash: string; explorerUrl: string; receiptHash: string }
     | { broadcast: false; reason: string }
@@ -245,6 +292,9 @@ export async function POST(request: NextRequest) {
     ok: true,
     mode: autonomousRun.mode,
     planner: autonomousRun.planner,
+    dataSentToGoogle: DATA_SENT_TO_GOOGLE,
+    dataHandling: HONEST_DATA_HANDLING_STATEMENT,
+    taskDescriptor: autonomousRun.taskDescriptor,
     arcAnchor,
     modelCalls: autonomousRun.modelCalls,
     primaryModel: GEMINI_4_ARGON_MODEL_ID,

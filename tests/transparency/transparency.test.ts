@@ -1,3 +1,7 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { ed25519 } from "@noble/curves/ed25519.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -8,38 +12,47 @@ vi.mock("next/server", () => ({
 
 import { GET as getTransparencyRoute, POST as postTransparencyRoute } from "@/app/api/transparency/route";
 import {
+  GET as getVerificationsRoute,
+  POST as postVerificationsRoute,
+} from "@/app/api/transparency/verifications/route";
+import { resetRateLimitStateForTests } from "@/lib/ratelimit";
+import {
+  VERIFICATION_CLAIM_DOMAIN,
   coarsenEpochSecToHour,
   computeAuditPathFromLeaves,
-  computeLeafHash,
   computeMerkleRootFromLeaves,
   computeNodeHash,
   computeRawLeafHash,
-  createSignedTransparencyEntry,
+  computeVerifierFingerprint,
   getOperatorPublicKey,
-  getTransparencyLog,
-  proveConsistency,
   proveConsistencyFromLeaves,
-  proveInclusion,
   signTreeHead,
+  signVerificationClaim,
   verifyConsistencyProofClient,
-  verifyInclusion,
   verifyInclusionProofClient,
   verifySignedTreeHeadClient,
   verifyTransparencyProofBundleClient,
+  verifyVerificationClaimSignature,
+  type VerifierSubmissionClaim,
 } from "@/lib/transparency/log";
-import {
-  getVerifierSet,
-  issueQuorumTicket,
-  verifyQuorumTicket,
-} from "@/lib/transparency/quorum";
 import {
   appendVerificationEventToLog,
   getPersistedTransparencyLog,
   resetAnchorRateLimitState,
   setAnchorReceiptOverride,
+  setLiveVerificationViewOverride,
   setTransparencyCollectionOverride,
+  setVerifierSubmissionsCollectionOverride,
+  type LiveVerificationView,
   type TransparencyCollectionLike,
 } from "@/lib/transparency/store";
+import {
+  buildCanonicalVerificationClaim,
+  loadOrCreateVerifierKey,
+  parseDrouterCliArgs,
+  signCliVerificationClaim,
+  submitVerificationClaim,
+} from "../../scripts/drouter-cli.mjs";
 
 function createMockCollection(): {
   col: TransparencyCollectionLike;
@@ -102,6 +115,14 @@ function createMockCollection(): {
       }
       return { acknowledged: true };
     },
+    async deleteMany(filter: Record<string, unknown>) {
+      for (let i = docs.length - 1; i >= 0; i--) {
+        if (matches(docs[i], filter)) {
+          docs.splice(i, 1);
+        }
+      }
+      return { acknowledged: true };
+    },
     async countDocuments(filter: Record<string, unknown> = {}) {
       return docs.filter((d) => matches(d, filter)).length;
     },
@@ -110,30 +131,80 @@ function createMockCollection(): {
   return { col, docs };
 }
 
+function buildSampleLiveView(): LiveVerificationView {
+  return {
+    router: {
+      nodeId: "tinfoil-router",
+      enclaveHost: "router-0.tinfoil.sh",
+      configRepo: "tinfoilsh/confidential-model-router",
+      releaseDigest: "5233a27f1468f474d27c103e06c1a7a607e6a722ff4f9299ddf4e32fa87f201e",
+      measurement: "9134838da8aa4e1792566b2988820340356517c4db0c94261eb8154843e0357554ba72fcf185f950d9301fbede574c90",
+    },
+    models: {
+      "kimi-k3": {
+        id: "kimi-k3",
+        repo: "tinfoilsh/confidential-kimi-k3",
+        tag: "v0.0.15",
+        measurement: "69c029108ac795b767e972858e926186c0e7b6a61f6c7fa9ce70ce1a6ee87f2c980bb51973cdf396404412ebb7c1a7b7",
+        dmVerityRootHash: "41068e0738e14ee74d5b987586bdfc261d7bdd59e156dd6818154fd188b8ee7b",
+        weightRepoCommit: "moonshotai/Kimi-K3@a590ce090cb049c93a33dfe8c208ec652aa20503",
+        ok: true,
+      },
+      "glm-5-3": {
+        id: "glm-5-3",
+        repo: "tinfoilsh/confidential-glm5-3-nvfp4",
+        tag: "v0.0.7",
+        measurement: "b64eb23f1441a8f25e29d901782fbb82f894f434db70cb1658dd37c398715bfff070f3b732f2e623bf151e56d2699188",
+        ok: true,
+      },
+    },
+    checks: [
+      { id: "C1", status: "pass" },
+      { id: "C2", status: "pass" },
+      { id: "C3", status: "pass" },
+      { id: "C4", status: "pass" },
+      { id: "C5", status: "pass" },
+      { id: "C6", status: "pass" },
+      { id: "C7", status: "pass" },
+    ],
+    overallOk: true,
+  };
+}
+
+function buildValidClaim(epochHourSec = coarsenEpochSecToHour()): VerifierSubmissionClaim {
+  const live = buildSampleLiveView();
+  return {
+    domain: VERIFICATION_CLAIM_DOMAIN,
+    epochHourSec,
+    router: { ...live.router },
+    models: [live.models["glm-5-3"], live.models["kimi-k3"]],
+    checks: live.checks.map((c) => ({ ...c })),
+    overallOk: true,
+  };
+}
+
 afterEach(() => {
   setTransparencyCollectionOverride(null);
+  setVerifierSubmissionsCollectionOverride(null);
   setAnchorReceiptOverride(null);
+  setLiveVerificationViewOverride(null);
   resetAnchorRateLimitState();
+  resetRateLimitStateForTests();
 });
 
 describe("RFC 6962 Standard Test Vectors & Client Proof Verifiers", () => {
   it("matches official RFC 6962 / Certificate Transparency SHA-256 Merkle tree test vectors", () => {
-    // 1. Empty tree root = SHA-256("")
     const emptyRoot = bytesToHex(computeMerkleRootFromLeaves([]));
     expect(emptyRoot).toBe("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
 
-    // 2. Single leaf of empty bytes: MTH({""}) = SHA-256(0x00)
     const leaf0 = computeRawLeafHash(new Uint8Array(0));
     expect(bytesToHex(leaf0)).toBe("6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d");
     expect(bytesToHex(computeMerkleRootFromLeaves([leaf0]))).toBe(
       "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
     );
 
-    // 3. Standard 7-leaf RFC 6962 tree where D[i] = utf8("leaf-i")
     const leaves = Array.from({ length: 7 }, (_, i) => computeRawLeafHash(utf8ToBytes(`leaf-${i}`)));
 
-    // Verify manual RFC 6962 Section 2.1 structure for 4 leaves and 7 leaves:
-    // MTH(D[4]) = SHA256(0x01 || SHA256(0x01 || L0 || L1) || SHA256(0x01 || L2 || L3))
     const h01 = computeNodeHash(leaves[0], leaves[1]);
     const h23 = computeNodeHash(leaves[2], leaves[3]);
     const h0123 = computeNodeHash(h01, h23);
@@ -145,7 +216,6 @@ describe("RFC 6962 Standard Test Vectors & Client Proof Verifiers", () => {
     const root7 = bytesToHex(computeMerkleRootFromLeaves(leaves));
     expect(root7).toBe(bytesToHex(h0to6));
 
-    // Verify inclusion proofs across all 7 leaves using pure client verifier
     for (let i = 0; i < leaves.length; i++) {
       const auditPath = computeAuditPathFromLeaves(leaves, i);
       const res = verifyInclusionProofClient({
@@ -159,7 +229,6 @@ describe("RFC 6962 Standard Test Vectors & Client Proof Verifiers", () => {
       expect(res.computedRoot).toBe(root7);
     }
 
-    // Verify consistency proofs for every pair (firstSize, secondSize) in 0..7
     for (let second = 1; second <= leaves.length; second++) {
       for (let first = 0; first <= second; first++) {
         const cProof = proveConsistencyFromLeaves(leaves, first, second);
@@ -167,7 +236,6 @@ describe("RFC 6962 Standard Test Vectors & Client Proof Verifiers", () => {
         expect(cVerdict.ok).toBe(true);
 
         if (first > 0 && first < second) {
-          // Tampering with consistency path or secondRoot must fail
           const badRoot = verifyConsistencyProofClient({
             ...cProof,
             secondRoot: "aa".repeat(32),
@@ -186,7 +254,7 @@ describe("RFC 6962 Standard Test Vectors & Client Proof Verifiers", () => {
 
   it("signs and verifies operator tree heads (STH) with hour-coarsened timestamps", () => {
     const rawRoot = bytesToHex(sha256(utf8ToBytes("test-merkle-root")));
-    const uncoarsenedTime = 1761330123; // Not divisible by 3600
+    const uncoarsenedTime = 1761330123;
     const sth = signTreeHead({
       treeSize: 5,
       rootHash: rawRoot,
@@ -200,180 +268,16 @@ describe("RFC 6962 Standard Test Vectors & Client Proof Verifiers", () => {
     const verified = verifySignedTreeHeadClient(sth, getOperatorPublicKey());
     expect(verified.ok).toBe(true);
 
-    // Rejects tampered treeSize
     expect(verifySignedTreeHeadClient({ ...sth, treeSize: 6 }, getOperatorPublicKey()).ok).toBe(false);
-    // Rejects uncoarsened timestamp
     expect(verifySignedTreeHeadClient({ ...sth, timestampSec: sth.timestampSec + 15 }, getOperatorPublicKey()).ok).toBe(
       false,
     );
-    // Rejects wrong operator public key
     expect(verifySignedTreeHeadClient(sth, "11".repeat(32)).ok).toBe(false);
   });
 });
 
-describe("Software Transparency Log (RFC 6962 Merkle tree & signatures)", () => {
-  it("verifies Merkle inclusion proof and consistency proof for each approved release entry", () => {
-    const log = getTransparencyLog();
-    expect(log.entries).toHaveLength(3);
-    expect(log.entries.map((e) => e.imageId)).toEqual([
-      "tinfoilsh/confidential-model-router",
-      "drouter-sim-node-image/v0.1.0",
-      "drouter-monitor-svsm/v0.1.0",
-    ]);
-
-    for (let i = 0; i < log.entries.length; i++) {
-      const entry = log.entries[i];
-      const proof = proveInclusion(i);
-      expect(proof.root).toBe(log.root);
-      expect(proof.leafIndex).toBe(i);
-      expect(proof.treeSize).toBe(3);
-      const res = verifyInclusion(entry, proof);
-      expect(res.ok).toBe(true);
-      expect(res.builderCount).toBe(3);
-      expect(res.reviewerCount).toBeGreaterThanOrEqual(4);
-      expect(res.reviewWindowPassed).toBe(true);
-      expect(verifyInclusionProofClient(proof).ok).toBe(true);
-    }
-
-    const consistency = proveConsistency(1, 3);
-    expect(verifyConsistencyProofClient(consistency).ok).toBe(true);
-  });
-
-  it("fails verifyInclusion if any entry field or sibling hash is tampered", () => {
-    const log = getTransparencyLog();
-    const entry = log.entries[1];
-    const proof = proveInclusion(1);
-
-    // Tamper with entry version
-    const tamperedEntry = { ...entry, version: "v0.1.1-backdoor" };
-    expect(verifyInclusion(tamperedEntry, proof).ok).toBe(false);
-
-    // Tamper with entry measurement
-    const tamperedMeasurement = { ...entry, measurement: "ff".repeat(48) };
-    expect(verifyInclusion(tamperedMeasurement, proof).ok).toBe(false);
-
-    // Tamper with a sibling hash in the audit path
-    const tamperedProof = {
-      ...proof,
-      auditPath: proof.auditPath.map((step, idx) =>
-        idx === 0 ? { ...step, hash: "aa".repeat(32) } : step,
-      ),
-    };
-    expect(verifyInclusion(entry, tamperedProof).ok).toBe(false);
-    expect(verifyInclusionProofClient(tamperedProof).ok).toBe(false);
-  });
-
-  it("fails verifyInclusion when <3 builders, <4 reviewers, or 14-day review window is unexpired", () => {
-    const baseTime = 1750000000;
-
-    // 1. Only 2 builders (< 3)
-    const twoBuilders = createSignedTransparencyEntry({
-      index: 0,
-      imageId: "drouter-sim-node-image/v0.1.0",
-      version: "v0.1.0",
-      measurement: "11".repeat(48),
-      approvedAt: baseTime,
-      reviewWindowDays: 14,
-      emergency: false,
-      builderCount: 2,
-      reviewerCount: 5,
-    });
-    const leaf1 = computeLeafHash(twoBuilders);
-    const root1 = bytesToHex(computeMerkleRootFromLeaves([leaf1]));
-    const resBuilders = verifyInclusion(
-      twoBuilders,
-      { root: root1, auditPath: [] },
-      baseTime + 15 * 86400,
-    );
-    expect(resBuilders.ok).toBe(false);
-    expect(resBuilders.builderCount).toBe(2);
-
-    // 2. Only 3 reviewers (< 4 for normal release)
-    const threeReviewers = createSignedTransparencyEntry({
-      index: 0,
-      imageId: "drouter-sim-node-image/v0.1.0",
-      version: "v0.1.0",
-      measurement: "11".repeat(48),
-      approvedAt: baseTime,
-      reviewWindowDays: 14,
-      emergency: false,
-      builderCount: 3,
-      reviewerCount: 3,
-    });
-    const leaf2 = computeLeafHash(threeReviewers);
-    const root2 = bytesToHex(computeMerkleRootFromLeaves([leaf2]));
-    const resReviewers = verifyInclusion(
-      threeReviewers,
-      { root: root2, auditPath: [] },
-      baseTime + 15 * 86400,
-    );
-    expect(resReviewers.ok).toBe(false);
-    expect(resReviewers.reviewerCount).toBe(3);
-
-    // 3. Unexpired 14-day review window (only 10 days elapsed)
-    const validNormal = createSignedTransparencyEntry({
-      index: 0,
-      imageId: "drouter-sim-node-image/v0.1.0",
-      version: "v0.1.0",
-      measurement: "11".repeat(48),
-      approvedAt: baseTime,
-      reviewWindowDays: 14,
-      emergency: false,
-      builderCount: 3,
-      reviewerCount: 5,
-    });
-    const leaf3 = computeLeafHash(validNormal);
-    const root3 = bytesToHex(computeMerkleRootFromLeaves([leaf3]));
-    const resUnexpired = verifyInclusion(
-      validNormal,
-      { root: root3, auditPath: [] },
-      baseTime + 10 * 86400,
-    );
-    expect(resUnexpired.ok).toBe(false);
-    expect(resUnexpired.reviewWindowPassed).toBe(false);
-  });
-
-  it("passes verifyInclusion for an emergency entry with 7/7 reviewers after 48h", () => {
-    const approvedAt = 1750000000;
-    const emergencyEntry = createSignedTransparencyEntry({
-      index: 0,
-      imageId: "drouter-monitor-svsm/v0.1.0-hotfix",
-      version: "v0.1.1",
-      measurement: "22".repeat(48),
-      approvedAt,
-      reviewWindowDays: 2,
-      emergency: true,
-      builderCount: 3,
-      reviewerCount: 7,
-    });
-    const leaves = [computeLeafHash(emergencyEntry)];
-    const root = bytesToHex(computeMerkleRootFromLeaves(leaves));
-    const auditPath = computeAuditPathFromLeaves(leaves, 0);
-
-    // Fails before 48h (e.g. after 24h)
-    const before48h = verifyInclusion(
-      emergencyEntry,
-      { root, auditPath },
-      approvedAt + 24 * 3600,
-    );
-    expect(before48h.ok).toBe(false);
-    expect(before48h.reviewWindowPassed).toBe(false);
-
-    // Passes after 48h with all 7/7 reviewers
-    const after48h = verifyInclusion(
-      emergencyEntry,
-      { root, auditPath },
-      approvedAt + 49 * 3600,
-    );
-    expect(after48h.ok).toBe(true);
-    expect(after48h.builderCount).toBe(3);
-    expect(after48h.reviewerCount).toBe(7);
-    expect(after48h.reviewWindowPassed).toBe(true);
-  });
-});
-
-describe("MongoDB Persistence (Mocked `transparency_log`), Hourly Arc Anchoring & API Route", () => {
-  it("persists genesis leaves, appends verification events with coarse timestamps, verifies bundle, and rate-limits Arc anchoring to at most hourly", async () => {
+describe("MongoDB Persistence (`transparency_log`), Real Tinfoil Leaves & Hourly Arc Anchoring", () => {
+  it("seeds only real Tinfoil enclave leaves (no sim nodes), rate-limits Arc anchoring to hourly, and rejects simulated nodes", async () => {
     const { col, docs } = createMockCollection();
     setTransparencyCollectionOverride(col);
 
@@ -383,16 +287,17 @@ describe("MongoDB Persistence (Mocked `transparency_log`), Hourly Arc Anchoring 
       return `0x${"ab".repeat(32)}`;
     });
 
-    const t0 = 1760000123; // Will be coarsened to 1760000123 - (1760000123 % 3600) = 1759996800
+    const t0 = 1760000123;
     const initial = await getPersistedTransparencyLog({ nowSec: t0, anchorIfDue: true });
     expect(initial.persisted).toBe(true);
     expect(initial.events).toHaveLength(3);
+    expect(initial.events.map((e) => e.nodeId)).toEqual(["tinfoil-router", "kimi-k3", "glm-5-3"]);
+    expect(initial.events.every((e) => e.nodeKind === "tinfoil")).toBe(true);
     expect(initial.signedTreeHead.treeSize).toBe(3);
     expect(initial.signedTreeHead.timestampSec % 3600).toBe(0);
     expect(initial.signedTreeHead.anchorTx).toBe(`0x${"ab".repeat(32)}`);
     expect(anchorCalls).toHaveLength(1);
 
-    // Appending a new verification event within the same hour must NOT trigger a second Arc transaction
     const appended1 = await appendVerificationEventToLog({
       nodeId: "tinfoil-router",
       nodeKind: "tinfoil",
@@ -400,7 +305,7 @@ describe("MongoDB Persistence (Mocked `transparency_log`), Hourly Arc Anchoring 
       measurement: "aa".repeat(48),
       evidenceHash: "bb".repeat(32),
       enclaveHost: "router-0.tinfoil.sh",
-      timestampSec: t0 + 600, // +10 minutes (< 1 hour)
+      timestampSec: t0 + 600,
       anchorOnArc: true,
     });
 
@@ -408,7 +313,7 @@ describe("MongoDB Persistence (Mocked `transparency_log`), Hourly Arc Anchoring 
     expect(appended1.event.index).toBe(3);
     expect(appended1.event.epochHourSec % 3600).toBe(0);
     expect(appended1.signedTreeHead.treeSize).toBe(4);
-    expect(anchorCalls).toHaveLength(1); // Still 1 because <1h elapsed
+    expect(anchorCalls).toHaveLength(1);
 
     const bundleVerdict = verifyTransparencyProofBundleClient({
       sth: appended1.signedTreeHead,
@@ -417,43 +322,73 @@ describe("MongoDB Persistence (Mocked `transparency_log`), Hourly Arc Anchoring 
       consistencyProof: appended1.consistencyProof,
     });
     expect(bundleVerdict.ok).toBe(true);
-    expect(bundleVerdict.sthVerified).toBe(true);
-    expect(bundleVerdict.inclusionVerified).toBe(true);
-    expect(bundleVerdict.consistencyVerified).toBe(true);
 
-    // Appending after >1 hour triggers a new Arc anchor transaction
     const appended2 = await appendVerificationEventToLog({
-      nodeId: "sim-1",
-      nodeKind: "sim",
+      nodeId: "kimi-k3",
+      nodeKind: "tinfoil",
       ok: true,
       measurement: "cc".repeat(48),
       evidenceHash: "dd".repeat(32),
-      timestampSec: t0 + 3700, // >1 hour later
+      timestampSec: t0 + 3700,
       anchorOnArc: true,
     });
     expect(appended2.signedTreeHead.treeSize).toBe(5);
     expect(anchorCalls).toHaveLength(2);
     expect(docs.filter((d) => d.docType === "leaf")).toHaveLength(5);
+
+    await expect(
+      appendVerificationEventToLog({
+        nodeId: "sim-1",
+        nodeKind: "tinfoil",
+        ok: true,
+        measurement: "cc".repeat(48),
+        evidenceHash: "dd".repeat(32),
+      }),
+    ).rejects.toThrow(/Simulated nodes are not permitted/);
   });
 
-  it("serves GET and POST /api/transparency with quorumSimulated: true, operatorPublicKey, signedTreeHead, and proofs", async () => {
+  it("removes simulated quorum, simulated release approvals, and simulated nodes from GET/POST /api/transparency", async () => {
     const { col } = createMockCollection();
+    const { col: subCol } = createMockCollection();
     setTransparencyCollectionOverride(col);
+    setVerifierSubmissionsCollectionOverride(subCol);
 
     const getRes = await getTransparencyRoute(new Request("http://localhost/api/transparency?first=1&second=3"));
     expect(getRes.status).toBe(200);
     const body = await getRes.json();
 
-    expect(body.quorumSimulated).toBe(true);
+    expect(body.quorumSimulated).toBeUndefined();
+    expect(body.verifierSet).toBeUndefined();
+    expect(body.tickets).toBeUndefined();
+    expect(body.log).toBeUndefined();
+    expect(body.proofs).toBeUndefined();
+    expect(body.releaseConsistencyProof).toBeUndefined();
+
     expect(body.operatorPublicKey).toBe(getOperatorPublicKey());
-    expect(body.verifierSet.quorumSimulated).toBe(true);
-    expect(body.verifierSet.operatorPublicKey).toBe(getOperatorPublicKey());
     expect(verifySignedTreeHeadClient(body.signedTreeHead, body.operatorPublicKey).ok).toBe(true);
     expect(verifyConsistencyProofClient(body.consistencyProof).ok).toBe(true);
-    expect(body.tickets["sim-1"].quorumSimulated).toBe(true);
-    expect(body.tickets["sim-1"].operatorPublicKey).toBe(getOperatorPublicKey());
-    expect(body.tickets["sim-1"].chipId.startsWith("73696d2d636869702d30303030303030")).toBe(true);
+    expect(body.verificationLog.events.every((e: { nodeKind: string }) => e.nodeKind === "tinfoil")).toBe(true);
+    expect(body.distinctVerifierCount).toBe(0);
+    expect(body.totalSubmissions).toBe(0);
+    expect(body.recentSubmissions).toEqual([]);
 
+    // Rejects sim node POST
+    const simPostRes = await postTransparencyRoute(
+      new Request("http://localhost/api/transparency", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          nodeId: "sim-1",
+          nodeKind: "sim",
+          ok: true,
+          measurement: "12".repeat(48),
+          evidenceHash: "34".repeat(32),
+        }),
+      }),
+    );
+    expect(simPostRes.status).toBe(400);
+
+    // Accepts real tinfoil node POST
     const postRes = await postTransparencyRoute(
       new Request("http://localhost/api/transparency", {
         method: "POST",
@@ -471,79 +406,320 @@ describe("MongoDB Persistence (Mocked `transparency_log`), Hourly Arc Anchoring 
     expect(postRes.status).toBe(200);
     const postBody = await postRes.json();
     expect(postBody.ok).toBe(true);
-    expect(postBody.quorumSimulated).toBe(true);
-    expect(postBody.operatorPublicKey).toBe(getOperatorPublicKey());
+    expect(postBody.quorumSimulated).toBeUndefined();
     expect(postBody.event.index).toBe(3);
-    expect(
-      verifyTransparencyProofBundleClient({
-        sth: postBody.signedTreeHead,
-        expectedOperatorPublicKey: postBody.operatorPublicKey,
-        inclusionProof: postBody.inclusionProof,
-        consistencyProof: postBody.consistencyProof,
-      }).ok,
-    ).toBe(true);
   });
 });
 
-describe("Simulated 5-of-7 Verifier Quorum Tickets", () => {
-  it("labels the 7-verifier set with quorumSimulated: true, operatorPublicKey, and non-deceptive names", () => {
-    const set = getVerifierSet();
-    expect(set.threshold).toBe(5);
-    expect(set.total).toBe(7);
-    expect(set.quorumSimulated).toBe(true);
-    expect(set.operatorPublicKey).toBe(getOperatorPublicKey());
-    expect(set.verifiers).toHaveLength(7);
-    for (const v of set.verifiers) {
-      expect(v.simulated).toBe(true);
-      expect(v.name).toContain("Simulated Verifier");
+describe("Permissionless Independent Verification (D8: CLI Key Gen, Canonical C1-C7 Signing & Server Re-Check)", () => {
+  it("generates and persists a local Ed25519 verifier key via loadOrCreateVerifierKey and parses verify --submit CLI flags", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "deroute-verifier-test-"));
+    const keyPath = path.join(tmpDir, "config", "deroute", "verifier-key");
+
+    try {
+      const k1 = loadOrCreateVerifierKey(keyPath);
+      expect(k1.created).toBe(true);
+      expect(fs.existsSync(keyPath)).toBe(true);
+      expect(k1.secretKeyHex).toMatch(/^[0-9a-f]{64}$/);
+      expect(k1.publicKeyHex).toMatch(/^[0-9a-f]{64}$/);
+      expect(k1.fingerprint).toBe(computeVerifierFingerprint(k1.publicKey));
+
+      // Second call reloads the exact same key from disk
+      const k2 = loadOrCreateVerifierKey(keyPath);
+      expect(k2.created).toBe(false);
+      expect(k2.secretKeyHex).toBe(k1.secretKeyHex);
+      expect(k2.publicKeyHex).toBe(k1.publicKeyHex);
+      expect(k2.fingerprint).toBe(k1.fingerprint);
+
+      const parsedArgs = parseDrouterCliArgs([
+        "verify",
+        "--submit",
+        "--key-path",
+        keyPath,
+        "--upstream",
+        "http://localhost:3000/",
+      ]);
+      expect(parsedArgs.command).toBe("verify");
+      expect(parsedArgs.submit).toBe(true);
+      expect(parsedArgs.keyPath).toBe(keyPath);
+      expect(parsedArgs.upstream).toBe("http://localhost:3000");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 
-  it("passes with 5-of-7 signatures and fails with 4-of-7, forged signature, or suspended status", () => {
-    const baseParams = {
-      nodeId: "sim-1",
-      chipId: "ab".repeat(64),
-      nodeIdentityPk: "cd".repeat(32),
-      epoch: 10,
-      status: "full" as const,
-      weight: 10000,
-    };
+  it("verifies valid signed C1-C7 claims, stores only fingerprint + result + coarse hour (no IP), appends to RFC 6962 log, and tracks distinctVerifierCount", async () => {
+    const { col: logCol } = createMockCollection();
+    const { col: subCol, docs: subDocs } = createMockCollection();
+    setTransparencyCollectionOverride(logCol);
+    setVerifierSubmissionsCollectionOverride(subCol);
+    setLiveVerificationViewOverride(async () => buildSampleLiveView());
 
-    // Passes with 5-of-7 signatures
-    const validTicket = issueQuorumTicket({ ...baseParams, signerCount: 5 });
-    expect(validTicket.quorumSimulated).toBe(true);
-    expect(validTicket.operatorPublicKey).toBe(getOperatorPublicKey());
-    const passRes = verifyQuorumTicket(validTicket);
-    expect(passRes.ok).toBe(true);
-    expect(passRes.validSignatures).toBe(5);
-    expect(passRes.required).toBe(5);
-    expect(passRes.quorumSimulated).toBe(true);
-    expect(passRes.operatorPublicKey).toBe(getOperatorPublicKey());
+    const sk1 = new Uint8Array(32).fill(0x11);
+    const sk2 = new Uint8Array(32).fill(0x22);
+    const claim = buildValidClaim();
 
-    // Fails with 4-of-7 signatures
-    const fourOfSeven = issueQuorumTicket({ ...baseParams, signerCount: 4 });
-    const failFour = verifyQuorumTicket(fourOfSeven);
-    expect(failFour.ok).toBe(false);
-    expect(failFour.validSignatures).toBe(4);
+    const signed1 = signVerificationClaim(claim, sk1);
+    expect(
+      verifyVerificationClaimSignature({
+        publicKey: signed1.publicKey,
+        signature: signed1.signature,
+        claim: signed1.claim,
+      }).ok,
+    ).toBe(true);
 
-    // Fails if a signature is forged
-    const forgedTicket = {
-      ...validTicket,
-      signatures: validTicket.signatures.map((sig, i) =>
-        i === 0 ? { ...sig, signature: "00".repeat(64) } : sig,
-      ),
-    };
-    const failForged = verifyQuorumTicket(forgedTicket);
-    expect(failForged.ok).toBe(false);
+    // Submit from verifier 1
+    const res1 = await postVerificationsRoute(
+      new Request("http://localhost/api/transparency/verifications", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": "203.0.113.42",
+        },
+        body: JSON.stringify({
+          publicKey: signed1.publicKey,
+          signature: signed1.signature,
+          claim: signed1.claim,
+        }),
+      }),
+    );
+    expect(res1.status).toBe(200);
+    const body1 = await res1.json();
+    expect(body1.ok).toBe(true);
+    expect(body1.verifierFingerprint).toBe(signed1.verifierFingerprint);
+    expect(body1.epochHourSec % 3600).toBe(0);
+    expect(body1.distinctVerifierCount).toBe(1);
+    expect(body1.totalSubmissions).toBe(1);
+    expect(body1.event.index).toBe(3);
+    expect(body1.event.verifierFingerprint).toBe(signed1.verifierFingerprint);
+    expect(
+      verifyTransparencyProofBundleClient({
+        sth: body1.signedTreeHead,
+        expectedOperatorPublicKey: body1.operatorPublicKey,
+        inclusionProof: body1.inclusionProof,
+        consistencyProof: body1.consistencyProof,
+      }).ok,
+    ).toBe(true);
 
-    // Fails if status === "suspended"
-    const suspendedTicket = issueQuorumTicket({
-      ...baseParams,
-      status: "suspended",
-      weight: 5000,
-      signerCount: 6,
+    // Inspect raw stored MongoDB document in verifier_submissions: no IP, no raw publicKey, no signature
+    expect(subDocs).toHaveLength(1);
+    const storedDoc = subDocs[0];
+    expect(storedDoc.verifierFingerprint).toBe(signed1.verifierFingerprint);
+    expect(storedDoc.epochHourSec).toBe(claim.epochHourSec);
+    expect(storedDoc.overallOk).toBe(true);
+    expect(JSON.stringify(storedDoc)).not.toContain("203.0.113.42");
+    expect(storedDoc.ip).toBeUndefined();
+    expect(storedDoc.publicKey).toBeUndefined();
+    expect(storedDoc.signature).toBeUndefined();
+
+    // Second submission from the SAME verifier key keeps distinctVerifierCount === 1
+    const res1b = await postVerificationsRoute(
+      new Request("http://localhost/api/transparency/verifications", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          publicKey: signed1.publicKey,
+          signature: signed1.signature,
+          claim: signed1.claim,
+        }),
+      }),
+    );
+    expect(res1b.status).toBe(200);
+    const body1b = await res1b.json();
+    expect(body1b.distinctVerifierCount).toBe(1);
+    expect(body1b.totalSubmissions).toBe(2);
+
+    // Submission from a SECOND distinct verifier key increments distinctVerifierCount to 2
+    const signed2 = signCliVerificationClaim(claim, bytesToHex(sk2));
+    const res2 = await postVerificationsRoute(
+      new Request("http://localhost/api/transparency/verifications", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          publicKey: signed2.publicKey,
+          signature: signed2.signature,
+          claim: signed2.claim,
+        }),
+      }),
+    );
+    expect(res2.status).toBe(200);
+    const body2 = await res2.json();
+    expect(body2.distinctVerifierCount).toBe(2);
+    expect(body2.totalSubmissions).toBe(3);
+
+    // GET /api/transparency/verifications exposes distinctVerifierCount and recentSubmissions
+    const getVerRes = await getVerificationsRoute(
+      new Request("http://localhost/api/transparency/verifications?limit=10"),
+    );
+    expect(getVerRes.status).toBe(200);
+    const getVerBody = await getVerRes.json();
+    expect(getVerBody.ok).toBe(true);
+    expect(getVerBody.distinctVerifierCount).toBe(2);
+    expect(getVerBody.totalSubmissions).toBe(3);
+    expect(getVerBody.recentSubmissions).toHaveLength(3);
+  });
+
+  it("rejects invalid signatures and rejects claims whose router, model, or C1-C7 facts mismatch the live view", async () => {
+    const { col: logCol } = createMockCollection();
+    const { col: subCol, docs: subDocs } = createMockCollection();
+    setTransparencyCollectionOverride(logCol);
+    setVerifierSubmissionsCollectionOverride(subCol);
+    setLiveVerificationViewOverride(async () => buildSampleLiveView());
+
+    const sk = new Uint8Array(32).fill(0x33);
+    const validClaim = buildValidClaim();
+    const signed = signVerificationClaim(validClaim, sk);
+
+    // 1. Forged signature -> HTTP 400
+    const badSigRes = await postVerificationsRoute(
+      new Request("http://localhost/api/transparency/verifications", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          publicKey: signed.publicKey,
+          signature: "00".repeat(64),
+          claim: signed.claim,
+        }),
+      }),
+    );
+    expect(badSigRes.status).toBe(400);
+
+    // 2. Valid signature over wrong router measurement -> HTTP 422
+    const wrongRouterSigned = signVerificationClaim(
+      {
+        ...validClaim,
+        router: {
+          ...validClaim.router,
+          measurement: "ff".repeat(48),
+        },
+      },
+      sk,
+    );
+    const wrongRouterRes = await postVerificationsRoute(
+      new Request("http://localhost/api/transparency/verifications", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          publicKey: wrongRouterSigned.publicKey,
+          signature: wrongRouterSigned.signature,
+          claim: wrongRouterSigned.claim,
+        }),
+      }),
+    );
+    expect(wrongRouterRes.status).toBe(422);
+    const wrongRouterBody = await wrongRouterRes.json();
+    expect(wrongRouterBody.ok).toBe(false);
+    expect(wrongRouterBody.mismatches.join(" ")).toContain("router.measurement mismatch");
+
+    // 3. Valid signature over wrong model tag -> HTTP 422
+    const wrongModelSigned = signVerificationClaim(
+      {
+        ...validClaim,
+        models: validClaim.models.map((m) => (m.id === "kimi-k3" ? { ...m, tag: "v9.9.9-backdoor" } : m)),
+      },
+      sk,
+    );
+    const wrongModelRes = await postVerificationsRoute(
+      new Request("http://localhost/api/transparency/verifications", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          publicKey: wrongModelSigned.publicKey,
+          signature: wrongModelSigned.signature,
+          claim: wrongModelSigned.claim,
+        }),
+      }),
+    );
+    expect(wrongModelRes.status).toBe(422);
+    const wrongModelBody = await wrongModelRes.json();
+    expect(wrongModelBody.mismatches.join(" ")).toContain('Model "kimi-k3" tag mismatch');
+
+    // 4. Valid signature over mismatched C4 check status -> HTTP 422
+    const wrongCheckSigned = signVerificationClaim(
+      {
+        ...validClaim,
+        checks: validClaim.checks.map((c) => (c.id === "C4" ? { ...c, status: "fail" as const } : c)),
+        overallOk: false,
+      },
+      sk,
+    );
+    const wrongCheckRes = await postVerificationsRoute(
+      new Request("http://localhost/api/transparency/verifications", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          publicKey: wrongCheckSigned.publicKey,
+          signature: wrongCheckSigned.signature,
+          claim: wrongCheckSigned.claim,
+        }),
+      }),
+    );
+    expect(wrongCheckRes.status).toBe(422);
+    expect(subDocs).toHaveLength(0);
+  });
+
+  it("builds a canonical C1-C7 claim via CLI helpers and submits end-to-end against POST /api/transparency/verifications", async () => {
+    const { col: logCol } = createMockCollection();
+    const { col: subCol } = createMockCollection();
+    setTransparencyCollectionOverride(logCol);
+    setVerifierSubmissionsCollectionOverride(subCol);
+    const liveView = buildSampleLiveView();
+    setLiveVerificationViewOverride(async () => liveView);
+
+    const cliClaim = buildCanonicalVerificationClaim({
+      doc: {
+        enclaveHost: liveView.router.enclaveHost,
+        configRepo: liveView.router.configRepo,
+        releaseDigest: liveView.router.releaseDigest,
+        codeFingerprint: liveView.router.measurement,
+        securityVerified: true,
+        steps: {
+          verifyEnclave: { status: "success" },
+          verifyCode: { status: "success" },
+          verifyCertificate: { status: "success" },
+          compareMeasurements: { status: "success" },
+        },
+      },
+      matrix: {
+        models: {
+          "kimi-k3": {
+            repo: liveView.models["kimi-k3"].repo,
+            tag: liveView.models["kimi-k3"].tag,
+            measurementRegisters: [liveView.models["kimi-k3"].measurement],
+            dmVerityRootHash: liveView.models["kimi-k3"].dmVerityRootHash,
+            weightRepoCommit: liveView.models["kimi-k3"].weightRepoCommit,
+            healthyHosts: 1,
+            configuredHosts: 1,
+            status: "router-attested",
+          },
+          "glm-5-3": {
+            repo: liveView.models["glm-5-3"].repo,
+            tag: liveView.models["glm-5-3"].tag,
+            measurementRegisters: [liveView.models["glm-5-3"].measurement],
+            healthyHosts: 7,
+            configuredHosts: 7,
+            status: "router-attested",
+          },
+        },
+      },
+      proxyTable: { models: {} },
+      registry: {
+        source: "arc",
+        nodes: [{ kind: "tinfoil", status: "active", stake: "100" }],
+      },
     });
-    const failSuspended = verifyQuorumTicket(suspendedTicket);
-    expect(failSuspended.ok).toBe(false);
+
+    const sk = ed25519.utils.randomSecretKey();
+    const signed = signCliVerificationClaim(cliClaim, sk);
+    const submitted = await submitVerificationClaim({
+      upstream: "http://localhost",
+      signedPayload: signed,
+      fetchImpl: (url: string, init: RequestInit) => postVerificationsRoute(new Request(url, init)),
+    });
+
+    expect(submitted.ok).toBe(true);
+    expect(submitted.status).toBe(200);
+    expect(submitted.body.verifierFingerprint).toBe(signed.verifierFingerprint);
+    expect(submitted.body.distinctVerifierCount).toBe(1);
   });
 });

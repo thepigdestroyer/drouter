@@ -1,18 +1,24 @@
 /**
- * Google DeepMind Gemini 4 Argon (`gemini-4-argon`) Interactions API Contract,
- * Tinfoil Enclave OpenAI-Compatible Planner Loop, Privacy Invariant Guard, and
- * Companion Toolkit Registry (`src/lib/gemini/interactions.ts`).
+ * Google DeepMind Gemini 4 Argon (`gemini-4-argon`) Split-Knowledge Control Plane,
+ * Content-Free Egress Firewall (`assertContentFree`), Strict Tool Schema Validator,
+ * Step/Time Budget Enforcer, and Attested Tinfoil Enclave Planner Loop (`src/lib/gemini/interactions.ts`).
  *
- * Uses the official `@google/genai` SDK (`new GoogleGenAI({ apiKey })` and
- * `client.interactions.create(...)`) when `GEMINI_API_KEY` is present, and
- * falls back to an attested Tinfoil enclave model (`kimi-k3` or `gemma4-31b`)
- * via the `tinfoil` SDK (`tinfoilClient.chat.completions.create(...)` with
- * OpenAI-compatible tool calls) when no Gemini key is configured.
+ * Architectural guarantee (D1 & D2):
+ * - Gemini is a control plane only. It never receives user content, enclave output text,
+ *   search queries, or anything derived from user text other than numbers, booleans,
+ *   allowlisted enums, fixed-format SHA-256 hashes, and opaque handles (`$INPUT`, `$RESULT_<n>`).
+ * - Every outbound request to Google Gemini passes through `assertContentFree(value)`.
+ * - Every tool call is validated against a strict function allowlist and JSON schema.
+ * - Step count and wall-clock time budgets are strictly enforced.
+ * - Model output is untrusted data, never executed, and never authoritative for gates.
  */
 
 import { GoogleGenAI } from "@google/genai";
+import { estimateTokens } from "@/lib/privacy/padding";
 
 export const GEMINI_4_ARGON_MODEL_ID = "gemini-4-argon" as const;
+
+export const DATA_SENT_TO_GOOGLE = "content-free task descriptor only" as const;
 
 export const ARGON_COMPANION_MODELS = {
   orchestrator: "gemini-4-argon",
@@ -35,6 +41,89 @@ export const VALID_THINKING_LEVELS: readonly ArgonThinkingLevel[] = [
   "medium",
   "high",
 ] as const;
+
+export type TaskKind = "summarize" | "analyze" | "draft" | "review" | "question";
+
+export const VALID_TASK_KINDS: readonly TaskKind[] = [
+  "summarize",
+  "analyze",
+  "draft",
+  "review",
+  "question",
+] as const;
+
+export const ALLOWED_PLANNER_TOOLS = [
+  "scrub_and_symmetry_mask",
+  "verify_two_hop_enclave_and_quorum",
+  "search_atlas_hybrid_kb",
+  "invoke_attested_enclave",
+  "anchor_arc_settlement_with_human_gate",
+] as const;
+
+export type PlannerToolName = (typeof ALLOWED_PLANNER_TOOLS)[number];
+
+export const ALLOWED_ATLAS_TOPICS = [
+  "tinfoil_enclave",
+  "sev_snp_router",
+  "tdx_gpu_cc",
+  "hpke_ehbp",
+  "arc_registry",
+  "blind_credits",
+  "pii_redaction",
+] as const;
+
+export type AllowedAtlasTopic = (typeof ALLOWED_ATLAS_TOPICS)[number];
+
+export const ALLOWED_ATLAS_CATEGORIES = [
+  "provider",
+  "advisory",
+  "architecture",
+  "all",
+] as const;
+
+export type AllowedAtlasCategory = (typeof ALLOWED_ATLAS_CATEGORIES)[number];
+
+export const MAX_PLANNER_STEPS = 5;
+export const MAX_PLANNER_WALL_CLOCK_MS = 20_000;
+
+export interface TaskDescriptor {
+  taskKind: TaskKind;
+  inputHandle: "$INPUT";
+  inputTokenEstimate: number;
+  redactionCounts: Record<string, number>;
+  verification: Record<string, boolean>;
+  allowedTools: string[];
+}
+
+/**
+ * Deterministically classifies a user prompt into a content-free `TaskKind` enum
+ * locally without invoking any external model.
+ */
+export function classifyTaskKind(rawText: string): TaskKind {
+  const lower = (rawText || "").toLowerCase();
+  if (
+    /\b(?:review|audit|inspect|compliance|agreement)\b/.test(lower) &&
+    !/\bsummarize\s+the\s+main\b/.test(lower)
+  ) {
+    return "review";
+  }
+  if (/\b(?:summarize|summary|briefing|tldr|overview)\b/.test(lower)) {
+    return "summarize";
+  }
+  if (/\b(?:draft|write|compose|prepare\s+a\s+draft)\b/.test(lower)) {
+    return "draft";
+  }
+  if (
+    lower.trim().endsWith("?") ||
+    /^(?:what|how|why|when|where|who|which|can\s+you\s+explain)\b/.test(lower.trim())
+  ) {
+    return "question";
+  }
+  if (/\b(?:review|audit|check)\b/.test(lower)) {
+    return "review";
+  }
+  return "analyze";
+}
 
 export const FORBIDDEN_ARGON_PARAMETERS = [
   "thinking_budget",
@@ -90,58 +179,67 @@ export interface ArgonToolkitModelSpec {
 export const ARGON_TOOLKIT_MANIFEST: readonly ArgonToolkitModelSpec[] = [
   {
     id: GEMINI_4_ARGON_MODEL_ID,
-    role: "Primary 1M-Context Autonomous Reasoning and Tool-Calling Orchestrator",
-    stageUsed: "Stage 4 (Autonomous Tool Loop and Synthesis when GEMINI_API_KEY is provided)",
+    role: "Split-Knowledge Control-Plane Planner (receives content-free TaskDescriptor only)",
+    stageUsed: "Stage 4 (Control-Plane Tool Loop when GEMINI_API_KEY is provided)",
     statusInDemo: "used-when-key-set",
     trustBoundary: "gemini-interactions-cloud",
     description:
-      "Invoked via @google/genai client.interactions.create with generation_config.thinking_level and background execution over scrubbed and symmetry-masked text. When GEMINI_API_KEY is absent, planning falls back to an attested Tinfoil model.",
-  },
-  {
-    id: ARGON_COMPANION_MODELS.parallelSubagentFast,
-    role: "Parallel Subagent for Attestation and Atlas Hybrid Search Summarization",
-    stageUsed: "Stage 2 (Parallel Subagent Summary when GEMINI_API_KEY is provided; skipped without key)",
-    statusInDemo: "used-when-key-set",
-    trustBoundary: "gemini-interactions-cloud",
-    description:
-      "Called in parallel via client.interactions.create when GEMINI_API_KEY is present to summarize MongoDB Atlas Hybrid Search ($rankFusion) and Tinfoil 2-hop attestation results.",
-  },
-  {
-    id: ARGON_COMPANION_MODELS.parallelSubagentLite,
-    role: "Parallel Subagent for Quorum and Policy Verification Summarization",
-    stageUsed: "Stage 2 (Parallel Subagent Summary when GEMINI_API_KEY is provided; skipped without key)",
-    statusInDemo: "used-when-key-set",
-    trustBoundary: "gemini-interactions-cloud",
-    description:
-      "Called in parallel via client.interactions.create when GEMINI_API_KEY is present to summarize 5-of-7 Ed25519 hardware verifier quorum and Circle Arc registry readiness.",
+      "Invoked via @google/genai client.interactions.create over a content-free TaskDescriptor ($INPUT handle, counts, booleans, enums). Never receives user text, enclave output text, or search queries.",
   },
   {
     id: ARGON_COMPANION_MODELS.confidentialOpenCloud,
     role: "Open-Weight Confidential Enclave Planner and Inference Model (Tinfoil Live Attested)",
-    stageUsed: "Stage 4 (Attested Tinfoil Enclave Planner and Inference via gemma4-31b or kimi-k3)",
+    stageUsed: "Stage 4 (Attested Tinfoil Enclave Planner and Content Execution via gemma4-31b or kimi-k3)",
     statusInDemo: "live-enclave",
     trustBoundary: "attested-tee-enclave",
     tinfoilEnclaveAlias: ARGON_COMPANION_MODELS.tinfoilEnclaveGemma,
     description:
-      "Maps to Tinfoil's live attested gemma4-31b and kimi-k3 enclaves (Intel TDX + NVIDIA CC GPUs, max-model-len 262,144 tokens on kimi-k3) routed via router-0.tinfoil.sh (AMD SEV-SNP).",
+      "Maps to Tinfoil's live attested gemma4-31b and kimi-k3 enclaves (Intel TDX + NVIDIA CC GPUs) routed via router-0.tinfoil.sh (AMD SEV-SNP). Executes all content work on server-resolved handles.",
   },
   {
-    id: ARGON_COMPANION_MODELS.sandboxAgent,
-    role: "Not used in this demo (VMPL0 1,344-state and V1/V6 memory-bus checks run in deterministic local TypeScript)",
-    stageUsed: "not used (Stage 3 uses local TypeScript verifiers)",
-    statusInDemo: "not-used",
+    id: "pii-filter",
+    role: "Attested Enclave Second-Pass PII Redaction Model (Tinfoil Live Attested)",
+    stageUsed: "Stage 1 (Attested PII Filter after deterministic mechanicalRedact)",
+    statusInDemo: "live-enclave",
     trustBoundary: "attested-tee-enclave",
     description:
-      "Not used in this demo. Stage 3 runs deterministic local TypeScript formal checks (verifyMonitorPolicyExhaustive across 1,344 states and runMemoryBusAndPopAudit).",
+      "Runs inside a sealed Tinfoil enclave after deterministic mechanicalRedact before any derived text leaves the enclave boundary.",
   },
   {
-    id: ARGON_COMPANION_MODELS.deepResearch,
-    role: "Not used in this demo (CVE and provider advisories are queried from MongoDB Atlas enclave_intelligence)",
+    id: ARGON_COMPANION_MODELS.parallelSubagentFast,
+    role: "Not used for user text (Atlas Hybrid Search runs deterministically on server)",
     stageUsed: "not used",
     statusInDemo: "not-used",
     trustBoundary: "gemini-interactions-cloud",
     description:
-      "Not used in this demo. Hardware advisories (TEE.fail, DDRop, Cipherleaks, VoltPillager) are retrieved from MongoDB Atlas Hybrid Search.",
+      "Not used for content summarization so zero search queries or document titles ever reach Google.",
+  },
+  {
+    id: ARGON_COMPANION_MODELS.parallelSubagentLite,
+    role: "Not used for user text (C1-C7 attestation verification runs deterministically in TypeScript)",
+    stageUsed: "not used",
+    statusInDemo: "not-used",
+    trustBoundary: "gemini-interactions-cloud",
+    description:
+      "Not used for attestation text summarization; C1-C7 checks are computed deterministically by code.",
+  },
+  {
+    id: ARGON_COMPANION_MODELS.sandboxAgent,
+    role: "Not used in this demo (enclave attestation and failover checks run in deterministic TypeScript)",
+    stageUsed: "not used",
+    statusInDemo: "not-used",
+    trustBoundary: "attested-tee-enclave",
+    description:
+      "Not used in this demo. Stage 3 verifies live Tinfoil model enclave measurements and failover in TypeScript.",
+  },
+  {
+    id: ARGON_COMPANION_MODELS.deepResearch,
+    role: "Not used in this demo (advisories are queried from MongoDB Atlas enclave_intelligence)",
+    stageUsed: "not used",
+    statusInDemo: "not-used",
+    trustBoundary: "gemini-interactions-cloud",
+    description:
+      "Not used in this demo. Hardware advisories are retrieved from MongoDB Atlas Hybrid Search.",
   },
   {
     id: ARGON_COMPANION_MODELS.realtimeVoice,
@@ -163,29 +261,601 @@ export const ARGON_TOOLKIT_MANIFEST: readonly ArgonToolkitModelSpec[] = [
   },
   {
     id: ARGON_COMPANION_MODELS.confidentialOnDevice,
-    role: "Not used in this demo (Stage 1 PII scrubbing and symmetry masking run in deterministic local TypeScript)",
-    stageUsed: "not used (Stage 1 uses local prompt pipeline and symmetry transform)",
+    role: "Not used in this demo (Stage 1 runs deterministic mechanicalRedact and symmetry masking)",
+    stageUsed: "not used",
     statusInDemo: "not-used",
     trustBoundary: "on-device-local",
     description:
-      "Not used in this demo. Stage 1 runs deterministic local regex scrubbing (src/lib/pipeline and src/lib/privacy) and homomorphic symmetry masking (src/lib/symmetry).",
+      "Not used in this demo. Stage 1 runs deterministic mechanicalRedact (src/lib/privacy/mechanical), attestedPiiFilter (src/lib/privacy/attested-filter), and symmetry masking.",
   },
 ] as const;
 
 export class PrivacyInvariantViolationError extends Error {
   readonly leakedToken: string;
 
-  constructor(leakedToken: string) {
+  constructor(leakedToken: string, messageOverride?: string) {
     super(
-      `PRIVACY_INVARIANT_VIOLATION: Outbound planner payload contained unredacted sensitive value (${leakedToken.slice(0, 4)}***). Call aborted before network transmission.`,
+      messageOverride ??
+        `PRIVACY_INVARIANT_VIOLATION: Outbound planner payload contained unredacted or non-allowlisted value (${String(leakedToken).slice(0, 12)}***). Call aborted before network transmission.`,
     );
     this.name = "PrivacyInvariantViolationError";
     this.leakedToken = leakedToken;
   }
 }
 
+export class ContentFreeEgressError extends PrivacyInvariantViolationError {
+  readonly path: string;
+
+  constructor(rejectedValue: string, path = "$") {
+    super(
+      rejectedValue,
+      `CONTENT_FREE_EGRESS_VIOLATION at ${path}: Outbound Gemini payload contained non-allowlisted string or content (${String(rejectedValue).slice(0, 16)}***). Only opaque handles, fixed SHA-256 hashes, booleans, numbers, and allowlisted enums may leave the server to Google.`,
+    );
+    this.name = "ContentFreeEgressError";
+    this.path = path;
+  }
+}
+
+export class ToolPolicyViolationError extends Error {
+  readonly toolName: string;
+  readonly validationErrors: string[];
+
+  constructor(toolName: string, validationErrors: string[]) {
+    super(
+      `TOOL_POLICY_VIOLATION (${toolName}): ${validationErrors.join("; ")}`,
+    );
+    this.name = "ToolPolicyViolationError";
+    this.toolName = toolName;
+    this.validationErrors = validationErrors;
+  }
+}
+
+export class PlannerBudgetExceededError extends Error {
+  readonly kind: "max_steps" | "wall_clock_timeout";
+  readonly limit: number;
+
+  constructor(kind: "max_steps" | "wall_clock_timeout", limit: number) {
+    super(
+      kind === "max_steps"
+        ? `PLANNER_BUDGET_EXCEEDED: Planner exceeded maximum step budget (${limit} steps).`
+        : `PLANNER_BUDGET_EXCEEDED: Planner exceeded wall-clock budget (${limit} ms).`,
+    );
+    this.name = "PlannerBudgetExceededError";
+    this.kind = kind;
+    this.limit = limit;
+  }
+}
+
+export const SPLIT_KNOWLEDGE_SYSTEM_INSTRUCTION =
+  "SPLIT_KNOWLEDGE_CONTROL_PLANE_V1: Plan over the content-free TaskDescriptor using only opaque handles ($INPUT, $RESULT_n) and allowlisted enums. Never request or emit user text." as const;
+
+export interface ArgonInteractionToolDeclaration {
+  type: "function";
+  name: PlannerToolName;
+  description: string;
+  parameters: {
+    type: "OBJECT";
+    properties: Record<
+      string,
+      {
+        type: "STRING" | "INTEGER" | "BOOLEAN";
+        description: string;
+        enum?: readonly string[];
+      }
+    >;
+    required: string[];
+  };
+}
+
+export const ARGON_CONFIDENTIAL_TOOLS: readonly ArgonInteractionToolDeclaration[] = [
+  {
+    type: "function",
+    name: "scrub_and_symmetry_mask",
+    description:
+      "Runs mechanical redaction, attested enclave PII filtering, symmetry masking, and RFC 8259 bucket padding on an opaque input handle.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        inputHandle: {
+          type: "STRING",
+          description: "Opaque input handle ($INPUT or $RESULT_n).",
+        },
+        bucketQuantumBytes: {
+          type: "INTEGER",
+          description: "Byte padding quantum in bytes.",
+        },
+      },
+      required: ["inputHandle", "bucketQuantumBytes"],
+    },
+  },
+  {
+    type: "function",
+    name: "verify_two_hop_enclave_and_quorum",
+    description:
+      "Verifies live Tinfoil two-hop hardware attestation (AMD SEV-SNP router and Intel TDX with NVIDIA Confidential Computing GPUs), Sigstore Rekor release digest, and Circle Arc registry admission.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        providerId: {
+          type: "STRING",
+          description: "Target confidential compute provider identifier (tinfoil).",
+          enum: ["tinfoil"],
+        },
+        enclaveModel: {
+          type: "STRING",
+          description: "Target attested enclave model identifier (gemma4-31b or kimi-k3).",
+          enum: ["gemma4-31b", "kimi-k3"],
+        },
+      },
+      required: ["providerId", "enclaveModel"],
+    },
+  },
+  {
+    type: "function",
+    name: "search_atlas_hybrid_kb",
+    description:
+      "Executes MongoDB Atlas Hybrid Search ($rankFusion combining $vectorSearch and $search) over confidential compute intelligence using a content-free topic enum or server-resolved handle.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        topic: {
+          type: "STRING",
+          description:
+            "Content-free technical topic enum (tinfoil_enclave, sev_snp_router, tdx_gpu_cc, hpke_ehbp, arc_registry, blind_credits, pii_redaction).",
+          enum: ALLOWED_ATLAS_TOPICS,
+        },
+        inputHandle: {
+          type: "STRING",
+          description:
+            "Optional opaque handle ($INPUT or $RESULT_n) resolved on the server after mechanical redaction.",
+        },
+        category: {
+          type: "STRING",
+          description: "Optional category filter (provider, advisory, architecture, all).",
+          enum: ALLOWED_ATLAS_CATEGORIES,
+        },
+      },
+      required: ["topic"],
+    },
+  },
+  {
+    type: "function",
+    name: "invoke_attested_enclave",
+    description:
+      "Dispatches the server-resolved handle to the verified Tinfoil confidential enclave (gemma4-31b or kimi-k3) over RFC 9180 HPKE Encrypted HTTP Body and stores the enclave output in a new server handle.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        inputHandle: {
+          type: "STRING",
+          description: "Opaque handle ($INPUT or $RESULT_n) resolved server-side for enclave execution.",
+        },
+        enclaveModel: {
+          type: "STRING",
+          description: "Attested Tinfoil enclave model identifier (gemma4-31b or kimi-k3).",
+          enum: ["gemma4-31b", "kimi-k3"],
+        },
+        taskKind: {
+          type: "STRING",
+          description: "Task kind enum (summarize, analyze, draft, review, question).",
+          enum: VALID_TASK_KINDS,
+        },
+      },
+      required: ["inputHandle", "enclaveModel"],
+    },
+  },
+  {
+    type: "function",
+    name: "anchor_arc_settlement_with_human_gate",
+    description:
+      "Requests anchoring the verified execution receipt hash on Circle Arc Testnet (chainId 5042002) subject to mandatory server-enforced human approval.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        actionKind: {
+          type: "STRING",
+          description: "Settlement action kind (anchor_receipt).",
+          enum: ["anchor_receipt"],
+        },
+        resultHandle: {
+          type: "STRING",
+          description:
+            "Optional opaque result handle ($INPUT or $RESULT_n) whose receipt hash will be anchored.",
+        },
+        humanApproved: {
+          type: "BOOLEAN",
+          description: "Whether human approval was requested (enforced independently by server state).",
+        },
+      },
+      required: ["actionKind", "humanApproved"],
+    },
+  },
+] as const;
+
+const OPAQUE_HANDLE_REGEX = /^(?:\$INPUT|\$RESULT_(?:[1-9]|[1-5]\d|6[0-4]))$/;
+const FIXED_SHA256_HEX_REGEX = /^0x[0-9a-f]{64}$/;
+const SAFE_CALL_ID_REGEX =
+  /^(?:call|tc|inter)-(?:[1-9]\d{0,2}|turn-[1-9]\d{0,1}|[a-z_]{2,40}|[1-9]-[a-z_]{2,40}|argon-turn-[1-9])$/;
+
+const ALLOWED_STATIC_SCHEMA_DESCRIPTIONS = new Set<string>([
+  SPLIT_KNOWLEDGE_SYSTEM_INSTRUCTION,
+  ...ARGON_CONFIDENTIAL_TOOLS.flatMap((t) => [
+    t.description,
+    ...Object.values(t.parameters.properties).map((p) => p.description),
+  ]),
+]);
+
+export const ALLOWED_CONTENT_FREE_ENUMS: ReadonlySet<string> = new Set<string>([
+  // Model & SDK identifiers
+  GEMINI_4_ARGON_MODEL_ID,
+  ARGON_COMPANION_MODELS.sandboxAgent,
+  ARGON_COMPANION_MODELS.parallelSubagentFast,
+  ARGON_COMPANION_MODELS.parallelSubagentLite,
+  ARGON_COMPANION_MODELS.deepResearch,
+  ARGON_COMPANION_MODELS.realtimeVoice,
+  ARGON_COMPANION_MODELS.voiceTts,
+  ARGON_COMPANION_MODELS.confidentialOpenCloud,
+  ARGON_COMPANION_MODELS.confidentialOnDevice,
+  ARGON_COMPANION_MODELS.tinfoilEnclaveGemma,
+  ARGON_COMPANION_MODELS.tinfoilEnclaveKimi,
+  "pii-filter",
+  "@google/genai>=2.31.0",
+  "client.interactions.create",
+  "redacted_clinical_scientist_persona",
+  "RFC 9180 HPKE EHBP + AMD SEV-SNP Router + Intel TDX / NVIDIA CC GPU Enclaves",
+  DATA_SENT_TO_GOOGLE,
+
+  // Thinking levels & config enums
+  "low",
+  "medium",
+  "high",
+  "enabled",
+
+  // Task kinds
+  ...VALID_TASK_KINDS,
+
+  // Roles & step types
+  "user",
+  "system",
+  "assistant",
+  "tool",
+  "text",
+  "function",
+  "function_call",
+  "function_result",
+  "model_output",
+  "auto",
+  "none",
+
+  // Schema types
+  "OBJECT",
+  "STRING",
+  "INTEGER",
+  "BOOLEAN",
+  "NUMBER",
+  "ARRAY",
+  "object",
+  "string",
+  "integer",
+  "boolean",
+  "number",
+  "array",
+
+  // Tool names
+  ...ALLOWED_PLANNER_TOOLS,
+
+  // Tool argument & result status enums
+  "tinfoil",
+  ...ALLOWED_ATLAS_TOPICS,
+  ...ALLOWED_ATLAS_CATEGORIES,
+  "anchor_receipt",
+  "ok",
+  "verified",
+  "completed",
+  "failed",
+  "blocked_pending_human",
+  "ready_for_anchor",
+  "anchored",
+  "dispatched_over_hpke_ehbp",
+  "paused_awaiting_human",
+  "executed_with_human_approval",
+  "executed",
+  "atlas",
+  "app-fallback",
+  "$rankFusion",
+  "rank_fusion",
+  "app-rrf",
+  "app_rrf",
+]);
+
+export const ALLOWED_CONTENT_FREE_KEYS: ReadonlySet<string> = new Set<string>([
+  // Top-level Interactions API & OpenAI planner keys
+  "model",
+  "thinking_level",
+  "background",
+  "max_output_tokens",
+  "max_context_tokens",
+  "implicit_caching",
+  "generation_config",
+  "system_instruction",
+  "input",
+  "tools",
+  "subagent_routing",
+  "metadata",
+  "taskDescriptor",
+  "previous_interaction_id",
+  "role",
+  "content",
+  "type",
+  "text",
+  "name",
+  "description",
+  "parameters",
+  "properties",
+  "required",
+  "enum",
+  "id",
+  "call_id",
+  "tool_call_id",
+  "arguments",
+  "result",
+  "messages",
+  "tool_choice",
+  "max_tokens",
+  "function",
+  "tool_calls",
+
+  // Subagent routing & metadata keys
+  "sandbox_verifier",
+  "fast_swarm",
+  "quorum_checker",
+  "deep_research",
+  "on_device_filter",
+  "attested_enclave_model",
+  "tinfoil_enclave_target",
+  "voice_briefing",
+  "live_voice_gate",
+  "sdk_target",
+  "api_surface",
+  "persona",
+  "enclave_protocol",
+  "data_sent_to_google",
+
+  // TaskDescriptor keys
+  "taskKind",
+  "inputHandle",
+  "inputTokenEstimate",
+  "redactionCounts",
+  "verification",
+  "allowedTools",
+
+  // Allowed redactionCounts category keys
+  "SECRET",
+  "EMAIL",
+  "PHONE",
+  "IP",
+  "ACCT",
+  "ENTITY",
+  "NAME",
+  "DIGITS",
+  "ENTROPY",
+  "URL",
+  "ADDRESS",
+  "DATE",
+  "CUSTOM",
+  "SYMMETRY",
+  "ATTESTED_PII",
+  "TOTAL",
+
+  // Allowed verification boolean keys
+  "mechanicalRedactionPassed",
+  "attestedPiiFilterVerified",
+  "bucketAligned4096",
+  "routerSevSnpVerified",
+  "enclaveTdxGpuVerified",
+  "hpkeKeyBound",
+  "sigstoreManifestVerified",
+  "arcRegistryVerified",
+
+  // Allowed tool argument & result keys
+  "bucketQuantumBytes",
+  "applyAttestedFilter",
+  "providerId",
+  "enclaveModel",
+  "topic",
+  "category",
+  "actionKind",
+  "resultHandle",
+  "outputHandle",
+  "humanApproved",
+  "status",
+  "passed",
+  "redactionCount",
+  "mechanicalRedactionCount",
+  "attestedRedactionCount",
+  "bucketBytes",
+  "plaintextLeakCount",
+  "contentSha256",
+  "checksPassed",
+  "checksTotal",
+  "selfHealed",
+  "routerDigestHex",
+  "enclaveMeasurementHex",
+  "vectorEngine",
+  "textEngine",
+  "fusionEngine",
+  "totalDocs",
+  "matchingReceiptsCount",
+  "topDocSha256",
+  "outputTokenEstimate",
+  "outputSha256",
+  "attested",
+  "requiresHumanApproval",
+  "stateChangedOnChain",
+  "receiptSha256",
+]);
+
+function hasSmuggledAsciiInHex(hexWithoutPrefix: string): boolean {
+  // Reject 64-digit decimal number strings disguised with a 0x prefix
+  if (/^\d{64}$/.test(hexWithoutPrefix)) {
+    return true;
+  }
+  // Reject trivial repeating sequences (e.g., 0000000000000000 or 1234123412341234)
+  if (/^([0-9a-f]{1,4})\1{15,}$/.test(hexWithoutPrefix)) {
+    return true;
+  }
+  let consecutivePrintableAscii = 0;
+  let totalPrintableLettersOrSpaces = 0;
+  for (let i = 0; i < hexWithoutPrefix.length; i += 2) {
+    const byteVal = parseInt(hexWithoutPrefix.slice(i, i + 2), 16);
+    if (byteVal >= 0x20 && byteVal <= 0x7e) {
+      consecutivePrintableAscii += 1;
+      if (
+        byteVal === 0x20 ||
+        (byteVal >= 0x41 && byteVal <= 0x5a) ||
+        (byteVal >= 0x61 && byteVal <= 0x7a)
+      ) {
+        totalPrintableLettersOrSpaces += 1;
+      }
+      if (consecutivePrintableAscii >= 8) {
+        return true;
+      }
+    } else {
+      consecutivePrintableAscii = 0;
+    }
+  }
+  return totalPrintableLettersOrSpaces >= 18;
+}
+
+const ALLOWED_REQUIRED_PARAM_NAMES = new Set<string>([
+  "inputHandle",
+  "bucketQuantumBytes",
+  "providerId",
+  "enclaveModel",
+  "topic",
+  "category",
+  "taskKind",
+  "actionKind",
+  "resultHandle",
+  "humanApproved",
+]);
+
+export function isContentFreeString(value: string, keyContext?: string): boolean {
+  if (typeof value !== "string" || value.length === 0) {
+    return false;
+  }
+  if (OPAQUE_HANDLE_REGEX.test(value)) {
+    return true;
+  }
+  if (FIXED_SHA256_HEX_REGEX.test(value)) {
+    return !hasSmuggledAsciiInHex(value.slice(2));
+  }
+  if (
+    keyContext === "required" &&
+    ALLOWED_REQUIRED_PARAM_NAMES.has(value)
+  ) {
+    return true;
+  }
+  if (
+    (keyContext === "id" ||
+      keyContext === "call_id" ||
+      keyContext === "tool_call_id" ||
+      keyContext === "previous_interaction_id") &&
+    SAFE_CALL_ID_REGEX.test(value) &&
+    !/\d{4,}/.test(value)
+  ) {
+    return true;
+  }
+  if (
+    (keyContext === "system_instruction" || keyContext === "description") &&
+    ALLOWED_STATIC_SCHEMA_DESCRIPTIONS.has(value)
+  ) {
+    return true;
+  }
+  return ALLOWED_CONTENT_FREE_ENUMS.has(value);
+}
+
 /**
- * Enforces the dRouter Privacy Invariant: neither Google nor Tinfoil planner calls
+ * Egress firewall (D1): recursively inspects any outbound value before it leaves
+ * for Google Gemini. Rejects any string not in the strict allowlist of opaque
+ * handles (`$INPUT`, `$RESULT_<n>`), verified 32-byte lowercase SHA-256 hex hashes,
+ * or allowlisted enum literals, and rejects any unallowlisted object keys or JSON-smuggled content.
+ */
+export function assertContentFree(
+  value: unknown,
+  path = "$",
+  keyContext?: string,
+): void {
+  if (value === null || value === undefined) {
+    return;
+  }
+  const valueType = typeof value;
+  if (valueType === "boolean") {
+    return;
+  }
+  if (valueType === "number") {
+    if (!Number.isFinite(value as number)) {
+      throw new ContentFreeEgressError(String(value), path);
+    }
+    return;
+  }
+  if (valueType === "string") {
+    const str = value as string;
+    const trimmed = str.trim();
+    if (trimmed.length === 0) {
+      throw new ContentFreeEgressError("<empty_string>", path);
+    }
+    if (
+      (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+      (trimmed.startsWith("[") && trimmed.endsWith("]"))
+    ) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch {
+        throw new ContentFreeEgressError(str, path);
+      }
+      if (!parsed || typeof parsed !== "object") {
+        throw new ContentFreeEgressError(str, path);
+      }
+      assertContentFree(parsed, `${path}(json)`);
+      return;
+    }
+    if (!isContentFreeString(str, keyContext)) {
+      throw new ContentFreeEgressError(str, path);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      assertContentFree(value[i], `${path}[${i}]`, keyContext);
+    }
+    return;
+  }
+  if (
+    valueType === "object" &&
+    Object.prototype.toString.call(value) === "[object Object]"
+  ) {
+    const obj = value as Record<string, unknown>;
+    if (Object.getOwnPropertySymbols(obj).length > 0) {
+      throw new ContentFreeEgressError("<symbol_property>", path);
+    }
+    if (typeof (obj as { toJSON?: unknown }).toJSON === "function") {
+      throw new ContentFreeEgressError("<custom_toJSON>", path);
+    }
+    for (const [k, v] of Object.entries(obj)) {
+      if (!ALLOWED_CONTENT_FREE_KEYS.has(k)) {
+        throw new ContentFreeEgressError(k, `${path}.${k}`);
+      }
+      assertContentFree(v, `${path}.${k}`, k);
+    }
+    return;
+  }
+  throw new ContentFreeEgressError(String(value), path);
+}
+
+/**
+ * Enforces the deRoute Privacy Invariant: neither Google nor Tinfoil planner calls
  * may receive raw PII or unredacted secrets. Inspects the serialized outbound payload
  * and throws `PrivacyInvariantViolationError` if any original placeholder value or
  * unmasked sensitive token (>= 4 chars) is present.
@@ -207,6 +877,197 @@ export function assertOutboundPrivacyInvariant(
       throw new PrivacyInvariantViolationError(cleaned);
     }
   }
+}
+
+export interface ToolArgumentFieldSchema {
+  type: "STRING" | "INTEGER" | "BOOLEAN";
+  required?: boolean;
+  isHandle?: boolean;
+  enum?: readonly string[];
+  min?: number;
+  max?: number;
+}
+
+export const TOOL_ARGUMENT_SCHEMAS: Record<
+  PlannerToolName,
+  Record<string, ToolArgumentFieldSchema>
+> = {
+  scrub_and_symmetry_mask: {
+    inputHandle: { type: "STRING", required: true, isHandle: true },
+    bucketQuantumBytes: {
+      type: "INTEGER",
+      required: true,
+      min: 512,
+      max: 65536,
+    },
+  },
+  verify_two_hop_enclave_and_quorum: {
+    providerId: { type: "STRING", required: true, enum: ["tinfoil"] },
+    enclaveModel: {
+      type: "STRING",
+      required: true,
+      enum: ["gemma4-31b", "kimi-k3"],
+    },
+  },
+  search_atlas_hybrid_kb: {
+    topic: { type: "STRING", required: true, enum: ALLOWED_ATLAS_TOPICS },
+    inputHandle: { type: "STRING", required: false, isHandle: true },
+    category: {
+      type: "STRING",
+      required: false,
+      enum: ALLOWED_ATLAS_CATEGORIES,
+    },
+  },
+  invoke_attested_enclave: {
+    inputHandle: { type: "STRING", required: true, isHandle: true },
+    enclaveModel: {
+      type: "STRING",
+      required: true,
+      enum: ["gemma4-31b", "kimi-k3"],
+    },
+    taskKind: { type: "STRING", required: false, enum: VALID_TASK_KINDS },
+  },
+  anchor_arc_settlement_with_human_gate: {
+    actionKind: { type: "STRING", required: true, enum: ["anchor_receipt"] },
+    resultHandle: { type: "STRING", required: false, isHandle: true },
+    humanApproved: { type: "BOOLEAN", required: true },
+  },
+};
+
+export interface ToolCallValidationResult {
+  valid: boolean;
+  errors: string[];
+  sanitizedArgs?: Record<string, unknown>;
+}
+
+/**
+ * Validates a planner tool call against the strict tool allowlist and JSON argument schema.
+ * Rejects unknown tools, unexpected properties, wrong types, non-handle strings, or free text.
+ */
+export function validateToolCallArguments(
+  toolName: string,
+  args: unknown,
+): ToolCallValidationResult {
+  if (!(ALLOWED_PLANNER_TOOLS as readonly string[]).includes(toolName)) {
+    return {
+      valid: false,
+      errors: [`Tool '${String(toolName)}' is not in ALLOWED_PLANNER_TOOLS.`],
+    };
+  }
+
+  if (
+    !args ||
+    typeof args !== "object" ||
+    Array.isArray(args) ||
+    Object.prototype.toString.call(args) !== "[object Object]"
+  ) {
+    return {
+      valid: false,
+      errors: [`Arguments for '${toolName}' must be a non-null plain object.`],
+    };
+  }
+
+  const schema = TOOL_ARGUMENT_SCHEMAS[toolName as PlannerToolName];
+  const rawObj = args as Record<string, unknown>;
+  const errors: string[] = [];
+  const sanitizedArgs: Record<string, unknown> = {};
+
+  for (const key of Object.keys(rawObj)) {
+    if (!Object.prototype.hasOwnProperty.call(schema, key)) {
+      errors.push(`Unexpected argument '${key}' on tool '${toolName}'.`);
+    }
+  }
+
+  for (const [field, spec] of Object.entries(schema)) {
+    const val = rawObj[field];
+    if (val === undefined) {
+      if (spec.required) {
+        errors.push(`Missing required argument '${field}' on tool '${toolName}'.`);
+      }
+      continue;
+    }
+
+    if (spec.type === "STRING") {
+      if (typeof val !== "string") {
+        errors.push(`Argument '${field}' on '${toolName}' must be a string.`);
+        continue;
+      }
+      if (spec.isHandle && !OPAQUE_HANDLE_REGEX.test(val)) {
+        errors.push(
+          `Argument '${field}' on '${toolName}' must be an opaque handle ($INPUT or $RESULT_1..$RESULT_64), got '${val.slice(0, 24)}'.`,
+        );
+        continue;
+      }
+      if (spec.enum && !spec.enum.includes(val)) {
+        errors.push(
+          `Argument '${field}' on '${toolName}' must be one of [${spec.enum.join(", ")}], got '${val.slice(0, 24)}'.`,
+        );
+        continue;
+      }
+      sanitizedArgs[field] = val;
+    } else if (spec.type === "INTEGER") {
+      if (typeof val !== "number" || !Number.isInteger(val)) {
+        errors.push(`Argument '${field}' on '${toolName}' must be an integer.`);
+        continue;
+      }
+      if (spec.min !== undefined && val < spec.min) {
+        errors.push(`Argument '${field}' on '${toolName}' must be >= ${spec.min}.`);
+        continue;
+      }
+      if (spec.max !== undefined && val > spec.max) {
+        errors.push(`Argument '${field}' on '${toolName}' must be <= ${spec.max}.`);
+        continue;
+      }
+      sanitizedArgs[field] = val;
+    } else if (spec.type === "BOOLEAN") {
+      if (typeof val !== "boolean") {
+        errors.push(`Argument '${field}' on '${toolName}' must be a boolean.`);
+        continue;
+      }
+      sanitizedArgs[field] = val;
+    }
+  }
+
+  if (errors.length === 0) {
+    try {
+      assertContentFree(sanitizedArgs, `$.toolCall(${toolName})`);
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : "Failed content-free check.");
+    }
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    ...(errors.length === 0 ? { sanitizedArgs } : {}),
+  };
+}
+
+export function assertValidToolCall(
+  toolName: string,
+  args: unknown,
+): Record<string, unknown> {
+  const res = validateToolCallArguments(toolName, args);
+  if (!res.valid || !res.sanitizedArgs) {
+    throw new ToolPolicyViolationError(toolName, res.errors);
+  }
+  return res.sanitizedArgs;
+}
+
+/**
+ * Sanitizes untrusted model text output so it can never inject HTML/scripts,
+ * control characters, or em dashes, and caps length. Model output is never executed
+ * and never used to compute pass/fail verification gates.
+ */
+export function sanitizeUntrustedModelOutput(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  return raw
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/[\u2013\u2014]/g, "-")
+    .replace(/<[^>]*>/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 512);
 }
 
 export interface ArgonRequestConfigInput {
@@ -426,140 +1287,6 @@ export function sanitizeToArgonConfig(
   };
 }
 
-export interface ArgonInteractionToolDeclaration {
-  type: "function";
-  name: string;
-  description: string;
-  parameters: {
-    type: "OBJECT";
-    properties: Record<string, { type: string; description: string }>;
-    required: string[];
-  };
-}
-
-export const ARGON_CONFIDENTIAL_TOOLS: readonly ArgonInteractionToolDeclaration[] = [
-  {
-    type: "function",
-    name: "scrub_and_symmetry_mask",
-    description:
-      "Runs local PII/secret scrubbing, PAPILLON generalization, and homomorphic symmetry masking f(T(x)) = T(f(x)) with 4096-byte RFC 8259 bucket padding.",
-    parameters: {
-      type: "OBJECT",
-      properties: {
-        rawPayload: {
-          type: "STRING",
-          description: "Already-scrubbed prompt context to verify and pad locally.",
-        },
-        bucketQuantumBytes: {
-          type: "INTEGER",
-          description: "Byte padding quantum (4096).",
-        },
-      },
-      required: ["rawPayload", "bucketQuantumBytes"],
-    },
-  },
-  {
-    type: "function",
-    name: "verify_two_hop_enclave_and_quorum",
-    description:
-      "Fetches and verifies live Tinfoil attestation (router-0.tinfoil.sh AMD SEV-SNP report + Intel TDX and NVIDIA CC GPU model enclave) and 5-of-7 Ed25519 verifier quorum.",
-    parameters: {
-      type: "OBJECT",
-      properties: {
-        providerId: {
-          type: "STRING",
-          description: "Target confidential compute provider ID (e.g., tinfoil).",
-        },
-        enclaveModel: {
-          type: "STRING",
-          description: "Target attested model ID (gemma4-31b or kimi-k3).",
-        },
-      },
-      required: ["providerId", "enclaveModel"],
-    },
-  },
-  {
-    type: "function",
-    name: "search_atlas_hybrid_kb",
-    description:
-      "Executes MongoDB Atlas Hybrid Search ($rankFusion combining $vectorSearch and $search) over enclave_intelligence and past agent_verification_receipts.",
-    parameters: {
-      type: "OBJECT",
-      properties: {
-        query: {
-          type: "STRING",
-          description: "Scrubbed technical search query for confidential enclaves and advisories.",
-        },
-        category: {
-          type: "STRING",
-          description: "Optional category filter (provider, advisory, architecture, all).",
-        },
-      },
-      required: ["query"],
-    },
-  },
-  {
-    type: "function",
-    name: "run_antigravity_vmpl0_and_memory_audit",
-    description:
-      "Exhaustively checks all 1,344 VMPL0 exit policy states (I1-I5) and V1/V6 DDR5 memory-bus Shannon entropy in an isolated sandbox.",
-    parameters: {
-      type: "OBJECT",
-      properties: {
-        candidateNodeId: {
-          type: "STRING",
-          description: "Candidate enclave node ID under test.",
-        },
-        autoPatchOnFailure: {
-          type: "BOOLEAN",
-          description: "Whether to fail over and re-verify on an attested node if a fault is found.",
-        },
-      },
-      required: ["candidateNodeId", "autoPatchOnFailure"],
-    },
-  },
-  {
-    type: "function",
-    name: "invoke_attested_enclave",
-    description:
-      "Dispatches the scrubbed and symmetry-masked prompt to the verified Tinfoil confidential enclave (gemma4-31b or kimi-k3) over RFC 9180 HPKE Encrypted HTTP Body.",
-    parameters: {
-      type: "OBJECT",
-      properties: {
-        enclaveModel: {
-          type: "STRING",
-          description: "Attested Tinfoil enclave model ID (gemma4-31b or kimi-k3).",
-        },
-        maskedPrompt: {
-          type: "STRING",
-          description: "Scrubbed and symmetry-masked prompt text.",
-        },
-      },
-      required: ["enclaveModel", "maskedPrompt"],
-    },
-  },
-  {
-    type: "function",
-    name: "anchor_arc_settlement_with_human_gate",
-    description:
-      "Prepares or submits a verified execution receipt to Circle Arc Testnet (chainId 5042002, registry 0xbc8085c2b6fe6e0db05f169925c0b841828f4481) only when humanApproved is true.",
-    parameters: {
-      type: "OBJECT",
-      properties: {
-        actionKind: {
-          type: "STRING",
-          description: "anchor_receipt | slash_faulty_node",
-        },
-        humanApproved: {
-          type: "BOOLEAN",
-          description: "Explicit confirmation from the human user before state change.",
-        },
-      },
-      required: ["actionKind", "humanApproved"],
-    },
-  },
-] as const;
-
 export interface OpenAICompatibleToolDefinition {
   type: "function";
   function: {
@@ -567,7 +1294,10 @@ export interface OpenAICompatibleToolDefinition {
     description: string;
     parameters: {
       type: "object";
-      properties: Record<string, { type: string; description: string }>;
+      properties: Record<
+        string,
+        { type: string; description: string; enum?: readonly string[] }
+      >;
       required: string[];
     };
   };
@@ -593,6 +1323,7 @@ export function buildTinfoilOpenAITools(
             {
               type: prop.type.toLowerCase(),
               description: prop.description,
+              ...(prop.enum ? { enum: prop.enum } : {}),
             },
           ]),
         ),
@@ -613,7 +1344,8 @@ export interface InteractionsCreatePayload {
     thinking_level: ArgonThinkingLevel;
     max_output_tokens: number;
   };
-  system_instruction: string;
+  system_instruction: typeof SPLIT_KNOWLEDGE_SYSTEM_INSTRUCTION;
+  taskDescriptor: TaskDescriptor;
   input: Array<{
     role: "user" | "system";
     content: string;
@@ -633,13 +1365,72 @@ export interface InteractionsCreatePayload {
   metadata: {
     sdk_target: "@google/genai>=2.31.0";
     api_surface: "client.interactions.create";
-    persona: string;
+    persona: "redacted_clinical_scientist_persona";
     enclave_protocol: "RFC 9180 HPKE EHBP + AMD SEV-SNP Router + Intel TDX / NVIDIA CC GPU Enclaves";
+    data_sent_to_google: typeof DATA_SENT_TO_GOOGLE;
   };
 }
 
+export function buildTaskDescriptor(params: {
+  taskKind?: TaskKind;
+  rawTextForClassification?: string;
+  inputTokenEstimate?: number;
+  redactionCounts?: Record<string, number>;
+  verification?: Record<string, boolean>;
+  allowedTools?: readonly string[];
+}): TaskDescriptor {
+  const taskKind: TaskKind =
+    params.taskKind ?? classifyTaskKind(params.rawTextForClassification ?? "");
+  const inputTokenEstimate = Math.max(
+    1,
+    Math.trunc(
+      params.inputTokenEstimate ??
+        estimateTokens(params.rawTextForClassification ?? "task"),
+    ),
+  );
+
+  const sanitizedRedactionCounts: Record<string, number> = {};
+  for (const [k, v] of Object.entries(params.redactionCounts ?? { TOTAL: 0 })) {
+    if (ALLOWED_CONTENT_FREE_KEYS.has(k) && typeof v === "number" && Number.isFinite(v)) {
+      sanitizedRedactionCounts[k] = Math.max(0, Math.trunc(v));
+    }
+  }
+  if (Object.keys(sanitizedRedactionCounts).length === 0) {
+    sanitizedRedactionCounts.TOTAL = 0;
+  }
+
+  const sanitizedVerification: Record<string, boolean> = {};
+  for (const [k, v] of Object.entries(
+    params.verification ?? { mechanicalRedactionPassed: true },
+  )) {
+    if (ALLOWED_CONTENT_FREE_KEYS.has(k) && typeof v === "boolean") {
+      sanitizedVerification[k] = v;
+    }
+  }
+  if (Object.keys(sanitizedVerification).length === 0) {
+    sanitizedVerification.mechanicalRedactionPassed = true;
+  }
+
+  const allowedTools = (params.allowedTools ?? ALLOWED_PLANNER_TOOLS).filter((t) =>
+    (ALLOWED_PLANNER_TOOLS as readonly string[]).includes(t),
+  );
+
+  const descriptor: TaskDescriptor = {
+    taskKind,
+    inputHandle: "$INPUT",
+    inputTokenEstimate,
+    redactionCounts: sanitizedRedactionCounts,
+    verification: sanitizedVerification,
+    allowedTools: allowedTools.length > 0 ? [...allowedTools] : [...ALLOWED_PLANNER_TOOLS],
+  };
+
+  assertContentFree(descriptor, "$.taskDescriptor");
+  return descriptor;
+}
+
 export function buildInteractionsCreatePayload(params: {
-  scrubbedPrompt: string;
+  taskDescriptor?: TaskDescriptor;
+  scrubbedPrompt?: string;
   thinkingLevel?: ArgonThinkingLevel;
   background?: boolean;
   maxOutputTokens?: number;
@@ -661,11 +1452,15 @@ export function buildInteractionsCreatePayload(params: {
   }
 
   const cfg = validation.normalizedConfig;
-  const persona =
-    params.persona ??
-    "Dana Reyes (Clinical data scientist, Oncology Trial Unit; fictional example persona)";
+  const descriptor =
+    params.taskDescriptor ??
+    buildTaskDescriptor({
+      rawTextForClassification: params.scrubbedPrompt ?? "",
+    });
 
-  return {
+  assertContentFree(descriptor, "$.taskDescriptor");
+
+  const payload: InteractionsCreatePayload = {
     model: cfg.model,
     thinking_level: cfg.thinking_level,
     background: cfg.background,
@@ -676,15 +1471,12 @@ export function buildInteractionsCreatePayload(params: {
       thinking_level: cfg.thinking_level,
       max_output_tokens: cfg.max_output_tokens,
     },
-    system_instruction:
-      "You are the Gemini 4 Argon Confidential Security and Routing Orchestrator for dRouter. " +
-      "Never accept unredacted secrets or raw patient identifiers outside the local trust boundary. " +
-      "Use the provided tools to verify live Tinfoil attestation (router-0.tinfoil.sh AMD SEV-SNP + Intel TDX / NVIDIA CC GPU model enclaves), query MongoDB Atlas Hybrid Search ($rankFusion), verify all 1,344 VMPL0 exit policy states, and dispatch scrubbed inference to the attested enclave. " +
-      "Require explicit Human-in-the-Loop confirmation before anchoring receipts on Circle Arc.",
+    system_instruction: SPLIT_KNOWLEDGE_SYSTEM_INSTRUCTION,
+    taskDescriptor: descriptor,
     input: [
       {
         role: "user",
-        content: params.scrubbedPrompt,
+        content: JSON.stringify(descriptor),
       },
     ],
     tools: ARGON_CONFIDENTIAL_TOOLS,
@@ -702,11 +1494,15 @@ export function buildInteractionsCreatePayload(params: {
     metadata: {
       sdk_target: "@google/genai>=2.31.0",
       api_surface: "client.interactions.create",
-      persona,
+      persona: "redacted_clinical_scientist_persona",
       enclave_protocol:
         "RFC 9180 HPKE EHBP + AMD SEV-SNP Router + Intel TDX / NVIDIA CC GPU Enclaves",
+      data_sent_to_google: DATA_SENT_TO_GOOGLE,
     },
   };
+
+  assertContentFree(payload, "$.payload");
+  return payload;
 }
 
 export function generateInteractionsSdkSnippets(
@@ -720,9 +1516,11 @@ export function generateInteractionsSdkSnippets(
     ``,
     `const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });`,
     ``,
-    `// Official Gemini 4 Argon Interactions API call`,
+    `// Official Gemini 4 Argon Split-Knowledge Interactions API call`,
+    `// Only a content-free TaskDescriptor ($INPUT handle, counts, booleans, enums) is sent.`,
     `// Note: thinking_budget, temperature, top_p, top_k, and cached_content are omitted`,
     `// because gemini-4-argon enforces thinking_level and automatic implicit caching.`,
+    `const taskDescriptor = ${JSON.stringify(payload.taskDescriptor, null, 2)};`,
     `const interaction = await client.interactions.create({`,
     `  model: "${payload.model}",`,
     `  background: ${String(payload.background)},`,
@@ -731,19 +1529,21 @@ export function generateInteractionsSdkSnippets(
     `    max_output_tokens: ${payload.max_output_tokens},`,
     `  },`,
     `  system_instruction: ${JSON.stringify(payload.system_instruction)},`,
-    `  input: [{ type: "text", text: ${JSON.stringify(payload.input[0]?.content ?? "")} }],`,
+    `  input: [{ type: "text", text: JSON.stringify(taskDescriptor) }],`,
     `  tools: ${JSON.stringify(payload.tools, null, 2)},`,
     `});`,
     ``,
-    `console.log(interaction.id, interaction.status, interaction.output_text);`,
+    `console.log(interaction.id, interaction.status);`,
   ].join("\n");
 
   const python = [
+    `import json`,
     `from google import genai  # google-genai >= 1.40.0`,
     ``,
     `client = genai.Client()`,
     ``,
-    `# Official Gemini 4 Argon Interactions API call`,
+    `# Official Gemini 4 Argon Split-Knowledge Interactions API call (content-free TaskDescriptor only)`,
+    `task_descriptor = json.loads(${JSON.stringify(JSON.stringify(payload.taskDescriptor))})`,
     `interaction = client.interactions.create(`,
     `    model="${payload.model}",`,
     `    background=${payload.background ? "True" : "False"},`,
@@ -752,7 +1552,7 @@ export function generateInteractionsSdkSnippets(
     `        "max_output_tokens": ${payload.max_output_tokens},`,
     `    },`,
     `    system_instruction=${JSON.stringify(payload.system_instruction)},`,
-    `    input=[{"type": "text", "text": ${JSON.stringify(payload.input[0]?.content ?? "")}}],`,
+    `    input=[{"type": "text", "text": json.dumps(task_descriptor)}],`,
     `)`,
     `print(interaction.id, interaction.status)`,
   ].join("\n");
@@ -770,6 +1570,8 @@ export interface LiveGeminiCallResult {
   liveSummaryText?: string;
   fallbackReason?: string;
   modelCallRecord?: ArgonModelCallRecord;
+  dataSentToGoogle: typeof DATA_SENT_TO_GOOGLE;
+  egressFirewallVerified: boolean;
 }
 
 export interface GenAIInteractionsClientLike {
@@ -849,10 +1651,43 @@ export type ArgonToolExecutor = (
   args: Record<string, unknown>,
 ) => Promise<Record<string, unknown>>;
 
+async function withWallClockBudget<T>(
+  promise: Promise<T>,
+  startedAtMs: number,
+  budgetMs: number,
+): Promise<T> {
+  const elapsed = Date.now() - startedAtMs;
+  const remaining = budgetMs - elapsed;
+  if (remaining <= 0) {
+    throw new PlannerBudgetExceededError("wall_clock_timeout", budgetMs);
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new PlannerBudgetExceededError("wall_clock_timeout", budgetMs));
+        }, remaining);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
+
 /**
  * Calls `@google/genai` (`new GoogleGenAI({ apiKey }).interactions.create(...)`)
- * and executes a multi-turn function-calling loop when a key or mock client is provided.
- * Strictly enforces `assertOutboundPrivacyInvariant` before every SDK call.
+ * over a content-free `TaskDescriptor` and executes a multi-turn function-calling loop.
+ *
+ * Security guarantees (D1 & D2):
+ * 1. Runs `assertContentFree` and `assertOutboundPrivacyInvariant` on every outbound request.
+ * 2. Validates every tool call with `assertValidToolCall` (strict allowlist + JSON schema).
+ * 3. Enforces `maxSteps` (<= `MAX_PLANNER_STEPS`) and `wallClockBudgetMs` (<= `MAX_PLANNER_WALL_CLOCK_MS`).
+ * 4. Treats model output as untrusted data and never executes or trusts it for gates.
+ * 5. Refuses to run with ambient keys in browser environments.
  */
 export async function callGeminiInteractionsEndpoint(params: {
   payload: InteractionsCreatePayload;
@@ -860,12 +1695,26 @@ export async function callGeminiInteractionsEndpoint(params: {
   sensitiveOriginals?: readonly string[];
   toolExecutor?: ArgonToolExecutor;
   genaiClient?: GenAIInteractionsClientLike;
+  maxSteps?: number;
+  wallClockBudgetMs?: number;
 }): Promise<LiveGeminiCallResult> {
   const sensitiveOriginals = params.sensitiveOriginals ?? [];
 
-  // Enforce the Privacy Invariant on the payload before checking key or calling Google
-  assertOutboundPrivacyInvariant(params.payload.input, sensitiveOriginals);
-  assertOutboundPrivacyInvariant(params.payload.system_instruction, sensitiveOriginals);
+  // Enforce both Privacy Invariant and Content-Free Egress Firewall before checking key or calling Google
+  assertOutboundPrivacyInvariant(params.payload, sensitiveOriginals);
+  assertContentFree(params.payload, "$.payload");
+
+  if (typeof window !== "undefined" && !params.genaiClient) {
+    return {
+      attemptedLiveCall: false,
+      liveEndpointReached: false,
+      sdkMethod: "client.interactions.create",
+      fallbackReason:
+        "Browser execution blocked: Gemini API key may only be used on the server.",
+      dataSentToGoogle: DATA_SENT_TO_GOOGLE,
+      egressFirewallVerified: true,
+    };
+  }
 
   const resolvedKey =
     params.apiKey?.trim() ||
@@ -879,12 +1728,23 @@ export async function callGeminiInteractionsEndpoint(params: {
       sdkMethod: "client.interactions.create",
       fallbackReason:
         "No GEMINI_API_KEY configured; planner routed to attested Tinfoil enclave model.",
+      dataSentToGoogle: DATA_SENT_TO_GOOGLE,
+      egressFirewallVerified: true,
     };
   }
 
   const client: GenAIInteractionsClientLike =
     params.genaiClient ??
     (new GoogleGenAI({ apiKey: resolvedKey }) as unknown as GenAIInteractionsClientLike);
+
+  const maxSteps = Math.min(
+    MAX_PLANNER_STEPS,
+    Math.max(1, Math.trunc(params.maxSteps ?? MAX_PLANNER_STEPS)),
+  );
+  const wallClockBudgetMs = Math.min(
+    MAX_PLANNER_WALL_CLOCK_MS,
+    Math.max(10, Math.trunc(params.wallClockBudgetMs ?? MAX_PLANNER_WALL_CLOCK_MS)),
+  );
 
   const startedAt = Date.now();
   const toolCallsExecuted: string[] = [];
@@ -910,8 +1770,14 @@ export async function callGeminiInteractionsEndpoint(params: {
     };
 
     assertOutboundPrivacyInvariant(createRequest, sensitiveOriginals);
+    assertContentFree(createRequest, "$.createRequest");
 
-    let interaction = await client.interactions.create(createRequest);
+    let interaction = await withWallClockBudget(
+      client.interactions.create(createRequest),
+      startedAt,
+      wallClockBudgetMs,
+    );
+
     if (typeof interaction.usage?.total_input_tokens === "number") {
       totalInputTokens += interaction.usage.total_input_tokens;
     }
@@ -919,34 +1785,59 @@ export async function callGeminiInteractionsEndpoint(params: {
       totalOutputTokens += interaction.usage.total_output_tokens;
     }
 
-    // Multi-turn tool-calling loop (up to 4 turns) when model emits function_call steps
+    let stepCount = 0;
     let turn = 0;
-    while (turn < 4 && params.toolExecutor && Array.isArray(interaction.steps)) {
+    while (params.toolExecutor && Array.isArray(interaction.steps)) {
       const fnCalls = interaction.steps.filter(
         (s) => s && s.type === "function_call" && typeof s.name === "string",
       );
       if (fnCalls.length === 0) break;
 
+      if (turn >= maxSteps || stepCount + fnCalls.length > maxSteps) {
+        throw new PlannerBudgetExceededError("max_steps", maxSteps);
+      }
+
       const fnResults: Array<Record<string, unknown>> = [];
-      for (const call of fnCalls) {
+      for (let idx = 0; idx < fnCalls.length; idx++) {
+        const call = fnCalls[idx];
         const name = call.name as string;
-        const callId = call.id || `call-${turn}-${name}`;
+        const validatedArgs = assertValidToolCall(name, call.arguments ?? {});
+        stepCount += 1;
         toolCallsExecuted.push(name);
-        const resultObj = await params.toolExecutor(name, call.arguments ?? {});
-        const resultStep = {
+
+        const resultObj = await withWallClockBudget(
+          params.toolExecutor(name, validatedArgs),
+          startedAt,
+          wallClockBudgetMs,
+        );
+
+        assertOutboundPrivacyInvariant(resultObj, sensitiveOriginals);
+        assertContentFree(resultObj, `$.toolResult(${name})`);
+
+        const safeCallId =
+          typeof call.id === "string" && SAFE_CALL_ID_REGEX.test(call.id)
+            ? call.id
+            : `call-${turn + 1}-${idx + 1}`;
+        const resultStep: Record<string, unknown> = {
           type: "function_result",
-          call_id: callId,
+          call_id: safeCallId,
           name,
           result: JSON.stringify(resultObj),
         };
         assertOutboundPrivacyInvariant(resultStep, sensitiveOriginals);
+        assertContentFree(resultStep, `$.functionResult(${name})`);
         fnResults.push(resultStep);
       }
+
+      const safePrevId =
+        typeof interaction.id === "string" && SAFE_CALL_ID_REGEX.test(interaction.id)
+          ? interaction.id
+          : `inter-argon-turn-${turn + 1}`;
 
       const followUpRequest: Record<string, unknown> = {
         model: params.payload.model,
         background: params.payload.background,
-        previous_interaction_id: interaction.id,
+        previous_interaction_id: safePrevId,
         generation_config: {
           thinking_level: params.payload.thinking_level,
           max_output_tokens: params.payload.max_output_tokens,
@@ -956,7 +1847,13 @@ export async function callGeminiInteractionsEndpoint(params: {
       };
 
       assertOutboundPrivacyInvariant(followUpRequest, sensitiveOriginals);
-      interaction = await client.interactions.create(followUpRequest);
+      assertContentFree(followUpRequest, `$.followUpRequest(${turn + 1})`);
+
+      interaction = await withWallClockBudget(
+        client.interactions.create(followUpRequest),
+        startedAt,
+        wallClockBudgetMs,
+      );
 
       if (typeof interaction.usage?.total_input_tokens === "number") {
         totalInputTokens += interaction.usage.total_input_tokens;
@@ -968,8 +1865,8 @@ export async function callGeminiInteractionsEndpoint(params: {
     }
 
     const latencyMs = Math.max(1, Date.now() - startedAt);
-    let outputText = interaction.output_text;
-    if (!outputText && Array.isArray(interaction.steps)) {
+    let rawOutputText = interaction.output_text;
+    if (!rawOutputText && Array.isArray(interaction.steps)) {
       for (const s of interaction.steps) {
         if (s.type === "model_output" && Array.isArray(s.content)) {
           const txt = s.content
@@ -977,12 +1874,14 @@ export async function callGeminiInteractionsEndpoint(params: {
             .join("")
             .trim();
           if (txt) {
-            outputText = txt;
+            rawOutputText = txt;
             break;
           }
         }
       }
     }
+
+    const safeTelemetrySummary = sanitizeUntrustedModelOutput(rawOutputText);
 
     return {
       attemptedLiveCall: true,
@@ -992,11 +1891,13 @@ export async function callGeminiInteractionsEndpoint(params: {
       interactionStatus: interaction.status ?? "completed",
       toolCallsExecuted,
       liveSummaryText:
-        outputText ||
-        `Gemini 4 Argon interaction ${interaction.id ?? "live"} completed (${toolCallsExecuted.length} tool call(s) executed).`,
+        safeTelemetrySummary ||
+        `Gemini 4 Argon control-plane interaction completed (${toolCallsExecuted.length} tool call(s) executed over content-free handles).`,
+      dataSentToGoogle: DATA_SENT_TO_GOOGLE,
+      egressFirewallVerified: true,
       modelCallRecord: {
         model: params.payload.model,
-        purpose: "Primary autonomous routing & tool-calling orchestrator (Stage 4)",
+        purpose: "Split-knowledge control-plane planner (content-free TaskDescriptor only)",
         ok: true,
         latencyMs,
         ...(totalInputTokens > 0 ? { inputTokens: totalInputTokens } : {}),
@@ -1004,7 +1905,12 @@ export async function callGeminiInteractionsEndpoint(params: {
       },
     };
   } catch (err) {
-    if (err instanceof PrivacyInvariantViolationError) {
+    if (
+      err instanceof PrivacyInvariantViolationError ||
+      err instanceof ContentFreeEgressError ||
+      err instanceof ToolPolicyViolationError ||
+      err instanceof PlannerBudgetExceededError
+    ) {
       throw err;
     }
     const latencyMs = Math.max(1, Date.now() - startedAt);
@@ -1016,10 +1922,12 @@ export async function callGeminiInteractionsEndpoint(params: {
       liveEndpointReached: false,
       sdkMethod: "client.interactions.create",
       toolCallsExecuted,
-      fallbackReason: `Gemini Interactions SDK call failed (${safeMsg.slice(0, 180)}); falling back to Tinfoil planner.`,
+      fallbackReason: `Gemini Interactions SDK call failed (${safeMsg.slice(0, 180)}); falling back to Tinfoil enclave planner.`,
+      dataSentToGoogle: DATA_SENT_TO_GOOGLE,
+      egressFirewallVerified: true,
       modelCallRecord: {
         model: params.payload.model,
-        purpose: "Primary autonomous routing & tool-calling orchestrator (Stage 4)",
+        purpose: "Split-knowledge control-plane planner (content-free TaskDescriptor only)",
         ok: false,
         latencyMs,
         error: safeMsg.slice(0, 180),
@@ -1029,12 +1937,16 @@ export async function callGeminiInteractionsEndpoint(params: {
 }
 
 /**
- * Executes the autonomous tool-calling planner loop using an attested Tinfoil enclave
- * model (`kimi-k3` or `gemma4-31b`) via OpenAI-compatible tool calls on the `tinfoil` SDK.
- * Strictly enforces `assertOutboundPrivacyInvariant` on every outbound prompt and tool result.
+ * Executes the autonomous tool-calling planner and enclave execution loop using an
+ * attested Tinfoil enclave model (`kimi-k3` or `gemma4-31b`) via OpenAI-compatible
+ * tool calls on the `tinfoil` SDK.
+ *
+ * Goes through the exact same tool allowlist, argument validation (`assertValidToolCall`),
+ * handle plumbing, and step/time budgets as the Gemini planner.
  */
 export async function callTinfoilPlannerToolLoop(params: {
   model: "gemma4-31b" | "kimi-k3";
+  taskDescriptor?: TaskDescriptor;
   scrubbedPrompt: string;
   systemInstruction?: string;
   apiKey?: string;
@@ -1043,17 +1955,22 @@ export async function callTinfoilPlannerToolLoop(params: {
   tinfoilClient?: TinfoilPlannerClientLike;
   enableNetworkCall?: boolean;
   maxTurns?: number;
+  maxSteps?: number;
+  wallClockBudgetMs?: number;
 }): Promise<TinfoilPlannerCallResult> {
   const sensitiveOriginals = params.sensitiveOriginals ?? [];
   const systemInstruction =
     params.systemInstruction ??
-    "You are the autonomous confidential security and routing planner for dRouter running inside an attested Tinfoil enclave. " +
-      "Never output unredacted PII or secrets, and never use em dashes. " +
-      "Use the provided verification tools to audit the scrubbed request and provide a concise verification summary repeating the masked identifiers.";
+    "You are the autonomous confidential security and routing planner for deRoute running inside an attested Tinfoil enclave. " +
+      "Never output unredacted personal details or secrets, and never use em dashes. " +
+      "Plan over the TaskDescriptor using the handle-based verification tools ($INPUT, $RESULT_1) and provide a concise verification summary repeating the masked identifiers.";
 
   // Enforce Privacy Invariant before checking credentials or making any SDK call
   assertOutboundPrivacyInvariant(params.scrubbedPrompt, sensitiveOriginals);
   assertOutboundPrivacyInvariant(systemInstruction, sensitiveOriginals);
+  if (params.taskDescriptor) {
+    assertContentFree(params.taskDescriptor, "$.tinfoilTaskDescriptor");
+  }
 
   const resolvedKey =
     params.apiKey?.trim() ||
@@ -1074,9 +1991,18 @@ export async function callTinfoilPlannerToolLoop(params: {
       model: params.model,
       toolCallsExecuted: [],
       fallbackReason:
-        "Tinfoil enclave network inference skipped (cached GET or no TINFOIL_API_KEY enabled).",
+        "Tinfoil enclave network inference skipped (no TINFOIL_API_KEY configured or offline test mode).",
     };
   }
+
+  const maxSteps = Math.min(
+    MAX_PLANNER_STEPS,
+    Math.max(1, Math.trunc(params.maxSteps ?? MAX_PLANNER_STEPS)),
+  );
+  const wallClockBudgetMs = Math.min(
+    MAX_PLANNER_WALL_CLOCK_MS,
+    Math.max(10, Math.trunc(params.wallClockBudgetMs ?? MAX_PLANNER_WALL_CLOCK_MS)),
+  );
 
   const startedAt = Date.now();
   const toolCallsExecuted: string[] = [];
@@ -1095,16 +2021,25 @@ export async function callTinfoilPlannerToolLoop(params: {
     }
 
     if (typeof client.ready === "function") {
-      await client.ready();
+      await withWallClockBudget(client.ready(), startedAt, wallClockBudgetMs);
     }
 
     const openAiTools = buildTinfoilOpenAITools(ARGON_CONFIDENTIAL_TOOLS);
+    const userContent = params.taskDescriptor
+      ? `TaskDescriptor: ${JSON.stringify(params.taskDescriptor)}\n\nEnclave Handle ($INPUT): ${params.scrubbedPrompt}`
+      : params.scrubbedPrompt;
+    assertOutboundPrivacyInvariant(userContent, sensitiveOriginals);
+
     const messages: Array<Record<string, unknown>> = [
       { role: "system", content: systemInstruction },
-      { role: "user", content: params.scrubbedPrompt },
+      { role: "user", content: userContent },
     ];
 
-    const maxTurns = params.maxTurns ?? (params.tinfoilClient ? 4 : 2);
+    const maxTurns = Math.min(
+      maxSteps,
+      params.maxTurns ?? (params.tinfoilClient ? 4 : 2),
+    );
+    let stepCount = 0;
     let completionId: string | undefined;
     let finalText = "";
 
@@ -1120,15 +2055,21 @@ export async function callTinfoilPlannerToolLoop(params: {
 
       let response: TinfoilChatCompletionResponse;
       try {
-        response = await client.chat.completions.create(reqPayload, {
-          headers: { "X-Tinfoil-Model": params.model },
-        });
+        response = await withWallClockBudget(
+          client.chat.completions.create(reqPayload, {
+            headers: { "X-Tinfoil-Model": params.model },
+          }),
+          startedAt,
+          wallClockBudgetMs,
+        );
       } catch (toolCallErr) {
-        if (toolCallErr instanceof PrivacyInvariantViolationError) {
+        if (
+          toolCallErr instanceof PrivacyInvariantViolationError ||
+          toolCallErr instanceof ToolPolicyViolationError ||
+          toolCallErr instanceof PlannerBudgetExceededError
+        ) {
           throw toolCallErr;
         }
-        // If the target enclave container does not accept tool definitions on turn 0,
-        // fall back to a standard completion call on the same attested enclave.
         if (turn === 0) {
           const plainReq: Record<string, unknown> = {
             model: params.model,
@@ -1136,9 +2077,13 @@ export async function callTinfoilPlannerToolLoop(params: {
             max_tokens: 240,
           };
           assertOutboundPrivacyInvariant(plainReq, sensitiveOriginals);
-          response = await client.chat.completions.create(plainReq, {
-            headers: { "X-Tinfoil-Model": params.model },
-          });
+          response = await withWallClockBudget(
+            client.chat.completions.create(plainReq, {
+              headers: { "X-Tinfoil-Model": params.model },
+            }),
+            startedAt,
+            wallClockBudgetMs,
+          );
         } else {
           throw toolCallErr;
         }
@@ -1158,11 +2103,15 @@ export async function callTinfoilPlannerToolLoop(params: {
       const toolCalls = Array.isArray(msg?.tool_calls) ? msg.tool_calls : [];
 
       if (typeof msg?.content === "string" && msg.content.trim().length > 0) {
-        finalText = msg.content.trim();
+        finalText = sanitizeUntrustedModelOutput(msg.content);
       }
 
       if (toolCalls.length === 0 || !params.toolExecutor) {
         break;
+      }
+
+      if (stepCount + toolCalls.length > maxSteps) {
+        throw new PlannerBudgetExceededError("max_steps", maxSteps);
       }
 
       messages.push({
@@ -1182,15 +2131,27 @@ export async function callTinfoilPlannerToolLoop(params: {
               parsedArgs = parsed as Record<string, unknown>;
             }
           } catch {
-            parsedArgs = {};
+            throw new ToolPolicyViolationError(fnName, [
+              "Tool arguments must be valid JSON object.",
+            ]);
           }
         }
         assertOutboundPrivacyInvariant(parsedArgs, sensitiveOriginals);
+        const validatedArgs = assertValidToolCall(fnName, parsedArgs);
+        stepCount += 1;
         toolCallsExecuted.push(fnName);
-        const toolResult = await params.toolExecutor(fnName, parsedArgs);
+
+        const toolResult = await withWallClockBudget(
+          params.toolExecutor(fnName, validatedArgs),
+          startedAt,
+          wallClockBudgetMs,
+        );
+        assertOutboundPrivacyInvariant(toolResult, sensitiveOriginals);
+        assertContentFree(toolResult, `$.tinfoilToolResult(${fnName})`);
+
         const toolMsg: Record<string, unknown> = {
           role: "tool",
-          tool_call_id: tc.id || `call-${turn}-${fnName}`,
+          tool_call_id: tc.id || `call-${turn + 1}-${fnName}`,
           name: fnName,
           content: JSON.stringify(toolResult),
         };
@@ -1212,7 +2173,7 @@ export async function callTinfoilPlannerToolLoop(params: {
         `Tinfoil enclave planner (${params.model}) executed ${toolCallsExecuted.length} tool call(s) over RFC 9180 HPKE.`,
       modelCallRecord: {
         model: params.model,
-        purpose: `Autonomous Tinfoil enclave planner & tool loop (${params.model} over RFC 9180 HPKE)`,
+        purpose: `Autonomous Tinfoil enclave planner & content execution (${params.model} over RFC 9180 HPKE)`,
         ok: true,
         latencyMs,
         ...(totalInputTokens > 0 ? { inputTokens: totalInputTokens } : {}),
@@ -1220,7 +2181,12 @@ export async function callTinfoilPlannerToolLoop(params: {
       },
     };
   } catch (err) {
-    if (err instanceof PrivacyInvariantViolationError) {
+    if (
+      err instanceof PrivacyInvariantViolationError ||
+      err instanceof ContentFreeEgressError ||
+      err instanceof ToolPolicyViolationError ||
+      err instanceof PlannerBudgetExceededError
+    ) {
       throw err;
     }
     const latencyMs = Math.max(1, Date.now() - startedAt);
@@ -1236,7 +2202,7 @@ export async function callTinfoilPlannerToolLoop(params: {
       fallbackReason: `Tinfoil planner SDK call failed (${safeMsg.slice(0, 180)}).`,
       modelCallRecord: {
         model: params.model,
-        purpose: `Autonomous Tinfoil enclave planner & tool loop (${params.model})`,
+        purpose: `Autonomous Tinfoil enclave planner & content execution (${params.model})`,
         ok: false,
         latencyMs,
         error: safeMsg.slice(0, 180),
@@ -1246,9 +2212,8 @@ export async function callTinfoilPlannerToolLoop(params: {
 }
 
 /**
- * Invokes a companion subagent (`gemini-3.8-flash` or `gemini-3.5-flash-lite`) via
- * `client.interactions.create` when a Gemini API key or mock client is available.
- * Enforces `assertOutboundPrivacyInvariant` before calling the SDK.
+ * Deprecated companion subagent helper kept only for backward-compatible exports.
+ * Enforces `assertContentFree` on any input so free text can never reach Google.
  */
 export async function callCompanionSubagentInteraction(params: {
   model:
@@ -1266,72 +2231,6 @@ export async function callCompanionSubagentInteraction(params: {
 }> {
   const sensitiveOriginals = params.sensitiveOriginals ?? [];
   assertOutboundPrivacyInvariant(params.scrubbedInput, sensitiveOriginals);
-
-  const resolvedKey =
-    params.apiKey?.trim() ||
-    (typeof process !== "undefined" ? process.env?.GEMINI_API_KEY?.trim() : "") ||
-    "";
-
-  if (!resolvedKey && !params.genaiClient) {
-    return { liveReached: false };
-  }
-
-  const client: GenAIInteractionsClientLike =
-    params.genaiClient ??
-    (new GoogleGenAI({ apiKey: resolvedKey }) as unknown as GenAIInteractionsClientLike);
-
-  const startedAt = Date.now();
-  try {
-    const req: Record<string, unknown> = {
-      model: params.model,
-      background: false,
-      generation_config: {
-        thinking_level: "low",
-        max_output_tokens: 256,
-      },
-      system_instruction:
-        "Summarize the confidential compute verification artifact concisely in one plain sentence without em dashes.",
-      input: [{ type: "text", text: params.scrubbedInput }],
-    };
-    assertOutboundPrivacyInvariant(req, sensitiveOriginals);
-
-    const interaction = await client.interactions.create(req);
-    const latencyMs = Math.max(1, Date.now() - startedAt);
-    const text = interaction.output_text?.trim();
-
-    return {
-      liveReached: true,
-      summaryText: text,
-      modelCallRecord: {
-        model: params.model,
-        purpose: params.purpose,
-        ok: true,
-        latencyMs,
-        ...(typeof interaction.usage?.total_input_tokens === "number"
-          ? { inputTokens: interaction.usage.total_input_tokens }
-          : {}),
-        ...(typeof interaction.usage?.total_output_tokens === "number"
-          ? { outputTokens: interaction.usage.total_output_tokens }
-          : {}),
-      },
-    };
-  } catch (err) {
-    if (err instanceof PrivacyInvariantViolationError) {
-      throw err;
-    }
-    const latencyMs = Math.max(1, Date.now() - startedAt);
-    const rawMsg = err instanceof Error ? err.message : "Subagent SDK error";
-    const safeMsg = resolvedKey ? rawMsg.split(resolvedKey).join("[REDACTED_KEY]") : rawMsg;
-
-    return {
-      liveReached: false,
-      modelCallRecord: {
-        model: params.model,
-        purpose: params.purpose,
-        ok: false,
-        latencyMs,
-        error: safeMsg.slice(0, 160),
-      },
-    };
-  }
+  assertContentFree(params.scrubbedInput, "$.companionSubagent.scrubbedInput");
+  return { liveReached: false };
 }

@@ -566,7 +566,7 @@ export function parseCliArgs(argv = process.argv.slice(2)) {
 
 export function formatHelpText() {
   return [
-    "drouter-proxy — Local OpenAI-Compatible Attested Enclave Proxy (Spec §1)",
+    "drouter-proxy - Local OpenAI-Compatible Attested Enclave Proxy (Spec §1)",
     "",
     "Usage:",
     "  node scripts/drouter-proxy.mjs [options]",
