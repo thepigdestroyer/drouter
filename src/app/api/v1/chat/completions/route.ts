@@ -12,17 +12,8 @@ import {
   createTokenBucketLimiter,
   readBoundedJson,
 } from "@/lib/ratelimit";
-import { openSimSession } from "@/lib/sim/client";
-import { nodeClose, nodeHello, nodeKeyshare, nodeTurn } from "@/lib/sim/node";
-import { simRoots } from "@/lib/sim/roots";
 
 const MAX_CHAT_BODY_BYTES = 131_072; // 128 KB max JSON request body
-
-const simChatLimiter = createTokenBucketLimiter({
-  name: "v1-chat-sim",
-  capacity: 40,
-  refillPerSec: 1,
-});
 
 const realTinfoilIpLimiter = createTokenBucketLimiter({
   name: "v1-chat-tinfoil",
@@ -44,31 +35,6 @@ const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Expose-Headers":
     "X-DRouter-Attested, X-DRouter-Node, X-DRouter-Enclave-Host, X-DRouter-Release, X-DRouter-Code-Fingerprint, X-DRouter-Enclave-Fingerprint, X-DRouter-Redactions, X-DRouter-Credit-Verified, X-DRouter-Credit-Nullifier, X-DRouter-Credit-Denomination",
 };
-
-const inProcessSimFetch: typeof fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-  const url = new URL(typeof input === "string" ? input : input.toString(), "http://in-process.drouter");
-  const parts = url.pathname.split("/").filter(Boolean); // ["api", "sim", ...]
-  if (parts[2] === "roots") {
-    return Response.json(simRoots());
-  }
-  const simId = decodeURIComponent(parts[2] ?? "sim-1");
-  const action = parts[3];
-  const body = init?.body ? JSON.parse(String(init.body)) : {};
-
-  if (action === "hello") {
-    return Response.json(nodeHello(simId, body));
-  }
-  if (action === "keyshare") {
-    return Response.json(nodeKeyshare(simId, body));
-  }
-  if (action === "turn") {
-    return Response.json(nodeTurn(simId, body));
-  }
-  if (action === "close") {
-    return Response.json(nodeClose(simId, body));
-  }
-  return Response.json({ error: "not found" }, { status: 404 });
-}) as typeof fetch;
 
 function createChunkRestorer(scrubber: SessionScrubber | null) {
   let pending = "";
@@ -174,30 +140,25 @@ export async function POST(req: Request): Promise<Response> {
     creditResponseHeaders["X-DRouter-Credit-Nullifier"] = creditSpend.nullifier;
     creditResponseHeaders["X-DRouter-Credit-Denomination"] = String(creditSpend.denomination);
 
-    if (parsed.model !== "sim-echo-1") {
-      const globalCheck = realTinfoilGlobalLimiter.consume(1);
-      if (!globalCheck.allowed) {
-        return Response.json(
-          {
-            error: {
-              message: "Hourly enclave gateway quota reached. Please retry later.",
-              type: "rate_limit_error",
-            },
+    const globalCheck = realTinfoilGlobalLimiter.consume(1);
+    if (!globalCheck.allowed) {
+      return Response.json(
+        {
+          error: {
+            message: "Hourly enclave gateway quota reached. Please retry later.",
+            type: "rate_limit_error",
           },
-          {
-            status: 429,
-            headers: {
-              ...CORS_HEADERS,
-              ...creditResponseHeaders,
-              "Retry-After": String(globalCheck.retryAfterSec),
-            },
+        },
+        {
+          status: 429,
+          headers: {
+            ...CORS_HEADERS,
+            ...creditResponseHeaders,
+            "Retry-After": String(globalCheck.retryAfterSec),
           },
-        );
-      }
+        },
+      );
     }
-  } else if (parsed.model === "sim-echo-1") {
-    const limited = simChatLimiter.check(req, CORS_HEADERS);
-    if (limited) return limited;
   } else {
     const limited = realTinfoilIpLimiter.check(req, CORS_HEADERS);
     if (limited) return limited;
@@ -261,221 +222,6 @@ export async function POST(req: Request): Promise<Response> {
   });
 
   const redactionCount = scrubber ? scrubber.entries().length : 0;
-
-  if (parsed.model === "sim-echo-1") {
-    if (!process.env.SIM_HARDWARE_SEED) {
-      process.env.SIM_HARDWARE_SEED =
-        "0f1e2d3c4b5a69788796a5b4c3d2e1f00112233445566778899aabbccddeeff0";
-    }
-    const simId = "sim-1";
-    const session = await openSimSession("http://in-process.drouter", simId, {
-      fetch: inProcessSimFetch,
-    });
-
-    const lastUserMsg =
-      [...preparedMessages].reverse().find((m) => m.role === "user")?.content ??
-      preparedMessages[preparedMessages.length - 1]?.content ??
-      "";
-
-    const simHeaders: Record<string, string> = {
-      ...CORS_HEADERS,
-      ...creditResponseHeaders,
-      "X-DRouter-Attested": "simulated-sev-snp",
-      "X-DRouter-Node": simId,
-      "X-DRouter-Redactions": String(redactionCount),
-    };
-
-    const completionId = `chatcmpl-sim-${Date.now()}`;
-    const created = Math.floor(Date.now() / 1000);
-
-    if (parsed.stream) {
-      const encoder = new TextEncoder();
-      const restorer = createChunkRestorer(scrubber);
-      const stream = new ReadableStream<Uint8Array>({
-        async start(controller) {
-          try {
-            for await (const rawChunk of session.send(lastUserMsg)) {
-              const content = restorer.push(rawChunk);
-              if (!content) continue;
-              const chunkPayload = {
-                id: completionId,
-                object: "chat.completion.chunk",
-                created,
-                model: "sim-echo-1",
-                choices: [
-                  {
-                    index: 0,
-                    delta: { content },
-                    finish_reason: null,
-                  },
-                ],
-              };
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunkPayload)}\n\n`));
-            }
-
-            const tail = restorer.flush();
-            if (tail) {
-              const tailPayload = {
-                id: completionId,
-                object: "chat.completion.chunk",
-                created,
-                model: "sim-echo-1",
-                choices: [
-                  {
-                    index: 0,
-                    delta: { content: tail },
-                    finish_reason: null,
-                  },
-                ],
-              };
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify(tailPayload)}\n\n`));
-            }
-
-            await session.close();
-
-            const stopPayload = {
-              id: completionId,
-              object: "chat.completion.chunk",
-              created,
-              model: "sim-echo-1",
-              choices: [
-                {
-                  index: 0,
-                  delta: {},
-                  finish_reason: "stop",
-                },
-              ],
-            };
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(stopPayload)}\n\n`));
-            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-            controller.close();
-          } catch (err) {
-            controller.error(err);
-          }
-        },
-      });
-
-      return new Response(stream, {
-        status: 200,
-        headers: {
-          ...simHeaders,
-          "Content-Type": "text/event-stream; charset=utf-8",
-          "Cache-Control": "no-cache",
-          Connection: "keep-alive",
-        },
-      });
-    }
-
-    let fullText = "";
-    for await (const chunk of session.send(lastUserMsg)) {
-      fullText += chunk;
-    }
-    const popReceipt = await session.close();
-    const restoredText = scrubber ? scrubber.restore(fullText) : fullText;
-
-    return Response.json(
-      {
-        id: completionId,
-        object: "chat.completion",
-        created,
-        model: "sim-echo-1",
-        choices: [
-          {
-            index: 0,
-            message: {
-              role: "assistant",
-              content: restoredText,
-            },
-            finish_reason: "stop",
-          },
-        ],
-        usage: {
-          prompt_tokens: new TextEncoder().encode(lastUserMsg).length,
-          completion_tokens: new TextEncoder().encode(restoredText).length,
-          total_tokens:
-            new TextEncoder().encode(lastUserMsg).length +
-            new TextEncoder().encode(restoredText).length,
-        },
-        drouter_attestation: {
-          securityVerified: session.checks.every((c) => c.status !== "fail"),
-          enclaveHost: `${simId}.sim.drouter.internal`,
-          nodeId: simId,
-          checks: session.checks,
-          evidence: session.evidence,
-          popReceipt,
-        },
-      },
-      {
-        status: 200,
-        headers: simHeaders,
-      },
-    );
-  }
-
-  // Stubbed upstream mode for load/stress testing without spending Tinfoil tokens
-  if (process.env.DROUTER_STUB_UPSTREAM === "1") {
-    const completionId = `chatcmpl-stub-${Date.now()}`;
-    const created = Math.floor(Date.now() / 1000);
-    const stubHeaders: Record<string, string> = {
-      ...CORS_HEADERS,
-      ...creditResponseHeaders,
-      "X-DRouter-Attested": "stubbed-tinfoil",
-      "X-DRouter-Enclave-Host": "router-0.tinfoil.sh",
-      "X-DRouter-Redactions": String(redactionCount),
-    };
-    const lastContent =
-      preparedMessages[preparedMessages.length - 1]?.content ?? "";
-    const rawStubText = `Stubbed enclave completion (${parsed.model}) for ${preparedMessages.length} message(s): ${lastContent}`;
-    const stubContent = scrubber ? scrubber.restore(rawStubText) : rawStubText;
-
-    if (parsed.stream) {
-      const encoder = new TextEncoder();
-      const stream = new ReadableStream<Uint8Array>({
-        start(controller) {
-          const payload = {
-            id: completionId,
-            object: "chat.completion.chunk",
-            created,
-            model: parsed.model,
-            choices: [{ index: 0, delta: { content: stubContent }, finish_reason: "stop" }],
-          };
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
-          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-          controller.close();
-        },
-      });
-      return new Response(stream, {
-        status: 200,
-        headers: {
-          ...stubHeaders,
-          "Content-Type": "text/event-stream; charset=utf-8",
-          "Cache-Control": "no-cache",
-        },
-      });
-    }
-
-    return Response.json(
-      {
-        id: completionId,
-        object: "chat.completion",
-        created,
-        model: parsed.model,
-        choices: [
-          {
-            index: 0,
-            message: { role: "assistant", content: stubContent },
-            finish_reason: "stop",
-          },
-        ],
-        drouter_attestation: {
-          securityVerified: true,
-          enclaveHost: "router-0.tinfoil.sh",
-          stubbed: true,
-        },
-      },
-      { status: 200, headers: stubHeaders },
-    );
-  }
 
   // Real Tinfoil enclave path
   const apiKey = process.env.TINFOIL_API_KEY;

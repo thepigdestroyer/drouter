@@ -1,3 +1,5 @@
+import { mechanicalRedact as realMechanicalRedact } from "@/lib/privacy/mechanical";
+import { attestedPiiFilter as realAttestedPiiFilter } from "@/lib/privacy/attested-filter";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 import { createSessionScrubber } from "@/lib/privacy/scrubber";
@@ -197,195 +199,20 @@ function isHighEntropySecretToken(token: string): boolean {
   return entropy >= 3.75;
 }
 
-/**
- * Built-in fail-closed deterministic mechanical redaction filter matching D3.
- * Used if `@/lib/privacy/mechanical` is not yet available on disk; delegates to
- * `@/lib/privacy/mechanical` when present.
- */
-export function fallbackMechanicalRedact(
-  input: string,
-  opts?: { customTerms?: string[] },
-): MechanicalRedactResult {
-  if (!input) {
-    return {
-      text: "",
-      redactions: [],
-      restore: (s: string) => s,
-    };
-  }
 
-  const restoreMap = new Map<string, string>();
-  const redactions: MechanicalRedactionItem[] = [];
-  const counters: Record<string, number> = {};
-
-  const allocatePlaceholder = (kind: string, original: string): string => {
-    const normKind = kind.toUpperCase();
-    counters[normKind] = (counters[normKind] ?? 0) + 1;
-    const placeholder = `[${normKind}_${counters[normKind]}]`;
-    restoreMap.set(placeholder, original);
-    redactions.push({ kind: normKind, placeholder });
-    return placeholder;
-  };
-
-  // Pass 1: Existing deterministic scrubber (SECRET, EMAIL, PHONE, IP, ACCT, ENTITY + customTerms)
-  const scrubber = createSessionScrubber(opts?.customTerms ?? []);
-  const pass1 = scrubber.scrub(input);
-  let working = pass1.scrubbed;
-  for (const rep of pass1.replacements) {
-    const orig = scrubber.restore(rep.placeholder);
-    restoreMap.set(rep.placeholder, orig);
-    redactions.push({ kind: rep.kind, placeholder: rep.placeholder });
-    const m = /^\[([A-Z]+)_(\d+)\]$/.exec(rep.placeholder);
-    if (m) {
-      const k = m[1];
-      const n = Number(m[2]);
-      counters[k] = Math.max(counters[k] ?? 0, n);
-    }
-  }
-
-  const replaceOutsidePlaceholders = (
-    text: string,
-    regex: RegExp,
-    kind: string,
-    validate?: (match: string) => boolean,
-  ): string => {
-    const placeholderSplitRe = /(\[[A-Z0-9_]+_\d+\])/g;
-    const parts = text.split(placeholderSplitRe);
-    return parts
-      .map((part) => {
-        if (/^\[[A-Z0-9_]+_\d+\]$/.test(part)) return part;
-        const re = new RegExp(regex.source, regex.flags);
-        return part.replace(re, (m) => {
-          if (validate && !validate(m)) return m;
-          return allocatePlaceholder(kind, m);
-        });
-      })
-      .join("");
-  };
-
-  // Pass 2: URLs and domains
-  working = replaceOutsidePlaceholders(
-    working,
-    /\bhttps?:\/\/[^\s"'<>)\]]+/gi,
-    "URL",
-  );
-  working = replaceOutsidePlaceholders(
-    working,
-    /\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+(?:com|org|net|edu|gov|mil|io|sh|ai|dev|app|co|uk|eu|de|fr|jp|cn|ch|nl|se|no|fi|dk|ca|au|nz|info|biz|me|xyz|tech|cloud|local|internal)\b(?:\.[a-zA-Z]{2,3})?(?:\/[^\s"'<>)\]]*)?/gi,
-    "URL",
-  );
-
-  // Pass 3: Street-address patterns (including lowercase/mixed case not caught by pass 1)
-  working = replaceOutsidePlaceholders(
-    working,
-    /\b\d{1,6}[A-Za-z]?\s+(?:[A-Za-z0-9.'-]+\s+){1,4}(?:Street|St\.?|Avenue|Ave\.?|Road|Rd\.?|Boulevard|Blvd\.?|Lane|Ln\.?|Drive|Dr\.?|Court|Ct\.?|Way|Place|Pl\.?|Terrace|Ter\.?|Square|Sq\.?|Circle|Cir\.?|Parkway|Pkwy\.?|Highway|Hwy\.?|Crescent|Cres\.?|Close|Grove|Gardens|Mews)\b/gi,
-    "ADDRESS",
-  );
-
-  // Pass 4: Dates (ISO YYYY-MM-DD, slash/dot/hyphen dates including 2020+, and month-name dates)
-  working = replaceOutsidePlaceholders(
-    working,
-    /\b(?:19|20)\d{2}[-/.](?:0?[1-9]|1[0-2])[-/.](?:0?[1-9]|[12]\d|3[01])\b/g,
-    "DATE",
-  );
-  working = replaceOutsidePlaceholders(
-    working,
-    /\b(?:0?[1-9]|[12]\d|3[01])[-/.](?:0?[1-9]|1[0-2])[-/.](?:19|20)\d{2}\b/g,
-    "DATE",
-  );
-  working = replaceOutsidePlaceholders(
-    working,
-    /\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?,?\s+(?:19|20)\d{2}\b/gi,
-    "DATE",
-  );
-  working = replaceOutsidePlaceholders(
-    working,
-    /\b\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?),?\s+(?:19|20)\d{2}\b/gi,
-    "DATE",
-  );
-
-  // Pass 5: Capitalized multi-word name sequences (e.g. "Jane Doe", "Dr. Robert Smith")
-  working = replaceOutsidePlaceholders(
-    working,
-    /\b(?:(?:Dr|Mr|Mrs|Ms|Prof|Sir|Lady)\.?\s+)?[A-Z][a-z]{1,25}(?:\s+[A-Z][a-z]{1,25}){1,3}\b/g,
-    "NAME",
-    (candidate) => {
-      const norm = candidate.replace(/\s+/g, " ").trim().toLowerCase();
-      if (TECHNICAL_TITLE_CASE_ALLOWLIST.has(norm)) return false;
-      const words = norm.split(" ");
-      if (words.every((w) => TECHNICAL_TITLE_CASE_ALLOWLIST.has(w))) return false;
-      return true;
-    },
-  );
-
-  // Pass 6: Any token with 4+ consecutive digits
-  working = replaceOutsidePlaceholders(
-    working,
-    /\b[A-Za-z0-9_.:/-]*\d{4,}[A-Za-z0-9_.:/-]*\b/g,
-    "DIGITS",
-  );
-
-  // Pass 7: High-entropy tokens (Shannon entropy threshold)
-  working = replaceOutsidePlaceholders(
-    working,
-    /\b[A-Za-z0-9_+=/.-]{16,}\b/g,
-    "ENTROPY",
-    (token) => isHighEntropySecretToken(token),
-  );
-
-  const restore = (s: string): string => {
-    if (!s || restoreMap.size === 0) return s;
-    return s.replace(/\[[A-Z0-9_]+_\d+\]/g, (tok) => restoreMap.get(tok) ?? tok);
-  };
-
-  return {
-    text: working,
-    redactions,
-    restore,
-  };
-}
-
-let cachedB2MechanicalMod: { mechanicalRedact?: MechanicalRedactFn } | null = null;
-let cachedB2AttestedMod: { attestedPiiFilter?: AttestedPiiFilterFn } | null = null;
 
 async function resolveMechanicalRedactFn(): Promise<MechanicalRedactFn> {
   if (globalForAtlasPrivacy.__drouterTestMechanicalRedactor) {
     return globalForAtlasPrivacy.__drouterTestMechanicalRedactor;
   }
-  if (cachedB2MechanicalMod?.mechanicalRedact) {
-    return cachedB2MechanicalMod.mechanicalRedact;
-  }
-  try {
-    const relPath = "../privacy/" + "mechanical";
-    const mod = (await import(relPath)) as { mechanicalRedact?: MechanicalRedactFn };
-    if (typeof mod?.mechanicalRedact === "function") {
-      cachedB2MechanicalMod = mod;
-      return mod.mechanicalRedact;
-    }
-  } catch {
-    // Module not yet created by B2 or unavailable; use deterministic fail-closed fallback
-  }
-  return fallbackMechanicalRedact;
+  return realMechanicalRedact as MechanicalRedactFn;
 }
 
 async function resolveAttestedPiiFilterFn(): Promise<AttestedPiiFilterFn | null> {
   if (globalForAtlasPrivacy.__drouterTestAttestedPiiFilter !== undefined) {
     return globalForAtlasPrivacy.__drouterTestAttestedPiiFilter;
   }
-  if (cachedB2AttestedMod?.attestedPiiFilter) {
-    return cachedB2AttestedMod.attestedPiiFilter;
-  }
-  try {
-    const relPath = "../privacy/" + "attested-filter";
-    const mod = (await import(relPath)) as { attestedPiiFilter?: AttestedPiiFilterFn };
-    if (typeof mod?.attestedPiiFilter === "function") {
-      cachedB2AttestedMod = mod;
-      return mod.attestedPiiFilter;
-    }
-  } catch {
-    // Module not yet created by B2 or unavailable
-  }
-  return null;
+  return realAttestedPiiFilter as AttestedPiiFilterFn;
 }
 
 /**
@@ -405,12 +232,8 @@ export async function redactForAtlasBoundary(
 }> {
   const mechanicalFn = await resolveMechanicalRedactFn();
   let d3Result: MechanicalRedactResult;
-  try {
-    d3Result = mechanicalFn(rawText || "", opts);
-  } catch {
-    // Fail closed if external redactor throws
-    d3Result = fallbackMechanicalRedact(rawText || "", opts);
-  }
+  // Fail closed: if the mechanical filter throws, the query is rejected, never sent unfiltered.
+  d3Result = mechanicalFn(rawText || "", opts);
 
   const mechanicalCountsByKind: Record<string, number> = {};
   for (const item of d3Result.redactions) {

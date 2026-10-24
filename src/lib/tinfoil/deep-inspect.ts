@@ -1,7 +1,50 @@
 import { ASN1Obj, uint8ArrayEqual } from "@freedomofpress/crypto-browser";
 import { X509Certificate } from "@freedomofpress/sigstore-browser";
-import { fromHex, toHex } from "@/lib/sim/bytes";
-import { decodePolicy, parseReport, tcbFromU64 } from "@/lib/sim/snp";
+import { bytesToHex as toHex, hexToBytes as fromHex } from "@noble/hashes/utils.js";
+
+const SNP_REPORT_SIZE = 0x4a0; // 1,184 bytes
+
+function parseSnpBinaryReport(bytes: Uint8Array) {
+  if (bytes.length !== SNP_REPORT_SIZE) {
+    throw new Error(`SNP report must be ${SNP_REPORT_SIZE} bytes`);
+  }
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const slice = (offset: number, length: number) => bytes.slice(offset, offset + length);
+  return {
+    version: dv.getUint32(0x00, true),
+    guestSvn: dv.getUint32(0x04, true),
+    policy: dv.getBigUint64(0x08, true),
+    vmpl: dv.getUint32(0x30, true),
+    currentTcb: dv.getBigUint64(0x38, true),
+    reportData: slice(0x50, 64),
+    measurement: slice(0x90, 48),
+    reportedTcb: dv.getBigUint64(0x180, true),
+    chipId: slice(0x1a0, 64),
+    signatureR: slice(0x2a0, 72),
+    signatureS: slice(0x2e8, 72),
+  };
+}
+
+function decodeSnpPolicy(policy: bigint) {
+  const bit = (n: number): bigint => BigInt(1) << BigInt(n);
+  const bitSet = (value: bigint, n: number): boolean => (value & bit(n)) !== BigInt(0);
+  return {
+    smt: bitSet(policy, 16),
+    migrationAgent: bitSet(policy, 18),
+    debug: bitSet(policy, 19),
+  };
+}
+
+function decodeTurinTcbU64(value: bigint) {
+  const byteAt = (v: bigint, n: number): number => Number((v >> BigInt(n)) & BigInt(0xff));
+  return {
+    fmc: byteAt(value, 0),
+    bootloader: byteAt(value, 8),
+    tee: byteAt(value, 16),
+    snp: byteAt(value, 24),
+    microcode: byteAt(value, 56),
+  };
+}
 
 export interface RouterSnpHardwareReport {
   version: number;
@@ -252,8 +295,8 @@ function decodeAsn1Integer(value: Uint8Array): number {
  * Works in both Node and browser environments.
  */
 export function decodeSnpReportBytes(raw1184Bytes: Uint8Array): RouterSnpHardwareReport {
-  const parsed = parseReport(raw1184Bytes);
-  const policyBits = decodePolicy(parsed.policy);
+  const parsed = parseSnpBinaryReport(raw1184Bytes);
+  const policyBits = decodeSnpPolicy(parsed.policy);
   const tcbRaw = parsed.reportedTcb !== BigInt(0) ? parsed.reportedTcb : parsed.currentTcb;
 
   // Inspect CPUID family/model at offsets 0x188 and 0x189 (valid in report version >= 3)
@@ -267,11 +310,11 @@ export function decodeSnpReportBytes(raw1184Bytes: Uint8Array): RouterSnpHardwar
   const snpByteTurin = byteAt(tcbRaw, 24);
 
   let productName: "Milan" | "Genoa" | "Turin" = "Genoa";
-  let tcb = tcbFromU64(tcbRaw);
+  let tcb = decodeTurinTcbU64(tcbRaw);
 
   if (family === 0x1a) {
     productName = "Turin";
-    tcb = tcbFromU64(tcbRaw);
+    tcb = decodeTurinTcbU64(tcbRaw);
   } else if (family === 0x19) {
     productName = model === 0x01 ? "Milan" : "Genoa";
     tcb = {

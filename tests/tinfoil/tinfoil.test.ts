@@ -1,12 +1,10 @@
 import { gunzipSync } from "node:zlib";
+import { bytesToHex as toHex } from "@noble/hashes/utils.js";
 import { describe, expect, it } from "vitest";
 import { GET as getRelayAttestation } from "@/app/api/relay/attestation/route";
 import { GET as getHopRelayAttestation } from "@/app/api/relay/[relayId]/attestation/route";
 import { GET as getEnclaveMatrix } from "@/app/api/relay/enclave-matrix/route";
 import { RELAY_HOPS, pacedStream, padJsonPayloadToBucket } from "@/lib/relay";
-import { toHex } from "@/lib/sim/bytes";
-import { SIM_TCB } from "@/lib/sim/constants";
-import { encodeReport, REPORT_SIZE, SIM_POLICY, tcbToU64, type SnpReportFields } from "@/lib/sim/snp";
 import { checksFromDocument, RELAY_HOPS as CLIENT_RELAY_HOPS } from "@/lib/tinfoil/client";
 import {
   decodeSnpReportBytes,
@@ -59,33 +57,31 @@ containers:
       ]
 `;
 
-function buildFixtureSnpReportBytes(overrides: Partial<SnpReportFields> = {}): Uint8Array {
-  const fill = (len: number, byte: number) => new Uint8Array(len).fill(byte);
-  const fields: SnpReportFields = {
-    version: 5,
-    guestSvn: 0,
-    policy: SIM_POLICY,
-    familyId: fill(16, 0x01),
-    imageId: fill(16, 0x02),
-    vmpl: 0,
-    signatureAlgo: 1,
-    currentTcb: tcbToU64(SIM_TCB),
-    platformInfo: BigInt(0),
-    flags: 0,
-    reportData: fill(64, 0xaa),
-    measurement: fill(48, 0xbb),
-    hostData: fill(32, 0x05),
-    idKeyDigest: fill(48, 0x06),
-    authorKeyDigest: fill(48, 0x07),
-    reportId: fill(32, 0x08),
-    reportIdMa: fill(32, 0x09),
-    reportedTcb: tcbToU64(SIM_TCB),
-    chipId: fill(64, 0xcc),
-    committedTcb: tcbToU64(SIM_TCB),
-    launchTcb: tcbToU64(SIM_TCB),
-    ...overrides,
-  };
-  return encodeReport(fields);
+const REPORT_SIZE = 1184;
+const EXPECTED_TURIN_TCB = { fmc: 0, bootloader: 4, tee: 0, snp: 24, microcode: 213 };
+
+function buildFixtureSnpReportBytes(): Uint8Array {
+  const out = new Uint8Array(REPORT_SIZE);
+  const dv = new DataView(out.buffer);
+  dv.setUint32(0x00, 5, true); // version 5
+  dv.setUint32(0x04, 0, true); // guestSvn 0
+  dv.setBigUint64(0x08, (BigInt(1) << BigInt(17)) | (BigInt(1) << BigInt(8)), true); // policy 0x20100
+  dv.setUint32(0x30, 0, true); // vmpl 0
+  dv.setUint32(0x34, 1, true); // signatureAlgo ECDSA-P384-SHA384
+  const tcbU64 =
+    (BigInt(EXPECTED_TURIN_TCB.fmc) << BigInt(0)) |
+    (BigInt(EXPECTED_TURIN_TCB.bootloader) << BigInt(8)) |
+    (BigInt(EXPECTED_TURIN_TCB.tee) << BigInt(16)) |
+    (BigInt(EXPECTED_TURIN_TCB.snp) << BigInt(24)) |
+    (BigInt(EXPECTED_TURIN_TCB.microcode) << BigInt(56));
+  dv.setBigUint64(0x38, tcbU64, true);
+  dv.setBigUint64(0x180, tcbU64, true);
+  out[0x188] = 0x1a; // family 0x1A (Turin)
+  out[0x189] = 0x02;
+  out.fill(0xaa, 0x50, 0x50 + 64); // reportData
+  out.fill(0xbb, 0x90, 0x90 + 48); // measurement
+  out.fill(0xcc, 0x1a0, 0x1a0 + 64); // chipId
+  return out;
 }
 
 function buildFixtureModelAttestation(
@@ -156,7 +152,7 @@ describe("Two-Hop Enclave & GPU Trust Verifier", () => {
     expect(decoded.smtAllowed).toBe(false);
     expect(decoded.migrationAllowed).toBe(false);
     expect(decoded.vmpl).toBe(0);
-    expect(decoded.tcb).toEqual(SIM_TCB);
+    expect(decoded.tcb).toEqual(EXPECTED_TURIN_TCB);
     expect(decoded.chipIdHex).toBe(toHex(new Uint8Array(64).fill(0xcc)));
     expect(decoded.measurementHex).toBe(toHex(new Uint8Array(48).fill(0xbb)));
     expect(decoded.reportDataHex).toBe(toHex(new Uint8Array(64).fill(0xaa)));

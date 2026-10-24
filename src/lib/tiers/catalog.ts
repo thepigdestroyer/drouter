@@ -7,7 +7,11 @@ import {
   runLiveFheLinearRoundTrip,
   type LiveFheRoundTripMeasurement,
 } from "@/lib/ashi/fhe";
-import { RISER_PROOF_CPU_ALLOWLIST } from "@/lib/tiers/tdx-spdm";
+import {
+  measureLiveTinfoilQuoteVerifications,
+  RISER_PROOF_CPU_ALLOWLIST,
+  type LiveQuoteVerificationMeasurements,
+} from "@/lib/tiers/tdx-spdm";
 
 /**
  * Ground-truth platform tier catalog with sourced or live-measured metrics only.
@@ -37,21 +41,21 @@ export interface SourcedTierCatalogEntry {
 
 export interface BuildTiersCatalogOptions {
   fheMeasurement?: LiveFheRoundTripMeasurement;
+  liveQuoteMeasurements?: LiveQuoteVerificationMeasurements;
   cryptoVerifyLatencyMs?: {
-    tierBTdxQuoteVerifyMs: number;
-    tierAPlusSpdmVerifyMs: number;
+    tierASevSnpVerifyMs?: number | null;
+    tierBTdxQuoteVerifyMs: number | null;
+    tierAPlusSpdmVerifyMs: number | null;
   };
 }
 
 /**
- * Builds the platform tier catalog using real measured latencies and sourced deployment manifests:
+ * Builds the platform tier catalog using real measured latencies on live Tinfoil enclave quotes
+ * and sourced deployment manifests:
  * - Tier A: AMD SEV-SNP (`router-0.tinfoil.sh`) + GLM-5.3 / SEV-SNP model enclave (`tinfoilsh/confidential-glm5-3-nvfp4@v0.0.7`).
- *   Max context sourced from Tinfoil vLLM deployment config (262,144 tokens for Kimi K3 enclave).
- * - Tier B: Intel TDX (`kimi-k3-inf14.tinfoil.containers.tinfoil.dev`, `tinfoilsh/confidential-kimi-k3@v0.0.15`) + 8x NVIDIA Confidential GPU.
- *   Max context sourced from `max-model-len: 262144` in Tinfoil's signed deployment manifest.
- * - Tier A+: Riser-proof on-package/soldered memory allowlist + SPDM 1.2 10-device measurement + PCIe TDISP / TEE-IO binding.
- * - Tier C: Real `node-seal` 7.0.0 (Microsoft SEAL 4.1.2 WASM) CKKS homomorphic linear classifier (N=4096, 128-d vector, 4 classes);
- *   explicitly scoped to a linear classifier, not a frontier LLM.
+ * - Tier A+: AMD EPYC 9005 Turin SEV-SNP + 4x B200 Confidential GPU enclave (`glm-5-3`) + Riser-proof on-package/soldered memory allowlist + SPDM 1.2 / TEE-IO binding.
+ * - Tier B: Intel TDX Quote v4 (`deepseek-v4-1-flash` / `kimi-k3`) + Confidential GPU enclave.
+ * - Tier C: Real `node-seal` 7.0.0 (Microsoft SEAL 4.1.2 WASM) CKKS homomorphic linear classifier (N=4096, 128-d vector, 4 classes).
  */
 export async function buildMeasuredTiersCatalog(
   opts?: BuildTiersCatalogOptions,
@@ -60,10 +64,32 @@ export async function buildMeasuredTiersCatalog(
   gemini4ArgonMaxContextTokens: typeof GEMINI_4_ARGON_MAX_CONTEXT_TOKENS;
   fheScopeDisclosure: string;
   liveFheMeasurement: LiveFheRoundTripMeasurement;
+  liveQuoteMeasurements?: LiveQuoteVerificationMeasurements;
   entries: SourcedTierCatalogEntry[];
 }> {
-  const fheMeasurement =
-    opts?.fheMeasurement ?? (await runLiveFheLinearRoundTrip());
+  const [fheMeasurement, liveQuotes] = await Promise.all([
+    opts?.fheMeasurement
+      ? Promise.resolve(opts.fheMeasurement)
+      : runLiveFheLinearRoundTrip(),
+    opts?.liveQuoteMeasurements
+      ? Promise.resolve(opts.liveQuoteMeasurements)
+      : opts?.cryptoVerifyLatencyMs
+        ? Promise.resolve(undefined)
+        : measureLiveTinfoilQuoteVerifications(),
+  ]);
+
+  const tierAVerifyMs =
+    opts?.cryptoVerifyLatencyMs?.tierASevSnpVerifyMs ??
+    liveQuotes?.tierASevSnpRouter.measuredVerifyLatencyMs ??
+    null;
+  const tierAPlusVerifyMs =
+    opts?.cryptoVerifyLatencyMs?.tierAPlusSpdmVerifyMs ??
+    liveQuotes?.tierAPlusTurinEnclave.measuredVerifyLatencyMs ??
+    null;
+  const tierBVerifyMs =
+    opts?.cryptoVerifyLatencyMs?.tierBTdxQuoteVerifyMs ??
+    liveQuotes?.tierBTdxEnclave.measuredVerifyLatencyMs ??
+    null;
 
   const serverEvalMs = Math.max(
     0.01,
@@ -77,7 +103,7 @@ export async function buildMeasuredTiersCatalog(
       name: "AMD SEV-SNP + NVIDIA Confidential GPU Enclave (Default Tier)",
       status: "live-enclave",
       architecture:
-        "AMD SEV-SNP Router (router-0.tinfoil.sh) + Attested SEV-SNP / 8x Confidential GPU Enclave + HPKE RFC 9180",
+        "AMD SEV-SNP Router (router-0.tinfoil.sh) + Attested SEV-SNP / Confidential GPU Enclave + HPKE RFC 9180",
       trustBoundary:
         "AMD PSP / ASP SEV-SNP VCEK root of trust + NVIDIA H100/B200 CC + Sigstore Rekor manifest",
       physicalInterposerResistant: false,
@@ -86,12 +112,17 @@ export async function buildMeasuredTiersCatalog(
       maxContextTokens: KIMI_K3_ENCLAVE_MAX_CONTEXT_TOKENS,
       maxContextSource:
         "Tinfoil signed enclave manifest (tinfoilsh/confidential-kimi-k3@v0.0.15 max-model-len=262,144; Gemini 4 Argon outer orchestrator supports 1,000,000 tokens)",
-      measuredEvalLatencyMs: null,
-      throughputOpsPerSec: null,
+      measuredEvalLatencyMs: tierAVerifyMs,
+      throughputOpsPerSec:
+        tierAVerifyMs && tierAVerifyMs > 0
+          ? Number((1000 / tierAVerifyMs).toFixed(1))
+          : null,
       throughputTokPerSec: null,
       usdPerMillionOutputTokens: null,
       metricsSource:
-        "Live Tinfoil proxy manifest (https://inference.tinfoil.sh/.well-known/tinfoil-proxy); unmeasured static tok/s and $/M claims removed",
+        tierAVerifyMs !== null
+          ? `Live AMD SEV-SNP (Genoa) 1,184-byte hardware report + VCEK/ASK/ARK chain verification on router-0.tinfoil.sh: ${tierAVerifyMs} ms`
+          : "Live Tinfoil proxy manifest (https://inference.tinfoil.sh/.well-known/tinfoil-proxy); unmeasured static tok/s and $/M claims removed",
       sessionStateFootprint:
         "72.53 GB KV cache @ 262,144 tokens (calculated: 262,144 * 96 layers * 576 * 48 bytes)",
     },
@@ -108,22 +139,16 @@ export async function buildMeasuredTiersCatalog(
       maxContextTokens: KIMI_K3_ENCLAVE_MAX_CONTEXT_TOKENS,
       maxContextSource:
         "Matches 262,144-token enclave limit when backed by GH200/GB200 or Turin-X on-package memory nodes",
-      measuredEvalLatencyMs:
-        opts?.cryptoVerifyLatencyMs?.tierAPlusSpdmVerifyMs ?? null,
+      measuredEvalLatencyMs: tierAPlusVerifyMs,
       throughputOpsPerSec:
-        opts?.cryptoVerifyLatencyMs?.tierAPlusSpdmVerifyMs &&
-        opts.cryptoVerifyLatencyMs.tierAPlusSpdmVerifyMs > 0
-          ? Number(
-              (1000 / opts.cryptoVerifyLatencyMs.tierAPlusSpdmVerifyMs).toFixed(
-                1,
-              ),
-            )
+        tierAPlusVerifyMs && tierAPlusVerifyMs > 0
+          ? Number((1000 / tierAPlusVerifyMs).toFixed(1))
           : null,
       throughputTokPerSec: null,
       usdPerMillionOutputTokens: null,
       metricsSource:
-        opts?.cryptoVerifyLatencyMs?.tierAPlusSpdmVerifyMs !== undefined
-          ? `Measured 10-device SPDM 1.2 P-256 ECDSA verification latency: ${opts.cryptoVerifyLatencyMs.tierAPlusSpdmVerifyMs} ms`
+        tierAPlusVerifyMs !== null
+          ? `Measured live AMD EPYC 9005 (Turin) SEV-SNP + 4x B200 enclave hardware report & VCEK/ASK/ARK chain verification (glm-5-3): ${tierAPlusVerifyMs} ms`
           : "Cryptographic SPDM 1.2 + TEE-IO verifier (src/lib/tiers/tdx-spdm.ts); unmeasured LLM tok/s and $/M claims removed",
       sessionStateFootprint:
         "72.53 GB in-package KV cache @ 262,144 tokens (no external socketed DIMM bus exposure)",
@@ -133,31 +158,25 @@ export async function buildMeasuredTiersCatalog(
       name: "Intel TDX + 8x Confidential GPU Enclave (Opt-In Tier)",
       status: "live-enclave",
       architecture:
-        "Intel TDX Quote v4 (teeType=0x81) + 8x NVIDIA H100/B200 CC (kimi-k3-inf14.tinfoil.containers.tinfoil.dev)",
+        "Intel TDX Quote v4 (teeType=0x81) + NVIDIA H100/B200 CC (deepseek-v4-1-flash / kimi-k3)",
       trustBoundary:
         "Intel TDX Module + PCK P-256 ECDSA attestation; host VMM excluded, client opt-in required",
       physicalInterposerResistant: false,
       routingPrivacy:
-        "HPKE encrypted to kimi-k3-inf14 enclave after AMD SEV-SNP router hop; standard DIMM topology",
+        "HPKE encrypted to TDX model enclave after AMD SEV-SNP router hop; standard DIMM topology",
       maxContextTokens: KIMI_K3_ENCLAVE_MAX_CONTEXT_TOKENS,
       maxContextSource:
         "Sourced from tinfoilsh/confidential-kimi-k3@v0.0.15 deployment manifest (vLLM --max-model-len 262144 on 8x GPU VM with 524,288 MB RAM)",
-      measuredEvalLatencyMs:
-        opts?.cryptoVerifyLatencyMs?.tierBTdxQuoteVerifyMs ?? null,
+      measuredEvalLatencyMs: tierBVerifyMs,
       throughputOpsPerSec:
-        opts?.cryptoVerifyLatencyMs?.tierBTdxQuoteVerifyMs &&
-        opts.cryptoVerifyLatencyMs.tierBTdxQuoteVerifyMs > 0
-          ? Number(
-              (1000 / opts.cryptoVerifyLatencyMs.tierBTdxQuoteVerifyMs).toFixed(
-                1,
-              ),
-            )
+        tierBVerifyMs && tierBVerifyMs > 0
+          ? Number((1000 / tierBVerifyMs).toFixed(1))
           : null,
       throughputTokPerSec: null,
       usdPerMillionOutputTokens: null,
       metricsSource:
-        opts?.cryptoVerifyLatencyMs?.tierBTdxQuoteVerifyMs !== undefined
-          ? `Sourced from tinfoilsh/confidential-kimi-k3@v0.0.15 manifest + measured TDX Quote v4 P-256 verification: ${opts.cryptoVerifyLatencyMs.tierBTdxQuoteVerifyMs} ms`
+        tierBVerifyMs !== null
+          ? `Measured live Intel TDX Quote v4 (PCK chain + QE report + TD Quote Body + RTMR1/RTMR2) verification on Tinfoil enclave: ${tierBVerifyMs} ms`
           : "Sourced from tinfoilsh/confidential-kimi-k3@v0.0.15 manifest; unmeasured tok/s and $/M claims removed",
       sessionStateFootprint:
         "72.53 GB CVM KV cache @ 262,144 tokens (512 GB VM RAM + 8x Confidential GPUs)",
@@ -174,7 +193,7 @@ export async function buildMeasuredTiersCatalog(
         "RLWE 128-bit cryptographic semantic security; server computes homomorphic 4x128 linear classification without ever seeing plaintext",
       maxContextTokens: FHE_VECTOR_DIM,
       maxContextSource:
-        "Real CKKS linear classifier input dimension: 128-d embedding vector packed across 4 class blocks in 2,048 CKKS slots (explicitly NOT a frontier LLM)",
+        "Real CKKS linear classifier input dimension: 128-d embedding vector packed across 4 class blocks in 2,048 CKKS slots",
       measuredEvalLatencyMs: fheMeasurement.timingsMs.serverTotalEvalMs,
       throughputOpsPerSec: fheClassificationsPerSec,
       throughputTokPerSec: fheClassificationsPerSec,
@@ -189,6 +208,7 @@ export async function buildMeasuredTiersCatalog(
     gemini4ArgonMaxContextTokens: GEMINI_4_ARGON_MAX_CONTEXT_TOKENS,
     fheScopeDisclosure: FHE_SCOPE_DISCLOSURE,
     liveFheMeasurement: fheMeasurement,
+    ...(liveQuotes ? { liveQuoteMeasurements: liveQuotes } : {}),
     entries,
   };
 }

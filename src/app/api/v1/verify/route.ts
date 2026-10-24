@@ -34,9 +34,6 @@ interface CachedVerification {
 let cachedVerification: CachedVerification | null = null;
 
 async function getLiveOrCachedVerification(): Promise<VerificationDocument | null> {
-  if (process.env.DROUTER_STUB_UPSTREAM === "1") {
-    return null;
-  }
   const now = Date.now();
   if (cachedVerification && now - cachedVerification.fetchedAt < CACHE_TTL_MS) {
     return cachedVerification.doc;
@@ -118,7 +115,11 @@ export async function OPTIONS(): Promise<Response> {
 }
 
 export async function GET(req: Request): Promise<Response> {
-  await connection();
+  try {
+    await connection();
+  } catch {
+    // Allow direct invocation in unit tests outside Next request storage
+  }
 
   const limited = verifyLimiter.check(req, CORS_HEADERS);
   if (limited) return limited;
@@ -160,9 +161,8 @@ export async function GET(req: Request): Promise<Response> {
     : null;
 
   const harnessConfigs = buildHarnessConfigs(baseUrl);
-  const isStub = process.env.DROUTER_STUB_UPSTREAM === "1";
   const allChecksOk = checks ? checks.every((c) => c.status !== "fail") : false;
-  const ok = isStub ? true : Boolean(doc?.securityVerified && allChecksOk);
+  const ok = Boolean(doc?.securityVerified && allChecksOk);
 
   return Response.json(
     {

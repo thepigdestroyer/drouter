@@ -1,5 +1,6 @@
 import type { CheckResult, PopReceipt } from "@/lib/types";
-import type { EvidenceSummary } from "./types";
+// Practice-network stub kept only until the console stops importing it.
+type EvidenceSummary = Record<string, string>;
 
 export interface SimSession {
   simId: string;

@@ -198,15 +198,8 @@ describe("Gateway harness-config & Live Model Table", () => {
     const mockFetch = vi.fn(async () => new Response(JSON.stringify(SAMPLE_LIVE_PROXY_TABLE), { status: 200 }));
     const liveProd = await fetchLiveGatewayModels({
       fetchImpl: mockFetch as unknown as typeof fetch,
-      includeSim: false,
     });
     expect(liveProd.map((m) => m.id)).toEqual(["kimi-k3", "glm-5-3", "gemma4-31b"]);
-
-    const liveDev = await fetchLiveGatewayModels({
-      fetchImpl: mockFetch as unknown as typeof fetch,
-      includeSim: true,
-    });
-    expect(liveDev.map((m) => m.id)).toContain("sim-echo-1");
   });
 
   it("normalizes string content and applies defaults in parseGatewayChatRequest", () => {
@@ -297,7 +290,7 @@ describe("Gateway harness-config & Live Model Table", () => {
     }
   });
 
-  it("rejects invalid requests and blocks sim-echo-1 unless DROUTER_ENABLE_SIM_MODEL=1", () => {
+  it("rejects invalid requests and blocks sim-echo-1 unconditionally", () => {
     expect(parseGatewayChatRequest(null).ok).toBe(false);
     expect(parseGatewayChatRequest({}).ok).toBe(false);
     expect(parseGatewayChatRequest({ messages: [] }).ok).toBe(false);
@@ -314,20 +307,12 @@ describe("Gateway harness-config & Live Model Table", () => {
       }).ok,
     ).toBe(false);
 
-    // sim-echo-1 blocked by default in production
+    // sim-echo-1 is rejected unconditionally
     const simBlocked = parseGatewayChatRequest({
       model: "sim-echo-1",
       messages: [{ role: "user", content: "hi" }],
     });
     expect(simBlocked.ok).toBe(false);
-
-    // sim-echo-1 allowed when dev flag enabled
-    process.env.DROUTER_ENABLE_SIM_MODEL = "1";
-    const simAllowed = parseGatewayChatRequest({
-      model: "sim-echo-1",
-      messages: [{ role: "user", content: "hi" }],
-    });
-    expect(simAllowed.ok).toBe(true);
   });
 
   it("builds valid OpenCode JSON and explicitly documents blind-credit auth in buildHarnessConfigs", () => {
@@ -560,9 +545,7 @@ describe("OpenAI-Compatible Gateway Routes (/api/v1/*)", () => {
     expect(rawSse).toContain("data: [DONE]");
   });
 
-  it("POST /api/v1/chat/completions with model sim-echo-1 works when DROUTER_ENABLE_SIM_MODEL=1", async () => {
-    process.env.DROUTER_ENABLE_SIM_MODEL = "1";
-
+  it("POST /api/v1/chat/completions rejects simulated model sim-echo-1 with 400", async () => {
     const req = new Request("http://localhost/api/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -579,31 +562,9 @@ describe("OpenAI-Compatible Gateway Routes (/api/v1/*)", () => {
     });
 
     const res = await postChatCompletions(req);
-    expect(res.status).toBe(200);
-    expect(res.headers.get("X-DRouter-Attested")).toBe("simulated-sev-snp");
-    expect(res.headers.get("X-DRouter-Node")).toBe("sim-1");
-
+    expect(res.status).toBe(400);
     const json = await res.json();
-    expect(json.object).toBe("chat.completion");
-    expect(json.model).toBe("sim-echo-1");
-    expect(json.choices[0].message.content).toContain("Simulated enclave sim-1 received");
-    expect(json.drouter_attestation.securityVerified).toBe(true);
-
-    const streamReq = new Request("http://localhost/api/v1/chat/completions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "sim-echo-1",
-        stream: true,
-        messages: [{ role: "user", content: "Stream test message" }],
-      }),
-    });
-
-    const streamRes = await postChatCompletions(streamReq);
-    expect(streamRes.status).toBe(200);
-    const sseText = await streamRes.text();
-    expect(sseText).toContain('"object":"chat.completion.chunk"');
-    expect(sseText).toContain("data: [DONE]");
+    expect(json.error.message).toContain("Unsupported model");
 
     const optRes = await optionsChatCompletions();
     expect(optRes.status).toBe(204);

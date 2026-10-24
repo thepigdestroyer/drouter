@@ -445,10 +445,31 @@ async function buildModelAttestation(
             },
           );
           const kdsChainPem = await getAmdKdsCertChainPem(decodedSnp.productName);
-          if (atcModelBundle?.vcek && kdsChainPem) {
+          let vcekDerOrBase64: Uint8Array | string | undefined = atcModelBundle?.vcek;
+          if (!vcekDerOrBase64) {
+            const chipIdForKds =
+              decodedSnp.productName === "Turin"
+                ? decodedSnp.chipIdHex.slice(0, 16)
+                : decodedSnp.chipIdHex;
+            const fmcParam =
+              decodedSnp.productName === "Turin" ? `&fmcSPL=${decodedSnp.tcb.fmc}` : "";
+            const kdsVcekUrl = `https://kdsintf.amd.com/vcek/v1/${decodedSnp.productName}/${chipIdForKds}?blSPL=${decodedSnp.tcb.bootloader}&teeSPL=${decodedSnp.tcb.tee}&snpSPL=${decodedSnp.tcb.snp}&ucodeSPL=${decodedSnp.tcb.microcode}${fmcParam}`;
+            try {
+              const vcekRes = await fetch(kdsVcekUrl, {
+                signal: AbortSignal.timeout(3500),
+                cache: "no-store",
+              });
+              if (vcekRes.ok) {
+                vcekDerOrBase64 = new Uint8Array(await vcekRes.arrayBuffer());
+              }
+            } catch {
+              // Leave undefined if AMD KDS is unreachable
+            }
+          }
+          if (vcekDerOrBase64 && kdsChainPem) {
             snpChainVerification = await verifyAmdSevSnpChainEndToEnd(
               rawQuoteBytes,
-              atcModelBundle.vcek,
+              vcekDerOrBase64,
               kdsChainPem,
             );
           }

@@ -11,8 +11,10 @@ import {
 } from "@/lib/credits/client";
 import { createSessionScrubber } from "@/lib/privacy/scrubber";
 import {
+  prepareHistoricalTurnText,
   prepareOutboundTurn,
   previewDraftPrivacy,
+  restoreUnspentCreditHeader,
 } from "@/components/console/send-pipeline";
 import { exportSessionProof } from "@/components/console/proof-exporter";
 import {
@@ -20,16 +22,23 @@ import {
   formatHiddenDetailsSummary,
   FRIENDLY_MODELS,
 } from "@/components/console";
-import { friendlyFailureReason } from "@/components/visual-trust-dashboard";
+import {
+  friendlyFailureReason,
+  friendlyRuntimeError,
+} from "@/components/visual-trust-dashboard";
+import { friendlyCreditFlowError } from "@/components/privacy-bar";
 import {
   openSession,
+  pickNode,
   registryAndQuorumCheck,
+  type RegistryNodeRecord,
   type RegistryResponse,
 } from "@/components/session";
-import type { CheckResult, NodeRecord } from "@/lib/types";
+import type { CheckResult } from "@/lib/types";
 
-const SAMPLE_NODE: NodeRecord = {
+const SAMPLE_NODE: RegistryNodeRecord = {
   id: "0x2696913aef54b88e8338ba4a362549e7c70465faa781aaa12240d20a247df29a",
+  key: "tinfoil-router",
   kind: "tinfoil",
   name: "Tinfoil confidential router",
   endpoint: "inference.tinfoil.sh",
@@ -154,6 +163,49 @@ describe("console send pipeline (I1 + I2 + I3)", () => {
     expect(preview.prepared.report.styleChanges).toBeGreaterThanOrEqual(1);
     expect(storedCreditBalance()).toBe(1);
   });
+
+  it("never bypasses preparePrompt even if scrubEnabled is false and prepares resumed historical turns", async () => {
+    unlockVaultWithPassphrase("abandon ability able about above absent", false);
+    updateVaultPayload({
+      customScrubTerms: ["Secret Project Alpha"],
+      createdAt: 1700000000000,
+    });
+
+    const scrubber = createSessionScrubber();
+    const turn = await prepareOutboundTurn(
+      "Discuss Secret Project Alpha with dana.reyes@example.com about colour",
+      { scrubEnabled: false, normalizeStyle: true, scrubber },
+    );
+    expect(turn.outboundText).not.toContain("Secret Project Alpha");
+    expect(turn.outboundText).not.toContain("dana.reyes@example.com");
+    expect(turn.outboundText).toContain("color");
+
+    const historical = prepareHistoricalTurnText(
+      "Earlier note on Secret Project Alpha at 415-555-0199",
+      { normalizeStyle: true, scrubber },
+    );
+    expect(historical).not.toContain("Secret Project Alpha");
+    expect(historical).not.toContain("415-555-0199");
+  });
+
+  it("restores unspent credit header back to local wallet if turn fails before streaming", async () => {
+    storeCreditTokens([
+      {
+        token: "ee".repeat(32),
+        signature: "ff".repeat(64),
+        denomination: 1,
+      },
+    ]);
+    expect(storedCreditBalance()).toBe(1);
+
+    const turn = await prepareOutboundTurn("Hello", { scrubEnabled: true });
+    expect(turn.creditHeader).toBeTruthy();
+    expect(storedCreditBalance()).toBe(0);
+
+    const refundedBalance = restoreUnspentCreditHeader(turn.creditHeader);
+    expect(refundedBalance).toBe(1);
+    expect(storedCreditBalance()).toBe(1);
+  });
 });
 
 describe("plain-language console helpers and jargon-free defaults", () => {
@@ -235,6 +287,25 @@ describe("plain-language console helpers and jargon-free defaults", () => {
       }
     }
   });
+
+  it("produces plain-language runtime and credit errors free of banned jargon", () => {
+    const messages = [
+      friendlyRuntimeError(
+        "Not verified: C3 (HPKE key) failed: enclave digest mismatch",
+      ),
+      friendlyRuntimeError("Free daily allowance exhausted (402): /api/credits/invoice"),
+      friendlyCreditFlowError(
+        "No confirmed USDC Transfer log found on Arc testnet for RSA blind claim",
+      ),
+      friendlyCreditFlowError("Invoice has expired (410)"),
+      friendlyCreditFlowError("Invoice has already been claimed (409)"),
+    ];
+    for (const text of messages) {
+      for (const word of BANNED_JARGON) {
+        expect(text.toLowerCase()).not.toContain(word.toLowerCase());
+      }
+    }
+  });
 });
 
 describe("honest registry & quorum checks and failure handling", () => {
@@ -267,7 +338,7 @@ describe("honest registry & quorum checks and failure handling", () => {
       vi.fn(async () => new Response("error", { status: 503 })),
     );
 
-    const suspendedNode: NodeRecord = {
+    const suspendedNode: RegistryNodeRecord = {
       ...SAMPLE_NODE,
       status: "suspended",
       stake: "0",
@@ -285,8 +356,41 @@ describe("honest registry & quorum checks and failure handling", () => {
     expect(c6.detail).toContain("suspended");
   });
 
-  it("blocks session opening when C6 fails on a simulated node", async () => {
-    const suspendedSimNode: NodeRecord = {
+  it("picks model-specific real Tinfoil nodes from /api/registry and rejects simulated nodes", () => {
+    const kimiNode: RegistryNodeRecord = {
+      ...SAMPLE_NODE,
+      id: "0x37c6b00064a5e5043631e41357f5500152a68198204c336745d6ba7fa0a0bb61",
+      key: "tinfoil-kimi-k3",
+      modelId: "kimi-k3",
+      name: "Tinfoil Kimi K3 enclave",
+    };
+    const glmNode: RegistryNodeRecord = {
+      ...SAMPLE_NODE,
+      id: "0x43c1bcad64147bb5f79acd628765525e02dcb7876bd5682742a5a663f49d88cd",
+      key: "tinfoil-glm-5-3",
+      modelId: "glm-5-3",
+      name: "Tinfoil GLM-5.3 enclave",
+    };
+
+    const chosenGlm = pickNode(
+      [SAMPLE_NODE, kimiNode, glmNode],
+      "tinfoil",
+      "glm-5-3",
+    );
+    expect(chosenGlm?.key).toBe("tinfoil-glm-5-3");
+    expect(pickNode([SAMPLE_NODE, kimiNode, glmNode], "sim")).toBeNull();
+  });
+
+  it("blocks session opening on non-tinfoil nodes without calling /api/sim", async () => {
+    const fetchSpy = vi.fn(
+      async (input: RequestInfo | URL) => {
+        void input;
+        return new Response("error", { status: 503 });
+      },
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const legacySimNode: RegistryNodeRecord = {
       ...SAMPLE_NODE,
       kind: "sim",
       name: "Simulated node 1",
@@ -297,14 +401,18 @@ describe("honest registry & quorum checks and failure handling", () => {
     const registry: RegistryResponse = {
       source: "arc",
       minStake: "0.01",
-      nodes: [suspendedSimNode],
+      nodes: [legacySimNode],
       chainId: 5042002,
       explorer: "https://explorer.testnet.arc.io",
     };
 
     await expect(
-      openSession(suspendedSimNode, registry, () => {}, "sim-echo-1"),
+      openSession(legacySimNode, registry, () => {}, "kimi-k3"),
     ).rejects.toThrow();
+
+    for (const call of fetchSpy.mock.calls) {
+      expect(String(call[0])).not.toContain("/api/sim");
+    }
   });
 });
 

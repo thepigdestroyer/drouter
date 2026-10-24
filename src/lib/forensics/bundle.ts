@@ -437,9 +437,7 @@ export function buildProofBundle(input: BuildSessionProofBundleInput): ForensicP
     rawEvidence["Measurement"] = activeNode.measurement;
   }
 
-  const modelId =
-    input.model ??
-    (activeNode.kind === "tinfoil" ? "kimi-k3" : "sim-echo-1");
+  const modelId = input.model ?? "kimi-k3";
 
   // Ensure PopReceipt.nodeId aligns with bundle.nodeId when sim close receipt uses "sim-1" while registry node.id is "0x..."
   let normalizedPopReceipt: PopReceipt | null = null;

@@ -7,11 +7,10 @@ import {
   PrefixCachePool,
   computePrefixBlockHashes,
   constantTimeEqualBytes,
-  runMemoryBusAndPopAudit,
   verifyCustodyPrimitives,
 } from "@/lib/custody";
 
-describe("Subsystem 10: Custody Cryptographic Primitives & Software Model", () => {
+describe("Subsystem 10: Custody Cryptographic Primitives", () => {
   describe("CustodyCtrDrbg (AES-256 CTR-DRBG in software Uint8Array)", () => {
     it("produces deterministic streams for identical seeds and diverges when client entropy is mixed in", () => {
       const seed = new Uint8Array(32);
@@ -123,8 +122,8 @@ describe("Subsystem 10: Custody Cryptographic Primitives & Software Model", () =
     });
   });
 
-  describe("verifyCustodyPrimitives, Model-Labelled Audit & GET /api/custody", () => {
-    it("verifies real cryptographic primitives and explicitly labels runMemoryBusAndPopAudit as mode='model'", async () => {
+  describe("verifyCustodyPrimitives & GET /api/custody", () => {
+    it("verifies real cryptographic primitives and serves GET /api/custody without simulated memory-bus model fields", async () => {
       const primitives = verifyCustodyPrimitives();
       expect(primitives.executionEnvironment).toBe("software-uint8array");
       expect(primitives.observesPhysicalGpuMemory).toBe(false);
@@ -135,21 +134,10 @@ describe("Subsystem 10: Custody Cryptographic Primitives & Software Model", () =
       expect(primitives.prefixCache.constantTimeCompareVerified).toBe(true);
       expect(primitives.prefixCache.sameSessionHitBlocks).toBe(3);
       expect(primitives.prefixCache.crossSessionHitBlocks).toBe(0);
-
-      const report = runMemoryBusAndPopAudit();
-      expect(report.mode).toBe("model");
-      expect(report.simulated).toBe(true);
-      expect(report.observesPhysicalGpuMemory).toBe(false);
-      expect(report.note).toContain("Simulated model");
-      expect(report.turnsSimulated).toBe(5);
-      expect(report.totalHostBytesObserved).toBeGreaterThan(8000);
-      expect(report.plaintextLeakMatches).toBe(0);
-      expect(report.repeated16ByteBlocks).toBe(0);
-      expect(report.shannonEntropyBitsPerByte).toBeGreaterThan(7.5);
-      expect(report.postPopAllZero).toBe(true);
-      expect(report.postPopOffloadDecryptFailed).toBe(true);
-      expect(report.v1Passed).toBe(true);
-      expect(report.v6Passed).toBe(true);
+      expect(primitives.aesGcmEnvelope.plaintextSubstringMatchesInCiphertext).toBe(0);
+      expect(primitives.aesGcmEnvelope.repeated16ByteCipherBlocks).toBe(0);
+      expect(primitives.aesGcmEnvelope.ciphertextShannonEntropyBitsPerByte).toBeGreaterThan(7.5);
+      expect(primitives.aesGcmEnvelope.decryptAfterKeyZeroizeFailed).toBe(true);
 
       const res = await getCustodyRoute(new Request("http://localhost:3000/api/custody"));
       expect(res.status).toBe(200);
@@ -157,14 +145,13 @@ describe("Subsystem 10: Custody Cryptographic Primitives & Software Model", () =
         executionEnvironment: string;
         observesPhysicalGpuMemory: boolean;
         primitives: { allPrimitivesPassed: boolean };
-        audit: { mode: string; simulated: boolean };
+        audit?: unknown;
         prefixCacheDemo: { constantTimeCompareCheck: boolean; popZeroized: boolean };
       };
       expect(json.executionEnvironment).toBe("software-uint8array");
       expect(json.observesPhysicalGpuMemory).toBe(false);
       expect(json.primitives.allPrimitivesPassed).toBe(true);
-      expect(json.audit.mode).toBe("model");
-      expect(json.audit.simulated).toBe(true);
+      expect(json.audit).toBeUndefined();
       expect(json.prefixCacheDemo.constantTimeCompareCheck).toBe(true);
       expect(json.prefixCacheDemo.popZeroized).toBe(true);
     });

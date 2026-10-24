@@ -1,3 +1,4 @@
+import { utf8ToBytes } from "@noble/hashes/utils.js";
 import { NextResponse, connection } from "next/server";
 import {
   MAX_CALLS_PER_AUDIT,
@@ -5,10 +6,18 @@ import {
   getAuditorRunsHistory,
   saveAuditorRun,
 } from "@/lib/auditor";
-import { bytesEqual, utf8 } from "@/lib/sim/bytes";
 import { TINFOIL_MODELS } from "@/lib/tinfoil/client";
 
 const ALLOWED_MODELS = new Set<string>(TINFOIL_MODELS.map((m) => m.id));
+
+function constantTimeBytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a[i] ^ b[i];
+  }
+  return diff === 0;
+}
 
 function verifyCronAuthorization(request: Request): {
   ok: boolean;
@@ -26,10 +35,10 @@ function verifyCronAuthorization(request: Request): {
 
   const authHeader = request.headers.get("authorization") ?? "";
   const expected = `Bearer ${secret}`;
-  const actualBytes = utf8(authHeader);
-  const expectedBytes = utf8(expected);
+  const actualBytes = utf8ToBytes(authHeader);
+  const expectedBytes = utf8ToBytes(expected);
 
-  if (!bytesEqual(actualBytes, expectedBytes)) {
+  if (!constantTimeBytesEqual(actualBytes, expectedBytes)) {
     return {
       ok: false,
       status: 401,

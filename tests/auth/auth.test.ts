@@ -3,21 +3,24 @@ import {
   VAULT_STORAGE_KEY,
   VAULT_WORDLIST,
   deriveVaultIdentity,
+  deriveVaultIdentityFromKeyMaterial,
   exportEncryptedVaultJson,
   generatePassphrase,
   getActiveCustomScrubTerms,
   getCurrentVaultSession,
   getPersistedVaultMetadata,
   importEncryptedVaultJson,
+  importEncryptedVaultWithActiveSession,
   lockVault,
   openVaultBundle,
   sealVaultBundle,
+  unlockVaultWithKeyMaterial,
   unlockVaultWithPassphrase,
   updateVaultPayload,
   wipeLocalVault,
 } from "@/lib/auth/vault";
 
-describe("dRouter Zero-Knowledge Client Vault", () => {
+describe("deRoute Client Vault", () => {
   beforeEach(() => {
     wipeLocalVault();
   });
@@ -229,5 +232,27 @@ describe("dRouter Zero-Knowledge Client Vault", () => {
     } finally {
       (globalThis as { window?: unknown }).window = origWindow;
     }
+  });
+
+  it("derives deterministic identities from raw key material and restores backups with the active session", () => {
+    const ikm = new Uint8Array(32);
+    for (let i = 0; i < 32; i++) ikm[i] = (i * 5 + 9) & 0xff;
+
+    const id1 = deriveVaultIdentityFromKeyMaterial(ikm);
+    const id2 = deriveVaultIdentityFromKeyMaterial(ikm);
+    expect(id1).toEqual(id2);
+
+    const session = unlockVaultWithKeyMaterial(ikm, false, "passkey");
+    expect(session.authMethod).toBe("passkey");
+    expect(session.vaultId).toBe(id1.vaultId);
+
+    updateVaultPayload({ customScrubTerms: ["SecretTerm1", "SecretTerm2"] });
+    const exported = exportEncryptedVaultJson();
+
+    updateVaultPayload({ customScrubTerms: [] });
+    expect(getActiveCustomScrubTerms()).toEqual([]);
+
+    const restored = importEncryptedVaultWithActiveSession(exported);
+    expect(restored.payload.customScrubTerms).toEqual(["SecretTerm1", "SecretTerm2"]);
   });
 });

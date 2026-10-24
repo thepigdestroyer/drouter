@@ -10,7 +10,6 @@ import {
   createTokenBucketLimiter,
   readBoundedJson,
 } from "@/lib/ratelimit";
-import { simRoots } from "@/lib/sim/roots";
 
 const MAX_FORENSICS_BODY_BYTES = 262_144; // 256 KB max proof bundle size
 
@@ -19,22 +18,6 @@ const forensicsLimiter = createTokenBucketLimiter({
   capacity: 60,
   refillPerSec: 2,
 });
-
-function getPinnedSimNodePublicKeys(): Record<string, string> {
-  try {
-    if (!process.env.SIM_HARDWARE_SEED) {
-      return {};
-    }
-    const roots = simRoots();
-    const map: Record<string, string> = {};
-    for (const n of roots.nodes) {
-      map[n.simId] = n.identityPublicKey;
-    }
-    return map;
-  } catch {
-    return {};
-  }
-}
 
 export async function GET(request?: NextRequest) {
   try {
@@ -49,7 +32,7 @@ export async function GET(request?: NextRequest) {
 
   return NextResponse.json({
     schema: FORENSIC_PROOF_SCHEMA,
-    pinnedNodePublicKeys: getPinnedSimNodePublicKeys(),
+    pinnedNodePublicKeys: {},
   });
 }
 
@@ -62,6 +45,7 @@ export async function POST(request: NextRequest) {
       bundle?: ForensicProofBundle;
       expectedClientPublicKeyHex?: string;
       expectedPopSignerPublicKeyHex?: string;
+      pinnedNodePublicKeys?: Record<string, string>;
       requirePinnedOrigin?: boolean;
     }>(request, MAX_FORENSICS_BODY_BYTES);
 
@@ -81,7 +65,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const pinnedNodePublicKeys = getPinnedSimNodePublicKeys();
+    const pinnedNodePublicKeys =
+      body.pinnedNodePublicKeys && typeof body.pinnedNodePublicKeys === "object"
+        ? body.pinnedNodePublicKeys
+        : {};
     const verification = verifyForensicProofBundleOffline(bundle, {
       expectedClientPublicKeyHex: body.expectedClientPublicKeyHex,
       expectedPopSignerPublicKeyHex: body.expectedPopSignerPublicKeyHex,

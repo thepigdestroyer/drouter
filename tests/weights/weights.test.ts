@@ -1,12 +1,7 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 import { describe, expect, it } from "vitest";
-import { GET as getWeightsRoute, POST as postWeightsRoute } from "@/app/api/weights/route";
-import {
-  createCustodyProviderKeypair,
-  custodyUnwrapWeightKey,
-  providerWrapWeightKey,
-} from "@/lib/weights/closed-release";
+import { GET as getWeightsRoute } from "@/app/api/weights/route";
 import {
   computeShardMerkleRoot,
   listModelRegistry,
@@ -18,7 +13,7 @@ import {
 
 describe("Subsystem 9: Model Weights Registry & Live Provenance Verification", () => {
   describe("Open-weight model real HF shard Merkle tree & verifier", () => {
-    it("exposes all required open models in OPEN_MODEL_CATALOG with real Hugging Face shard counts and provenance", () => {
+    it("exposes only real open models in OPEN_MODEL_CATALOG with real Hugging Face shard counts and provenance", () => {
       expect(OPEN_MODEL_CATALOG["kimi-k3"].shardCount).toBe(96);
       expect(OPEN_MODEL_CATALOG["kimi-k3"].totalParams).toBe("2.8T");
       expect(OPEN_MODEL_CATALOG["kimi-k3"].weightRepoCommit).toBe(
@@ -29,18 +24,20 @@ describe("Subsystem 9: Model Weights Registry & Live Provenance Verification", (
       expect(OPEN_MODEL_CATALOG["gpt-oss-120b"].shardCount).toBe(15);
       expect(OPEN_MODEL_CATALOG["llama3-3-70b"].shardCount).toBe(15);
       expect(OPEN_MODEL_CATALOG["kimi-linear-48b"].shardCount).toBe(20);
-      expect(OPEN_MODEL_CATALOG["sim-echo-1"].shardCount).toBe(1);
-      expect(OPEN_MODEL_CATALOG["sim-echo-1"].simulated).toBe(true);
+      expect(OPEN_MODEL_CATALOG["sim-echo-1"]).toBeUndefined();
 
       const registry = listModelRegistry();
       const ids = registry.map((r) => r.modelId);
-      expect(ids).toContain("kimi-k3");
-      expect(ids).toContain("glm-5-3");
-      expect(ids).toContain("deepseek-v4-1-flash");
-      expect(ids).toContain("gpt-oss-120b");
-      expect(ids).toContain("llama3-3-70b");
-      expect(ids).toContain("kimi-linear-48b");
-      expect(ids).toContain("sim-echo-1");
+      expect(ids).toEqual([
+        "kimi-k3",
+        "glm-5-3",
+        "deepseek-v4-1-flash",
+        "gpt-oss-120b",
+        "llama3-3-70b",
+        "kimi-linear-48b",
+      ]);
+      expect(ids).not.toContain("sim-echo-1");
+      expect(ids).not.toContain("frontier-closed-x1");
     });
 
     it("verifies Merkle root and membership proof for every shard index across all catalog models", () => {
@@ -248,7 +245,7 @@ describe("Subsystem 9: Model Weights Registry & Live Provenance Verification", (
       expect(tamperedRes.comparisons.hfRepoCommitMatchesAcrossSources).toBe(false);
     });
 
-    it("GET /api/weights and POST /api/weights return real provenance comparisons and real HF shard Merkle proofs", async () => {
+    it("GET /api/weights returns real provenance comparisons and real HF shard Merkle proofs", async () => {
       const getRes = await getWeightsRoute(new Request("http://localhost:3000/api/weights?model=kimi-k3"));
       expect(getRes.status).toBe(200);
       const getJson = (await getRes.json()) as {
@@ -265,176 +262,6 @@ describe("Subsystem 9: Model Weights Registry & Live Provenance Verification", (
       expect(getJson.provenance.comparisons.weightMpkHashMatchesAcrossSources).toBe(true);
       expect(Object.keys(getJson.allModelsProvenance)).toContain("kimi-k3");
       expect(Object.keys(getJson.allModelsProvenance)).toContain("glm-5-3");
-
-      const postRes = await postWeightsRoute(
-        new Request("http://localhost:3000/api/weights", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            providerId: "provider-frontier-labs",
-            modelId: "kimi-k3",
-            status: "full",
-          }),
-        }),
-      );
-      expect(postRes.status).toBe(200);
-      const postJson = (await postRes.json()) as {
-        released: boolean;
-        simulated: boolean;
-        mode: string;
-        provenance: { modelId: string };
-      };
-      expect(postJson.released).toBe(true);
-      expect(postJson.simulated).toBe(true);
-      expect(postJson.mode).toBe("Simulated");
-      expect(postJson.provenance.modelId).toBe("kimi-k3");
-    });
-  });
-
-  describe("Local hybrid X25519 + ML-KEM-768 weight-key wrapping primitive", () => {
-    const approvedMeasurement = bytesToHex(
-      sha256(utf8ToBytes("drouter:approved-tee-rim-measurement:v1")),
-    );
-    const sampleWeightKeyHex = bytesToHex(
-      sha256(utf8ToBytes("provider-master-aes256-weight-key-material")),
-    );
-
-    it("wraps and unwraps weight key when evidence meets measurement and quorum requirements", () => {
-      const custodyKeys = createCustodyProviderKeypair(
-        bytesToHex(sha256(utf8ToBytes("deterministic-custody-seed-1"))),
-      );
-      expect(custodyKeys.bindingHash).toHaveLength(64);
-
-      const res = providerWrapWeightKey({
-        providerId: "provider-alpha",
-        modelId: "frontier-closed-x1",
-        weightKeyHex: sampleWeightKeyHex,
-        nodeEvidence: {
-          chipId: "H200-TEE-001",
-          measurement: approvedMeasurement,
-          approvedMeasurement,
-          status: "full",
-          quorumSignatures: 5,
-          requiredQuorum: 4,
-          custodyX25519Pk: custodyKeys.x25519PublicKey,
-          custodyMlkemPk: custodyKeys.mlkemPublicKey,
-        },
-      });
-
-      expect(res.released).toBe(true);
-      if (!res.released) throw new Error("Expected release");
-
-      const recoveredWeightKey = custodyUnwrapWeightKey(res, custodyKeys);
-      expect(recoveredWeightKey).toBe(sampleWeightKeyHex);
-
-      const tamperedCiphertext = {
-        ...res,
-        wrappedKeyCiphertextHex:
-          res.wrappedKeyCiphertextHex.slice(0, -2) +
-          (res.wrappedKeyCiphertextHex.endsWith("00") ? "ff" : "00"),
-      };
-      expect(() => custodyUnwrapWeightKey(tamperedCiphertext, custodyKeys)).toThrow();
-    });
-
-    it("refuses weight key release when measurement mismatches, node is suspended, or quorum signatures are below threshold", () => {
-      const custodyKeys = createCustodyProviderKeypair();
-
-      const wrongMeasurementRes = providerWrapWeightKey({
-        providerId: "provider-alpha",
-        modelId: "frontier-closed-x1",
-        weightKeyHex: sampleWeightKeyHex,
-        nodeEvidence: {
-          chipId: "H200-TEE-002",
-          measurement: bytesToHex(sha256(utf8ToBytes("unapproved-measurement"))),
-          approvedMeasurement,
-          status: "full",
-          quorumSignatures: 5,
-          requiredQuorum: 4,
-          custodyX25519Pk: custodyKeys.x25519PublicKey,
-          custodyMlkemPk: custodyKeys.mlkemPublicKey,
-        },
-      });
-      expect(wrongMeasurementRes.released).toBe(false);
-      if (!wrongMeasurementRes.released) {
-        expect(wrongMeasurementRes.reason).toMatch(/measurement/i);
-      }
-
-      const suspendedRes = providerWrapWeightKey({
-        providerId: "provider-alpha",
-        modelId: "frontier-closed-x1",
-        weightKeyHex: sampleWeightKeyHex,
-        nodeEvidence: {
-          chipId: "H200-TEE-003",
-          measurement: approvedMeasurement,
-          approvedMeasurement,
-          status: "suspended",
-          quorumSignatures: 5,
-          requiredQuorum: 4,
-          custodyX25519Pk: custodyKeys.x25519PublicKey,
-          custodyMlkemPk: custodyKeys.mlkemPublicKey,
-        },
-      });
-      expect(suspendedRes.released).toBe(false);
-      if (!suspendedRes.released) {
-        expect(suspendedRes.reason).toMatch(/suspended/i);
-      }
-
-      const lowQuorumRes = providerWrapWeightKey({
-        providerId: "provider-alpha",
-        modelId: "frontier-closed-x1",
-        weightKeyHex: sampleWeightKeyHex,
-        nodeEvidence: {
-          chipId: "H200-TEE-004",
-          measurement: approvedMeasurement,
-          approvedMeasurement,
-          status: "ramp",
-          quorumSignatures: 2,
-          requiredQuorum: 4,
-          custodyX25519Pk: custodyKeys.x25519PublicKey,
-          custodyMlkemPk: custodyKeys.mlkemPublicKey,
-        },
-      });
-      expect(lowQuorumRes.released).toBe(false);
-      if (!lowQuorumRes.released) {
-        expect(lowQuorumRes.reason).toMatch(/quorum/i);
-      }
-
-      const zeroQuorumBypass = providerWrapWeightKey({
-        providerId: "provider-alpha",
-        modelId: "frontier-closed-x1",
-        weightKeyHex: sampleWeightKeyHex,
-        nodeEvidence: {
-          chipId: "H200-TEE-005",
-          measurement: approvedMeasurement,
-          approvedMeasurement,
-          status: "full",
-          quorumSignatures: 0,
-          requiredQuorum: 0,
-          custodyX25519Pk: custodyKeys.x25519PublicKey,
-          custodyMlkemPk: custodyKeys.mlkemPublicKey,
-        },
-      });
-      expect(zeroQuorumBypass.released).toBe(false);
-
-      const validRel = providerWrapWeightKey({
-        providerId: "provider-alpha",
-        modelId: "frontier-closed-x1",
-        weightKeyHex: sampleWeightKeyHex,
-        nodeEvidence: {
-          chipId: "H200-TEE-006",
-          measurement: approvedMeasurement,
-          approvedMeasurement,
-          status: "full",
-          quorumSignatures: 5,
-          requiredQuorum: 4,
-          custodyX25519Pk: custodyKeys.x25519PublicKey,
-          custodyMlkemPk: custodyKeys.mlkemPublicKey,
-        },
-      });
-      if (!validRel.released) throw new Error("Expected release");
-      expect(() => custodyUnwrapWeightKey(validRel, custodyKeys, "aa".repeat(32))).toThrow(
-        /Provider public key does not match/i,
-      );
     });
   });
 });

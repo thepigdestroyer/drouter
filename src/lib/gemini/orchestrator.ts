@@ -26,6 +26,8 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { createSessionScrubber } from "@/lib/privacy/scrubber";
+import { mechanicalRedact as realMechanicalRedact } from "@/lib/privacy/mechanical";
+import { attestedPiiFilter as realAttestedPiiFilter } from "@/lib/privacy/attested-filter";
 import { bucketForTokens, estimateTokens } from "@/lib/privacy/padding";
 import { padJsonPayloadToBucket } from "@/lib/relay";
 import { CONFIDENTIAL_PROVIDERS } from "@/lib/providers/catalog";
@@ -143,150 +145,6 @@ function computeTokenShannonEntropy(token: string): number {
   return entropy;
 }
 
-/**
- * Deterministic fallback implementation of D3 `mechanicalRedact` matching the
- * exact `@/lib/privacy/mechanical` contract, used only if `@/lib/privacy/mechanical`
- * is still being built by parallel agent B2.
- */
-function fallbackMechanicalRedact(
-  text: string,
-  opts?: { customTerms?: string[] },
-): MechanicalRedactResult {
-  const scrubber = createSessionScrubber(opts?.customTerms ?? []);
-  const firstPass = scrubber.scrub(text);
-  const redactions: MechanicalRedactionItem[] = firstPass.replacements.map(
-    (r) => ({
-      kind: r.kind,
-      placeholder: r.placeholder,
-    }),
-  );
-
-  const extraMap = new Map<string, string>();
-  const reverseMap = new Map<string, string>();
-  const counters: Record<string, number> = {
-    URL: 0,
-    DATE: 0,
-    ADDRESS: 0,
-    NAME: 0,
-    DIGITS: 0,
-    ENTROPY: 0,
-  };
-
-  const allocatePlaceholder = (kind: string, original: string): string => {
-    const key = `${kind}:${original}`;
-    const existing = reverseMap.get(key);
-    if (existing) {
-      redactions.push({ kind, placeholder: existing });
-      return existing;
-    }
-    counters[kind] = (counters[kind] ?? 0) + 1;
-    const ph = `[${kind}_${counters[kind]}]`;
-    extraMap.set(ph, original);
-    reverseMap.set(key, ph);
-    redactions.push({ kind, placeholder: ph });
-    return ph;
-  };
-
-  let working = firstPass.scrubbed;
-
-  // 1. URLs and domains
-  working = working.replace(
-    /\b(?:https?:\/\/[^\s<>)"']+|www\.[^\s<>)"']+|[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.(?:com|org|net|io|sh|dev|ai|app|gov|edu|co\.uk|ac\.uk)(?:\/[^\s<>)"']*)?)\b/gi,
-    (m) => allocatePlaceholder("URL", m),
-  );
-
-  // 2. Dates (ISO YYYY-MM-DD, slash/dot dates, or Month DD, YYYY)
-  working = working.replace(
-    /\b(?:\d{4}[-/.](?:0[1-9]|1[0-2])[-/.](?:0[1-9]|[12]\d|3[01])|(?:0?[1-9]|[12]\d|3[01])[-/.](?:0?[1-9]|1[0-2])[-/.](?:19|20)\d{2}|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?,?\s+(?:19|20)\d{2})\b/g,
-    (m) => allocatePlaceholder("DATE", m),
-  );
-
-  // 3. Street-address patterns
-  working = working.replace(
-    /\b\d{1,6}\s+(?:[A-Z][a-zA-Z0-9.'-]*\s+){1,4}(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Way|Place|Pl|Square|Sq|Parkway|Pkwy|Close|Crescent|Gardens)\b/g,
-    (m) => allocatePlaceholder("ADDRESS", m),
-  );
-
-  // 4. Capitalized multi-word name sequences (excluding common sentence starters and placeholder brackets)
-  const SAFE_CAPITALIZED_WORDS = new Set([
-    "Audit",
-    "Review",
-    "Summarize",
-    "Verify",
-    "List",
-    "Check",
-    "Allow",
-    "Northvale",
-    "Institute",
-    "Atlas",
-    "Cellular",
-    "Unit",
-    "Phase",
-    "Tinfoil",
-    "Confidential",
-    "Computing",
-    "Intel",
-    "Circle",
-    "Arc",
-    "Testnet",
-    "MongoDB",
-    "Hybrid",
-    "Search",
-  ]);
-  working = working.replace(
-    /\b([A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,}){1,3})\b/g,
-    (m) => {
-      const words = m.split(/\s+/);
-      if (words.every((w) => SAFE_CAPITALIZED_WORDS.has(w))) {
-        return m;
-      }
-      return allocatePlaceholder("NAME", m);
-    },
-  );
-
-  // 5. Any token with 4+ consecutive digits (that is not already inside a [PLACEHOLDER_N])
-  working = working.replace(
-    /(\[[A-Z_]+_\d+\])|([£$€¥]?\d[\d,._-]*\d|\b[A-Za-z0-9_.-]*\d{4,}[A-Za-z0-9_.-]*\b)/g,
-    (full, placeholderMatch: string | undefined, digitToken: string | undefined) => {
-      if (placeholderMatch) return placeholderMatch;
-      if (!digitToken) return full;
-      const digitsOnly = digitToken.replace(/\D/g, "");
-      if (digitsOnly.length >= 4) {
-        return allocatePlaceholder("DIGITS", digitToken);
-      }
-      return full;
-    },
-  );
-
-  // 6. High-entropy tokens (length >= 16, Shannon entropy >= 3.75 bits/char, mixed char classes)
-  working = working.replace(
-    /(\[[A-Z_]+_\d+\])|\b([A-Za-z0-9_+=/.-]{16,})\b/g,
-    (full, placeholderMatch: string | undefined, cand: string | undefined) => {
-      if (placeholderMatch) return placeholderMatch;
-      if (!cand) return full;
-      const hasDigit = /\d/.test(cand);
-      const hasLetter = /[A-Za-z]/.test(cand);
-      if (hasDigit && hasLetter && computeTokenShannonEntropy(cand) >= 3.75) {
-        return allocatePlaceholder("ENTROPY", cand);
-      }
-      return full;
-    },
-  );
-
-  const restore = (s: string): string => {
-    if (!s) return s;
-    const afterExtra = s.replace(/\[[A-Z_]+_\d+\]/g, (tok) => {
-      return extraMap.get(tok) ?? tok;
-    });
-    return scrubber.restore(afterExtra);
-  };
-
-  return {
-    text: working,
-    redactions,
-    restore,
-  };
-}
 
 let cachedMechanicalRedactFn: MechanicalRedactFn | null = null;
 let cachedAttestedFilterFn: AttestedPiiFilterFn | null = null;
@@ -296,19 +154,8 @@ async function resolveMechanicalRedactFn(
 ): Promise<MechanicalRedactFn> {
   if (override) return override;
   if (cachedMechanicalRedactFn) return cachedMechanicalRedactFn;
-  const moduleSpecifier = "@/lib/privacy/mechanical";
-  try {
-    const mod = (await import(moduleSpecifier)) as {
-      mechanicalRedact?: MechanicalRedactFn;
-    };
-    if (typeof mod.mechanicalRedact === "function") {
-      cachedMechanicalRedactFn = mod.mechanicalRedact;
-      return mod.mechanicalRedact;
-    }
-  } catch {
-    // Parallel agent B2 module not yet on disk; use deterministic fallback matching D3 contract.
-  }
-  return fallbackMechanicalRedact;
+  cachedMechanicalRedactFn = realMechanicalRedact as MechanicalRedactFn;
+  return cachedMechanicalRedactFn;
 }
 
 async function resolveAttestedPiiFilterFn(
@@ -316,19 +163,8 @@ async function resolveAttestedPiiFilterFn(
 ): Promise<AttestedPiiFilterFn | null> {
   if (override) return override;
   if (cachedAttestedFilterFn) return cachedAttestedFilterFn;
-  const moduleSpecifier = "@/lib/privacy/attested-filter";
-  try {
-    const mod = (await import(moduleSpecifier)) as {
-      attestedPiiFilter?: AttestedPiiFilterFn;
-    };
-    if (typeof mod.attestedPiiFilter === "function") {
-      cachedAttestedFilterFn = mod.attestedPiiFilter;
-      return mod.attestedPiiFilter;
-    }
-  } catch {
-    // Parallel agent B2 module not yet on disk or unavailable.
-  }
-  return null;
+  cachedAttestedFilterFn = realAttestedPiiFilter as AttestedPiiFilterFn;
+  return cachedAttestedFilterFn;
 }
 
 /**

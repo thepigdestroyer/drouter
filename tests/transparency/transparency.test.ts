@@ -714,7 +714,8 @@ describe("Permissionless Independent Verification (D8: CLI Key Gen, Canonical C1
     const submitted = await submitVerificationClaim({
       upstream: "http://localhost",
       signedPayload: signed,
-      fetchImpl: (url: string, init: RequestInit) => postVerificationsRoute(new Request(url, init)),
+      fetchImpl: ((url: string, init: RequestInit) =>
+        postVerificationsRoute(new Request(url, init))) as unknown as typeof fetch,
     });
 
     expect(submitted.ok).toBe(true);

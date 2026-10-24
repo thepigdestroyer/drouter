@@ -4,7 +4,6 @@ export {
   type SprtAuditOptions,
   type SprtAuditResult,
   type SprtVerdict,
-  generateMysteryShopperProbes,
   runSprtModelAudit,
 } from "./sprt";
 

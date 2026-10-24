@@ -1,7 +1,17 @@
+import { gunzipSync } from "node:zlib";
 import { p256 } from "@noble/curves/nist.js";
-import { hkdf } from "@noble/hashes/hkdf.js";
-import { sha256, sha384 } from "@noble/hashes/sha2.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
+import {
+  decodeSnpReportBytes,
+  decodeTdxQuoteBytes,
+  verifyAmdSevSnpChainEndToEnd,
+  verifyTdxQuoteEndToEnd,
+  type RouterSnpHardwareReport,
+  type SnpChainVerificationResult,
+  type TdxQuoteParsed,
+  type TdxQuoteVerificationResult,
+} from "@/lib/tinfoil/deep-inspect";
 
 /**
  * Spec §3 E4: Platform Tiers
@@ -81,7 +91,9 @@ export interface VerifyTierAPlusResult {
   detail: string;
 }
 
-function canonicalTdxQuotePayload(quote: Omit<TdxQuoteV4, "pckSignatureHex" | "pckPublicKeyHex">): Uint8Array {
+export function canonicalTdxQuotePayload(
+  quote: Omit<TdxQuoteV4, "pckSignatureHex" | "pckPublicKeyHex">,
+): Uint8Array {
   const canonical = JSON.stringify({
     domain: "drouter-tdx-quote-v4",
     teeType: quote.teeType,
@@ -94,8 +106,11 @@ function canonicalTdxQuotePayload(quote: Omit<TdxQuoteV4, "pckSignatureHex" | "p
   return utf8ToBytes(canonical);
 }
 
-function canonicalSpdmPayload(
-  device: Omit<SpdmDeviceMeasurement, "signatureHex" | "devicePublicKeyHex" | "expectedDigestHex">,
+export function canonicalSpdmPayload(
+  device: Omit<
+    SpdmDeviceMeasurement,
+    "signatureHex" | "devicePublicKeyHex" | "expectedDigestHex"
+  >,
   teeIoBoundVmId: string,
 ): Uint8Array {
   const canonical = JSON.stringify({
@@ -115,7 +130,11 @@ export function p256SignHex(message: Uint8Array, secretKey: Uint8Array): string 
   return bytesToHex(p256.sign(digest, secretKey, { prehash: false }));
 }
 
-export function p256VerifyHex(signatureHex: string, message: Uint8Array, publicKeyHex: string): boolean {
+export function p256VerifyHex(
+  signatureHex: string,
+  message: Uint8Array,
+  publicKeyHex: string,
+): boolean {
   try {
     const sigBytes = hexToBytes(signatureHex);
     const pubBytes = hexToBytes(publicKeyHex);
@@ -124,68 +143,6 @@ export function p256VerifyHex(signatureHex: string, message: Uint8Array, publicK
   } catch {
     return false;
   }
-}
-
-export function deriveDeterministicP256KeyPair(label: string): {
-  secretKey: Uint8Array;
-  publicKeyHex: string;
-} {
-  const seed = sha256(utf8ToBytes("drouter-tiers-demo-seed-v1"));
-  const secretKey = hkdf(sha256, seed, undefined, utf8ToBytes(label), 32);
-  const publicKeyHex = bytesToHex(p256.getPublicKey(secretKey, false));
-  return { secretKey, publicKeyHex };
-}
-
-/**
- * Helper to create a signed Intel TDX Quote v4 for testing and simulation.
- */
-export function createSignedTdxQuote(params?: Partial<{
-  teeType: number;
-  mrtd: string;
-  rtmr0: string;
-  reportData: string;
-  tdAttributesDebug: boolean;
-  tcbSvn: number;
-  keyLabel: string;
-}>): TdxQuoteV4 {
-  const mrtd =
-    params?.mrtd ??
-    bytesToHex(sha384(utf8ToBytes("drouter-tdx-mrtd/v0.1.0")));
-  const rtmr0 =
-    params?.rtmr0 ??
-    bytesToHex(sha384(utf8ToBytes("drouter-tdx-rtmr0/v0.1.0")));
-  const reportData =
-    params?.reportData ??
-    bytesToHex(sha256(utf8ToBytes("drouter-session-binding-v1")));
-  const teeType = params?.teeType ?? TDX_TEE_TYPE;
-  const tdAttributesDebug = params?.tdAttributesDebug ?? false;
-  const tcbSvn = params?.tcbSvn ?? 7;
-
-  const { secretKey, publicKeyHex } = deriveDeterministicP256KeyPair(
-    params?.keyLabel ?? "intel-sgx-pck-tdx-v4",
-  );
-
-  const payload = canonicalTdxQuotePayload({
-    teeType,
-    mrtd,
-    rtmr0,
-    reportData,
-    tdAttributesDebug,
-    tcbSvn,
-  });
-
-  const pckSignatureHex = p256SignHex(payload, secretKey);
-
-  return {
-    teeType,
-    mrtd,
-    rtmr0,
-    reportData,
-    tdAttributesDebug,
-    tcbSvn,
-    pckSignatureHex,
-    pckPublicKeyHex: publicKeyHex,
-  };
 }
 
 /**
@@ -221,7 +178,8 @@ export function verifyTdxTierBQuote(
       accepted: false,
       tier: "B",
       assuranceWarning: TIER_B_ASSURANCE_WARNING,
-      reason: "TDX quote rejected: TD_ATTRIBUTES.DEBUG bit is set (debug TDs cannot serve production traffic)",
+      reason:
+        "TDX quote rejected: TD_ATTRIBUTES.DEBUG bit is set (debug TDs cannot serve production traffic)",
     };
   }
 
@@ -275,75 +233,6 @@ export function verifyTdxTierBQuote(
     tier: "B",
     assuranceWarning: TIER_B_ASSURANCE_WARNING,
     reason: "Intel TDX Quote v4 verified (Tier B opt-in active)",
-  };
-}
-
-/**
- * Helper to create a complete 10-device (8 GPUs + 1 NIC + 1 NVMe) SPDM 1.2 + TEE-IO evidence bundle.
- */
-export function createSampleTierAPlusEvidence(params?: {
-  nodeId?: string;
-  cpuModel?: string;
-  teeIoBoundVmId?: string;
-  signedVmId?: string;
-}): TierAPlusEvidence {
-  const nodeId = params?.nodeId ?? "tier-aplus-node-1";
-  const cpuModel = params?.cpuModel ?? RISER_PROOF_CPU_ALLOWLIST[1];
-  const teeIoBoundVmId = params?.teeIoBoundVmId ?? "cvm-snp-vm-001";
-  const signedVmId = params?.signedVmId ?? teeIoBoundVmId;
-
-  const specs: { deviceId: string; deviceClass: SpdmDeviceClass }[] = [
-    { deviceId: "gpu-0", deviceClass: "GPU" },
-    { deviceId: "gpu-1", deviceClass: "GPU" },
-    { deviceId: "gpu-2", deviceClass: "GPU" },
-    { deviceId: "gpu-3", deviceClass: "GPU" },
-    { deviceId: "gpu-4", deviceClass: "GPU" },
-    { deviceId: "gpu-5", deviceClass: "GPU" },
-    { deviceId: "gpu-6", deviceClass: "GPU" },
-    { deviceId: "gpu-7", deviceClass: "GPU" },
-    { deviceId: "nic-0", deviceClass: "NIC" },
-    { deviceId: "nvme-0", deviceClass: "NVME" },
-  ];
-
-  const devices: SpdmDeviceMeasurement[] = specs.map((spec) => {
-    const digest = bytesToHex(
-      sha384(utf8ToBytes(`spdm-fw-measurement/${spec.deviceClass}/${spec.deviceId}/v1`)),
-    );
-    const nonceHex = bytesToHex(
-      sha256(utf8ToBytes(`spdm-nonce/${nodeId}/${spec.deviceId}`)),
-    );
-    const { secretKey, publicKeyHex } = deriveDeterministicP256KeyPair(
-      `spdm-device-key/${nodeId}/${spec.deviceId}`,
-    );
-    const payload = canonicalSpdmPayload(
-      {
-        deviceId: spec.deviceId,
-        deviceClass: spec.deviceClass,
-        spdmVersion: "1.2",
-        measurementDigestHex: digest,
-        nonceHex,
-      },
-      signedVmId,
-    );
-    const signatureHex = p256SignHex(payload, secretKey);
-
-    return {
-      deviceId: spec.deviceId,
-      deviceClass: spec.deviceClass,
-      spdmVersion: "1.2",
-      measurementDigestHex: digest,
-      expectedDigestHex: digest,
-      nonceHex,
-      devicePublicKeyHex: publicKeyHex,
-      signatureHex,
-    };
-  });
-
-  return {
-    nodeId,
-    cpuModel,
-    teeIoBoundVmId,
-    devices,
   };
 }
 
@@ -433,5 +322,293 @@ export function verifyTierAPlusEvidence(
     detail: accepted
       ? `Upgraded to Tier A+: ${spdmVerifiedCount}/10 SPDM 1.2 devices (8x GPU, NIC, NVMe) bound via TEE-IO to ${expectedVmId} on ${evidence.cpuModel}`
       : `Remains Tier A: ${reasons.join("; ")}`,
+  };
+}
+
+export interface LiveQuoteVerificationMeasurements {
+  tierASevSnpRouter: {
+    host: string;
+    report: RouterSnpHardwareReport | null;
+    verification: SnpChainVerificationResult | null;
+    measuredVerifyLatencyMs: number | null;
+  };
+  tierAPlusTurinEnclave: {
+    modelId: string;
+    host: string;
+    report: RouterSnpHardwareReport | null;
+    verification: SnpChainVerificationResult | null;
+    measuredVerifyLatencyMs: number | null;
+  };
+  tierBTdxEnclave: {
+    modelId: string;
+    host: string;
+    parsedQuote: TdxQuoteParsed | null;
+    verification: TdxQuoteVerificationResult | null;
+    measuredVerifyLatencyMs: number | null;
+  };
+}
+
+interface RawLiveQuoteCache {
+  fetchedAt: number;
+  routerHost: string;
+  routerRawBytes: Uint8Array | null;
+  routerVcek: string | null;
+  genoaChainPem: string | null;
+  turinModelId: string;
+  turinHost: string;
+  turinRawBytes: Uint8Array | null;
+  turinVcekDer: Uint8Array | null;
+  turinChainPem: string | null;
+  tdxModelId: string;
+  tdxHost: string;
+  tdxRawBytes: Uint8Array | null;
+  tdxRtmr1Hex?: string;
+  tdxRtmr2Hex?: string;
+}
+
+const LIVE_QUOTE_CACHE_TTL_MS = 60_000;
+let cachedRawLiveQuotes: RawLiveQuoteCache | null = null;
+
+async function fetchJsonWithTimeout<T>(url: string, timeoutMs = 4500): Promise<T | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as T;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchTextWithTimeout(url: string, timeoutMs = 4500): Promise<string | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    return await res.text();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchBytesWithTimeout(url: string, timeoutMs = 4500): Promise<Uint8Array | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    return new Uint8Array(await res.arrayBuffer());
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function getOrFetchRawLiveQuotes(): Promise<RawLiveQuoteCache> {
+  const now = Date.now();
+  if (cachedRawLiveQuotes && now - cachedRawLiveQuotes.fetchedAt < LIVE_QUOTE_CACHE_TTL_MS) {
+    return cachedRawLiveQuotes;
+  }
+
+  const [atc, proxy, genoaChainPem, turinChainPem] = await Promise.all([
+    fetchJsonWithTimeout<{
+      domain?: string;
+      vcek?: string;
+      enclaveAttestationReport?: { body?: string };
+    }>("https://atc.tinfoil.sh/attestation", 4500),
+    fetchJsonWithTimeout<{
+      models?: Record<
+        string,
+        {
+          tag?: string;
+          measurement?: { registers?: string[] };
+          enclaves?: Record<string, { predicate?: string }>;
+          verification?: { hosts?: Record<string, { code_tag?: string }> };
+        }
+      >;
+    }>("https://inference.tinfoil.sh/.well-known/tinfoil-proxy", 4500),
+    fetchTextWithTimeout("https://kdsintf.amd.com/vcek/v1/Genoa/cert_chain", 4000),
+    fetchTextWithTimeout("https://kdsintf.amd.com/vcek/v1/Turin/cert_chain", 4000),
+  ]);
+
+  let routerRawBytes: Uint8Array | null = null;
+  if (atc?.enclaveAttestationReport?.body) {
+    try {
+      routerRawBytes = new Uint8Array(
+        gunzipSync(Buffer.from(atc.enclaveAttestationReport.body, "base64")),
+      );
+    } catch {
+      routerRawBytes = null;
+    }
+  }
+
+  // Pick live AMD Turin SEV-SNP model enclave (glm-5-3) and live Intel TDX v4 model enclave (deepseek-v4-1-flash)
+  const glmEntry = proxy?.models?.["glm-5-3"];
+  const glmHost = glmEntry?.enclaves ? Object.keys(glmEntry.enclaves)[0] ?? "" : "";
+
+  const dsEntry = proxy?.models?.["deepseek-v4-1-flash"];
+  const dsHost = dsEntry?.enclaves
+    ? (Object.keys(dsEntry.enclaves).find(
+        (h) => dsEntry.verification?.hosts?.[h]?.code_tag === dsEntry.tag,
+      ) ??
+        Object.keys(dsEntry.enclaves)[0] ??
+        "")
+    : "";
+
+  const [glmAtt, dsAtt] = await Promise.all([
+    glmHost
+      ? fetchJsonWithTimeout<{ format?: string; body?: string }>(
+          `https://${glmHost}/.well-known/tinfoil-attestation`,
+          3500,
+        )
+      : Promise.resolve(null),
+    dsHost
+      ? fetchJsonWithTimeout<{ format?: string; body?: string }>(
+          `https://${dsHost}/.well-known/tinfoil-attestation`,
+          3500,
+        )
+      : Promise.resolve(null),
+  ]);
+
+  let turinRawBytes: Uint8Array | null = null;
+  let turinVcekDer: Uint8Array | null = null;
+  if (glmAtt?.body) {
+    try {
+      turinRawBytes = new Uint8Array(gunzipSync(Buffer.from(glmAtt.body, "base64")));
+      const decoded = decodeSnpReportBytes(turinRawBytes);
+      const chipIdShort =
+        decoded.productName === "Turin" ? decoded.chipIdHex.slice(0, 16) : decoded.chipIdHex;
+      const fmcParam = decoded.productName === "Turin" ? `&fmcSPL=${decoded.tcb.fmc}` : "";
+      const vcekUrl = `https://kdsintf.amd.com/vcek/v1/${decoded.productName}/${chipIdShort}?blSPL=${decoded.tcb.bootloader}&teeSPL=${decoded.tcb.tee}&snpSPL=${decoded.tcb.snp}&ucodeSPL=${decoded.tcb.microcode}${fmcParam}`;
+      turinVcekDer = await fetchBytesWithTimeout(vcekUrl, 3500);
+    } catch {
+      turinRawBytes = null;
+    }
+  }
+
+  let tdxRawBytes: Uint8Array | null = null;
+  if (dsAtt?.body) {
+    try {
+      tdxRawBytes = new Uint8Array(gunzipSync(Buffer.from(dsAtt.body, "base64")));
+    } catch {
+      tdxRawBytes = null;
+    }
+  }
+
+  const entry: RawLiveQuoteCache = {
+    fetchedAt: Date.now(),
+    routerHost: atc?.domain ?? "router-0.tinfoil.sh",
+    routerRawBytes,
+    routerVcek: atc?.vcek ?? null,
+    genoaChainPem,
+    turinModelId: "glm-5-3",
+    turinHost: glmHost,
+    turinRawBytes,
+    turinVcekDer,
+    turinChainPem,
+    tdxModelId: "deepseek-v4-1-flash",
+    tdxHost: dsHost,
+    tdxRawBytes,
+    tdxRtmr1Hex: dsEntry?.measurement?.registers?.[1],
+    tdxRtmr2Hex: dsEntry?.measurement?.registers?.[2],
+  };
+
+  if (routerRawBytes || turinRawBytes || tdxRawBytes) {
+    cachedRawLiveQuotes = entry;
+  }
+  return entry;
+}
+
+/**
+ * Measures real cryptographic hardware quote verification time on live quotes fetched from Tinfoil:
+ * 1. Tier A: Live AMD SEV-SNP (Genoa) 1,184-byte report + VCEK/ASK/ARK chain on `router-0.tinfoil.sh`
+ * 2. Tier A+: Live AMD EPYC 9005 (Turin) SEV-SNP 1,184-byte report + VCEK/ASK/ARK chain on `glm-5-3` enclave
+ * 3. Tier B: Live Intel TDX Quote v4 + PCK chain + QE report + RTMR1/RTMR2 on `deepseek-v4-1-flash` enclave
+ */
+export async function measureLiveTinfoilQuoteVerifications(): Promise<LiveQuoteVerificationMeasurements> {
+  const raw = await getOrFetchRawLiveQuotes();
+
+  // 1. Measure live Tier A AMD SEV-SNP Genoa router verification
+  let routerReport: RouterSnpHardwareReport | null = null;
+  let routerVerification: SnpChainVerificationResult | null = null;
+  let routerVerifyMs: number | null = null;
+  if (raw.routerRawBytes && raw.routerVcek && raw.genoaChainPem) {
+    const t0 = performance.now();
+    routerReport = decodeSnpReportBytes(raw.routerRawBytes);
+    routerVerification = await verifyAmdSevSnpChainEndToEnd(
+      raw.routerRawBytes,
+      raw.routerVcek,
+      raw.genoaChainPem,
+    );
+    routerVerifyMs = Number(Math.max(0.01, performance.now() - t0).toFixed(3));
+  }
+
+  // 2. Measure live Tier A+ AMD EPYC 9005 Turin SEV-SNP model enclave verification
+  let turinReport: RouterSnpHardwareReport | null = null;
+  let turinVerification: SnpChainVerificationResult | null = null;
+  let turinVerifyMs: number | null = null;
+  if (raw.turinRawBytes && raw.turinVcekDer && raw.turinChainPem) {
+    const t0 = performance.now();
+    turinReport = decodeSnpReportBytes(raw.turinRawBytes);
+    turinVerification = await verifyAmdSevSnpChainEndToEnd(
+      raw.turinRawBytes,
+      raw.turinVcekDer,
+      raw.turinChainPem,
+    );
+    turinVerifyMs = Number(Math.max(0.01, performance.now() - t0).toFixed(3));
+  }
+
+  // 3. Measure live Tier B Intel TDX Quote v4 model enclave verification
+  let tdxParsed: TdxQuoteParsed | null = null;
+  let tdxVerification: TdxQuoteVerificationResult | null = null;
+  let tdxVerifyMs: number | null = null;
+  if (raw.tdxRawBytes) {
+    const t0 = performance.now();
+    tdxParsed = decodeTdxQuoteBytes(raw.tdxRawBytes);
+    tdxVerification = await verifyTdxQuoteEndToEnd(raw.tdxRawBytes, {
+      rtmr1Hex: raw.tdxRtmr1Hex,
+      rtmr2Hex: raw.tdxRtmr2Hex,
+    });
+    tdxVerifyMs = Number(Math.max(0.01, performance.now() - t0).toFixed(3));
+  }
+
+  return {
+    tierASevSnpRouter: {
+      host: raw.routerHost,
+      report: routerReport,
+      verification: routerVerification,
+      measuredVerifyLatencyMs: routerVerifyMs,
+    },
+    tierAPlusTurinEnclave: {
+      modelId: raw.turinModelId,
+      host: raw.turinHost,
+      report: turinReport,
+      verification: turinVerification,
+      measuredVerifyLatencyMs: turinVerifyMs,
+    },
+    tierBTdxEnclave: {
+      modelId: raw.tdxModelId,
+      host: raw.tdxHost,
+      parsedQuote: tdxParsed,
+      verification: tdxVerification,
+      measuredVerifyLatencyMs: tdxVerifyMs,
+    },
   };
 }

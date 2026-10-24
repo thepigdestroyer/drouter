@@ -135,35 +135,21 @@ export async function POST(
       }
     : {};
 
-  if (process.env.DROUTER_STUB_UPSTREAM === "1") {
-    return Response.json(
-      {
-        stubbed: true,
-        relayId,
-        path: validatedPath,
-        bytesUp: requestBody.byteLength,
-        ...(spentCredit
-          ? {
-              creditNullifier: spentCredit.nullifier,
-              creditDenomination: spentCredit.denomination,
-            }
-          : {}),
+  if (process.env.VITEST === "true" && process.env.DROUTER_STUB_UPSTREAM === "1") {
+    return new Response(new Uint8Array(0), {
+      status: 200,
+      headers: {
+        "content-type": "application/octet-stream",
+        "X-DRouter-Relay-Hop": relayId,
+        ...creditHeaders,
       },
-      {
-        status: 200,
-        headers: {
-          "content-type": "application/json",
-          "X-DRouter-Relay-Hop": relayId,
-          ...creditHeaders,
-        },
-      },
-    );
+    });
   }
 
   const apiKey = process.env.TINFOIL_API_KEY;
   if (!apiKey) {
     return Response.json(
-      { error: "This relay has no Tinfoil API key configured. Simulated nodes still work." },
+      { error: "This relay has no Tinfoil API key configured." },
       { status: 503, headers: { "X-DRouter-Relay-Hop": relayId, ...creditHeaders } },
     );
   }

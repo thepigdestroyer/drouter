@@ -24,7 +24,6 @@ export interface OpenModelSpec {
   tokenizerHash: string;
   shardHashes: string[];
   merkleRoot: string;
-  simulated?: boolean;
   tinfoilRepo?: string;
   tinfoilTag?: string;
   weightRepoCommit?: string;
@@ -43,27 +42,14 @@ export interface OpenModelSpec {
   };
 }
 
-export interface ClosedModelSpec {
-  modelId: string;
-  kind: "closed";
-  totalParams: string;
-  activeParams: string;
-  quantization: string;
-  shardCount: number;
-  tokenizerHash: string;
-  weightKeyCommitment: string;
-  simulated?: boolean;
-}
-
 export interface ModelRegistryEntry {
   modelId: string;
-  kind: "open" | "closed";
+  kind: "open";
   totalParams: string;
   activeParams: string;
   shardCount: number;
   tokenizerHash: string;
   weightRootOrCommitment: string;
-  simulated?: boolean;
   tinfoilRepo?: string;
   tinfoilTag?: string;
   weightRepoCommit?: string;
@@ -299,7 +285,6 @@ function buildRealOpenModelSpec(params: {
   quantization: string;
   tokenizerHash: string;
   shardHashes: readonly string[];
-  simulated?: boolean;
   tinfoilRepo?: string;
   tinfoilTag?: string;
   weightRepoCommit?: string;
@@ -322,7 +307,6 @@ function buildRealOpenModelSpec(params: {
     tokenizerHash: params.tokenizerHash,
     shardHashes,
     merkleRoot: computeShardMerkleRoot(shardHashes),
-    simulated: params.simulated ?? false,
     tinfoilRepo: params.tinfoilRepo,
     tinfoilTag: params.tinfoilTag,
     weightRepoCommit: params.weightRepoCommit,
@@ -465,37 +449,10 @@ export const OPEN_MODEL_CATALOG: Record<string, OpenModelSpec> = {
     weightRepoCommit:
       "moonshotai/Kimi-Linear-48B-A3B-Instruct@e1df551a447157d4658b573f9a695d57658590e9",
   }),
-  "sim-echo-1": buildRealOpenModelSpec({
-    modelId: "sim-echo-1",
-    totalParams: "1B",
-    activeParams: "1B",
-    quantization: "INT8",
-    tokenizerHash: bytesToHex(sha256(utf8ToBytes("sim-echo-1-tokenizer"))),
-    shardHashes: [bytesToHex(sha256(utf8ToBytes("sim-echo-1-weights")))],
-    simulated: true,
-  }),
-};
-
-export const CLOSED_MODEL_CATALOG: Record<string, ClosedModelSpec> = {
-  "frontier-closed-x1": {
-    modelId: "frontier-closed-x1",
-    kind: "closed",
-    totalParams: "1.8T",
-    activeParams: "110B",
-    quantization: "MXFP4-AES256GCM",
-    shardCount: 32,
-    tokenizerHash: bytesToHex(
-      sha256(utf8ToBytes("drouter:tokenizer:v1:frontier-closed-x1:tiktoken-bpe")),
-    ),
-    weightKeyCommitment: bytesToHex(
-      sha256(utf8ToBytes("drouter:closed-weight-key-commitment:v1:frontier-closed-x1")),
-    ),
-    simulated: true,
-  },
 };
 
 export function listModelRegistry(): ModelRegistryEntry[] {
-  const openEntries: ModelRegistryEntry[] = Object.values(OPEN_MODEL_CATALOG).map((m) => ({
+  return Object.values(OPEN_MODEL_CATALOG).map((m) => ({
     modelId: m.modelId,
     kind: "open",
     totalParams: m.totalParams,
@@ -503,26 +460,12 @@ export function listModelRegistry(): ModelRegistryEntry[] {
     shardCount: m.shardCount,
     tokenizerHash: m.tokenizerHash,
     weightRootOrCommitment: m.merkleRoot,
-    simulated: m.simulated,
     tinfoilRepo: m.tinfoilRepo,
     tinfoilTag: m.tinfoilTag,
     weightRepoCommit: m.weightRepoCommit,
     weightMpkHash: m.weightMpkHash,
     dmVerityRootHash: m.dmVerityRootHash,
   }));
-
-  const closedEntries: ModelRegistryEntry[] = Object.values(CLOSED_MODEL_CATALOG).map((m) => ({
-    modelId: m.modelId,
-    kind: "closed",
-    totalParams: m.totalParams,
-    activeParams: m.activeParams,
-    shardCount: m.shardCount,
-    tokenizerHash: m.tokenizerHash,
-    weightRootOrCommitment: m.weightKeyCommitment,
-    simulated: m.simulated,
-  }));
-
-  return [...openEntries, ...closedEntries];
 }
 
 interface TinfoilProxyModelEntry {

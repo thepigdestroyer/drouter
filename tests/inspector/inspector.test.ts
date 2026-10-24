@@ -20,13 +20,17 @@ import {
 } from "@/components/inspector/live-records";
 import {
   buildTerminalSnippets,
+  DEFAULT_LIVE_MODEL_IDS,
   normalizeBaseUrl,
   PRODUCTION_BASE_URL,
   REPO_CLONE_URL,
   resolveCliUpstreamUrl,
+  sanitizeLiveModelId,
 } from "@/components/inspector/terminal-snippets";
 import {
+  FOCUSABLE_SELECTOR,
   MODAL_PLAIN_SUMMARY,
+  TERMINAL_MODAL_PLAIN_SUMMARY,
   resolveFocusTrapTarget,
   resolveNextTabId,
 } from "@/components/modal/modal-a11y";
@@ -224,10 +228,13 @@ describe("Terminal modal verbatim commands & snippets", () => {
     );
   });
 
-  it("builds verbatim commands that work without an npm CLI package and uses deRoute user-visible branding", () => {
+  it("builds verbatim commands that work without an npm CLI package, excludes sim-echo-1, and uses deRoute user-visible branding", () => {
+    expect(sanitizeLiveModelId("sim-echo-1")).toBe("kimi-k3");
+    expect(DEFAULT_LIVE_MODEL_IDS).not.toContain("sim-echo-1");
+
     const snippets = buildTerminalSnippets(
       "http://localhost:3000",
-      "kimi-k3",
+      "sim-echo-1",
     );
     expect(snippets.curlSnippet).toContain(
       `git clone ${REPO_CLONE_URL} && cd drouter && npm ci && node scripts/drouter-cli.mjs verify`,
@@ -235,12 +242,16 @@ describe("Terminal modal verbatim commands & snippets", () => {
     expect(snippets.curlSnippet).toContain(
       `curl ${PRODUCTION_BASE_URL}/v1/models`,
     );
+    expect(snippets.envSnippet).not.toContain("sim-echo-1");
+    expect(snippets.envSnippet).toContain("kimi-k3");
+    expect(snippets.envSnippet).toContain("gemma4-31b");
     expect(snippets.sdkSnippet).toContain(
       `baseURL: "${PRODUCTION_BASE_URL}/v1"`,
     );
     expect(snippets.sdkSnippet).toContain("x-drouter-credit");
     expect(snippets.sdkSnippet).toContain("deRoute accepts any value");
     expect(snippets.sdkSnippet).not.toContain("dRouter");
+    expect(snippets.sdkSnippet).not.toContain("sim-echo-1");
     const parsedOpencode = JSON.parse(snippets.opencodeConfig);
     expect(
       parsedOpencode.provider["drouter-confidential"].options.baseURL,
@@ -251,14 +262,19 @@ describe("Terminal modal verbatim commands & snippets", () => {
     expect(parsedOpencode.provider["drouter-confidential"].name).toBe(
       "deRoute Confidential TEE (Attested)",
     );
+    expect(parsedOpencode.model).toBe("drouter-confidential/kimi-k3");
   });
 });
 
 describe("Shared InkModal accessibility, layout, summary, and deRoute branding", () => {
-  it("exposes exact verbatim plain-language summary text", () => {
+  it("exposes distinct verbatim plain-language summaries for the inspector and terminal windows", () => {
     expect(MODAL_PLAIN_SUMMARY).toBe(
       "What this shows: the sealed computer's signed proof that it runs the published code. You do not need to read this; it is here so experts can check our work.",
     );
+    expect(TERMINAL_MODAL_PLAIN_SUMMARY).toBe(
+      "What this shows: how developers can use deRoute from their own computer or code editor. You do not need any of this to use the chat.",
+    );
+    expect(FOCUSABLE_SELECTOR).toContain('button:not([disabled]):not([tabindex="-1"])');
   });
 
   it("traps focus at first and last focusable elements on Tab and Shift+Tab", () => {
@@ -287,7 +303,7 @@ describe("Shared InkModal accessibility, layout, summary, and deRoute branding",
     expect(resolveNextTabId(tabs, "gpu", "Enter")).toBeNull();
   });
 
-  it("renders RecordInspectorModal and TerminalModal with non-shrinking header, non-clipping tablist, plain summary, reduced-motion bloom CSS, and deRoute branding", () => {
+  it("renders RecordInspectorModal and TerminalModal with non-shrinking header, flex-wrap non-clipping tablist, roving tabIndex, distinct plain summaries, and zero simulated/practice content", () => {
     const inspectorHtml = renderToStaticMarkup(
       React.createElement(RecordInspectorModal, {
         open: true,
@@ -305,6 +321,9 @@ describe("Shared InkModal accessibility, layout, summary, and deRoute branding",
     expect(inspectorHtml).toContain('data-testid="ink-modal-header"');
     expect(inspectorHtml).toContain('data-testid="ink-modal-tabbar"');
     expect(inspectorHtml).toContain('role="tablist"');
+    expect(inspectorHtml).toContain("flex-wrap");
+    expect(inspectorHtml).toContain('tabindex="0"');
+    expect(inspectorHtml).toContain('tabindex="-1"');
     expect(inspectorHtml).toContain('data-testid="ink-modal-body"');
     expect(inspectorHtml).toContain(
       "What this shows: the sealed computer&#x27;s signed proof that it runs the published code. You do not need to read this; it is here so experts can check our work.",
@@ -312,6 +331,8 @@ describe("Shared InkModal accessibility, layout, summary, and deRoute branding",
     expect(inspectorHtml).toContain("prefers-reduced-motion: reduce");
     expect(inspectorHtml).toContain("The deRoute relay only forwards ciphertext.");
     expect(inspectorHtml).not.toContain("dRouter");
+    expect(inspectorHtml).not.toContain("sim-1");
+    expect(inspectorHtml).not.toContain("Simulated");
 
     const terminalHtml = renderToStaticMarkup(
       React.createElement(TerminalModal, {
@@ -322,10 +343,14 @@ describe("Shared InkModal accessibility, layout, summary, and deRoute branding",
 
     expect(terminalHtml).toContain("Use deRoute from Terminal, OpenCode, or Cursor");
     expect(terminalHtml).toContain(
-      "What this shows: the sealed computer&#x27;s signed proof that it runs the published code. You do not need to read this; it is here so experts can check our work.",
+      "What this shows: how developers can use deRoute from their own computer or code editor. You do not need any of this to use the chat.",
+    );
+    expect(terminalHtml).not.toContain(
+      "What this shows: the sealed computer&#x27;s signed proof",
     );
     expect(terminalHtml).toContain("https://drouter-demo.vercel.app/v1");
     expect(terminalHtml).toContain("scripts/drouter-cli.mjs verify");
+    expect(terminalHtml).not.toContain("sim-echo-1");
     expect(terminalHtml).not.toContain("dRouter");
   });
 });

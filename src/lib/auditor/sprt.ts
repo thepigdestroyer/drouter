@@ -35,17 +35,9 @@ export interface SprtAuditResult {
   empiricalPassRate: number;
 }
 
-const CALIBRATION_CATEGORIES = [
-  "multi-hop-formal-logic",
-  "cryptographic-invariant-synthesis",
-  "long-horizon-code-verification",
-  "symbolic-tensor-calculus",
-  "adversarial-constraint-satisfaction",
-] as const;
-
 /**
  * Runs Wald's Sequential Probability Ratio Test (SPRT) over a stream of
- * anonymous mystery-shopper calibration probes.
+ * mystery-shopper calibration probes.
  *
  * H0 (honest frontier model): pass probability = p0 (default 0.90)
  * H1 (cheating substitute model): pass probability = p1 (default 0.45)
@@ -108,69 +100,4 @@ export function runSprtModelAudit(
     probesEvaluated,
     empiricalPassRate,
   };
-}
-
-/**
- * Generates deterministic, Synthetic / Simulated mystery-shopper calibration probe streams
- * for unit testing SPRT decision bounds on an honest `kimi-k3` (2.8T MoE, ~90% pass rate)
- * vs. a cheating provider that swapped in an 8B model (~35-45% pass rate).
- */
-export function generateMysteryShopperProbes(
-  mode: "honest-kimi-k3" | "cheating-8b-swap",
-  count = 15,
-): MysteryShopperProbe[] {
-  const honestPattern = [
-    true,
-    true,
-    true,
-    true,
-    true,
-    false,
-    true,
-    true,
-    true,
-    true,
-    true,
-    true,
-    true,
-    true,
-    true,
-  ];
-
-  const cheatingPattern = [
-    false,
-    true,
-    false,
-    false,
-    false,
-    true,
-    false,
-    false,
-    false,
-    true,
-    false,
-    false,
-    true,
-    false,
-    false,
-  ];
-
-  const pattern = mode === "honest-kimi-k3" ? honestPattern : cheatingPattern;
-  const probes: MysteryShopperProbe[] = [];
-
-  for (let i = 0; i < count; i++) {
-    const passed = pattern[i % pattern.length];
-    const category = CALIBRATION_CATEGORIES[i % CALIBRATION_CATEGORIES.length];
-    const baseLatency = mode === "honest-kimi-k3" ? 640 : 185;
-    const jitter = ((i * 37) % 55) - 25;
-
-    probes.push({
-      probeId: `probe-${mode}-${String(i + 1).padStart(3, "0")}`,
-      category,
-      passed,
-      latencyMs: baseLatency + jitter,
-    });
-  }
-
-  return probes;
 }

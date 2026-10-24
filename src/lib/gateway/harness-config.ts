@@ -10,7 +10,6 @@ export interface GatewayModelSpec {
   configured_hosts?: number;
   verified_hosts?: number;
   created?: number;
-  simulated?: boolean;
 }
 
 export const TINFOIL_PROXY_WELL_KNOWN_URL =
@@ -53,27 +52,7 @@ const PRIMARY_MODEL_ORDER: readonly string[] = [
 ];
 
 /**
- * Simulated enclave model kept strictly behind an explicit dev/test flag
- * (`DROUTER_ENABLE_SIM_MODEL=1` or `DROUTER_STUB_UPSTREAM=1`) and excluded from production.
- */
-export const SIM_GATEWAY_MODEL: GatewayModelSpec = {
-  id: "sim-echo-1",
-  label: "Simulated Enclave Echo (sim-1)",
-  provider: "drouter-simulated-sev-snp",
-  enclave_attested: true,
-  simulated: true,
-};
-
-export function isSimGatewayEnabled(): boolean {
-  if (typeof process === "undefined" || !process.env) return false;
-  return (
-    process.env.DROUTER_ENABLE_SIM_MODEL === "1" ||
-    process.env.DROUTER_STUB_UPSTREAM === "1"
-  );
-}
-
-/**
- * Production baseline of real Tinfoil enclave models (never includes `sim-echo-1`).
+ * Production baseline of real Tinfoil enclave models.
  * Live requests to `/v1/models` and `/v1/verify` query `fetchLiveGatewayModels()` to read
  * Tinfoil's live `.well-known/tinfoil-proxy` enclave table directly.
  */
@@ -268,14 +247,12 @@ export function parseTinfoilProxyModelTable(
 
 /**
  * Fetches the live model enclave table from `https://inference.tinfoil.sh/.well-known/tinfoil-proxy`.
- * Uses a 60s in-memory cache and only appends `sim-echo-1` when the explicit dev flag is set.
+ * Uses a 60s in-memory cache and returns only real attested enclave models.
  */
 export async function fetchLiveGatewayModels(opts?: {
   fetchImpl?: typeof fetch;
   forceRefresh?: boolean;
-  includeSim?: boolean;
 }): Promise<GatewayModelSpec[]> {
-  const includeSim = opts?.includeSim ?? isSimGatewayEnabled();
   const customFetch = opts?.fetchImpl;
   const now = Date.now();
 
@@ -285,14 +262,7 @@ export async function fetchLiveGatewayModels(opts?: {
     cachedLiveModels &&
     now - cachedLiveModels.fetchedAt < LIVE_MODEL_CACHE_TTL_MS
   ) {
-    return includeSim
-      ? [...cachedLiveModels.models, SIM_GATEWAY_MODEL]
-      : [...cachedLiveModels.models];
-  }
-
-  if (!customFetch && process.env.DROUTER_STUB_UPSTREAM === "1") {
-    const base = [...SUPPORTED_GATEWAY_MODELS];
-    return includeSim ? [...base, SIM_GATEWAY_MODEL] : base;
+    return [...cachedLiveModels.models];
   }
 
   const doFetch = customFetch ?? globalThis.fetch;
@@ -311,7 +281,7 @@ export async function fetchLiveGatewayModels(opts?: {
         if (!customFetch) {
           cachedLiveModels = { models: live, fetchedAt: Date.now() };
         }
-        return includeSim ? [...live, SIM_GATEWAY_MODEL] : [...live];
+        return [...live];
       }
     } finally {
       clearTimeout(timer);
@@ -320,8 +290,7 @@ export async function fetchLiveGatewayModels(opts?: {
     // Fall back to last cached live table or baseline Tinfoil models on transient network error
   }
 
-  const fallback = cachedLiveModels?.models ?? [...SUPPORTED_GATEWAY_MODELS];
-  return includeSim ? [...fallback, SIM_GATEWAY_MODEL] : [...fallback];
+  return cachedLiveModels ? [...cachedLiveModels.models] : [...SUPPORTED_GATEWAY_MODELS];
 }
 
 export interface HarnessConfigs {
@@ -342,7 +311,7 @@ export function buildHarnessConfigs(baseUrl: string): HarnessConfigs {
     provider: {
       drouter: {
         npm: "@ai-sdk/openai-compatible",
-        name: "dRouter Attested Enclave Gateway",
+        name: "deRoute Attested Enclave Gateway",
         options: {
           baseURL: gatewayUrl,
           // Any non-empty apiKey value works (the OpenAI SDK requires a string);
@@ -391,7 +360,7 @@ export function buildHarnessConfigs(baseUrl: string): HarnessConfigs {
     `)`,
     `resp = client.chat.completions.create(`,
     `    model="kimi-k3",`,
-    `    messages=[{"role": "user", "content": "Hello from dRouter enclave!"}],`,
+    `    messages=[{"role": "user", "content": "Hello from deRoute enclave!"}],`,
     `)`,
     `print(resp.choices[0].message.content)`,
   ].join("\n");
@@ -407,7 +376,7 @@ export function buildHarnessConfigs(baseUrl: string): HarnessConfigs {
     `});`,
     `const resp = await client.chat.completions.create({`,
     `  model: "kimi-k3",`,
-    `  messages: [{ role: "user", content: "Hello from dRouter enclave!" }],`,
+    `  messages: [{ role: "user", content: "Hello from deRoute enclave!" }],`,
     `});`,
     `console.log(resp.choices[0]?.message?.content);`,
   ].join("\n");
@@ -539,7 +508,6 @@ export function parseGatewayChatRequest(
   body: unknown,
   opts?: {
     allowedModelIds?: Iterable<string>;
-    allowSimModel?: boolean;
   },
 ): ParsedGatewayChatRequest {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
@@ -555,24 +523,14 @@ export function parseGatewayChatRequest(
     ? rawModel.slice("drouter/".length)
     : rawModel;
 
-  const allowSim = opts?.allowSimModel ?? isSimGatewayEnabled();
-  if (normalizedModel === SIM_GATEWAY_MODEL.id) {
-    if (!allowSim) {
-      return {
-        ok: false,
-        error: `Model "${SIM_GATEWAY_MODEL.id}" is a simulated test model and is disabled in production (set DROUTER_ENABLE_SIM_MODEL=1 for dev testing).`,
-      };
-    }
-  } else {
-    const allowedSet = opts?.allowedModelIds
-      ? new Set(opts.allowedModelIds)
-      : dynamicLiveModelIds;
-    if (!allowedSet.has(normalizedModel)) {
-      return {
-        ok: false,
-        error: `Unsupported model "${rawModel}". Supported models: ${[...allowedSet].join(", ")}`,
-      };
-    }
+  const allowedSet = opts?.allowedModelIds
+    ? new Set(opts.allowedModelIds)
+    : dynamicLiveModelIds;
+  if (!allowedSet.has(normalizedModel)) {
+    return {
+      ok: false,
+      error: `Unsupported model "${rawModel}". Supported models: ${[...allowedSet].join(", ")}`,
+    };
   }
 
   if (!Array.isArray(record.messages) || record.messages.length === 0) {

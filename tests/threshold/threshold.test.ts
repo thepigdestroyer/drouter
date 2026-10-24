@@ -2,12 +2,18 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 import { describe, expect, it } from "vitest";
 import {
-  authorizeThresholdKeyRelease,
+  SHAMIR_PRIME,
   combineShares,
+  parsePortableShareToken,
+  recoverFreezeSecretFromShares,
+  recoverVaultKeyFromShares,
+  splitFreezeSecretIntoShares,
   splitSecret,
+  splitVaultKeyIntoShares,
+  verifyShareCommitment,
 } from "@/lib/threshold/shamir";
 
-describe("Shamir k-of-n Threshold Key Release", () => {
+describe("Client-Side Shamir k-of-n Secret Splitting", () => {
   const sampleSecretHex = bytesToHex(
     sha256(utf8ToBytes("drouter:test-secret-32-byte-master-key"))
   );
@@ -49,8 +55,7 @@ describe("Shamir k-of-n Threshold Key Release", () => {
     expect(() => combineShares([], k)).toThrow(/Insufficient shares/i);
   });
 
-  it("rejects secrets >= SHAMIR_PRIME, x=0 shares, negative indices, duplicate x indices, and tampered commitments", async () => {
-    const { SHAMIR_PRIME, verifyShareCommitment } = await import("@/lib/threshold/shamir");
+  it("rejects secrets >= SHAMIR_PRIME, x=0 shares, negative indices, duplicate x indices, and tampered commitments", () => {
     const shares = splitSecret(sampleSecretHex, 3, 5, "deadbeefcafebabe");
 
     for (const s of shares) {
@@ -100,92 +105,11 @@ describe("Shamir k-of-n Threshold Key Release", () => {
     }
   });
 
-  it("releases and reconstructs the 32-byte key when all regional checker criteria pass", () => {
-    const result = authorizeThresholdKeyRelease({
-      sessionId: "session-alpha-01",
-      chipId: "H200-SXM-NV-0042",
-      measurementOk: true,
-      registryActive: true,
-      notFlagged: true,
-      k: 3,
-      n: 5,
-    });
-
-    expect(result.released).toBe(true);
-    expect(result.k).toBe(3);
-    expect(result.n).toBe(5);
-    expect(result.approvals).toHaveLength(5);
-    expect(result.approvals.map((a) => a.checkerId)).toEqual([
-      "checker-zurich",
-      "checker-frankfurt",
-      "checker-virginia",
-      "checker-tokyo",
-      "checker-reykjavik",
-    ]);
-    expect(result.approvals.every((a) => a.approved && a.share !== undefined)).toBe(
-      true
-    );
-    expect(result.reconstructedKeyHex).toMatch(/^[0-9a-f]{64}$/);
-
-    // Any 3 of the released shares also reconstruct the same key
-    const releasedShares = result.approvals.map((a) => a.share!);
-    expect(
-      combineShares(
-        [releasedShares[0], releasedShares[2], releasedShares[4]],
-        3
-      )
-    ).toBe(result.reconstructedKeyHex);
-  });
-
-  it("refuses key release when measurementOk is false or notFlagged is false", () => {
-    const badMeasurement = authorizeThresholdKeyRelease({
-      sessionId: "session-alpha-01",
-      chipId: "H200-SXM-NV-0042",
-      measurementOk: false,
-      registryActive: true,
-      notFlagged: true,
-      k: 3,
-      n: 5,
-    });
-
-    expect(badMeasurement.released).toBe(false);
-    expect(badMeasurement.reconstructedKeyHex).toBeUndefined();
-    expect(badMeasurement.approvals.every((a) => !a.approved && !a.share)).toBe(
-      true
-    );
-    expect(badMeasurement.reason).toContain("measurementOk=false");
-
-    const flaggedNode = authorizeThresholdKeyRelease({
-      sessionId: "session-alpha-01",
-      chipId: "H200-SXM-NV-0042",
-      measurementOk: true,
-      registryActive: true,
-      notFlagged: false,
-      k: 3,
-      n: 5,
-    });
-
-    expect(flaggedNode.released).toBe(false);
-    expect(flaggedNode.reconstructedKeyHex).toBeUndefined();
-    expect(flaggedNode.approvals.every((a) => !a.approved && !a.share)).toBe(
-      true
-    );
-    expect(flaggedNode.reason).toContain("notFlagged=false");
-  });
-
-  it("splits and recovers real FreezeReceipt secrets and Client Vault export keys via 3-of-5 portable Shamir tokens", async () => {
-    const {
-      parsePortableShareToken,
-      recoverFreezeSecretFromShares,
-      recoverVaultKeyFromShares,
-      splitFreezeSecretIntoShares,
-      splitVaultKeyIntoShares,
-    } = await import("@/lib/threshold/shamir");
-
+  it("splits and recovers real FreezeReceipt secrets and Client Vault export keys via 3-of-5 portable Shamir tokens", () => {
     // 1. FreezeReceipt secret splitting & recovery
     const freezeReceipt = {
       blobId: "freeze-blob-7741",
-      freezeSecretHex: bytesToHex(sha256(utf8ToBytes("client-freeze-secret-dana-reyes"))),
+      freezeSecretHex: bytesToHex(sha256(utf8ToBytes("client-freeze-secret-session-01"))),
       sessionIdHex: "aa".repeat(32),
       createdAt: 1760000500000,
     };

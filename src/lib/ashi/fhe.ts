@@ -10,13 +10,10 @@ import { embedDocumentText, normalizeVectorL2 } from "@/lib/atlas/embeddings";
  * - This module executes a real, cryptographically sound CKKS homomorphic computation
  *   (4-class encrypted linear classifier + encrypted L2-norm check over a 128-dimensional
  *   embedding vector) where the server NEVER sees plaintext or secret keys.
- * - It does NOT run a 3-trillion-parameter frontier LLM in FHE. Frontier LLM FHE remains a
- *   labelled analytical simulation (`src/lib/ashi/model.ts`) because a 96-layer MoE pass
- *   requires ~2.4 GB of encrypted state and multi-GPU / ASIC bootstrapping hardware.
  */
 
 export const FHE_SCOPE_DISCLOSURE =
-  "Tier C (node-seal 7.0.0 / Microsoft SEAL 4.1.2 WASM) executes a real CKKS homomorphic linear classifier (4x128 matrix-vector dot products + encrypted squared L2 norm) over a 128-d embedding where the server never sees plaintext or the secret key. It does NOT run a frontier LLM under FHE; frontier LLM FHE numbers in model.ts are an analytical simulation." as const;
+  "Tier C (node-seal 7.0.0 / Microsoft SEAL 4.1.2 WASM) executes a real CKKS homomorphic linear classifier (4x128 matrix-vector dot products + encrypted squared L2 norm) over a 128-d embedding where the server never sees plaintext or the secret key." as const;
 
 export const FHE_SCHEME = "CKKS" as const;
 export const FHE_POLY_MODULUS_DEGREE = 4096 as const;

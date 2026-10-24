@@ -6,7 +6,6 @@ import {
   type TinfoilCompletionResponse,
   clearMemoryAuditorRuns,
   executeMysteryShopperAudit,
-  generateMysteryShopperProbes,
   getAuditorRunsHistory,
   matchesAdvertisedModel,
   runSprtModelAudit,
@@ -109,7 +108,14 @@ describe("Mystery-Shopper Statistical Model Auditor (SPRT & Live Scoring)", () =
   });
 
   it("certifies an honest kimi-k3 probe stream as PASS_GENUINE_FRONTIER_MODEL", () => {
-    const probes = generateMysteryShopperProbes("honest-kimi-k3", 15);
+    const honestPattern = [
+      true, true, true, true, true, false, true, true, true, true, true, true, true, true, true,
+    ];
+    const probes = honestPattern.map((passed, idx) => ({
+      probeId: `probe-honest-${idx + 1}`,
+      passed,
+      latencyMs: 620,
+    }));
     const result = runSprtModelAudit(probes);
 
     expect(result.verdict).toBe("PASS_GENUINE_FRONTIER_MODEL");
@@ -120,7 +126,14 @@ describe("Mystery-Shopper Statistical Model Auditor (SPRT & Live Scoring)", () =
   });
 
   it("detects a cheating 8B-swap provider with SLASH_MODEL_DOWNGRADE_DETECTED within 15 probes", () => {
-    const probes = generateMysteryShopperProbes("cheating-8b-swap", 15);
+    const cheatingPattern = [
+      false, true, false, false, false, true, false, false, false, true, false, false, true, false, false,
+    ];
+    const probes = cheatingPattern.map((passed, idx) => ({
+      probeId: `probe-cheat-${idx + 1}`,
+      passed,
+      latencyMs: 180,
+    }));
     const result = runSprtModelAudit(probes);
 
     expect(result.verdict).toBe("SLASH_MODEL_DOWNGRADE_DETECTED");

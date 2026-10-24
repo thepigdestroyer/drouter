@@ -17,8 +17,6 @@ export {
 export {
   buildMonotonicGcmNonce,
   computeShannonEntropyBitsPerByte,
-  runMemoryBusAndPopAudit,
   verifyCustodyPrimitives,
   type CustodyPrimitiveVerificationReport,
-  type MemoryBusAndPopAuditReport,
 } from "./probe-audit";

@@ -11,11 +11,8 @@ import {
   MAX_SANDBOX_OUTPUT_BYTES,
   SANDBOX_DESCRIPTION,
   SANDBOX_ISOLATION_MODE,
-  destroySandbox,
-  execInSandbox,
   getSandboxCapabilities,
   normalizeSandboxLanguage,
-  spawnSandbox,
 } from "@/lib/sandbox/microvm";
 import { runInVercelSandbox } from "@/lib/sandbox/vercel-runner";
 
@@ -226,14 +223,6 @@ export async function POST(request: Request) {
       maxOutputBytes: MAX_SANDBOX_OUTPUT_BYTES,
     });
 
-    // Also include legacy state-tracker fields for backward compatibility
-    const sim = spawnSandbox(`live-${result.sandboxId}`);
-    const simExec = execInSandbox(sim, {
-      tool: "python",
-      code: body.code.slice(0, 256),
-    });
-    const simDestroy = destroySandbox(sim);
-
     return NextResponse.json(
       {
         ok: result.exitCode === 0,
@@ -254,25 +243,6 @@ export async function POST(request: Request) {
         memoryMb: result.memoryMb,
         stopped: result.stopped,
         envPassedToSandbox: false,
-        sessionId: sim.sessionId,
-        trace: {
-          spawn: {
-            sandboxId: result.sandboxId,
-            imageMeasurementHex: sim.imageMeasurementHex,
-            rtmr3Hex: sim.rtmr3Hex,
-          },
-          exec: [
-            {
-              ...simExec,
-              exitCode: result.exitCode,
-              durationMs: result.durationMs,
-              decryptedStdoutForTest: result.stdout,
-            },
-          ],
-          destroy: {
-            parent: simDestroy,
-          },
-        },
       },
       {
         status: 200,

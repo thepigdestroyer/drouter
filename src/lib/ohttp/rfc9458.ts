@@ -764,7 +764,7 @@ export function runOhttpSelfTest() {
     path: "/v1/chat/completions",
     headers: { "content-type": "application/json" },
     body: {
-      model: "deepseek-r1-70b",
+      model: "kimi-k3",
       messages: [{ role: "user", content: "Verify RFC 9458 OHTTP binary framing." }],
     },
   });
@@ -793,7 +793,7 @@ export function runOhttpSelfTest() {
       ohttp: "rfc9458-verified",
       echoedMethod: parsedRequest.method ?? "POST",
       echoedPath: parsedRequest.path ?? "/v1/chat/completions",
-      model: parsedRequest.body?.model ?? "deepseek-r1-70b",
+      model: parsedRequest.body?.model ?? "kimi-k3",
     },
   });
 

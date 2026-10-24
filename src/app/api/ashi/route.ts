@@ -6,7 +6,6 @@ import {
   serverEvaluateEncryptedLinearScores,
   type FheEncryptedRequestPayload,
 } from "@/lib/ashi/fhe";
-import { evaluateAshiTierC } from "@/lib/ashi/model";
 import {
   BodyTooLargeError,
   InvalidJsonBodyError,
@@ -80,21 +79,11 @@ export async function GET(request?: NextRequest) {
     if (limited) return limited;
   }
 
-  const alphaParam = request?.nextUrl?.searchParams.get("alpha") ?? null;
-  const parsedAlpha = alphaParam !== null ? Number(alphaParam) : 0.95;
-  const alpha =
-    Number.isFinite(parsedAlpha) && parsedAlpha > 0 && parsedAlpha < 1
-      ? parsedAlpha
-      : 0.95;
-
-  // 1. Run a real measured CKKS homomorphic linear classification round trip via node-seal WASM
+  // Run a real measured CKKS homomorphic linear classification round trip via node-seal WASM
   const liveFhe = await runLiveFheLinearRoundTrip();
   const catalog = await buildMeasuredTiersCatalog({
     fheMeasurement: liveFhe,
   });
-
-  // 2. Keep the analytical frontier FHE model explicitly labelled as a simulation
-  const evaluation = evaluateAshiTierC({ alpha });
 
   const tierComparison: PlatformTierComparisonEntry[] =
     catalog.entries.map(toComparisonEntry);
@@ -102,7 +91,6 @@ export async function GET(request?: NextRequest) {
   const publicMatrix = getPublicScoringMatrix();
 
   return NextResponse.json({
-    alpha,
     fheScopeDisclosure: FHE_SCOPE_DISCLOSURE,
     liveFhe,
     publicScoringMatrix: {
@@ -117,7 +105,6 @@ export async function GET(request?: NextRequest) {
         bias: c.bias,
       })),
     },
-    ...evaluation,
     kimiK3MaxContextTokens: KIMI_K3_ENCLAVE_MAX_CONTEXT_TOKENS,
     tierComparison,
   });

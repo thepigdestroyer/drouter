@@ -395,20 +395,14 @@ describe("RFC 9458 Oblivious HTTP (OHTTP) Binary KeyConfig & Framing", () => {
     const decodedFromGet = decodeOhttpKeyConfig(rawKeyBytes);
     expect(decodedFromGet.keyId).toBe(1);
 
-    // 4. POST /api/ohttp forwards inner /api/v1/chat/completions (sim-echo-1) and encapsulates the real completion
-    // The practice model is only served when the dev flag is set.
-    process.env.DROUTER_ENABLE_SIM_MODEL = "1";
-    const chatInnerReq = JSON.stringify({
-      method: "POST",
-      path: "/api/v1/chat/completions",
-      headers: { "content-type": "application/json" },
-      body: {
-        model: "sim-echo-1",
-        messages: [{ role: "user", content: "Ping enclave via RFC 9458 OHTTP gateway" }],
-      },
+    // 4. POST /api/ohttp forwards inner GET /api/v1/models and encapsulates the real model list
+    const modelsInnerReq = JSON.stringify({
+      method: "GET",
+      path: "/api/v1/models",
+      headers: { accept: "application/json" },
     });
-    const { encapsulatedRequest: encChatReq, clientContext: chatClientCtx } =
-      encapsulateOhttpRequest(chatInnerReq, decodedFromGet.publicKey, decodedFromGet.keyId);
+    const { encapsulatedRequest: encModelsReq, clientContext: modelsClientCtx } =
+      encapsulateOhttpRequest(modelsInnerReq, decodedFromGet.publicKey, decodedFromGet.keyId);
 
     // Send as binary message/ohttp-req
     const postBinaryReq = new NextRequest("http://localhost:3000/api/ohttp", {
@@ -417,22 +411,22 @@ describe("RFC 9458 Oblivious HTTP (OHTTP) Binary KeyConfig & Framing", () => {
         "content-type": "message/ohttp-req",
         accept: "message/ohttp-res",
       },
-      body: Buffer.from(encChatReq),
+      body: Buffer.from(encModelsReq),
     });
     const postBinaryRes = await POST(postBinaryReq);
     expect(postBinaryRes.status).toBe(200);
     expect(postBinaryRes.headers.get("content-type")).toBe("message/ohttp-res");
-    const encChatResBytes = new Uint8Array(await postBinaryRes.arrayBuffer());
-    const decChatResJson = decapsulateOhttpResponse(encChatResBytes, chatClientCtx);
-    const parsedChatRes = JSON.parse(decChatResJson) as {
+    const encModelsResBytes = new Uint8Array(await postBinaryRes.arrayBuffer());
+    const decModelsResJson = decapsulateOhttpResponse(encModelsResBytes, modelsClientCtx);
+    const parsedModelsRes = JSON.parse(decModelsResJson) as {
       status: number;
       forwardedTo: string;
-      body: { choices: Array<{ message: { content: string } }> };
+      body: { object: string; data: Array<{ id: string }> };
     };
-    expect(parsedChatRes.status).toBe(200);
-    expect(parsedChatRes.forwardedTo).toBe("/api/v1/chat/completions");
-    expect(parsedChatRes.body.choices[0].message.content).toContain("Simulated enclave sim-1");
-    delete process.env.DROUTER_ENABLE_SIM_MODEL;
+    expect(parsedModelsRes.status).toBe(200);
+    expect(parsedModelsRes.forwardedTo).toBe("/api/v1/models");
+    expect(parsedModelsRes.body.object).toBe("list");
+    expect(parsedModelsRes.body.data.some((m) => m.id === "kimi-k3")).toBe(true);
 
     // 5. POST /api/ohttp rejects non-allowlisted inner path with encapsulated 403
     // Re-fetch current gateway key after SIM_HARDWARE_SEED may have been initialized by chatCompletionsPost

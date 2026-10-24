@@ -16,7 +16,11 @@ const CORS_HEADERS: Record<string, string> = {
 };
 
 export async function GET(req?: Request): Promise<Response> {
-  await connection();
+  try {
+    await connection();
+  } catch {
+    // Allow direct invocation in unit tests outside Next request storage
+  }
   if (req) {
     const limited = modelsLimiter.check(req, CORS_HEADERS);
     if (limited) return limited;
@@ -39,7 +43,6 @@ export async function GET(req?: Request): Promise<Response> {
         ...(m.healthy_hosts !== undefined ? { healthy_hosts: m.healthy_hosts } : {}),
         ...(m.configured_hosts !== undefined ? { configured_hosts: m.configured_hosts } : {}),
         ...(m.verified_hosts !== undefined ? { verified_hosts: m.verified_hosts } : {}),
-        ...(m.simulated ? { simulated: true } : {}),
       })),
     },
     {

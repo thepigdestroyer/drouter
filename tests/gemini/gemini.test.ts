@@ -379,7 +379,7 @@ describe("Gemini 4 Argon Config Contract, TaskDescriptor & Content-Free Egress F
       interactions: {
         create: vi.fn(
           () =>
-            new Promise((resolve) => {
+            new Promise<{ id?: string; status?: string }>((resolve) => {
               setTimeout(
                 () => resolve({ id: "inter-argon-turn-1", status: "completed" }),
                 120,

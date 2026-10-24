@@ -45,7 +45,7 @@ async function resolveActiveNodeIds(): Promise<string[]> {
   try {
     const registry = await listNodes();
     const activeIds = registry.nodes
-      .filter((n) => n.status === "active")
+      .filter((n) => n.status === "active" && n.kind === "tinfoil")
       .map((n) => n.name || n.id);
     return activeIds.length >= 2 ? activeIds : DEFAULT_COMPARTMENT_NODES;
   } catch {
@@ -81,7 +81,7 @@ export async function GET(request?: NextRequest) {
     plan.fragments.map((f) => ({
       index: f.index,
       assignedNodeId: f.assignedNodeId,
-      response: `[Simulated preview] Enclave compartment ${f.fragmentId} assigned to ${f.assignedNodeId}`,
+      response: f.subPrompt,
     })),
   );
 

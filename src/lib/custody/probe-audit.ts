@@ -36,22 +36,6 @@ export interface CustodyPrimitiveVerificationReport {
   allPrimitivesPassed: boolean;
 }
 
-export interface MemoryBusAndPopAuditReport {
-  mode: "model";
-  simulated: true;
-  observesPhysicalGpuMemory: false;
-  note: string;
-  v1Passed: boolean;
-  v6Passed: boolean;
-  turnsSimulated: number;
-  totalHostBytesObserved: number;
-  plaintextLeakMatches: number;
-  repeated16ByteBlocks: number;
-  shannonEntropyBitsPerByte: number;
-  postPopAllZero: boolean;
-  postPopOffloadDecryptFailed: boolean;
-}
-
 /**
  * Construct a 12-byte AES-GCM nonce from a 4-byte session prefix, 4-byte channel tag,
  * and a strictly monotonic 32-bit counter.
@@ -342,43 +326,5 @@ export function verifyCustodyPrimitives(): CustodyPrimitiveVerificationReport {
       decryptAfterKeyZeroizeFailed,
     },
     allPrimitivesPassed,
-  };
-}
-
-/**
- * Software model of monotonic-nonce AES-256-GCM frame encryption and in-memory
- * `Uint8Array` buffer zeroization.
- *
- * Explicitly labelled `mode: "model"` (`simulated: true`, `observesPhysicalGpuMemory: false`):
- * this function checks ciphertext entropy, 16-byte block uniqueness, and `Uint8Array.fill(0)`
- * zeroization in JavaScript memory and does not observe physical GPU HBM or DDR5 memory-bus traffic.
- */
-export function runMemoryBusAndPopAudit(): MemoryBusAndPopAuditReport {
-  const primitives = verifyCustodyPrimitives();
-  const v1Passed =
-    primitives.aesGcmEnvelope.plaintextSubstringMatchesInCiphertext === 0 &&
-    primitives.aesGcmEnvelope.repeated16ByteCipherBlocks === 0 &&
-    primitives.aesGcmEnvelope.ciphertextShannonEntropyBitsPerByte > 7.5;
-  const postPopAllZero =
-    primitives.ctrDrbg.zeroizedBuffersVerified &&
-    primitives.prefixCache.popZeroizedVerified;
-  const postPopOffloadDecryptFailed =
-    primitives.aesGcmEnvelope.decryptAfterKeyZeroizeFailed;
-  const v6Passed = postPopAllZero && postPopOffloadDecryptFailed;
-
-  return {
-    mode: "model",
-    simulated: true,
-    observesPhysicalGpuMemory: false,
-    note: "Simulated model: encrypts 5 turns in local JavaScript Uint8Array buffers with AES-256-GCM and monotonic nonces, measures ciphertext Shannon entropy and 16-byte block uniqueness, and verifies Uint8Array.fill(0) zeroization. Does not observe physical GPU HBM or DDR5 memory-bus traffic.",
-    v1Passed,
-    v6Passed,
-    turnsSimulated: 5,
-    totalHostBytesObserved: primitives.aesGcmEnvelope.totalCiphertextBytes,
-    plaintextLeakMatches: primitives.aesGcmEnvelope.plaintextSubstringMatchesInCiphertext,
-    repeated16ByteBlocks: primitives.aesGcmEnvelope.repeated16ByteCipherBlocks,
-    shannonEntropyBitsPerByte: primitives.aesGcmEnvelope.ciphertextShannonEntropyBitsPerByte,
-    postPopAllZero,
-    postPopOffloadDecryptFailed,
   };
 }

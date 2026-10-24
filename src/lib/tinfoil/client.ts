@@ -1,6 +1,6 @@
 import { TinfoilAI, type VerificationDocument } from "tinfoil";
+import { bytesToHex } from "@noble/hashes/utils.js";
 import { RELAY_HOPS, padJsonPayloadToBucket } from "@/lib/relay";
-import { toHex } from "@/lib/sim/bytes";
 import {
   verifyModelEnclaveStatus,
   type DeepAttestationBundle,
@@ -238,7 +238,7 @@ export async function openTinfoilSession(
   const origin = window.location.origin;
   const secretBytes = new Uint8Array(32);
   crypto.getRandomValues(secretBytes);
-  const userCacheSecret = toHex(secretBytes);
+  const userCacheSecret = bytesToHex(secretBytes);
 
   const initialRelayId = opts?.relayId;
   const baseURL = initialRelayId

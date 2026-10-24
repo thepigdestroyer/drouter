@@ -38,6 +38,13 @@ export const ALLOWED_TINFOIL_MODELS = new Set<string>([
   "gpt-oss-120b",
   "llama3-3-70b",
   "gemma4-31b",
+  "voxtral-small-24b",
+  "voxtral-mini-4b-realtime",
+  "voxtral-tts",
+  "qwen3-tts",
+  "whisper-large-v3-turbo",
+  "nomic-embed-text",
+  "pii-filter",
 ]);
 
 /**
