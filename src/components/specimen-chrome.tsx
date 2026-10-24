@@ -152,6 +152,23 @@ export function SpecimenHeader({
     });
   }, []);
 
+  useEffect(() => {
+    setMobileOpen(false);
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setMobileOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [mobileOpen]);
+
   const navItems = session ? SIGNED_IN_NAV_ITEMS : SIGNED_OUT_NAV_ITEMS;
 
   return (
@@ -222,7 +239,9 @@ export function SpecimenHeader({
             </InkButton>
           )}
 
-          <div className="flex items-center">
+          <div
+            className={`${mobileOpen ? "hidden md:flex" : "flex"} items-center`}
+          >
             {rightSlot !== undefined ? rightSlot : <AuthPill />}
           </div>
 

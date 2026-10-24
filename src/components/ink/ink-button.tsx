@@ -61,30 +61,25 @@ export function InkButton(props: InkButtonProps): React.JSX.Element {
 
   if (href && !disabled) {
     const {
-      id,
-      title,
-      style,
-      tabIndex,
+      form: _form,
+      formAction: _formAction,
+      formEncType: _formEncType,
+      formMethod: _formMethod,
+      formNoValidate: _formNoValidate,
+      formTarget: _formTarget,
+      name: _name,
+      value: _value,
       onClick,
-      "aria-label": ariaLabel,
-      "aria-describedby": ariaDescribedBy,
-      "aria-current": ariaCurrent,
-      "aria-expanded": ariaExpanded,
-      "aria-controls": ariaControls,
+      ...anchorCompatProps
     } = rest;
 
     return (
       <Link
         href={href}
-        id={id}
-        title={title}
-        style={style}
-        tabIndex={tabIndex}
-        aria-label={ariaLabel}
-        aria-describedby={ariaDescribedBy}
-        aria-current={ariaCurrent}
-        aria-expanded={ariaExpanded}
-        aria-controls={ariaControls}
+        {...(anchorCompatProps as unknown as Omit<
+          React.AnchorHTMLAttributes<HTMLAnchorElement>,
+          "href" | "className" | "children" | "onClick"
+        >)}
         onClick={
           onClick as unknown as React.MouseEventHandler<HTMLAnchorElement>
         }

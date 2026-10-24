@@ -51,57 +51,6 @@ div.min-h-screen.bg-paper {
   background-color: transparent !important;
 }
 
-.ep-ink-drift-a {
-  animation: ep-ink-float-a 26s ease-in-out infinite alternate;
-  transform-origin: center;
-}
-
-.ep-ink-drift-b {
-  animation: ep-ink-float-b 32s ease-in-out infinite alternate;
-  transform-origin: center;
-}
-
-.ep-ink-drift-c {
-  animation: ep-ink-float-c 22s ease-in-out infinite alternate;
-  transform-origin: center;
-}
-
-@keyframes ep-ink-float-a {
-  0% {
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-  50% {
-    transform: translate3d(34px, 22px, 0) scale(1.05);
-  }
-  100% {
-    transform: translate3d(-24px, 38px, 0) scale(0.97);
-  }
-}
-
-@keyframes ep-ink-float-b {
-  0% {
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-  50% {
-    transform: translate3d(-38px, 28px, 0) scale(1.04);
-  }
-  100% {
-    transform: translate3d(26px, -24px, 0) scale(0.96);
-  }
-}
-
-@keyframes ep-ink-float-c {
-  0% {
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-  50% {
-    transform: translate3d(24px, -26px, 0) scale(1.06);
-  }
-  100% {
-    transform: translate3d(-18px, 20px, 0) scale(0.98);
-  }
-}
-
 ::selection {
   background: var(--color-ink);
   color: var(--color-paper);
@@ -483,9 +432,6 @@ div.min-h-screen.bg-paper {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ep-ink-drift-a,
-  .ep-ink-drift-b,
-  .ep-ink-drift-c,
   .ep-btn,
   .ep-btn::before,
   .ep-btn-ghost,
