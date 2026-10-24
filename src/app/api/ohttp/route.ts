@@ -7,9 +7,28 @@ import {
   hexToBytes,
   runOhttpSelfTest,
 } from "@/lib/ohttp/rfc9458";
+import {
+  BodyTooLargeError,
+  InvalidJsonBodyError,
+  createTokenBucketLimiter,
+  readBoundedJson,
+} from "@/lib/ratelimit";
 
-export async function GET() {
+const MAX_OHTTP_BODY_BYTES = 65_536;
+const MAX_OHTTP_HEX_LEN = 65_536;
+
+const ohttpLimiter = createTokenBucketLimiter({
+  name: "ohttp-route",
+  capacity: 60,
+  refillPerSec: 2,
+});
+
+export async function GET(request?: NextRequest) {
   await connection();
+  if (request) {
+    const limited = ohttpLimiter.check(request);
+    if (limited) return limited;
+  }
 
   const gateway = getDefaultOhttpGatewayKeypair(1);
   const selfTest = runOhttpSelfTest();
@@ -25,11 +44,14 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  const limited = ohttpLimiter.check(request);
+  if (limited) return limited;
+
   try {
-    const body = (await request.json()) as {
+    const body = await readBoundedJson<{
       encapsulatedRequestHex?: string;
       keyId?: number;
-    };
+    }>(request, MAX_OHTTP_BODY_BYTES);
 
     if (
       !body ||
@@ -42,8 +64,19 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const encapsulatedRequest = hexToBytes(body.encapsulatedRequestHex.trim());
-    const keyId = typeof body.keyId === "number" ? body.keyId : encapsulatedRequest[0] ?? 1;
+    const cleanHex = body.encapsulatedRequestHex.trim();
+    if (cleanHex.length > MAX_OHTTP_HEX_LEN || cleanHex.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(cleanHex)) {
+      return NextResponse.json(
+        { error: "encapsulatedRequestHex must be valid even-length hex <= 65536 chars" },
+        { status: 400 },
+      );
+    }
+
+    const encapsulatedRequest = hexToBytes(cleanHex);
+    const keyId =
+      typeof body.keyId === "number" && Number.isInteger(body.keyId) && body.keyId >= 0 && body.keyId <= 255
+        ? body.keyId
+        : encapsulatedRequest[0] ?? 1;
     const gateway = getDefaultOhttpGatewayKeypair(keyId);
 
     const { plaintextHttpJson, serverContext } = decapsulateOhttpRequest(
@@ -78,7 +111,15 @@ export async function POST(request: NextRequest) {
       contentType: "message/ohttp-res",
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "OHTTP decapsulation failed";
+    if (err instanceof BodyTooLargeError) {
+      return NextResponse.json({ error: err.message }, { status: 413 });
+    }
+    const message =
+      err instanceof InvalidJsonBodyError
+        ? err.message
+        : err instanceof Error
+          ? err.message
+          : "OHTTP decapsulation failed";
     return NextResponse.json({ error: message }, { status: 400 });
   }
 }

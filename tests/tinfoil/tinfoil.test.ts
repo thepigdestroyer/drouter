@@ -166,8 +166,8 @@ describe("Two-Hop Enclave & GPU Trust Verifier", () => {
     const healthy = buildSampleModelAttestation();
     const res = verifyModelEnclaveStatus(healthy);
     expect(res.c5Pass).toBe(true);
-    expect(res.c5Detail).toBe(
-      "8× NVIDIA confidential GPUs attested by router (1/1 hosts healthy, TDX + CC mode, VLLM_DISABLE_UVA=1, SYMM_MEM=0)",
+    expect(res.c5Detail).toContain(
+      "8× NVIDIA confidential GPUs attested by router (1/1 hosts healthy, TDX + CC mode, VLLM_DISABLE_UVA=1, SYMM_MEM=0",
     );
     expect(res.c7Pass).toBe(true);
     expect(res.c7Detail).toBe(

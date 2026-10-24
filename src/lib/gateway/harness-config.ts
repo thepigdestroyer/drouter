@@ -216,8 +216,12 @@ export function parseGatewayChatRequest(body: unknown): ParsedGatewayChatRequest
   if (!Array.isArray(record.messages) || record.messages.length === 0) {
     return { ok: false, error: "messages must be a non-empty array" };
   }
+  if (record.messages.length > 64) {
+    return { ok: false, error: "messages cannot exceed 64 turns per request" };
+  }
 
   const messages: NormalizedChatMessage[] = [];
+  let totalContentChars = 0;
   for (let i = 0; i < record.messages.length; i += 1) {
     const item = record.messages[i];
     if (!item || typeof item !== "object") {
@@ -238,6 +242,19 @@ export function parseGatewayChatRequest(body: unknown): ParsedGatewayChatRequest
         error: `messages[${i}].content must be a string or an array of content parts`,
       };
     }
+    if (content.length > 131_072) {
+      return {
+        ok: false,
+        error: `messages[${i}].content exceeds maximum length (131072 characters)`,
+      };
+    }
+    totalContentChars += content.length;
+    if (totalContentChars > 262_144) {
+      return {
+        ok: false,
+        error: "Total messages content exceeds maximum length (262144 characters)",
+      };
+    }
     messages.push({ role, content });
   }
 
@@ -246,8 +263,13 @@ export function parseGatewayChatRequest(body: unknown): ParsedGatewayChatRequest
 
   let temperature: number | undefined;
   if (record.temperature !== undefined && record.temperature !== null) {
-    if (typeof record.temperature !== "number" || Number.isNaN(record.temperature)) {
-      return { ok: false, error: "temperature must be a number" };
+    if (
+      typeof record.temperature !== "number" ||
+      !Number.isFinite(record.temperature) ||
+      record.temperature < 0 ||
+      record.temperature > 2
+    ) {
+      return { ok: false, error: "temperature must be a finite number between 0 and 2" };
     }
     temperature = record.temperature;
   }
@@ -255,8 +277,13 @@ export function parseGatewayChatRequest(body: unknown): ParsedGatewayChatRequest
   let max_tokens: number | undefined;
   const rawMax = record.max_tokens ?? record.max_completion_tokens;
   if (rawMax !== undefined && rawMax !== null) {
-    if (typeof rawMax !== "number" || !Number.isInteger(rawMax) || rawMax <= 0) {
-      return { ok: false, error: "max_tokens must be a positive integer" };
+    if (
+      typeof rawMax !== "number" ||
+      !Number.isInteger(rawMax) ||
+      rawMax <= 0 ||
+      rawMax > 16_384
+    ) {
+      return { ok: false, error: "max_tokens must be a positive integer up to 16384" };
     }
     max_tokens = rawMax;
   }

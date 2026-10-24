@@ -1,5 +1,12 @@
 import { NextRequest, NextResponse, connection } from "next/server";
 import { evaluateAshiTierC } from "@/lib/ashi/model";
+import { createTokenBucketLimiter } from "@/lib/ratelimit";
+
+const ashiLimiter = createTokenBucketLimiter({
+  name: "ashi-get",
+  capacity: 120,
+  refillPerSec: 4,
+});
 
 export interface PlatformTierComparisonEntry {
   tier: "Tier A" | "Tier A+" | "Tier B" | "Tier C";
@@ -16,6 +23,10 @@ export interface PlatformTierComparisonEntry {
 
 export async function GET(request: NextRequest) {
   await connection();
+  if (request) {
+    const limited = ashiLimiter.check(request);
+    if (limited) return limited;
+  }
 
   const alphaParam = request.nextUrl.searchParams.get("alpha");
   const parsedAlpha = alphaParam !== null ? Number(alphaParam) : 0.95;

@@ -1,12 +1,22 @@
-import { NextResponse } from "next/server";
-import { connection } from "next/server";
+import { NextResponse, connection } from "next/server";
 import {
   generateMysteryShopperProbes,
   runSprtModelAudit,
 } from "@/lib/auditor/sprt";
+import { createTokenBucketLimiter } from "@/lib/ratelimit";
 
-export async function GET() {
+const auditorLimiter = createTokenBucketLimiter({
+  name: "auditor-get",
+  capacity: 120,
+  refillPerSec: 4,
+});
+
+export async function GET(request?: Request) {
   await connection();
+  if (request) {
+    const limited = auditorLimiter.check(request);
+    if (limited) return limited;
+  }
 
   const honestProbes = generateMysteryShopperProbes("honest-kimi-k3", 15);
   const cheatingProbes = generateMysteryShopperProbes("cheating-8b-swap", 15);

@@ -1,4 +1,5 @@
 import { NextResponse, connection } from "next/server";
+import { createTokenBucketLimiter } from "@/lib/ratelimit";
 import {
   destroySandbox,
   execInSandbox,
@@ -7,8 +8,18 @@ import {
   spawnSandbox,
 } from "@/lib/sandbox/microvm";
 
-export async function GET() {
+const sandboxLimiter = createTokenBucketLimiter({
+  name: "sandbox-get",
+  capacity: 120,
+  refillPerSec: 4,
+});
+
+export async function GET(request?: Request) {
   await connection();
+  if (request) {
+    const limited = sandboxLimiter.check(request);
+    if (limited) return limited;
+  }
 
   const sessionId = "ehbp-sess-kimi-k3-1m-demo";
   const parent = spawnSandbox(sessionId);

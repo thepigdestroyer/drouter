@@ -55,8 +55,8 @@ export async function listNodes(): Promise<ListNodesResult> {
       }),
     );
     return { source: "arc", address, nodes };
-  } catch (err) {
-    console.error("[arc] listNodes failed, using fallback:", err instanceof Error ? err.message : err);
+  } catch {
+    console.error("[arc] listNodes failed, using fallback");
     return { source: "fallback", nodes: fallbackNodes() };
   }
 }
@@ -99,8 +99,8 @@ async function verifierWrite(
         maxPriorityFeePerGas: PRIORITY_FEE,
       } as never);
     });
-  } catch (err) {
-    console.error(`[arc] ${functionName} failed:`, err instanceof Error ? err.message : err);
+  } catch {
+    console.error(`[arc] ${functionName} failed`);
     return null;
   }
 }

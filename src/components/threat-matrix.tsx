@@ -27,212 +27,212 @@ export const THREAT_SCENARIOS: ThreatScenario[] = [
   {
     id: "malicious-relay",
     index: "01",
-    specimenCode: "VEC-01 / NET-RELAY",
-    vectorCategory: "Network & Edge Proxy",
-    attackTitle: "Malicious Relay / Vercel Host",
+    specimenCode: "NET-RELAY",
+    vectorCategory: "Network and proxy",
+    attackTitle: "The web host or relay tries to read your prompt",
     attackerGoal:
-      "Inspect your plaintext prompt, read streamed model tokens, or infer prompt length from packet sizes at the routing gateway.",
+      "Read your plaintext prompt, inspect streamed tokens, or guess prompt length from packet sizes at the gateway.",
     whatAttackerSees:
-      "Fixed-bucket padded ciphertext blobs (1024 B, 4096 B, 16384 B) wrapped in hybrid X25519 + ML-KEM-768 HPKE and inner AES-256-GCM.",
-    neutralizingLayer: "L1 Browser Sandbox + L2 Enclave HPKE Tunnel",
+      "Fixed-bucket padded ciphertext blobs (4,096 B multiples) encrypted to the enclave public key.",
+    neutralizingLayer: "Browser local scrubbing + HPKE tunnel",
     defenseSummary:
-      "Stopped by browser-to-enclave HPKE (RFC 9180) + inner AES-256-GCM + RFC 8259 bucket padding.",
+      "Your browser scrubs identifiers locally and encrypts the padded request directly to the enclave key.",
     plainExplanation:
-      "Your browser encrypts every prompt directly to the enclave public key before it touches the network. Even if the Vercel host or dRouter relay is completely compromised, it only forwards opaque ciphertext padded into uniform size buckets.",
+      "Your browser strips sensitive tokens and encrypts every prompt before it leaves your device. Even if our Vercel host is compromised, it only forwards padded ciphertext.",
     controls: [
-      "RFC 9180 HPKE (X25519 + ML-KEM-768)",
-      "Inner AES-256-GCM session seal",
-      "RFC 8259 JSON whitespace bucket padding",
+      "RFC 9180 HPKE encryption",
+      "Local PII and secret scrubbing",
+      "4,096-byte bucket padding",
     ],
     telemetryProof: {
-      metricLabel: "Relay Payload Visibility",
-      metricValue: "0.00% Plaintext / Bucket-Padded",
+      metricLabel: "Relay payload visibility",
+      metricValue: "0 bytes plaintext (bucket-padded)",
       verificationTag: "HPKE-SEAL-OK",
       rawArtifact:
-        "aad=drouter/v1/chat | bucket=4096B | kem=X25519+MLKEM768 | cipher=AES-256-GCM",
+        "aad=drouter/v1/chat | bucket=4096B | cipher=AES-256-GCM",
     },
     residualNote:
-      "Relay sees connection timing and bucket size tier only, never prompt content or token text.",
+      "The relay sees connection timing and bucket size tier only, never prompt text.",
   },
   {
     id: "ddr5-interposer",
     index: "02",
-    specimenCode: "VEC-02 / PHY-INTERPOSER",
-    vectorCategory: "Physical Hardware Bus",
-    attackTitle: "Datacenter Tech Clips $900 DDR5 Probe onto RAM (TEE.fail)",
+    specimenCode: "PHY-INTERPOSER",
+    vectorCategory: "Physical hardware bus",
+    attackTitle: "A technician clips a hardware probe onto server RAM",
     attackerGoal:
-      "Passively snoop CPU-to-DRAM memory lines or replay deterministic ciphertexts across the PCIe bus during active inference.",
+      "Snoop CPU-to-DRAM memory lines or replay deterministic ciphertexts across the PCIe bus during inference.",
     whatAttackerSees:
-      "High-entropy AES-XTS host memory lines and fresh 96-bit random nonces on every CPU-to-GPU bounce buffer.",
-    neutralizingLayer: "L3 Silicon Memory Encryption + GPU HBM Custody",
+      "Encrypted host memory lines and fresh random nonces on every CPU-to-GPU bounce buffer.",
+    neutralizingLayer: "CPU memory encryption + GPU HBM custody",
     defenseSummary:
-      "Stopped by GPU HBM Custody (S3) + non-deterministic AES-GCM nonces on host transfer buffers (V1 audit: 0 repeated blocks, 7.99 bits/byte entropy).",
+      "Active model weights and KV caches stay in GPU HBM, and host transfer buffers use fresh random AES-GCM nonces.",
     plainExplanation:
-      "Model weights, KV-cache state, and token activations stay inside Hopper H100 HBM3 on-package memory. Any transfer across PCIe uses fresh random AES-256-GCM nonces so physical interposers cannot correlate repeated blocks.",
+      "AMD SEV-SNP and Intel TDX encrypt host RAM in silicon, while NVIDIA confidential computing keeps active weights in on-package GPU memory and encrypts PCIe transfers with fresh nonces.",
     controls: [
-      "GPU HBM Custody (S3 on-package memory)",
-      "Non-deterministic AES-GCM bounce buffer nonces",
-      "V1 Audit: 0 repeated 16B blocks, 7.99 bits/byte entropy",
+      "AMD SEV-SNP / Intel TDX memory encryption",
+      "NVIDIA GPU HBM custody",
+      "Fresh random nonces on bounce buffers",
     ],
     telemetryProof: {
-      metricLabel: "Host Bus Ciphertext Entropy",
-      metricValue: "7.994 bits/byte (0 Repeats)",
-      verificationTag: "S3-HBM-CUSTODY + V1-PASS",
+      metricLabel: "Host bus ciphertext entropy",
+      metricValue: "7.99 bits/byte (0 repeated 16B blocks)",
+      verificationTag: "V1-BUS-AUDIT-PASS",
       rawArtifact:
-        "bus_audit=V1 | repeated_16b_blocks=0/65536 | shannon_entropy=7.9941 | hbm_custody=LOCKED",
+        "bus_audit=V1 | repeated_16b_blocks=0 | shannon_entropy=7.99",
     },
     residualNote:
-      "Physical probe captures only randomized ciphertext traffic with zero reusable keystream.",
+      "A physical RAM probe captures only randomized ciphertext with no repeated blocks.",
   },
   {
     id: "debug-mode-container",
     index: "03",
-    specimenCode: "VEC-03 / ENCLAVE-INTEGRITY",
-    vectorCategory: "Host OS & Container Image",
-    attackTitle: "Operator Leaves SEV-SNP Debug Mode On or Modifies Container",
+    specimenCode: "ENCLAVE-INTEGRITY",
+    vectorCategory: "Host OS and container image",
+    attackTitle: "An operator enables debug mode or runs a modified container",
     attackerGoal:
-      "Boot a patched container image that logs user prompts, or attach a hypervisor debugger to read enclave memory.",
+      "Boot a modified container image that logs user prompts, or attach a debugger to read enclave memory.",
     whatAttackerSees:
-      "Connection aborted inside the user's browser before ephemeral session keys are ever generated or transmitted.",
-    neutralizingLayer: "L1 Client Hardware Verifier + L4 Sigstore Log",
+      "The client aborts the connection before generating or sending any session key.",
+    neutralizingLayer: "Hardware quote check + Sigstore Rekor log",
     defenseSummary:
-      "Stopped by browser C1/C2/C4 checks against AMD VCEK root + Sigstore Rekor transparency log before any key is shared.",
+      "We verify the hardware signature, confirm the debug bit is off, and match the build digest against Sigstore Rekor.",
     plainExplanation:
-      "Before sending a single byte, your browser checks the AMD SEV-SNP hardware signature against AMD's silicon root, verifies that the hardware DEBUG bit is zero, and matches the 48-byte launch measurement against the immutable Sigstore Rekor build log.",
+      "Before sending your prompt, the verifier checks the AMD SEV-SNP or Intel TDX hardware quote against the vendor root, confirms debug mode is disabled, and matches the launch measurement against the public Sigstore Rekor build log.",
     controls: [
-      "C1 AMD VCEK ECDSA P-384 hardware signature check",
-      "C2 Policy bit check (DEBUG=0, MIGRATE_MA=0, SMT=1)",
-      "C4 Sigstore Rekor transparency log digest match",
+      "Vendor silicon root signature check",
+      "Guest policy check (debug disabled)",
+      "Sigstore Rekor transparency log match",
     ],
     telemetryProof: {
-      metricLabel: "Pre-Key Handshake Gate",
-      metricValue: "Aborted at 0 Bytes Sent",
-      verificationTag: "C1-C2-C4-ENFORCED",
+      metricLabel: "Pre-key handshake gate",
+      metricValue: "Aborted at 0 bytes sent on mismatch",
+      verificationTag: "QUOTE-AND-REKOR-OK",
       rawArtifact:
-        "policy.debug_bit=0 (REQUIRED) | vcek_sig=VERIFIED | rekor_log_index=#149882104",
+        "policy.debug=0 | hardware_sig=VERIFIED | rekor_log=MATCHED",
     },
     residualNote:
-      "Any single bit mismatch in the container digest or SEV-SNP policy halts key exchange in the browser.",
+      "Any mismatch in the container digest or hardware policy stops key exchange.",
   },
   {
     id: "model-weight-swap",
     index: "04",
-    specimenCode: "VEC-04 / MODEL-SUBSTITUTION",
-    vectorCategory: "Model Integrity & Quality",
-    attackTitle: "Provider Secretly Swaps Kimi K3 (2.8T) for a Cheap 8B Model",
+    specimenCode: "MODEL-SUBSTITUTION",
+    vectorCategory: "Model integrity",
+    attackTitle: "A provider swaps a large model for a cheaper smaller model",
     attackerGoal:
-      "Pocket high-tier inference fees while serving degraded responses from a quantized or smaller model inside the enclave.",
+      "Charge for a frontier model while serving answers from a smaller or heavily quantized model.",
     whatAttackerSees:
-      "Attestation rejection at boot if weight blocks differ, plus automatic on-chain quarantine when statistical logits drift.",
-    neutralizingLayer: "L4 Measured Weight Root + L5 SPRT Mystery-Shopper",
+      "Boot measurement mismatch if the container image changes, plus statistical canary failure under audit.",
+    neutralizingLayer: "Measured container digest + canary prompts",
     defenseSummary:
-      "Caught by C7 pinned dm-verity weight root (mpk-58d5e74b…) + Mystery-Shopper SPRT statistical auditing.",
+      "The model serving container is pinned in the attestation measurement, and canary prompts test response quality.",
     plainExplanation:
-      "The read-only dm-verity Merkle root of the model weights is pinned directly inside the signed enclave measurement. In addition, blind mystery-shopper probes run Sequential Probability Ratio Tests (SPRT) to catch runtime quantization tricks.",
+      "The enclave measurement pins the container image and model configuration, and simulated mystery-shopper probes check for statistical drift.",
     controls: [
-      "C7 Pinned dm-verity weight Merkle root (mpk-58d5e74b…)",
-      "Blind Mystery-Shopper Canary prompts",
-      "Wald SPRT log-likelihood ratio audit",
+      "Measured container rootfs digest",
+      "Simulated mystery-shopper canary probes",
+      "Sequential probability ratio check",
     ],
     telemetryProof: {
-      metricLabel: "Weight & Logit Integrity",
-      metricValue: "mpk-58d5e74b… + SPRT H0 Accepted",
-      verificationTag: "C7-VERITY + SPRT-OK",
+      metricLabel: "Model image and canary check",
+      metricValue: "Measurement matched + canary accepted",
+      verificationTag: "IMAGE-PINNED",
       rawArtifact:
-        "model_pack=mpk-58d5e74b91a2 | fs=dm-verity-ro | sprt_llr=-4.82 (threshold=-4.59)",
+        "image_digest=PINNED | canary_audit=PASS",
     },
     residualNote:
-      "Altering a single 4 KB weight page breaks dm-verity I/O; runtime logit drift triggers slashing.",
+      "Changing the container image alters the hardware measurement reported at boot.",
   },
   {
     id: "subpoena-post-session",
     index: "05",
-    specimenCode: "VEC-05 / POST-SESSION-COMPULSION",
-    vectorCategory: "Legal Compulsion & Storage Breach",
-    attackTitle: "Court Subpoena or Breach After Session Ends",
+    specimenCode: "POST-SESSION-DATA",
+    vectorCategory: "Post-session storage",
+    attackTitle: "Database breach or compulsion after your session ends",
     attackerGoal:
-      "Demand historical chat logs from the operator or recover past prompts from database snapshots weeks later.",
+      "Recover historical prompts from server disks or database snapshots after a session finishes.",
     whatAttackerSees:
-      "Zeroed enclave RAM pages, no server-side prompt logs, and crypto-shredded client vaults locked under client-held K_freeze.",
-    neutralizingLayer: "L1 Client Crypto-Shredding + L2 Ephemeral RAM Zeroization",
+      "Wiped session keys and, if you froze a session, only AES-256-GCM ciphertext whose key stays on your device.",
+    neutralizingLayer: "Client-held keys + session memory wipe",
     defenseSummary:
-      "Stopped by Pop Bubble key zeroization (V6) + Zero-Telemetry Mode + client-held K_freeze crypto-shredding.",
+      "Popping a bubble wipes ephemeral session keys in RAM, and frozen session blobs store only client-encrypted ciphertext.",
     plainExplanation:
-      "When you click Pop Bubble, the enclave overwrites the ephemeral session key and KV-cache in RAM and returns a signed destruction receipt. If you save a Frozen Bubble, the AES key stays only on your device.",
+      "dRouter does not log plaintext prompts. When you pop a session bubble, ephemeral keys are zeroed. If you freeze a session to resume later, the decryption key stays in your browser.",
     controls: [
-      "Pop Bubble explicit RAM zeroization (V6 audit)",
-      "Zero-Telemetry Mode (no server prompt storage)",
-      "Client-held K_freeze HKDF-SHA256 crypto-shredding",
+      "Pop bubble session key zeroization",
+      "Client-held freeze key (AES-256-GCM)",
+      "Server rejects plaintext freeze uploads",
     ],
     telemetryProof: {
-      metricLabel: "Retained Server Plaintext",
-      metricValue: "0 Bytes (Zeroized in 1.4 ms)",
-      verificationTag: "V6-ZEROIZED + K-FREEZE",
+      metricLabel: "Retained server plaintext",
+      metricValue: "0 bytes stored on dRouter server",
+      verificationTag: "CIPHERTEXT-ONLY",
       rawArtifact:
-        "session_key=0x0000...0000 | kv_cache_pages=WIPED | server_db_rows=0 | k_freeze=CLIENT_ONLY",
+        "session_key=ZEROED | freeze_store=AES_256_GCM_CIPHERTEXT_ONLY",
     },
     residualNote:
-      "Operators cannot hand over data that never existed on disk and whose session keys are wiped.",
+      "Note: Tinfoil's upstream router runs an attested acceptable-use classifier sidecar that reports policy violations to api.tinfoil.sh.",
   },
   {
     id: "colluding-verifiers",
     index: "06",
-    specimenCode: "VEC-06 / QUORUM-SYBIL",
-    vectorCategory: "On-Chain Consensus & Routing",
-    attackTitle: "3 Colluding Verifiers Try to Admit a Rogue Node",
+    specimenCode: "QUORUM-SYBIL",
+    vectorCategory: "Verifier quorum",
+    attackTitle: "A minority of verifiers collude to approve a bad node",
     attackerGoal:
-      "Bribe a minority of attestation verifiers to whitelist an unverified server on the registry contract.",
+      "Bribe 3 verifiers into signing a routing ticket for an unverified server.",
     whatAttackerSees:
-      "On-chain transaction revert in AttestationVerifier.sol, plus independent browser rejection even if all 7 verifiers lied.",
-    neutralizingLayer: "L5 5-of-7 Arc Quorum + L1 Dual-Gate Browser Check",
+      "Quorum check rejects tickets with fewer than 5 of 7 signatures, and the client still checks the raw hardware quote.",
+    neutralizingLayer: "5-of-7 quorum + direct quote verification",
     defenseSummary:
-      "Blocked by 5-of-7 Verifier Quorum (C6) + independent client-side hardware verification (G8).",
+      "Routing tickets require at least 5 of 7 verifier signatures, and the client independently verifies the hardware quote.",
     plainExplanation:
-      "Admitting a node on Circle Arc Testnet requires at least 5 of 7 independent verifier signatures. More importantly, your browser never trusts the blockchain alone: it re-verifies the raw silicon signature locally (G8 Dual-Gate).",
+      "Admitting a node to the simulated routing table requires 5 of 7 independent verifier signatures, and direct hardware quote verification provides a second check.",
     controls: [
-      "C6 5-of-7 ECDSA Verifier Quorum on Circle Arc",
-      "G8 Client-Side Dual-Gate independent verification",
-      "Per-chip stake cap (2% of active pool)",
+      "5-of-7 Ed25519 verifier quorum threshold",
+      "Independent hardware quote verification",
+      "Arc Testnet registry anchor",
     ],
     telemetryProof: {
-      metricLabel: "Consensus & Client Gate",
-      metricValue: "3/7 Rejected (Needs >=5) + Local G8",
-      verificationTag: "C6-QUORUM + G8-DUAL-GATE",
+      metricLabel: "Quorum threshold check",
+      metricValue: "3/7 rejected (requires 5/7)",
+      verificationTag: "QUORUM-ENFORCED",
       rawArtifact:
-        "quorum_sigs=3/7 (REVERT: InsufficientQuorum) | browser_g8_verify=REQUIRED_INDEPENDENTLY",
+        "quorum_sigs=3/7 (REJECTED) | threshold=5/7",
     },
     residualNote:
-      "Even a 7-of-7 on-chain compromise cannot bypass your browser's local AMD/Intel silicon check.",
+      "Simulated quorum tickets are verified in our transparency and accountability modules.",
   },
   {
     id: "lab-key-extraction",
     index: "07",
-    specimenCode: "VEC-07 / SILICON-DECAPPING",
-    vectorCategory: "Nation-State Lab Extraction",
-    attackTitle: "Attacker Extracts Chip Attestation Key in a Lab",
+    specimenCode: "KEY-EXTRACTION",
+    vectorCategory: "Physical key extraction",
+    attackTitle: "An attacker extracts a node signing key in a lab",
     attackerGoal:
-      "Decap a physical CPU with focused ion beams, extract its VCEK private key, and impersonate a trusted enclave at scale.",
+      "Extract a node's attestation key to sign fake reports and impersonate an honest enclave.",
     whatAttackerSees:
-      "Immediate economic self-destruction: anyone holding the extracted key can claim 50% of the node's USDC stake in one transaction.",
-    neutralizingLayer: "L5 Cryptoeconomic Toxicity & Key-Compromise Bounty",
+      "Anyone with the extracted key can sign a forbidden prefix to claim a 50% slash bounty against the node's stake (Simulated).",
+    neutralizingLayer: "Forbidden-prefix key bounty (Simulated)",
     defenseSummary:
-      "Made toxic by the 50% Key-Compromise Bounty (F = sha256(\"drouter/forbidden-report-data/v1\")) + Canary Honeytoken slashing + 2% operator share cap.",
+      "Honest enclaves never sign the forbidden prefix F, so any signature over F proves key extraction and slashes the node.",
     plainExplanation:
-      "Honest enclave binaries refuse to ever sign the forbidden digest F. If an attacker extracts the silicon key in a lab, any insider or researcher can sign F once and submit it to NodeStakeVault.sol to seize 50% of the operator's stake and burn the rest.",
+      "In our accountability simulation, honest enclaves refuse to sign REPORT_DATA starting with F = sha256('drouter/forbidden-report-data/v1'). Signing F serves as a cryptographic proof of key compromise.",
     controls: [
-      "50% Key-Compromise Bounty on forbidden digest F",
-      "F = sha256(\"drouter/forbidden-report-data/v1\")",
-      "Canary Honeytoken slashing + 2% operator share cap",
+      "Forbidden report_data prefix F",
+      "50% key-compromise bounty simulation",
+      "Canary honeytoken commitment simulation",
     ],
     telemetryProof: {
-      metricLabel: "Extracted Key Economic Value",
-      metricValue: "Instant 100% Slash (50% Bounty Paid)",
-      verificationTag: "FORBIDDEN-DIGEST-TRAP",
+      metricLabel: "Compromised key penalty",
+      metricValue: "100% stake slash (50% reporter bounty, Simulated)",
+      verificationTag: "BOUNTY-TRAP-SIM",
       rawArtifact:
-        "F=sha256('drouter/forbidden-report-data/v1') | bounty=50% USDC | burned=50% | max_pool_share=2%",
+        "F=sha256('drouter/forbidden-report-data/v1') | slash=100% | mode=SIMULATED",
     },
     residualNote:
-      "The extracted key becomes a bearer check against the attacker's own collateral before it can exploit users.",
+      "Slashing and bounty claims are simulated against sim-1, sim-2, and sim-3.",
   },
 ];
 
@@ -243,7 +243,7 @@ export interface ThreatMatrixProps {
 
 export function ThreatMatrix({
   className = "",
-  defaultActiveIds = ["malicious-relay", "ddr5-interposer"],
+  defaultActiveIds = ["malicious-relay"],
 }: ThreatMatrixProps) {
   const [activeAttacks, setActiveAttacks] = useState<Record<string, boolean>>(
     () => {
@@ -252,19 +252,11 @@ export function ThreatMatrix({
         initial[item.id] = defaultActiveIds.includes(item.id);
       }
       return initial;
-    }
-  );
-
-  const [focusedId, setFocusedId] = useState<string>(
-    defaultActiveIds[0] ?? THREAT_SCENARIOS[0].id
+    },
   );
 
   const toggleAttack = (id: string) => {
-    setActiveAttacks((prev) => {
-      const nextState = !prev[id];
-      return { ...prev, [id]: nextState };
-    });
-    setFocusedId(id);
+    setActiveAttacks((prev) => ({ ...prev, [id]: !prev[id] }));
   };
 
   const setAllAttacks = (enabled: boolean) => {
@@ -276,393 +268,137 @@ export function ThreatMatrix({
   };
 
   const activeCount = THREAT_SCENARIOS.filter(
-    (s) => activeAttacks[s.id]
+    (s) => activeAttacks[s.id],
   ).length;
-  const focusedScenario =
-    THREAT_SCENARIOS.find((s) => s.id === focusedId) ?? THREAT_SCENARIOS[0];
-  const isFocusedSimulating = Boolean(activeAttacks[focusedScenario.id]);
 
   return (
     <section
-      aria-label="What If Someone Cheats? Live Attack Simulator"
-      className={`rounded-2xl border border-[#ece7da]/15 bg-[#050706] text-[#ece7da] shadow-[0_24px_80px_rgba(0,0,0,0.85)] overflow-hidden ${className}`}
+      aria-label="What if someone cheats?"
+      className={`ep-card p-5 sm:p-6 text-ink space-y-5 ${className}`}
     >
-      {/* Top Specimen Cabinet Header Bar */}
-      <div className="border-b border-[#ece7da]/10 bg-[#090d0b] px-5 py-4 sm:px-6">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="space-y-1">
-            <div className="flex flex-wrap items-center gap-2.5">
-              <span className="inline-flex items-center gap-1.5 rounded-full border border-[#a6ff72]/40 bg-[#a6ff72]/10 px-2.5 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-[0.16em] text-[#a6ff72]">
-                <span className="h-1.5 w-1.5 rounded-full bg-[#a6ff72] shadow-[0_0_8px_#a6ff72]" />
-                Interactive Specimen Matrix
-              </span>
-              <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-[#ece7da]/55">
-                7 Real-World Attack Vectors · Zero Single Points of Trust
-              </span>
-            </div>
-            <h2 className="text-lg sm:text-xl font-semibold tracking-tight text-[#ece7da]">
-              What If Someone Cheats? · Live Attack Simulator
-            </h2>
-            <p className="max-w-3xl text-xs sm:text-sm text-[#ece7da]/75 leading-relaxed">
-              Flip any toggle below to simulate a real-world compromise across
-              the relay, physical RAM bus, container host, model weights, or
-              verifier quorum. Watch which cryptographic layer neutralizes the
-              attack before plaintext can leak.
-            </p>
-          </div>
-
-          {/* Global Simulation Controls & Counter */}
-          <div className="flex flex-wrap items-center gap-2.5">
-            <div className="rounded-xl border border-[#ece7da]/15 bg-[#050706] px-3.5 py-2 text-right">
-              <div className="font-mono text-[10px] uppercase tracking-wider text-[#ece7da]/55">
-                Simulated Compromises
-              </div>
-              <div className="mt-0.5 flex items-center justify-end gap-2 font-mono text-xs font-semibold">
-                <span
-                  className={
-                    activeCount > 0 ? "text-[#ffb85c]" : "text-[#ece7da]/60"
-                  }
-                >
-                  {activeCount} / {THREAT_SCENARIOS.length} Active
-                </span>
-                <span className="text-[#ece7da]/30">|</span>
-                <span className="text-[#a6ff72]">
-                  {activeCount} / {activeCount} Neutralized
-                </span>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => setAllAttacks(true)}
-                className="cursor-pointer rounded-lg border border-[#ffb85c]/40 bg-[#ffb85c]/10 px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-[#ffb85c] transition hover:bg-[#ffb85c]/20"
-              >
-                Simulate All 7 Attacks
-              </button>
-              <button
-                type="button"
-                onClick={() => setAllAttacks(false)}
-                className="cursor-pointer rounded-lg border border-[#ece7da]/15 bg-[#050706] px-3 py-2 font-mono text-[11px] font-medium uppercase tracking-wider text-[#ece7da]/70 transition hover:border-[#ece7da]/35 hover:text-[#ece7da]"
-              >
-                Reset
-              </button>
-            </div>
-          </div>
+      {/* Header */}
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between border-b border-rule pb-4">
+        <div className="space-y-1">
+          <div className="ep-label">Threat scenarios</div>
+          <h2 className="font-serif text-xl sm:text-2xl text-ink">
+            Seven ways an operator or attacker could try to cheat
+          </h2>
+          <p className="max-w-[70ch] text-sm text-ink-2">
+            Select any scenario below to see what the attacker gets and which
+            technical check blocks the leak.
+          </p>
         </div>
 
-        {/* Defense-in-Depth Layer Status Strip */}
-        <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-5">
-          {[
-            {
-              layer: "L1 · Browser Gate",
-              desc: "HPKE + C1/C2/C4 + K_freeze",
-              triggered:
-                activeAttacks["malicious-relay"] ||
-                activeAttacks["debug-mode-container"] ||
-                activeAttacks["subpoena-post-session"] ||
-                activeAttacks["colluding-verifiers"],
-            },
-            {
-              layer: "L2 · Enclave Tunnel",
-              desc: "AES-256-GCM + Bucket Pad + V6",
-              triggered:
-                activeAttacks["malicious-relay"] ||
-                activeAttacks["subpoena-post-session"],
-            },
-            {
-              layer: "L3 · Silicon & HBM3",
-              desc: "SEV-SNP + GPU HBM Custody (S3)",
-              triggered:
-                activeAttacks["ddr5-interposer"] ||
-                activeAttacks["debug-mode-container"],
-            },
-            {
-              layer: "L4 · Measured Build",
-              desc: "Sigstore Rekor + dm-verity C7",
-              triggered:
-                activeAttacks["debug-mode-container"] ||
-                activeAttacks["model-weight-swap"],
-            },
-            {
-              layer: "L5 · Arc Stake & SPRT",
-              desc: "5-of-7 Quorum + 50% Bounty",
-              triggered:
-                activeAttacks["model-weight-swap"] ||
-                activeAttacks["colluding-verifiers"] ||
-                activeAttacks["lab-key-extraction"],
-            },
-          ].map((item) => (
-            <div
-              key={item.layer}
-              className={`rounded-lg border px-3 py-2 transition ${
-                item.triggered
-                  ? "border-[#a6ff72]/45 bg-[#a6ff72]/10"
-                  : "border-[#ece7da]/10 bg-[#050706]/80"
-              }`}
-            >
-              <div className="flex items-center justify-between gap-1">
-                <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-[#ece7da]">
-                  {item.layer}
-                </span>
-                <span
-                  className={`font-mono text-[9px] font-bold uppercase px-1.5 py-0.5 rounded ${
-                    item.triggered
-                      ? "bg-[#a6ff72]/20 text-[#a6ff72]"
-                      : "bg-[#ece7da]/10 text-[#ece7da]/55"
-                  }`}
-                >
-                  {item.triggered ? "ENGAGED" : "STANDBY"}
-                </span>
-              </div>
-              <div className="mt-0.5 truncate font-mono text-[10px] text-[#ece7da]/65">
-                {item.desc}
-              </div>
-            </div>
-          ))}
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <span className="ep-muted-chip">
+            {activeCount} of {THREAT_SCENARIOS.length} selected
+          </span>
+          <button
+            type="button"
+            onClick={() => setAllAttacks(true)}
+            className="ep-btn-ghost text-xs py-1.5 px-3 cursor-pointer"
+          >
+            Select all
+          </button>
+          <button
+            type="button"
+            onClick={() => setAllAttacks(false)}
+            className="ep-btn-ghost text-xs py-1.5 px-3 cursor-pointer"
+          >
+            Clear
+          </button>
         </div>
       </div>
 
-      {/* Main Split View: 7 Toggleable Threat Rows + Live Specimen Telemetry Drawer */}
-      <div className="grid grid-cols-1 lg:grid-cols-12">
-        {/* Left Column: 7 Interactive Threat Toggle Cards */}
-        <div className="divide-y divide-[#ece7da]/10 lg:col-span-7 lg:border-r lg:border-[#ece7da]/10">
-          {THREAT_SCENARIOS.map((scenario) => {
-            const isSimulating = Boolean(activeAttacks[scenario.id]);
-            const isFocused = focusedScenario.id === scenario.id;
+      {/* Scenario rows */}
+      <div className="divide-y divide-rule">
+        {THREAT_SCENARIOS.map((scenario) => {
+          const isSimulating = Boolean(activeAttacks[scenario.id]);
 
-            return (
-              <div
-                key={scenario.id}
-                onClick={() => setFocusedId(scenario.id)}
-                className={`group cursor-pointer px-5 py-4 transition sm:px-6 ${
-                  isSimulating
-                    ? "bg-[#090d0b]"
-                    : "bg-[#050706] hover:bg-[#090d0b]/60"
-                } ${
-                  isFocused
-                    ? "ring-1 ring-inset ring-[#a6ff72]/40"
-                    : ""
-                }`}
-              >
-                <div className="flex items-start justify-between gap-4">
-                  <div className="min-w-0 flex-1">
-                    {/* Specimen Metadata Row */}
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-mono text-[10px] font-bold uppercase tracking-widest text-[#ece7da]/45">
-                        #{scenario.index} · {scenario.specimenCode}
-                      </span>
-                      <span className="rounded border border-[#ece7da]/15 bg-[#050706] px-1.5 py-0.5 font-mono text-[10px] text-[#ece7da]/70">
-                        {scenario.vectorCategory}
-                      </span>
-                      {isSimulating ? (
-                        <span className="inline-flex items-center gap-1 rounded border border-[#a6ff72]/45 bg-[#a6ff72]/15 px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-[#a6ff72]">
-                          <span className="h-1.5 w-1.5 rounded-full bg-[#a6ff72]" />
-                          Attack Neutralized
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 rounded border border-[#ece7da]/15 bg-[#ece7da]/5 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-[#ece7da]/55">
-                          Toggle to Simulate
-                        </span>
-                      )}
-                    </div>
-
-                    {/* Attack Headline */}
-                    <h3 className="mt-1.5 text-sm sm:text-base font-semibold text-[#ece7da] group-hover:text-white">
-                      {scenario.attackTitle}
-                    </h3>
-
-                    {/* Immediate Neutralization Line */}
-                    <div
-                      className={`mt-2 rounded-lg border px-3 py-2 text-xs leading-relaxed transition ${
-                        isSimulating
-                          ? "border-[#a6ff72]/35 bg-[#a6ff72]/[0.07] text-[#ece7da]"
-                          : "border-[#ece7da]/10 bg-[#090d0b]/70 text-[#ece7da]/75"
-                      }`}
-                    >
-                      <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-[#a6ff72] mr-2">
-                        Defense Verdict:
-                      </span>
-                      <span>{scenario.defenseSummary}</span>
-                    </div>
-
-                    {/* Control Pills */}
-                    <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-                      {scenario.controls.map((ctrl) => (
-                        <span
-                          key={ctrl}
-                          className={`rounded-md border px-2 py-0.5 font-mono text-[10px] ${
-                            isSimulating
-                              ? "border-[#a6ff72]/30 bg-[#a6ff72]/10 text-[#a6ff72]"
-                              : "border-[#ece7da]/15 bg-[#050706] text-[#ece7da]/65"
-                          }`}
-                        >
-                          {ctrl}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Interactive Toggle Switch */}
-                  <div className="flex flex-col items-end gap-1.5 pt-0.5">
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={isSimulating}
-                      aria-label={`Simulate attack: ${scenario.attackTitle}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        toggleAttack(scenario.id);
-                      }}
-                      className={`relative inline-flex h-7 w-13 shrink-0 cursor-pointer items-center rounded-full border transition-colors duration-200 focus:outline-none ${
-                        isSimulating
-                          ? "border-[#ff6d4d]/60 bg-[#ff6d4d]/25"
-                          : "border-[#ece7da]/25 bg-[#090d0b]"
-                      }`}
-                    >
-                      <span
-                        className={`inline-block h-5 w-5 transform rounded-full transition-transform duration-200 ${
-                          isSimulating
-                            ? "translate-x-6 bg-[#a6ff72] shadow-[0_0_10px_#a6ff72]"
-                            : "translate-x-1 bg-[#ece7da]/60"
-                        }`}
-                      />
-                    </button>
-                    <span
-                      className={`font-mono text-[9px] uppercase tracking-wider ${
-                        isSimulating ? "text-[#ffb85c]" : "text-[#ece7da]/45"
-                      }`}
-                    >
-                      {isSimulating ? "Compromise On" : "Normal"}
+          return (
+            <div key={scenario.id} className="py-4 first:pt-0 last:pb-0 space-y-3">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="space-y-1 max-w-[70ch]">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="ep-label">
+                      {scenario.index}. {scenario.vectorCategory}
                     </span>
+                    <span className="ep-pass">{scenario.neutralizingLayer}</span>
                   </div>
+                  <h3 className="font-serif text-base sm:text-lg font-medium text-ink">
+                    {scenario.attackTitle}
+                  </h3>
+                  <p className="text-sm text-ink-2">
+                    {scenario.defenseSummary}
+                  </p>
                 </div>
-              </div>
-            );
-          })}
-        </div>
 
-        {/* Right Column: Live Specimen Inspection & Attack Trace */}
-        <div className="flex flex-col justify-between bg-[#090d0b] p-5 sm:p-6 lg:col-span-5">
-          <div className="space-y-4">
-            {/* Inspector Header */}
-            <div className="flex items-center justify-between gap-2 border-b border-[#ece7da]/10 pb-3">
-              <div>
-                <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-[#ece7da]/55">
-                  Live Threat Specimen #{focusedScenario.index}
-                </div>
-                <div className="mt-0.5 font-mono text-xs font-semibold text-[#a6ff72]">
-                  {focusedScenario.specimenCode} ·{" "}
-                  {focusedScenario.neutralizingLayer}
-                </div>
+                <button
+                  type="button"
+                  aria-pressed={isSimulating}
+                  onClick={() => toggleAttack(scenario.id)}
+                  className={
+                    isSimulating
+                      ? "ep-btn text-xs py-1.5 px-3 shrink-0 self-start cursor-pointer"
+                      : "ep-btn-ghost text-xs py-1.5 px-3 shrink-0 self-start cursor-pointer"
+                  }
+                >
+                  {isSimulating ? "Hide breakdown" : "Inspect scenario"}
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={() => toggleAttack(focusedScenario.id)}
-                className={`cursor-pointer rounded-lg border px-3 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-wider transition ${
-                  isFocusedSimulating
-                    ? "border-[#a6ff72]/50 bg-[#a6ff72]/15 text-[#a6ff72]"
-                    : "border-[#ff6d4d]/50 bg-[#ff6d4d]/15 text-[#ff6d4d] hover:bg-[#ff6d4d]/25"
-                }`}
-              >
-                {isFocusedSimulating
-                  ? "Simulating Attack (Blocked)"
-                  : "Trigger This Attack"}
-              </button>
+
+              {isSimulating && (
+                <div className="ep-inset p-4 space-y-3 text-sm">
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                    <div>
+                      <div className="ep-label">Attacker goal</div>
+                      <p className="mt-1 text-xs text-ink-2 leading-relaxed">
+                        {scenario.attackerGoal}
+                      </p>
+                    </div>
+                    <div>
+                      <div className="ep-label">What the attacker gets</div>
+                      <p className="mt-1 text-xs text-ink-2 leading-relaxed">
+                        {scenario.whatAttackerSees}
+                      </p>
+                    </div>
+                    <div>
+                      <div className="ep-label">How it is stopped</div>
+                      <p className="mt-1 text-xs text-ink leading-relaxed">
+                        {scenario.plainExplanation}
+                      </p>
+                    </div>
+                  </div>
+
+                  <details className="text-xs text-ink-3 border-t border-rule pt-2.5">
+                    <summary className="cursor-pointer font-mono text-ink-2 hover:text-ink select-none">
+                      Show technical controls and boundary notes
+                    </summary>
+                    <div className="mt-2 space-y-2 font-mono text-xs text-ink-2">
+                      <div>
+                        <span className="text-ink font-medium">Controls:</span>{" "}
+                        {scenario.controls.join(" | ")}
+                      </div>
+                      <div>
+                        <span className="text-ink font-medium">
+                          {scenario.telemetryProof.metricLabel}:
+                        </span>{" "}
+                        {scenario.telemetryProof.metricValue} (
+                        {scenario.telemetryProof.rawArtifact})
+                      </div>
+                      <div className="font-sans text-ink-3">
+                        <span className="font-mono text-ink-2">
+                          Boundary note:
+                        </span>{" "}
+                        {scenario.residualNote}
+                      </div>
+                    </div>
+                  </details>
+                </div>
+              )}
             </div>
-
-            {/* Attack Title & Plain English Breakdown */}
-            <div>
-              <h3 className="text-base font-semibold text-[#ece7da]">
-                {focusedScenario.attackTitle}
-              </h3>
-              <p className="mt-1.5 text-xs sm:text-sm leading-relaxed text-[#ece7da]/80">
-                {focusedScenario.plainExplanation}
-              </p>
-            </div>
-
-            {/* Step-by-Step Attack vs Defense Comparison Boxes */}
-            <div className="space-y-2.5">
-              <div className="rounded-xl border border-[#ff6d4d]/35 bg-[#ff6d4d]/[0.07] p-3.5">
-                <div className="flex items-center justify-between">
-                  <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-[#ff6d4d]">
-                    1. Adversary Action
-                  </span>
-                  <span className="font-mono text-[10px] text-[#ff6d4d]/80">
-                    Hostile Assumption
-                  </span>
-                </div>
-                <p className="mt-1 text-xs leading-relaxed text-[#ece7da]/90">
-                  {focusedScenario.attackerGoal}
-                </p>
-              </div>
-
-              <div className="rounded-xl border border-[#ffb85c]/35 bg-[#ffb85c]/[0.07] p-3.5">
-                <div className="flex items-center justify-between">
-                  <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-[#ffb85c]">
-                    2. What the Attacker Actually Obtains
-                  </span>
-                  <span className="font-mono text-[10px] text-[#ffb85c]/80">
-                    Zero Plaintext
-                  </span>
-                </div>
-                <p className="mt-1 text-xs leading-relaxed text-[#ece7da]/90">
-                  {focusedScenario.whatAttackerSees}
-                </p>
-              </div>
-
-              <div className="rounded-xl border border-[#a6ff72]/40 bg-[#a6ff72]/[0.08] p-3.5">
-                <div className="flex items-center justify-between">
-                  <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-[#a6ff72]">
-                    3. How dRouter Neutralizes It
-                  </span>
-                  <span className="font-mono text-[10px] text-[#a6ff72]">
-                    {focusedScenario.telemetryProof.verificationTag}
-                  </span>
-                </div>
-                <p className="mt-1 text-xs font-medium leading-relaxed text-[#ece7da]">
-                  {focusedScenario.defenseSummary}
-                </p>
-              </div>
-            </div>
-
-            {/* Cryptographic Telemetry Proof Readout */}
-            <div className="rounded-xl border border-[#ece7da]/15 bg-[#050706] p-3.5 font-mono">
-              <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-[#ece7da]/55">
-                <span>{focusedScenario.telemetryProof.metricLabel}</span>
-                <span className="text-[#a6ff72]">
-                  {focusedScenario.telemetryProof.metricValue}
-                </span>
-              </div>
-              <div className="mt-2 overflow-x-auto rounded border border-[#ece7da]/10 bg-[#090d0b] px-2.5 py-2 text-[11px] text-[#ece7da]/85">
-                <code>{focusedScenario.telemetryProof.rawArtifact}</code>
-              </div>
-              <div className="mt-2 text-[11px] text-[#ece7da]/65 font-sans">
-                <span className="font-mono text-[10px] uppercase tracking-wider text-[#ece7da]/50 mr-1.5">
-                  Boundary Note:
-                </span>
-                {focusedScenario.residualNote}
-              </div>
-            </div>
-          </div>
-
-          {/* Bottom Summary Footer inside Inspector */}
-          <div className="mt-6 rounded-xl border border-[#ece7da]/12 bg-[#050706] p-3.5">
-            <div className="flex items-center justify-between gap-2">
-              <span className="font-mono text-[10px] uppercase tracking-wider text-[#ece7da]/60">
-                Combined Multi-Vector Status
-              </span>
-              <span className="font-mono text-[11px] font-semibold text-[#a6ff72]">
-                Plaintext Exposure: 0 Bytes
-              </span>
-            </div>
-            <p className="mt-1 text-xs text-[#ece7da]/70 leading-relaxed">
-              Even if all 7 compromises happen at the same time, your browser
-              blocks unverified nodes before key exchange and keeps active
-              session keys sealed inside attested enclave memory.
-            </p>
-          </div>
-        </div>
+          );
+        })}
       </div>
     </section>
   );

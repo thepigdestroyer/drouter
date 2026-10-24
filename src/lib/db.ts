@@ -71,8 +71,8 @@ async function insert(collection: string, doc: { at: Date } & Record<string, unk
     if (!database) return false;
     await database.collection(collection).insertOne({ ...doc, at: coarsenToHour(doc.at) });
     return true;
-  } catch (error) {
-    console.error(`mongo insert into ${collection} failed`, error);
+  } catch {
+    console.error(`mongo insert into ${collection} failed`);
     return false;
   }
 }
@@ -100,8 +100,8 @@ export async function logRelay(e: RelayEvent): Promise<boolean> {
       { upsert: true },
     );
     return true;
-  } catch (error) {
-    console.error("mongo relay counter update failed", error);
+  } catch {
+    console.error("mongo relay counter update failed");
     return false;
   }
 }
@@ -136,8 +136,8 @@ export async function recentActivity(limit = 25) {
       bytesDown: Number(relayTotals?.bytesDown ?? 0) + Number(legacy.bytesDown ?? 0),
     };
     return { configured: true, verifications, receipts, relay };
-  } catch (error) {
-    console.error("mongo read failed", error);
+  } catch {
+    console.error("mongo read failed");
     return { configured: true, error: "read failed", verifications: [], receipts: [], relay: null };
   }
 }

@@ -26,6 +26,28 @@ import {
   type HeartbeatEvaluation,
   type HeartbeatEvent,
 } from "@/lib/accountability/ramp";
+import {
+  BodyTooLargeError,
+  InvalidJsonBodyError,
+  createTokenBucketLimiter,
+  readBoundedJson,
+} from "@/lib/ratelimit";
+
+const MAX_ACCOUNTABILITY_BODY_BYTES = 8192;
+const MAX_RECENT_CLAIMS = 50;
+const MAX_HEARTBEATS_PER_NODE = 64;
+
+const getLimiter = createTokenBucketLimiter({
+  name: "accountability-get",
+  capacity: 60,
+  refillPerSec: 2,
+});
+
+const postLimiter = createTokenBucketLimiter({
+  name: "accountability-post",
+  capacity: 30,
+  refillPerSec: 1,
+});
 
 const DEMO_NODE_IDS = ["tinfoil-router", "sim-1", "sim-2", "sim-3"] as const;
 const BASE_NOW_SEC = 1760100000;
@@ -91,8 +113,12 @@ function computeRampStates(): Record<string, HeartbeatEvaluation & { nodeId: str
   return out;
 }
 
-export async function GET() {
+export async function GET(request?: Request) {
   await connection();
+  if (request) {
+    const limited = getLimiter.check(request);
+    if (limited) return limited;
+  }
 
   return Response.json({
     manifests: defaultManifests(),
@@ -104,19 +130,42 @@ export async function GET() {
   });
 }
 
+function pushClaim(eventRecord: RecordedClaimEvent) {
+  store.recentClaims.unshift(eventRecord);
+  if (store.recentClaims.length > MAX_RECENT_CLAIMS) {
+    store.recentClaims.length = MAX_RECENT_CLAIMS;
+  }
+}
+
 export async function POST(request: Request) {
+  const limited = postLimiter.check(request);
+  if (limited) return limited;
+
   let body: { action?: string; nodeId?: string };
   try {
-    body = (await request.json()) as { action?: string; nodeId?: string };
-  } catch {
+    body = await readBoundedJson<{ action?: string; nodeId?: string }>(
+      request,
+      MAX_ACCOUNTABILITY_BODY_BYTES,
+    );
+  } catch (err) {
+    if (err instanceof BodyTooLargeError) {
+      return Response.json({ error: err.message }, { status: 413 });
+    }
+    return Response.json(
+      { error: err instanceof InvalidJsonBodyError ? err.message : "Invalid JSON request body" },
+      { status: 400 },
+    );
+  }
+
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
     return Response.json({ error: "Invalid JSON request body" }, { status: 400 });
   }
 
   const action = body.action;
-  const nodeId = body.nodeId || "sim-1";
+  const nodeId = typeof body.nodeId === "string" && body.nodeId ? body.nodeId : "sim-1";
 
   if (!DEMO_NODE_IDS.includes(nodeId as (typeof DEMO_NODE_IDS)[number])) {
-    return Response.json({ error: `Unknown nodeId: ${nodeId}` }, { status: 400 });
+    return Response.json({ error: "Unknown nodeId" }, { status: 400 });
   }
 
   store.nowSec += 10;
@@ -136,7 +185,7 @@ export async function POST(request: Request) {
     });
 
     const eventRecord: RecordedClaimEvent = {
-      id: `claim-${store.recentClaims.length + 1}`,
+      id: `claim-${store.epoch}-${store.recentClaims.length + 1}`,
       kind: "canary-leak",
       nodeId,
       timestamp: store.nowSec,
@@ -146,7 +195,7 @@ export async function POST(request: Request) {
       summary: verdict.reason,
       detail: { canary, verdict },
     };
-    store.recentClaims.unshift(eventRecord);
+    pushClaim(eventRecord);
     store.epoch += 1;
     store.activeCanaries[nodeId] = createCanarySession(nodeId, publicKeyHex, store.epoch);
 
@@ -177,7 +226,7 @@ export async function POST(request: Request) {
     );
 
     const eventRecord: RecordedClaimEvent = {
-      id: `claim-${store.recentClaims.length + 1}`,
+      id: `claim-${store.epoch}-${store.recentClaims.length + 1}`,
       kind: "key-compromise",
       nodeId,
       timestamp: store.nowSec,
@@ -187,7 +236,7 @@ export async function POST(request: Request) {
       summary: verdict.reason,
       detail: { claim, verdict },
     };
-    store.recentClaims.unshift(eventRecord);
+    pushClaim(eventRecord);
 
     return Response.json({
       ok: true,
@@ -213,11 +262,14 @@ export async function POST(request: Request) {
       nodeIdentityPk: rotatedPk,
       timestamp: store.nowSec,
     });
+    if (events.length > MAX_HEARTBEATS_PER_NODE) {
+      events.splice(0, events.length - MAX_HEARTBEATS_PER_NODE);
+    }
     store.heartbeatsByNode[nodeId] = events;
 
     const evaluation = evaluateHeartbeatWindow(events, store.nowSec);
     const eventRecord: RecordedClaimEvent = {
-      id: `claim-${store.recentClaims.length + 1}`,
+      id: `claim-${store.epoch}-${store.recentClaims.length + 1}`,
       kind: "restart",
       nodeId,
       timestamp: store.nowSec,
@@ -227,7 +279,7 @@ export async function POST(request: Request) {
       summary: evaluation.detail,
       detail: evaluation,
     };
-    store.recentClaims.unshift(eventRecord);
+    pushClaim(eventRecord);
 
     return Response.json({
       ok: true,
@@ -253,11 +305,14 @@ export async function POST(request: Request) {
       { nodeIdentityPk: clonedPkA, timestamp: store.nowSec - 5 },
       { nodeIdentityPk: clonedPkB, timestamp: store.nowSec },
     );
+    if (events.length > MAX_HEARTBEATS_PER_NODE) {
+      events.splice(0, events.length - MAX_HEARTBEATS_PER_NODE);
+    }
     store.heartbeatsByNode[nodeId] = events;
 
     const evaluation = evaluateHeartbeatWindow(events, store.nowSec);
     const eventRecord: RecordedClaimEvent = {
-      id: `claim-${store.recentClaims.length + 1}`,
+      id: `claim-${store.epoch}-${store.recentClaims.length + 1}`,
       kind: "clone-detected",
       nodeId,
       timestamp: store.nowSec,
@@ -267,7 +322,7 @@ export async function POST(request: Request) {
       summary: evaluation.detail,
       detail: evaluation,
     };
-    store.recentClaims.unshift(eventRecord);
+    pushClaim(eventRecord);
 
     return Response.json({
       ok: true,
@@ -283,7 +338,7 @@ export async function POST(request: Request) {
 
   return Response.json(
     {
-      error: `Unsupported action: ${String(action)}. Expected trigger-canary, claim-key-bounty, simulate-restart, or simulate-clone.`,
+      error: "Unsupported action. Expected trigger-canary, claim-key-bounty, simulate-restart, or simulate-clone.",
     },
     { status: 400 },
   );

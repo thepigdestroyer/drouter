@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 
 interface AtlasSearchResultItem {
   docId: string;
@@ -18,10 +18,21 @@ interface AtlasSearchResultItem {
   textRank: number;
 }
 
+interface AtlasEnginesInfo {
+  vectorSearch: "atlas" | "app-fallback";
+  textSearch: "atlas" | "app-fallback";
+  fusion: "$rankFusion" | "app-rrf";
+  embedding: string;
+}
+
 interface AtlasResponse {
   query: string;
   results: AtlasSearchResultItem[];
-  featuresUsed: string[];
+  featuresUsed?: string[];
+  engines?: AtlasEnginesInfo;
+  search?: {
+    engines?: AtlasEnginesInfo;
+  };
   analytics?: {
     totalKnowledgeDocs?: number;
     verificationsCount?: number;
@@ -33,10 +44,10 @@ interface AtlasResponse {
 }
 
 const PRESET_QUERIES = [
-  "DDR5 memory bus interposer probe TEE.fail mitigation",
-  "Kimi K3 8x NVIDIA B200 confidential GPU enclave",
-  "AMD SEV-SNP VCEK hardware attestation and Sigstore Rekor",
-  "RSA blind signature unlinkable credits and Shamir threshold",
+  "AMD SEV-SNP router and Intel TDX model enclave",
+  "Kimi K3 Intel TDX and NVIDIA confidential GPU enclave",
+  "DDR5 memory bus interposer probe mitigation",
+  "Chaumian RSA blind signature credits",
 ];
 
 export function AtlasExplorer() {
@@ -60,59 +71,59 @@ export function AtlasExplorer() {
     void runSearch(PRESET_QUERIES[0]);
   }, [runSearch]);
 
+  const engines = data?.engines ?? data?.search?.engines;
+  const enginesLine = engines
+    ? `vector: ${engines.vectorSearch} | text: ${engines.textSearch} | fusion: ${engines.fusion} | embedding: ${engines.embedding}`
+    : "engine unknown";
+
+  const indexList = data?.analytics?.searchIndexes ?? [];
+  const indexSummary =
+    indexList.length > 0
+      ? indexList
+          .map((idx) => `${idx.name} (${idx.status ?? "unknown"})`)
+          .join(", ")
+      : "No live Atlas index report";
+
   return (
-    <div className="rounded-xl border border-[rgba(236,231,218,0.14)] bg-[#090d0b] p-5 text-[#ece7da]">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[rgba(236,231,218,0.1)] pb-4">
-        <div>
-          <div className="font-mono text-[11px] uppercase tracking-[0.14em] text-[#a6ff72]">
-            MONGODB ATLAS DEVELOPER DATA PLATFORM · LIVE CLUSTER (`drouter`)
-          </div>
-          <h3 className="mt-1 text-lg font-semibold text-[#ece7da]">
-            Hybrid Vector + Full-Text Enclave Intelligence Search
-          </h3>
-        </div>
-        <div className="flex flex-wrap gap-1.5">
-          {(data?.featuresUsed ?? [
-            "Atlas Search ($search)",
-            "Atlas Vector Search ($vectorSearch)",
-            "Hybrid Search (RRF)",
-            "Automated 128-d Embeddings",
-            "Stream Analytics ($facet)",
-          ]).map((f) => (
-            <span
-              key={f}
-              className="rounded border border-[#a6ff72]/30 bg-[#133b22]/50 px-2 py-0.5 font-mono text-[10px] text-[#a6ff72]"
-            >
-              {f}
-            </span>
-          ))}
-        </div>
+    <div className="ep-card p-5 sm:p-6 text-ink space-y-5">
+      <div className="space-y-1.5">
+        <div className="ep-label">Knowledge retrieval</div>
+        <h3 className="font-serif text-xl sm:text-2xl text-ink">
+          Search hardware and enclave documentation
+        </h3>
+        <p className="max-w-[70ch] text-sm text-ink-2">
+          Queries our hardware advisory and provider catalog using hybrid vector
+          and full-text search, falling back to local ranking when MongoDB Atlas
+          search indexes are unavailable.
+        </p>
       </div>
 
-      {/* Live Search Bar */}
+      {/* Search form */}
       <form
-        className="mt-4 flex flex-col gap-2 sm:flex-row"
+        className="flex flex-col gap-2 sm:flex-row"
         onSubmit={(e) => {
           e.preventDefault();
           void runSearch(query);
         }}
       >
+        <label htmlFor="atlas-search-input" className="sr-only">
+          Search enclave knowledge base
+        </label>
         <input
+          id="atlas-search-input"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search confidential providers, CVEs, or enclave registers via Atlas Hybrid Search…"
-          className="flex-1 rounded-lg border border-[rgba(236,231,218,0.18)] bg-[#050706] px-3.5 py-2 text-sm text-[#ece7da] placeholder:text-[#ece7da]/40"
+          placeholder="Search providers, hardware checks, or threat notes..."
+          className="ep-input flex-1"
         />
-        <button
-          type="submit"
-          disabled={loading}
-          className="rounded-lg bg-[#a6ff72] px-4 py-2 text-sm font-semibold text-[#050706] hover:bg-[#5fe07a] disabled:opacity-50"
-        >
-          {loading ? "Querying Atlas…" : "Run Hybrid Search"}
+        <button type="submit" disabled={loading} className="ep-btn shrink-0">
+          {loading ? "Searching..." : "Search"}
         </button>
       </form>
 
-      <div className="mt-2.5 flex flex-wrap gap-2">
+      {/* Preset queries */}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="ep-label">Presets:</span>
         {PRESET_QUERIES.map((preset) => (
           <button
             key={preset}
@@ -121,83 +132,68 @@ export function AtlasExplorer() {
               setQuery(preset);
               void runSearch(preset);
             }}
-            className="rounded border border-[rgba(236,231,218,0.12)] bg-[#0f1512] px-2.5 py-1 text-xs text-[#ece7da]/75 hover:border-[#a6ff72]/50 hover:text-[#ece7da]"
+            className="ep-muted-chip hover:border-ink hover:text-ink transition-colors cursor-pointer"
           >
             {preset}
           </button>
         ))}
       </div>
 
-      {/* Analytics Strip */}
-      {data?.analytics && (
-        <div className="mt-4 grid grid-cols-2 gap-2.5 sm:grid-cols-5">
-          <div className="rounded-lg border border-[rgba(236,231,218,0.1)] bg-[#050706] p-2.5">
-            <div className="font-mono text-[10px] uppercase text-[#ece7da]/55">Embedded Docs</div>
-            <div className="mt-0.5 font-mono text-base font-semibold text-[#a6ff72]">
-              {data.analytics.totalKnowledgeDocs ?? 16} (128-d)
-            </div>
-          </div>
-          <div className="rounded-lg border border-[rgba(236,231,218,0.1)] bg-[#050706] p-2.5">
-            <div className="font-mono text-[10px] uppercase text-[#ece7da]/55">Atlas Indexes</div>
-            <div className="mt-0.5 font-mono text-xs font-semibold text-[#a6ff72]">
-              {(data.analytics.searchIndexes ?? [])
-                .map((idx) => `${idx.name} (${idx.status ?? "READY"})`)
-                .join(" · ") || "search + vectorSearch READY"}
-            </div>
-          </div>
-          <div className="rounded-lg border border-[rgba(236,231,218,0.1)] bg-[#050706] p-2.5">
-            <div className="font-mono text-[10px] uppercase text-[#ece7da]/55">Verifications</div>
-            <div className="mt-0.5 font-mono text-base font-semibold text-[#ece7da]">
-              {data.analytics.verificationsCount ?? 0}
-            </div>
-          </div>
-          <div className="rounded-lg border border-[rgba(236,231,218,0.1)] bg-[#050706] p-2.5">
-            <div className="font-mono text-[10px] uppercase text-[#ece7da]/55">Spent Nullifiers</div>
-            <div className="mt-0.5 font-mono text-base font-semibold text-[#ffb85c]">
-              {data.analytics.nullifiersCount ?? 0}
-            </div>
-          </div>
-          <div className="rounded-lg border border-[rgba(236,231,218,0.1)] bg-[#050706] p-2.5">
-            <div className="font-mono text-[10px] uppercase text-[#ece7da]/55">Frozen Ciphertexts</div>
-            <div className="mt-0.5 font-mono text-base font-semibold text-[#ece7da]">
-              {data.analytics.frozenBlobsCount ?? 0}
-            </div>
-          </div>
+      {/* Honest Engines & Index Status bar */}
+      <div className="ep-inset px-3.5 py-2.5 text-xs text-ink-2 space-y-1 font-mono">
+        <div>
+          <span className="text-ink font-medium">Engines:</span> {enginesLine}
         </div>
-      )}
+        <div>
+          <span className="text-ink font-medium">Index status:</span>{" "}
+          {indexSummary}
+          {data?.analytics?.totalKnowledgeDocs !== undefined
+            ? ` (${data.analytics.totalKnowledgeDocs} docs)`
+            : ""}
+        </div>
+      </div>
 
-      {/* Results */}
-      <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
+      {/* Results list */}
+      <div className="divide-y divide-rule border-t border-b border-rule">
         {(data?.results ?? []).slice(0, 4).map((item) => (
-          <div
-            key={item.docId}
-            className="flex flex-col justify-between rounded-lg border border-[rgba(236,231,218,0.12)] bg-[#050706] p-3.5"
-          >
-            <div>
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-mono text-[10px] uppercase tracking-wider text-[#a6ff72]">
-                  {item.category} {item.provider ? `· ${item.provider}` : ""}
-                </span>
-                <span className="font-mono text-[10px] text-[#ffb85c]">
-                  RRF {item.rrfScore.toFixed(4)} · vec #{item.vectorRank} ({item.vectorScore.toFixed(2)}) · txt #{item.textRank}
-                </span>
+          <article key={item.docId} className="py-4 space-y-2">
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <h4 className="font-serif text-base font-medium text-ink">
+                {item.title}
+              </h4>
+              <span className="ep-label">
+                {item.category}
+                {item.provider ? ` / ${item.provider}` : ""}
+              </span>
+            </div>
+            <p className="max-w-[70ch] text-sm text-ink-2 leading-relaxed">
+              {item.summary}
+            </p>
+            <details className="text-xs text-ink-3">
+              <summary className="cursor-pointer font-mono text-ink-2 hover:text-ink select-none">
+                Show score details
+              </summary>
+              <div className="mt-2 ep-inset p-2.5 font-mono text-xs text-ink-2 space-y-1">
+                <div>
+                  RRF score: {item.rrfScore.toFixed(4)} | Vector rank: #
+                  {item.vectorRank} ({item.vectorScore.toFixed(3)}) | Text rank:
+                  #{item.textRank} ({item.textScore.toFixed(3)})
+                </div>
+                {item.tags.length > 0 && (
+                  <div>Tags: {item.tags.join(", ")}</div>
+                )}
               </div>
-              <h4 className="mt-1 text-sm font-semibold text-[#ece7da]">{item.title}</h4>
-              <p className="mt-1 text-xs leading-relaxed text-[#ece7da]/70">{item.summary}</p>
-            </div>
-            <div className="mt-2.5 flex flex-wrap gap-1.5">
-              {item.tags.slice(0, 5).map((t) => (
-                <span
-                  key={t}
-                  className="rounded bg-[#0f1512] px-1.5 py-0.5 font-mono text-[10px] text-[#ece7da]/60"
-                >
-                  {t}
-                </span>
-              ))}
-            </div>
-          </div>
+            </details>
+          </article>
         ))}
+        {data && data.results.length === 0 && (
+          <p className="py-4 text-sm text-ink-3">
+            No matching records found for this query.
+          </p>
+        )}
       </div>
     </div>
   );
 }
+
+export default AtlasExplorer;

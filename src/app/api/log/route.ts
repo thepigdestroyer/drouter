@@ -1,15 +1,48 @@
+import { connection } from "next/server";
 import { logReceipt, logVerification, mongoConfigured, recentActivity } from "@/lib/db";
-
+import {
+  BodyTooLargeError,
+  InvalidJsonBodyError,
+  createGlobalBucketLimiter,
+  createTokenBucketLimiter,
+  readBoundedJson,
+} from "@/lib/ratelimit";
 
 const HEX = /^(0x)?[0-9a-fA-F]{1,256}$/;
 const CHECK_STATUS = new Set(["pass", "fail", "skip"]);
+const MAX_LOG_BODY_BYTES = 16_384; // 16 KB
+
+const getLimiter = createTokenBucketLimiter({
+  name: "log-get",
+  capacity: 60,
+  refillPerSec: 2,
+});
+
+const postIpLimiter = createTokenBucketLimiter({
+  name: "log-post-ip",
+  capacity: 20,
+  refillPerSec: 20 / 60,
+});
+
+const postGlobalLimiter = createGlobalBucketLimiter({
+  name: "log-post-global",
+  capacity: 200,
+  refillPerSec: 200 / 3600,
+});
 
 function str(value: unknown, max = 200): string | null {
-  return typeof value === "string" && value.length > 0 && value.length <= max ? value : null;
+  return typeof value === "string" && value.length > 0 && value.length <= max && !value.includes("\0")
+    ? value
+    : null;
 }
 
 /** Public transparency log: recent verifications, receipts and relay totals. */
-export async function GET() {
+export async function GET(request?: Request) {
+  await connection();
+  if (request) {
+    const limited = getLimiter.check(request);
+    if (limited) return limited;
+  }
   return Response.json(await recentActivity());
 }
 
@@ -18,12 +51,36 @@ export async function GET() {
  * endpoint cannot be used to store prompts or outputs.
  */
 export async function POST(request: Request) {
-  if (!mongoConfigured()) return Response.json({ stored: false, reason: "MongoDB not configured" });
+  const limited = postIpLimiter.check(request);
+  if (limited) return limited;
+
   let body: Record<string, unknown>;
   try {
-    body = await request.json();
-  } catch {
-    return Response.json({ error: "Invalid JSON" }, { status: 400 });
+    const parsed = await readBoundedJson(request, MAX_LOG_BODY_BYTES);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return Response.json({ error: "Invalid JSON object" }, { status: 400 });
+    }
+    body = parsed as Record<string, unknown>;
+  } catch (err) {
+    if (err instanceof BodyTooLargeError) {
+      return Response.json({ error: err.message }, { status: 413 });
+    }
+    return Response.json(
+      { error: err instanceof InvalidJsonBodyError ? err.message : "Invalid JSON" },
+      { status: 400 },
+    );
+  }
+
+  const globalCheck = postGlobalLimiter.consume(1);
+  if (!globalCheck.allowed) {
+    return Response.json(
+      { error: "Transparency log write quota exceeded", retryAfterSec: globalCheck.retryAfterSec },
+      { status: 429, headers: { "Retry-After": String(globalCheck.retryAfterSec) } },
+    );
+  }
+
+  if (process.env.DROUTER_STUB_UPSTREAM === "1" || !mongoConfigured()) {
+    return Response.json({ stored: false, reason: "MongoDB not configured" });
   }
 
   if (body.type === "verification") {

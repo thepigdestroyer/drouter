@@ -17,9 +17,72 @@ export function isValidRelayId(relayId: string | null | undefined): relayId is s
   return /^[a-zA-Z0-9_-]{1,32}$/.test(relayId);
 }
 
+/** Allowed upstream v1 endpoint paths that the oblivious relay may forward to a Tinfoil enclave. */
+export const ALLOWED_RELAY_V1_PATHS = [
+  "chat/completions",
+  "completions",
+  "embeddings",
+  "models",
+  "audio/transcriptions",
+  "audio/speech",
+  "responses",
+] as const;
+
+const ALLOWED_RELAY_V1_PATH_SET = new Set<string>(ALLOWED_RELAY_V1_PATHS);
+
+/**Allowed models that can be specified in `x-tinfoil-model`. */
+export const ALLOWED_TINFOIL_MODELS = new Set<string>([
+  "kimi-k3",
+  "glm-5-3",
+  "deepseek-v4-1-flash",
+  "gpt-oss-120b",
+  "llama3-3-70b",
+  "gemma4-31b",
+]);
+
+/**
+ * Validates that the `[...path]` segments under `/api/relay/v1/[...path]` contain no traversal,
+ * backslashes, control characters, or unapproved upstream routes, and returns the canonical relative path.
+ */
+export function validateRelayPath(pathSegments: unknown): string | null {
+  if (!Array.isArray(pathSegments) || pathSegments.length === 0 || pathSegments.length > 4) {
+    return null;
+  }
+  const cleaned: string[] = [];
+  for (const seg of pathSegments) {
+    if (typeof seg !== "string" || seg.length === 0 || seg.length > 64) return null;
+    if (
+      seg === "." ||
+      seg === ".." ||
+      seg.includes("/") ||
+      seg.includes("\\") ||
+      seg.includes("%") ||
+      seg.includes("\0") ||
+      !/^[a-zA-Z0-9_-]+$/.test(seg)
+    ) {
+      return null;
+    }
+    cleaned.push(seg);
+  }
+  const joined = cleaned.join("/");
+  if (!ALLOWED_RELAY_V1_PATH_SET.has(joined)) {
+    return null;
+  }
+  return joined;
+}
+
+/** Validates optional `x-tinfoil-model` header against the allowlist. */
+export function isAllowedRelayModel(modelHeader: string | null | undefined): boolean {
+  if (modelHeader === null || modelHeader === undefined || modelHeader === "") return true;
+  const trimmed = modelHeader.trim();
+  if (/[\r\n\0]/.test(trimmed)) return false;
+  return ALLOWED_TINFOIL_MODELS.has(trimmed);
+}
+
 /** Only forward to HTTPS Tinfoil enclave origins, so the relay cannot be used as an open proxy. */
 export function isAllowedEnclave(rawUrl: string | null): rawUrl is string {
-  if (!rawUrl) return false;
+  if (!rawUrl || typeof rawUrl !== "string" || rawUrl.length > 256) return false;
+  if (/[\r\n\0\\]/.test(rawUrl)) return false;
   let url: URL;
   try {
     url = new URL(rawUrl);
@@ -27,9 +90,17 @@ export function isAllowedEnclave(rawUrl: string | null): rawUrl is string {
     return false;
   }
   if (url.protocol !== "https:" || url.username || url.password || url.port) return false;
-  const host = url.hostname;
-  return host === "tinfoil.sh" || host.endsWith(".tinfoil.sh");
+  if (url.pathname !== "/" || url.search || url.hash) return false;
+  const host = url.hostname.toLowerCase();
+  if (!/^[a-z0-9.-]+$/.test(host) || host.includes("..")) return false;
+  return (
+    host === "tinfoil.sh" ||
+    host.endsWith(".tinfoil.sh") ||
+    host.endsWith(".tinfoil.dev")
+  );
 }
+
+const HEADER_VALUE_SAFE_RE = /^[\x20-\x7E]{1,512}$/;
 
 /** Request headers the relay forwards unchanged. The body is HPKE-encrypted and is never read. */
 export const FORWARD_REQUEST_HEADERS = ["content-type", "accept", "ehbp-encapsulated-key", "x-tinfoil-model"];
@@ -41,7 +112,9 @@ export function pickHeaders(src: Headers, names: string[]): Headers {
   const out = new Headers();
   for (const name of names) {
     const value = src.get(name);
-    if (value !== null) out.set(name, value);
+    if (value !== null && HEADER_VALUE_SAFE_RE.test(value)) {
+      out.set(name, value);
+    }
   }
   return out;
 }

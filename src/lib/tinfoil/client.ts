@@ -111,11 +111,11 @@ export function checksFromDocument(
     },
     {
       id: "C3",
-      label: "Fresh and bound to this session",
+      label: "HPKE key bound to enclave report",
       status: stepStatus(s.verifyCertificate),
       detail: stepDetail(
         s.verifyCertificate,
-        "Encryption key is committed to by the attestation; requests are HPKE-encrypted to it",
+        "HPKE public key & TLS key fingerprint match REPORT_DATA[0..64] and certificate SANs; each request uses a fresh ephemeral HPKE sender key",
       ),
     },
     {
@@ -126,11 +126,11 @@ export function checksFromDocument(
     },
     {
       id: "C5",
-      label: "GPUs in confidential mode",
+      label: "Router-attested confidential GPU pool",
       status: modelStatus ? (modelStatus.c5Pass ? "pass" : "fail") : "skip",
       detail: modelStatus
         ? modelStatus.c5Detail
-        : "Tinfoil's browser verifier does not expose GPU reports; the router enclave attests the model enclaves",
+        : "Tinfoil's browser verifier does not expose raw GPU SPDM reports; the router enclave attests the model enclaves",
     },
     {
       id: "C6",
@@ -140,7 +140,7 @@ export function checksFromDocument(
     },
     {
       id: "C7",
-      label: "Committed model",
+      label: "Manifest-pinned model & dm-verity root",
       status: modelStatus ? (modelStatus.c7Pass ? "pass" : "fail") : "pass",
       detail: modelStatus
         ? modelStatus.c7Detail

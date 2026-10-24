@@ -2,6 +2,7 @@ import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 import { connection } from "next/server";
+import { createTokenBucketLimiter } from "@/lib/ratelimit";
 import {
   deriveEd25519Key,
   getSeedBytes,
@@ -10,6 +11,12 @@ import {
 } from "@/lib/transparency/log";
 import { getVerifierSet, issueQuorumTicket } from "@/lib/transparency/quorum";
 
+const transparencyLimiter = createTokenBucketLimiter({
+  name: "transparency-get",
+  capacity: 120,
+  refillPerSec: 4,
+});
+
 function deriveNodeChipAndIdentity(nodeId: string): { chipId: string; nodeIdentityPk: string } {
   const seed = getSeedBytes();
   const chipId = bytesToHex(hkdf(sha256, seed, undefined, utf8ToBytes(`sim/chip/${nodeId}`), 64));
@@ -17,8 +24,12 @@ function deriveNodeChipAndIdentity(nodeId: string): { chipId: string; nodeIdenti
   return { chipId, nodeIdentityPk };
 }
 
-export async function GET() {
+export async function GET(request?: Request) {
   await connection();
+  if (request) {
+    const limited = transparencyLimiter.check(request);
+    if (limited) return limited;
+  }
 
   const log = getTransparencyLog();
   const proofs = [proveInclusion(0), proveInclusion(1), proveInclusion(2)];

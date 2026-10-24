@@ -9,6 +9,7 @@ export interface RouterSnpHardwareReport {
   migrationAllowed: boolean;
   debugAllowed: boolean;
   vmpl: number;
+  productName: "Milan" | "Genoa" | "Turin";
   tcb: {
     fmc: number;
     bootloader: number;
@@ -19,6 +20,8 @@ export interface RouterSnpHardwareReport {
   chipIdHex: string;
   measurementHex: string;
   reportDataHex: string;
+  tlsKeyFpFromReportDataHex: string;
+  hpkeKeyFromReportDataHex: string;
   signatureRHex: string;
   signatureSHex: string;
 }
@@ -86,13 +89,56 @@ export interface DeepAttestationBundle {
 
 /**
  * Decodes a raw 1,184-byte AMD SEV-SNP binary attestation report into structured hardware fields.
+ * Handles both Milan/Genoa (Zen 3 / Zen 4) TCB byte offsets (bl=byte0, tee=byte1, snp=byte6, ucode=byte7)
+ * and Turin (Zen 5, family 0x1A) TCB byte offsets (fmc=byte0, bl=byte1, tee=byte2, snp=byte3, ucode=byte7).
  * Works in both Node and browser environments.
  */
 export function decodeSnpReportBytes(raw1184Bytes: Uint8Array): RouterSnpHardwareReport {
   const parsed = parseReport(raw1184Bytes);
   const policyBits = decodePolicy(parsed.policy);
   const tcbRaw = parsed.reportedTcb !== BigInt(0) ? parsed.reportedTcb : parsed.currentTcb;
-  const tcb = tcbFromU64(tcbRaw);
+
+  // Inspect CPUID family/model at offsets 0x188 and 0x189 (valid in report version >= 3)
+  const family = parsed.version >= 3 && raw1184Bytes.length > 0x189 ? raw1184Bytes[0x188] : 0x19;
+  const model = parsed.version >= 3 && raw1184Bytes.length > 0x189 ? raw1184Bytes[0x189] : 0x11;
+
+  // Turin is Family 0x1A (26). Genoa is Family 0x19 Model 0x10..0x1F or 0xA0..0xAF.
+  // In synthetic test reports where family/model are 0x00, fall back to tcbFromU64 (Turin layout) if byte 0 & byte 3 are non-zero while byte 6 is 0.
+  const byteAt = (val: bigint, bitShift: number): number =>
+    Number((val >> BigInt(bitShift)) & BigInt(0xff));
+  const snpByteGenoa = byteAt(tcbRaw, 48);
+  const fmcByteTurin = byteAt(tcbRaw, 0);
+  const snpByteTurin = byteAt(tcbRaw, 24);
+
+  let productName: "Milan" | "Genoa" | "Turin" = "Genoa";
+  let tcb = tcbFromU64(tcbRaw);
+
+  if (family === 0x1a) {
+    productName = "Turin";
+    tcb = tcbFromU64(tcbRaw);
+  } else if (family === 0x19) {
+    productName = model === 0x01 ? "Milan" : "Genoa";
+    tcb = {
+      fmc: 0,
+      bootloader: byteAt(tcbRaw, 0),
+      tee: byteAt(tcbRaw, 8),
+      snp: snpByteGenoa,
+      microcode: byteAt(tcbRaw, 56),
+    };
+  } else if (snpByteGenoa > 0 && snpByteTurin === 0) {
+    productName = "Genoa";
+    tcb = {
+      fmc: 0,
+      bootloader: byteAt(tcbRaw, 0),
+      tee: byteAt(tcbRaw, 8),
+      snp: snpByteGenoa,
+      microcode: byteAt(tcbRaw, 56),
+    };
+  } else if (fmcByteTurin > 0 && snpByteTurin > 0) {
+    productName = "Turin";
+  }
+
+  const reportDataHex = toHex(parsed.reportData);
 
   return {
     version: parsed.version,
@@ -102,10 +148,13 @@ export function decodeSnpReportBytes(raw1184Bytes: Uint8Array): RouterSnpHardwar
     migrationAllowed: policyBits.migrationAgent,
     debugAllowed: policyBits.debug,
     vmpl: parsed.vmpl,
+    productName,
     tcb,
     chipIdHex: toHex(parsed.chipId),
     measurementHex: toHex(parsed.measurement),
-    reportDataHex: toHex(parsed.reportData),
+    reportDataHex,
+    tlsKeyFpFromReportDataHex: reportDataHex.slice(0, 64),
+    hpkeKeyFromReportDataHex: reportDataHex.slice(64, 128),
     signatureRHex: toHex(parsed.signatureR),
     signatureSHex: toHex(parsed.signatureS),
   };
@@ -197,7 +246,7 @@ export function verifyModelEnclaveStatus(m: ModelEnclaveAttestation): {
   const teeLabel = isSevSnp ? "SEV-SNP + CC mode" : "TDX + CC mode";
 
   const c5Detail = c5Pass
-    ? `${m.vmShape.gpus}× NVIDIA confidential GPU${m.vmShape.gpus === 1 ? "" : "s"} attested by router (${m.healthyHosts}/${m.configuredHosts} hosts healthy, ${teeLabel}, VLLM_DISABLE_UVA=1, SYMM_MEM=0)`
+    ? `${m.vmShape.gpus}× NVIDIA confidential GPU${m.vmShape.gpus === 1 ? "" : "s"} attested by router (${m.healthyHosts}/${m.configuredHosts} hosts healthy, ${teeLabel}, VLLM_DISABLE_UVA=1, SYMM_MEM=0; transitive via router proxy table & signed deployment YAML)`
     : `GPU enclave verification incomplete: ${m.verifiedHosts}/${m.configuredHosts} verified, ${m.unverifiedHosts} unverified, ${m.vmShape.gpus} GPUs, CC flags=${m.ccGpuFlagsVerified}`;
 
   const c7Pass = Boolean(

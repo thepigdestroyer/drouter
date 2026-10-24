@@ -1,9 +1,36 @@
 import { TinfoilAI } from "tinfoil";
 import { parseGatewayChatRequest } from "@/lib/gateway/harness-config";
 import { createSessionScrubber } from "@/lib/privacy/scrubber";
+import {
+  BodyTooLargeError,
+  InvalidJsonBodyError,
+  createGlobalBucketLimiter,
+  createTokenBucketLimiter,
+  readBoundedJson,
+} from "@/lib/ratelimit";
 import { openSimSession } from "@/lib/sim/client";
 import { nodeClose, nodeHello, nodeKeyshare, nodeTurn } from "@/lib/sim/node";
 import { simRoots } from "@/lib/sim/roots";
+
+const MAX_CHAT_BODY_BYTES = 131_072; // 128 KB max JSON request body
+
+const simChatLimiter = createTokenBucketLimiter({
+  name: "v1-chat-sim",
+  capacity: 40,
+  refillPerSec: 1,
+});
+
+const realTinfoilIpLimiter = createTokenBucketLimiter({
+  name: "v1-chat-tinfoil",
+  capacity: 10,
+  refillPerSec: 1 / 12, // 5 per minute per IP
+});
+
+const realTinfoilGlobalLimiter = createGlobalBucketLimiter({
+  name: "v1-chat-tinfoil-global",
+  capacity: 40,
+  refillPerSec: 40 / 3600, // 40 per hour globally
+});
 
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
@@ -49,12 +76,23 @@ export async function OPTIONS(): Promise<Response> {
 export async function POST(req: Request): Promise<Response> {
   let rawBody: unknown;
   try {
-    rawBody = await req.json();
-  } catch {
+    rawBody = await readBoundedJson(req, MAX_CHAT_BODY_BYTES);
+  } catch (err) {
+    if (err instanceof BodyTooLargeError) {
+      return Response.json(
+        {
+          error: {
+            message: err.message,
+            type: "invalid_request_error",
+          },
+        },
+        { status: 413, headers: CORS_HEADERS },
+      );
+    }
     return Response.json(
       {
         error: {
-          message: "Invalid JSON in request body",
+          message: err instanceof InvalidJsonBodyError ? err.message : "Invalid JSON in request body",
           type: "invalid_request_error",
         },
       },
@@ -73,6 +111,29 @@ export async function POST(req: Request): Promise<Response> {
       },
       { status: 400, headers: CORS_HEADERS },
     );
+  }
+
+  if (parsed.model === "sim-echo-1") {
+    const limited = simChatLimiter.check(req, CORS_HEADERS);
+    if (limited) return limited;
+  } else {
+    const limited = realTinfoilIpLimiter.check(req, CORS_HEADERS);
+    if (limited) return limited;
+    const globalCheck = realTinfoilGlobalLimiter.consume(1);
+    if (!globalCheck.allowed) {
+      return Response.json(
+        {
+          error: {
+            message: "Hourly enclave gateway quota reached. Use model 'sim-echo-1' or retry later.",
+            type: "rate_limit_error",
+          },
+        },
+        {
+          status: 429,
+          headers: { ...CORS_HEADERS, "Retry-After": String(globalCheck.retryAfterSec) },
+        },
+      );
+    }
   }
 
   const headerScrub = req.headers.get("x-drouter-scrub-pii");
@@ -213,6 +274,70 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
+  // Stubbed upstream mode for load/stress testing without spending Tinfoil tokens
+  if (process.env.DROUTER_STUB_UPSTREAM === "1") {
+    const completionId = `chatcmpl-stub-${Date.now()}`;
+    const created = Math.floor(Date.now() / 1000);
+    const stubHeaders: Record<string, string> = {
+      ...CORS_HEADERS,
+      "X-DRouter-Attested": "stubbed-tinfoil",
+      "X-DRouter-Enclave-Host": "router-0.tinfoil.sh",
+    };
+    const stubContent = scrubber
+      ? scrubber.restore(
+          `Stubbed enclave completion (${parsed.model}) for ${preparedMessages.length} message(s).`,
+        )
+      : `Stubbed enclave completion (${parsed.model}) for ${preparedMessages.length} message(s).`;
+
+    if (parsed.stream) {
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const payload = {
+            id: completionId,
+            object: "chat.completion.chunk",
+            created,
+            model: parsed.model,
+            choices: [{ index: 0, delta: { content: stubContent }, finish_reason: "stop" }],
+          };
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: {
+          ...stubHeaders,
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache",
+        },
+      });
+    }
+
+    return Response.json(
+      {
+        id: completionId,
+        object: "chat.completion",
+        created,
+        model: parsed.model,
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: stubContent },
+            finish_reason: "stop",
+          },
+        ],
+        drouter_attestation: {
+          securityVerified: true,
+          enclaveHost: "router-0.tinfoil.sh",
+          stubbed: true,
+        },
+      },
+      { status: 200, headers: stubHeaders },
+    );
+  }
+
   // Real Tinfoil enclave path
   const apiKey = process.env.TINFOIL_API_KEY;
   if (!apiKey) {
@@ -324,11 +449,11 @@ export async function POST(req: Request): Promise<Response> {
         headers: enclaveHeaders,
       },
     );
-  } catch (err) {
+  } catch {
     return Response.json(
       {
         error: {
-          message: err instanceof Error ? err.message : String(err),
+          message: "Upstream enclave inference request failed",
           type: "enclave_gateway_error",
         },
       },

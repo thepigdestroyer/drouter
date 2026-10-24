@@ -1,6 +1,8 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
+import { AuthPill } from "@/components/auth-pill";
+import { AtlasExplorer } from "@/components/atlas-explorer";
 import {
   ExhibitSection,
   SpecimenFooter,
@@ -9,9 +11,9 @@ import {
 import {
   ARGON_TOOLKIT_MANIFEST,
   DEFAULT_TASK_PROMPT,
+  DEMO_PERSONA,
   FORBIDDEN_ARGON_PARAMETERS,
   GEMINI_4_ARGON_MODEL_ID,
-  DEMO_PERSONA,
   runArgonAutonomousWorkflow,
   validateArgonRequestConfig,
   type ArgonAutonomousRunResult,
@@ -19,33 +21,144 @@ import {
   type ArgonValidationResult,
 } from "@/lib/gemini";
 
+interface ModelCallRecord {
+  model: string;
+  purpose: string;
+  ok: boolean;
+  latencyMs: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  error?: string;
+}
+
+interface GeminiRouteResponse {
+  ok?: boolean;
+  mode?: "live" | "simulated";
+  modelCalls?: ModelCallRecord[];
+  autonomousRun?: ArgonAutonomousRunResult;
+}
+
+function buildFallbackModelCalls(
+  run: ArgonAutonomousRunResult,
+  mode: "live" | "simulated",
+): ModelCallRecord[] {
+  const liveCall = run.stages.stage4.liveGeminiCall;
+  const rows: ModelCallRecord[] = [
+    {
+      model: GEMINI_4_ARGON_MODEL_ID,
+      purpose:
+        mode === "live"
+          ? "Primary reasoning orchestrator (live API)"
+          : "Primary reasoning orchestrator (simulated)",
+      ok: mode === "live" ? liveCall.liveEndpointReached : true,
+      latencyMs: 12,
+      error:
+        liveCall.attemptedLiveCall && !liveCall.liveEndpointReached
+          ? liveCall.fallbackReason
+          : undefined,
+    },
+    {
+      model: run.stages.stage1.modelsUsed.join(", "),
+      purpose: "Stage 1 local PII scrub and symmetry masking (simulated)",
+      ok: run.stages.stage1.passed,
+      latencyMs: 6,
+    },
+  ];
+
+  for (const sub of run.stages.stage2.subagents) {
+    rows.push({
+      model: sub.model,
+      purpose: `${sub.task} (simulated)`,
+      ok: sub.passed,
+      latencyMs: sub.latencyMs,
+    });
+  }
+
+  rows.push({
+    model: run.stages.stage3.modelsUsed.join(", "),
+    purpose: "Stage 3 sandbox policy and bus entropy check (simulated)",
+    ok: run.stages.stage3.passed,
+    latencyMs: 28,
+  });
+
+  rows.push({
+    model: run.stages.stage4.routedEnclaveModel,
+    purpose: "Stage 4 confidential enclave completion (simulated)",
+    ok: run.stages.stage4.passed,
+    latencyMs: 42,
+  });
+
+  return rows;
+}
+
 export default function ArgonShowcasePage() {
   const [taskPrompt, setTaskPrompt] = useState<string>(DEFAULT_TASK_PROMPT);
   const [thinkingLevel, setThinkingLevel] = useState<ArgonThinkingLevel>("high");
   const [backgroundDecode, setBackgroundDecode] = useState<boolean>(true);
-  const [enclaveModel, setEnclaveModel] = useState<"gemma4-31b" | "kimi-k3">("gemma4-31b");
+  const [enclaveModel, setEnclaveModel] = useState<"gemma4-31b" | "kimi-k3">(
+    "gemma4-31b",
+  );
   const [injectFault, setInjectFault] = useState<boolean>(true);
   const [humanApproved, setHumanApproved] = useState<boolean>(false);
   const [geminiApiKey, setGeminiApiKey] = useState<string>("");
-  const [sdkTab, setSdkTab] = useState<"typescript" | "python" | "payload">("typescript");
+  const [sdkTab, setSdkTab] = useState<"typescript" | "python" | "payload">(
+    "typescript",
+  );
   const [isRunning, setIsRunning] = useState<boolean>(false);
-  const [runResult, setRunResult] = useState<ArgonAutonomousRunResult | null>(null);
-  const [legacyTestResult, setLegacyTestResult] = useState<ArgonValidationResult | null>(null);
+  const [runResult, setRunResult] = useState<ArgonAutonomousRunResult | null>(
+    null,
+  );
+  const [apiMode, setApiMode] = useState<"live" | "simulated">("simulated");
+  const [apiModelCalls, setApiModelCalls] = useState<ModelCallRecord[] | null>(
+    null,
+  );
+  const [legacyTestResult, setLegacyTestResult] =
+    useState<ArgonValidationResult | null>(null);
 
   useEffect(() => {
     let active = true;
-    runArgonAutonomousWorkflow({
-      taskPrompt: DEFAULT_TASK_PROMPT,
-      thinkingLevel: "high",
-      background: true,
-      injectFaultToTestSelfHealing: true,
-      humanApprovedExternalAction: false,
-      preferredEnclaveModel: "gemma4-31b",
-    }).then((res) => {
-      if (active) {
-        setRunResult(res);
-      }
-    });
+    fetch("/api/gemini")
+      .then((res) => (res.ok ? (res.json() as Promise<GeminiRouteResponse>) : null))
+      .then(async (data) => {
+        if (!active) return;
+        if (data?.autonomousRun) {
+          setRunResult(data.autonomousRun);
+          const resolvedMode =
+            data.mode ??
+            (data.autonomousRun.stages.stage4.liveGeminiCall.liveEndpointReached
+              ? "live"
+              : "simulated");
+          setApiMode(resolvedMode);
+          setApiModelCalls(data.modelCalls ?? null);
+          return;
+        }
+        const fallback = await runArgonAutonomousWorkflow({
+          taskPrompt: DEFAULT_TASK_PROMPT,
+          thinkingLevel: "high",
+          background: true,
+          injectFaultToTestSelfHealing: true,
+          humanApprovedExternalAction: false,
+          preferredEnclaveModel: "gemma4-31b",
+        });
+        if (active) {
+          setRunResult(fallback);
+          setApiMode("simulated");
+        }
+      })
+      .catch(async () => {
+        const fallback = await runArgonAutonomousWorkflow({
+          taskPrompt: DEFAULT_TASK_PROMPT,
+          thinkingLevel: "high",
+          background: true,
+          injectFaultToTestSelfHealing: true,
+          humanApprovedExternalAction: false,
+          preferredEnclaveModel: "gemma4-31b",
+        });
+        if (active) {
+          setRunResult(fallback);
+          setApiMode("simulated");
+        }
+      });
     return () => {
       active = false;
     };
@@ -74,17 +187,22 @@ export default function ArgonShowcasePage() {
         }),
       });
       if (response.ok) {
-        const data = (await response.json()) as {
-          autonomousRun?: ArgonAutonomousRunResult;
-        };
+        const data = (await response.json()) as GeminiRouteResponse;
         if (data.autonomousRun) {
           setRunResult(data.autonomousRun);
+          const resolvedMode =
+            data.mode ??
+            (data.autonomousRun.stages.stage4.liveGeminiCall.liveEndpointReached
+              ? "live"
+              : "simulated");
+          setApiMode(resolvedMode);
+          setApiModelCalls(data.modelCalls ?? null);
           setIsRunning(false);
           return;
         }
       }
     } catch {
-      // Fall back to direct client-side execution if offline
+      // Fall back to client execution if offline
     }
 
     const fallbackRun = await runArgonAutonomousWorkflow({
@@ -97,6 +215,12 @@ export default function ArgonShowcasePage() {
       geminiApiKey: geminiApiKey.trim() || undefined,
     });
     setRunResult(fallbackRun);
+    setApiMode(
+      fallbackRun.stages.stage4.liveGeminiCall.liveEndpointReached
+        ? "live"
+        : "simulated",
+    );
+    setApiModelCalls(null);
     setIsRunning(false);
   }
 
@@ -122,606 +246,731 @@ export default function ArgonShowcasePage() {
     autonomousMultiStep: true,
   });
 
+  const modelCallsList = runResult
+    ? (apiModelCalls ?? buildFallbackModelCalls(runResult, apiMode))
+    : [];
+
+  const isGatePending =
+    runResult?.stages.stage5.externalActionStatus === "paused_awaiting_human";
+
   return (
-    <div className="min-h-screen flex flex-col bg-[#050706] text-[#ece7da]">
-      <SpecimenHeader />
+    <div className="min-h-screen flex flex-col bg-paper text-ink overflow-x-hidden">
+      <SpecimenHeader activePath="/argon" rightSlot={<AuthPill />} />
 
-      <main className="flex-1">
-        {/* Hero Banner & Named Persona */}
-        <section className="mx-auto max-w-[1440px] px-4 pt-10 pb-4 sm:px-6">
-          <div className="rounded-2xl border border-[rgba(236,231,218,0.14)] bg-[#070a08] p-6 sm:p-8 shadow-[0_24px_60px_rgba(0,0,0,0.65)]">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="inline-flex items-center gap-2 rounded-full border border-[#a6ff72]/40 bg-[#a6ff72]/10 px-3 py-1 font-mono text-xs uppercase tracking-[0.14em] text-[#a6ff72]">
-                <span className="h-2 w-2 rounded-full bg-[#a6ff72] shadow-[0_0_8px_#a6ff72]" />
-                <span>Google DeepMind Encode London Hackathon · Gemini 4 Argon Track</span>
-              </div>
-              <div className="flex flex-wrap items-center gap-2 font-mono text-xs">
-                <span className="rounded border border-[rgba(236,231,218,0.18)] bg-[#090d0b] px-2.5 py-1 text-[#ece7da]/85">
-                  model: &quot;gemini-4-argon&quot;
+      <main className="flex-1 w-full min-w-0">
+        <div className="mx-auto w-full max-w-5xl px-4 pt-10 pb-4 sm:px-6 space-y-10">
+        {/* 1. Intro & Mode Badge */}
+        <header className="space-y-5 border-b border-rule pb-8">
+          <div className="ep-label">Gemini 4 Argon agent</div>
+          <h1 className="ep-display text-3xl sm:text-4xl lg:text-5xl">
+            Confidential research agent with hardware checks and human approval
+          </h1>
+          <p className="max-w-[70ch] text-base sm:text-lg text-ink-2 leading-relaxed">
+            This agent scrubs private identifiers on your device, verifies a
+            confidential hardware enclave, routes your task, and pauses before any
+            on-chain action until a human approves.
+          </p>
+
+          {/* Large Mode Badge */}
+          <div className="ep-card p-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-3">
+              {apiMode === "live" ? (
+                <span className="inline-flex items-center rounded-full bg-ink text-paper px-3.5 py-1 font-mono text-xs font-medium tracking-wider uppercase">
+                  Live: gemini-4-argon
                 </span>
-                <span className="rounded border border-[#a6ff72]/35 bg-[#a6ff72]/10 px-2.5 py-1 text-[#a6ff72]">
-                  thinking_level: &quot;{thinkingLevel}&quot;
+              ) : (
+                <span className="inline-flex items-center rounded-full border border-ink text-ink px-3.5 py-1 font-mono text-xs font-medium tracking-wider uppercase">
+                  Simulated: no Gemini API key
                 </span>
-                <span className="rounded border border-[#ffb85c]/35 bg-[#ffb85c]/10 px-2.5 py-1 text-[#ffb85c]">
-                  background: {String(backgroundDecode)} (1M Context)
-                </span>
+              )}
+            </div>
+            <p className="text-xs text-ink-2 max-w-[56ch]">
+              {apiMode === "live"
+                ? "Connected to Google's live Interactions API with local privacy scrubbing and enclave verification."
+                : "No GEMINI_API_KEY is configured in production today, so the agent runs in deterministic simulated mode unless you supply a key below."}
+            </p>
+          </div>
+
+          {/* 2. Persona Card (Example user: Dana Reyes) */}
+          <div className="ep-inset p-4 sm:p-5 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="ep-label">Example user</span>
+              <span className="ep-muted-chip">Fictional persona</span>
+            </div>
+            <div className="font-serif text-lg font-medium text-ink">
+              {DEMO_PERSONA.name}
+            </div>
+            <div className="text-xs font-mono text-ink-2">
+              {DEMO_PERSONA.role} / {DEMO_PERSONA.institution}
+            </div>
+            <p className="max-w-[70ch] text-xs sm:text-sm text-ink-2 leading-relaxed">
+              <strong className="text-ink font-medium">Task:</strong>{" "}
+              {DEMO_PERSONA.assayProtocol}.{" "}
+              <strong className="text-ink font-medium">Goal:</strong>{" "}
+              {DEMO_PERSONA.confidentialityMandate}
+            </p>
+          </div>
+        </header>
+
+        {/* 3. Task Input & Controls */}
+        <section aria-label="Agent controls" className="ep-card p-5 sm:p-6 space-y-5">
+          <div className="space-y-2">
+            <label htmlFor="argon-task-prompt" className="ep-label block">
+              Task prompt (scrubbed locally in Stage 1 before leaving your device)
+            </label>
+            <textarea
+              id="argon-task-prompt"
+              rows={4}
+              value={taskPrompt}
+              onChange={(e) => setTaskPrompt(e.target.value)}
+              className="ep-input font-mono text-xs sm:text-sm leading-relaxed"
+            />
+          </div>
+
+          {/* Controls row */}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            {/* Thinking level */}
+            <div className="space-y-1.5">
+              <span className="ep-label block">Thinking level</span>
+              <div className="flex gap-1.5" role="group" aria-label="Thinking level">
+                {(["low", "medium", "high"] as const).map((lvl) => (
+                  <button
+                    key={lvl}
+                    type="button"
+                    onClick={() => setThinkingLevel(lvl)}
+                    className={
+                      thinkingLevel === lvl
+                        ? "ep-btn flex-1 py-1.5 px-2.5 text-xs font-mono uppercase cursor-pointer"
+                        : "ep-btn-ghost flex-1 py-1.5 px-2.5 text-xs font-mono uppercase cursor-pointer"
+                    }
+                  >
+                    {lvl}
+                  </button>
+                ))}
               </div>
             </div>
 
-            <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-12">
-              <div className="lg:col-span-7">
-                <h1
-                  className="text-3xl sm:text-4xl lg:text-5xl font-normal italic tracking-tight text-[#ece7da] leading-[1.12]"
-                  style={{
-                    fontFamily:
-                      "Instrument Serif, Playfair Display, Georgia, Cambria, Times New Roman, serif",
-                  }}
-                >
-                  Gemini 4 Argon Autonomous Confidential Security and Routing Agent
-                </h1>
-                <p className="mt-4 text-sm sm:text-base leading-relaxed text-[#ece7da]/75">
-                  A 6-stage autonomous agent orchestrating{" "}
-                  <code className="font-mono text-[#a6ff72]">gemini-4-argon</code>,{" "}
-                  <code className="font-mono text-[#a6ff72]">antigravity-preview-09-2026</code>,{" "}
-                  <code className="font-mono text-[#a6ff72]">gemini-3.8-flash</code>,{" "}
-                  <code className="font-mono text-[#a6ff72]">deep-research-preview-04-2026</code>,{" "}
-                  <code className="font-mono text-[#a6ff72]">gemini-3.8-live</code>, and{" "}
-                  <code className="font-mono text-[#a6ff72]">gemma-4-31b-it</code> (mapped to
-                  Tinfoil&apos;s live attested <code className="font-mono text-[#ffb85c]">gemma4-31b</code>{" "}
-                  enclave). Built with concrete pass/fail verification gates, autonomous
-                  fault remediation, and a strict Human-in-the-Loop safeguard.
-                </p>
-              </div>
+            {/* Simulate a compromised node */}
+            <div className="space-y-1.5">
+              <span className="ep-label block">Simulate a compromised node</span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={injectFault}
+                onClick={() => setInjectFault((prev) => !prev)}
+                className={
+                  injectFault
+                    ? "ep-btn w-full py-1.5 px-3 text-xs font-mono cursor-pointer"
+                    : "ep-btn-ghost w-full py-1.5 px-3 text-xs font-mono cursor-pointer"
+                }
+              >
+                {injectFault ? "On: inject faulty node" : "Off: clean path"}
+              </button>
+            </div>
 
-              {/* Named Real User Card */}
-              <div className="lg:col-span-5 rounded-xl border border-[#ffb85c]/35 bg-[#090d0b] p-5">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-[#ffb85c]">
-                    Named Real User &amp; Scientific Workflow
-                  </span>
-                  <span className="rounded bg-[#ffb85c]/15 px-2 py-0.5 font-mono text-[10px] text-[#ffb85c]">
-                    1,000,000-Token Session
-                  </span>
-                </div>
-                <div className="mt-3 text-lg font-semibold text-[#ece7da]">
-                  {DEMO_PERSONA.name}
-                </div>
-                <div className="font-mono text-xs text-[#a6ff72]">
-                  {DEMO_PERSONA.role} · {DEMO_PERSONA.institution}
-                </div>
-                <p className="mt-2.5 text-xs leading-relaxed text-[#ece7da]/75">
-                  <strong className="text-[#ece7da]">Pipeline:</strong>{" "}
-                  {DEMO_PERSONA.assayProtocol}
-                </p>
-                <p className="mt-2 text-xs leading-relaxed text-[#ece7da]/70">
-                  <strong className="text-[#ece7da]">Mandate:</strong>{" "}
-                  {DEMO_PERSONA.confidentialityMandate}
-                </p>
+            {/* Enclave model */}
+            <div className="space-y-1.5">
+              <span className="ep-label block">Enclave model</span>
+              <div className="flex gap-1.5" role="group" aria-label="Enclave model">
+                {(["gemma4-31b", "kimi-k3"] as const).map((mdl) => (
+                  <button
+                    key={mdl}
+                    type="button"
+                    onClick={() => setEnclaveModel(mdl)}
+                    className={
+                      enclaveModel === mdl
+                        ? "ep-btn flex-1 py-1.5 px-2 text-xs font-mono cursor-pointer"
+                        : "ep-btn-ghost flex-1 py-1.5 px-2 text-xs font-mono cursor-pointer"
+                    }
+                  >
+                    {mdl}
+                  </button>
+                ))}
               </div>
             </div>
+          </div>
+
+          <p className="text-xs text-ink-3">
+            Note: Gemini 4 Argon supports a 1,000,000-token context window. On
+            Tinfoil, router-0.tinfoil.sh attests with AMD SEV-SNP, and the Kimi K3
+            enclave runs on Intel TDX plus NVIDIA confidential GPUs with a
+            262,144-token max context length.
+          </p>
+
+          {/* Optional Gemini API key */}
+          <details className="ep-inset p-3.5 text-xs">
+            <summary className="cursor-pointer font-mono text-ink-2 hover:text-ink select-none">
+              Use your own Gemini key (optional)
+            </summary>
+            <div className="mt-3 space-y-2">
+              <label htmlFor="gemini-api-key-input" className="block text-ink-2">
+                Sent to our server for one call. Never stored or logged.
+              </label>
+              <input
+                id="gemini-api-key-input"
+                type="password"
+                placeholder="AIzaSy..."
+                value={geminiApiKey}
+                onChange={(e) => setGeminiApiKey(e.target.value)}
+                className="ep-input font-mono text-xs"
+              />
+            </div>
+          </details>
+
+          {/* Primary Run button */}
+          <div className="pt-1">
+            <button
+              type="button"
+              disabled={isRunning}
+              onClick={() => void handleExecuteWorkflow()}
+              className="ep-btn w-full sm:w-auto px-6 py-2.5 text-sm cursor-pointer"
+            >
+              {isRunning ? "Running agent..." : "Run agent"}
+            </button>
           </div>
         </section>
 
-        {/* Exhibit 01: Interactive 3-Minute Judge Controls */}
-        <ExhibitSection
-          number="01"
-          tag="INTERACTIVE ORCHESTRATOR CONTROLS"
-          title="Configure Gemini 4 Argon, Inject Enclave Faults, and Gate On-Chain Actions"
-          subtitle="Adjust thinking_level, toggle a simulated VMPL0 + DDR5 memory-bus leak to watch antigravity-preview-09-2026 self-heal, and control the Human-in-the-Loop gate."
-        >
-          <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-            <div className="lg:col-span-7 space-y-4">
+        {/* 4. Vertical Timeline of Stages */}
+        {runResult ? (
+          <section aria-label="Agent execution stages" className="space-y-6">
+            <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-rule pb-3">
               <div>
-                <label
-                  htmlFor="argon-task-prompt"
-                  className="block font-mono text-xs uppercase tracking-[0.12em] text-[#ece7da]/75"
-                >
-                  Unredacted Local Research Prompt (Scrubbed on-device in Stage 1)
-                </label>
-                <textarea
-                  id="argon-task-prompt"
-                  rows={4}
-                  value={taskPrompt}
-                  onChange={(e) => setTaskPrompt(e.target.value)}
-                  className="mt-2 w-full rounded-xl border border-[rgba(236,231,218,0.18)] bg-[#050706] p-3 font-mono text-xs text-[#ece7da] focus:border-[#a6ff72] focus:outline-none"
-                />
+                <div className="ep-label">Execution trace</div>
+                <h2 className="font-serif text-2xl text-ink">
+                  Six verification stages
+                </h2>
               </div>
+              <span className="ep-mono">Run ID: {runResult.runId}</span>
+            </div>
 
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-                {/* Thinking Level */}
-                <div className="rounded-xl border border-[rgba(236,231,218,0.14)] bg-[#090d0b] p-3.5">
-                  <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-[#ece7da]/65">
-                    1. thinking_level
+            <ol className="relative border-l border-rule-2 ml-3 pl-6 space-y-6">
+              {/* Stage 1 */}
+              <li className="relative space-y-2">
+                <span className="absolute -left-[31px] top-1 h-3 w-3 rounded-full bg-ink border-2 border-paper" />
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="space-y-0.5">
+                    <h3 className="font-serif text-lg font-medium text-ink">
+                      Stage 1: On-device privacy scrub and masking
+                    </h3>
+                    <div className="font-mono text-xs text-ink-3">
+                      Model: {runResult.stages.stage1.modelsUsed.join(", ")} (Simulated local scrubber)
+                    </div>
                   </div>
-                  <div className="mt-2 flex gap-1.5">
-                    {(["low", "medium", "high"] as const).map((lvl) => (
-                      <button
-                        key={lvl}
-                        type="button"
-                        onClick={() => setThinkingLevel(lvl)}
-                        className={`flex-1 rounded-lg border px-2 py-1.5 font-mono text-xs uppercase transition-colors ${
-                          thinkingLevel === lvl
-                            ? "border-[#a6ff72] bg-[#a6ff72]/15 text-[#a6ff72]"
-                            : "border-[rgba(236,231,218,0.14)] bg-[#050706] text-[#ece7da]/70 hover:text-[#ece7da]"
-                        }`}
-                      >
-                        {lvl}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Background 1M Decode */}
-                <div className="rounded-xl border border-[rgba(236,231,218,0.14)] bg-[#090d0b] p-3.5">
-                  <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-[#ece7da]/65">
-                    2. Long Decode (&gt;65k)
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setBackgroundDecode((prev) => !prev)}
-                    className={`mt-2 w-full rounded-lg border px-3 py-1.5 font-mono text-xs transition-colors ${
-                      backgroundDecode
-                        ? "border-[#a6ff72] bg-[#a6ff72]/15 text-[#a6ff72]"
-                        : "border-[rgba(236,231,218,0.14)] bg-[#050706] text-[#ece7da]/70"
-                    }`}
+                  <span
+                    className={
+                      runResult.stages.stage1.passed ? "ep-pass" : "ep-fail"
+                    }
                   >
-                    background: {String(backgroundDecode)}
-                  </button>
+                    {runResult.stages.stage1.passed ? "Pass" : "Fail"}
+                  </span>
                 </div>
-
-                {/* Target Attested Enclave */}
-                <div className="rounded-xl border border-[rgba(236,231,218,0.14)] bg-[#090d0b] p-3.5">
-                  <div className="font-mono text-[11px] uppercase tracking-[0.12em] text-[#ece7da]/65">
-                    3. Tinfoil Enclave
-                  </div>
-                  <div className="mt-2 flex gap-1.5">
-                    {(["gemma4-31b", "kimi-k3"] as const).map((mdl) => (
-                      <button
-                        key={mdl}
-                        type="button"
-                        onClick={() => setEnclaveModel(mdl)}
-                        className={`flex-1 rounded-lg border px-2 py-1.5 font-mono text-[11px] transition-colors ${
-                          enclaveModel === mdl
-                            ? "border-[#ffb85c] bg-[#ffb85c]/15 text-[#ffb85c]"
-                            : "border-[rgba(236,231,218,0.14)] bg-[#050706] text-[#ece7da]/70"
-                        }`}
-                      >
-                        {mdl}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              {/* Optional Live Gemini API Key */}
-              <div>
-                <label
-                  htmlFor="gemini-api-key-input"
-                  className="block font-mono text-[11px] uppercase tracking-[0.12em] text-[#ece7da]/65"
-                >
-                  Optional Live GEMINI_API_KEY (Calls Google v1beta/interactions alongside local enclave verification)
-                </label>
-                <input
-                  id="gemini-api-key-input"
-                  type="password"
-                  placeholder="AIzaSy... (leave blank for deterministic offline verification)"
-                  value={geminiApiKey}
-                  onChange={(e) => setGeminiApiKey(e.target.value)}
-                  className="mt-1.5 w-full rounded-xl border border-[rgba(236,231,218,0.16)] bg-[#050706] px-3 py-2 font-mono text-xs text-[#ece7da] focus:border-[#a6ff72] focus:outline-none"
-                />
-              </div>
-            </div>
-
-            {/* Fault Injection & Human-in-the-Loop Gate Controls */}
-            <div className="lg:col-span-5 flex flex-col justify-between space-y-4 rounded-xl border border-[rgba(236,231,218,0.14)] bg-[#090d0b] p-4">
-              <div className="space-y-3">
-                <div className="font-mono text-xs uppercase tracking-[0.14em] text-[#a6ff72]">
-                  Autonomous Verification &amp; Safeguard Toggles
-                </div>
-
-                {/* Fault Injection Toggle */}
-                <div className="rounded-lg border border-[rgba(236,231,218,0.12)] bg-[#050706] p-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-mono text-xs font-semibold text-[#ece7da]">
-                      Inject Faulty Enclave / Memory-Bus Leak
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setInjectFault((prev) => !prev)}
-                      className={`rounded-full border px-3 py-1 font-mono text-xs transition-colors ${
-                        injectFault
-                          ? "border-[#ffb85c] bg-[#ffb85c]/20 text-[#ffb85c]"
-                          : "border-[rgba(236,231,218,0.2)] bg-[#090d0b] text-[#ece7da]/70"
-                      }`}
-                    >
-                      {injectFault ? "FAULT INJECTED" : "CLEAN PATH"}
-                    </button>
-                  </div>
-                  <p className="mt-1.5 text-xs text-[#ece7da]/65">
-                    Simulates a misconfigured node (<code className="font-mono">node-bad-ecb-leak-01</code>)
-                    that violates VMPL0 invariant <code className="font-mono">I1_NoPlaintextEgress</code>{" "}
-                    and leaks 15 repeated 16-byte ECB cipher blocks on the DDR5 bus so{" "}
-                    <code className="font-mono text-[#a6ff72]">antigravity-preview-09-2026</code>{" "}
-                    can catch and self-heal it.
-                  </p>
-                </div>
-
-                {/* Human-in-the-Loop Safeguard */}
-                <div className="rounded-lg border border-[rgba(236,231,218,0.12)] bg-[#050706] p-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-mono text-xs font-semibold text-[#ece7da]">
-                      Human-in-the-Loop Safeguard (Stage 5)
-                    </span>
-                    <span
-                      className={`rounded-full px-2.5 py-0.5 font-mono text-[11px] ${
-                        humanApproved
-                          ? "bg-[#a6ff72]/20 text-[#a6ff72] border border-[#a6ff72]/40"
-                          : "bg-[#ffb85c]/20 text-[#ffb85c] border border-[#ffb85c]/40"
-                      }`}
-                    >
-                      {humanApproved ? "APPROVED BY HUMAN" : "PAUSED (SAFEGUARD ACTIVE)"}
-                    </span>
-                  </div>
-                  <p className="mt-1.5 text-xs text-[#ece7da]/65">
-                    Blocks Circle Arc USDC receipt anchoring and node slashing until
-                    the user explicitly confirms the state-changing transaction.
-                  </p>
-                  <div className="mt-2.5 flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => handleExecuteWorkflow(false)}
-                      className={`flex-1 rounded-lg border px-2.5 py-1.5 font-mono text-xs transition-colors ${
-                        !humanApproved
-                          ? "border-[#ffb85c] bg-[#ffb85c]/15 text-[#ffb85c]"
-                          : "border-[rgba(236,231,218,0.16)] bg-[#090d0b] text-[#ece7da]/75"
-                      }`}
-                    >
-                      Hold / Reject External Action
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleExecuteWorkflow(true)}
-                      className={`flex-1 rounded-lg border px-2.5 py-1.5 font-mono text-xs transition-colors ${
-                        humanApproved
-                          ? "border-[#a6ff72] bg-[#a6ff72]/15 text-[#a6ff72]"
-                          : "border-[rgba(236,231,218,0.16)] bg-[#090d0b] text-[#ece7da]/75"
-                      }`}
-                    >
-                      Approve Circle Arc Tx
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <button
-                type="button"
-                disabled={isRunning}
-                onClick={() => handleExecuteWorkflow()}
-                className="w-full rounded-xl border border-[#a6ff72] bg-[#a6ff72]/15 px-4 py-3 font-mono text-xs uppercase tracking-[0.14em] text-[#a6ff72] transition-all hover:bg-[#a6ff72]/25 disabled:opacity-50"
-              >
-                {isRunning
-                  ? "Running 6-Stage Gemini 4 Argon Verification Loop..."
-                  : "Run 6-Stage Gemini 4 Argon Autonomous Agent ↗"}
-              </button>
-            </div>
-          </div>
-        </ExhibitSection>
-
-        {/* Exhibit 02: 6-Stage Autonomous Execution Trace & Pass/Fail Signals */}
-        <ExhibitSection
-          number="02"
-          tag="6-STAGE AUTONOMOUS EXECUTION TRACE"
-          title="Concrete Pass/Fail Verification Signals Across All 6 Agent Stages"
-          subtitle="Every stage emits a machine-verifiable invariant formula before the pipeline advances to the next trust boundary."
-        >
-          {runResult ? (
-            <div className="space-y-4">
-              {/* Summary Status Bar */}
-              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#a6ff72]/35 bg-[#090d0b] p-4">
-                <div className="flex items-center gap-3">
-                  <span className="h-3 w-3 rounded-full bg-[#a6ff72] shadow-[0_0_10px_#a6ff72]" />
-                  <div>
-                    <div className="font-mono text-xs uppercase tracking-[0.12em] text-[#a6ff72]">
-                      Run ID: {runResult.runId} · All 6 Verification Gates Passed:{" "}
-                      {String(runResult.overallPassed)}
-                    </div>
-                    <div className="text-xs text-[#ece7da]/70">
-                      Self-Healing Triggered &amp; Resolved:{" "}
-                      <strong className="font-mono text-[#ffb85c]">
-                        {String(runResult.selfHealingTriggeredAndResolved)}
-                      </strong>{" "}
-                      | Human Gate Status:{" "}
-                      <strong className="font-mono text-[#a6ff72]">
-                        {runResult.humanGateState}
-                      </strong>
-                    </div>
-                  </div>
-                </div>
-                <div className="font-mono text-xs text-[#ece7da]/65">
-                  Proof Digest: 0x{runResult.stages.stage6.forensicProofDigestHex.slice(0, 20)}...
-                </div>
-              </div>
-
-              {/* Grid of 6 Stages */}
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                {/* Stage 1 */}
-                <div className="rounded-xl border border-[rgba(236,231,218,0.14)] bg-[#090d0b] p-4">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-mono text-xs font-semibold text-[#a6ff72]">
-                      Stage 1 · {runResult.stages.stage1.stageName}
-                    </span>
-                    <span className="rounded border border-[#a6ff72]/40 bg-[#a6ff72]/10 px-2 py-0.5 font-mono text-[10px] text-[#a6ff72]">
-                      PASS ({runResult.stages.stage1.verificationSignal.formula})
-                    </span>
-                  </div>
-                  <div className="mt-1 font-mono text-[11px] text-[#ffb85c]">
-                    Models: {runResult.stages.stage1.modelsUsed.join(" -> ")}
-                  </div>
-                  <p className="mt-2 text-xs text-[#ece7da]/75">
-                    Scrubbed {runResult.stages.stage1.redactionCount} sensitive items
-                    (API key, email, cohort ID, grant currency, date) and padded
-                    the frame to{" "}
-                    <code className="font-mono text-[#a6ff72]">
-                      {runResult.stages.stage1.verificationSignal.bucketBytes} bytes
-                    </code>{" "}
-                    (4096-byte multiple) with{" "}
-                    <code className="font-mono text-[#a6ff72]">
-                      plaintextLeakCount = {runResult.stages.stage1.verificationSignal.plaintextLeakCount}
-                    </code>
-                    .
-                  </p>
-                  <div className="mt-2.5 rounded-lg border border-[rgba(236,231,218,0.1)] bg-[#050706] p-2.5 font-mono text-[11px] text-[#ece7da]/80">
-                    <div className="text-[10px] uppercase text-[#ece7da]/45">
-                      PAPILLON Generalized &amp; Symmetry-Masked Prompt Sent Outbound:
-                    </div>
-                    <div className="mt-1 break-words">
+                <p className="max-w-[70ch] text-sm text-ink-2">
+                  Scrubbed {runResult.stages.stage1.redactionCount} sensitive items
+                  (email, API key, cohort ID, grant amount, date) and padded the
+                  frame to{" "}
+                  {runResult.stages.stage1.verificationSignal.bucketBytes.toLocaleString()}{" "}
+                  bytes with {runResult.stages.stage1.verificationSignal.plaintextLeakCount}{" "}
+                  plaintext leaks.
+                </p>
+                <details className="text-xs text-ink-3">
+                  <summary className="cursor-pointer font-mono text-ink-2 hover:text-ink select-none">
+                    Show details
+                  </summary>
+                  <div className="mt-2 ep-inset p-3 font-mono text-xs space-y-2 text-ink-2">
+                    <div>
+                      <span className="text-ink font-medium">
+                        Outbound masked prompt:
+                      </span>{" "}
                       {runResult.stages.stage1.papillonGeneralizedPrompt}
                     </div>
+                    <div>
+                      <span className="text-ink font-medium">Formula:</span>{" "}
+                      {runResult.stages.stage1.verificationSignal.formula}
+                    </div>
                   </div>
-                </div>
+                </details>
+              </li>
 
-                {/* Stage 2 */}
-                <div className="rounded-xl border border-[rgba(236,231,218,0.14)] bg-[#090d0b] p-4">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-mono text-xs font-semibold text-[#a6ff72]">
-                      Stage 2 · {runResult.stages.stage2.stageName}
-                    </span>
-                    <span className="rounded border border-[#a6ff72]/40 bg-[#a6ff72]/10 px-2 py-0.5 font-mono text-[10px] text-[#a6ff72]">
-                      PASS ({runResult.stages.stage2.verificationSignal.formula})
-                    </span>
+              {/* Stage 2 */}
+              <li className="relative space-y-2">
+                <span className="absolute -left-[31px] top-1 h-3 w-3 rounded-full bg-ink border-2 border-paper" />
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="space-y-0.5">
+                    <h3 className="font-serif text-lg font-medium text-ink">
+                      Stage 2: Parallel enclave discovery and quorum check
+                    </h3>
+                    <div className="font-mono text-xs text-ink-3">
+                      Model: {runResult.stages.stage2.modelsUsed.join(", ")} (Simulated subagents)
+                    </div>
                   </div>
-                  <div className="mt-1 font-mono text-[11px] text-[#ffb85c]">
-                    Models: {runResult.stages.stage2.modelsUsed.join(" + ")}
-                  </div>
-                  <ul className="mt-2 space-y-1.5 text-xs text-[#ece7da]/80">
+                  <span
+                    className={
+                      runResult.stages.stage2.passed ? "ep-pass" : "ep-fail"
+                    }
+                  >
+                    {runResult.stages.stage2.passed ? "Pass" : "Fail"}
+                  </span>
+                </div>
+                <p className="max-w-[70ch] text-sm text-ink-2">
+                  Matched provider {runResult.stages.stage2.selectedEnclaveProvider}{" "}
+                  for {runResult.stages.stage2.selectedEnclaveModel} and verified{" "}
+                  {runResult.stages.stage2.verificationSignal.quorumValidSignatures} of{" "}
+                  7 verifier signatures.
+                </p>
+                <details className="text-xs text-ink-3">
+                  <summary className="cursor-pointer font-mono text-ink-2 hover:text-ink select-none">
+                    Show details
+                  </summary>
+                  <div className="mt-2 ep-inset p-3 font-mono text-xs space-y-2 text-ink-2">
                     {runResult.stages.stage2.subagents.map((sub) => (
-                      <li
-                        key={sub.subagentId}
-                        className="rounded border border-[rgba(236,231,218,0.1)] bg-[#050706] p-2"
-                      >
-                        <div className="flex justify-between font-mono text-[11px] text-[#a6ff72]">
-                          <span>{sub.model}</span>
-                          <span>{sub.latencyMs} ms</span>
-                        </div>
-                        <div className="mt-0.5 text-[11px] text-[#ece7da]/75">
-                          {sub.artifactSummary}
-                        </div>
-                      </li>
+                      <div key={sub.subagentId}>
+                        <span className="text-ink font-medium">{sub.model}</span> (
+                        {sub.latencyMs} ms): {sub.artifactSummary}
+                      </div>
                     ))}
-                  </ul>
-                </div>
+                  </div>
+                </details>
+              </li>
 
-                {/* Stage 3 */}
-                <div className="rounded-xl border border-[rgba(236,231,218,0.14)] bg-[#090d0b] p-4">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-mono text-xs font-semibold text-[#a6ff72]">
-                      Stage 3 · {runResult.stages.stage3.stageName}
-                    </span>
-                    <span className="rounded border border-[#a6ff72]/40 bg-[#a6ff72]/10 px-2 py-0.5 font-mono text-[10px] text-[#a6ff72]">
-                      PASS (1,344 States &amp; V1/V6)
-                    </span>
+              {/* Stage 3 */}
+              <li className="relative space-y-2">
+                <span className="absolute -left-[31px] top-1 h-3 w-3 rounded-full bg-ink border-2 border-paper" />
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="space-y-0.5">
+                    <h3 className="font-serif text-lg font-medium text-ink">
+                      Stage 3: Monitor policy and memory-bus check
+                    </h3>
+                    <div className="font-mono text-xs text-ink-3">
+                      Model: {runResult.stages.stage3.modelsUsed.join(", ")} (Simulated sandbox)
+                    </div>
                   </div>
-                  <div className="mt-1 font-mono text-[11px] text-[#ffb85c]">
-                    Model: {runResult.stages.stage3.modelsUsed.join(", ")}
-                  </div>
-                  <div className="mt-2 space-y-2">
+                  <span
+                    className={
+                      runResult.stages.stage3.passed ? "ep-pass" : "ep-fail"
+                    }
+                  >
+                    {runResult.stages.stage3.passed
+                      ? runResult.stages.stage3.selfHealed
+                        ? "Pass (recovered)"
+                        : "Pass"
+                      : "Fail"}
+                  </span>
+                </div>
+                <p className="max-w-[70ch] text-sm text-ink-2">
+                  {runResult.stages.stage3.faultInjected
+                    ? `Caught injected plaintext leak and 15 repeated 16-byte blocks on ${runResult.stages.stage3.attempts[0]?.candidateNodeId}, blocked the node, and failed over to a clean node.`
+                    : `Verified 1,344 policy states and measured ${runResult.stages.stage3.verificationSignal.entropyBitsPerByte} bits/byte ciphertext entropy with 0 repeated 16-byte blocks.`}
+                </p>
+                <details className="text-xs text-ink-3">
+                  <summary className="cursor-pointer font-mono text-ink-2 hover:text-ink select-none">
+                    Show details
+                  </summary>
+                  <div className="mt-2 ep-inset p-3 font-mono text-xs space-y-2 text-ink-2">
                     {runResult.stages.stage3.attempts.map((att) => (
                       <div
                         key={att.attemptNumber}
-                        className={`rounded-lg border p-2.5 font-mono text-[11px] ${
-                          att.passed
-                            ? "border-[#a6ff72]/35 bg-[#050706] text-[#ece7da]"
-                            : "border-[#ffb85c]/50 bg-[#ffb85c]/10 text-[#ffb85c]"
-                        }`}
+                        className="border-b border-rule last:border-b-0 pb-2 last:pb-0"
                       >
-                        <div className="flex items-center justify-between">
-                          <span>
-                            Attempt #{att.attemptNumber} · Node: {att.candidateNodeId}
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-ink font-medium">
+                            Attempt #{att.attemptNumber}: {att.candidateNodeId}
                           </span>
-                          <span>{att.passed ? "VERIFIED (100%)" : "FAULT CAUGHT"}</span>
+                          <span className={att.passed ? "ep-pass" : "ep-muted-chip"}>
+                            {att.passed ? "Verified" : "Fault caught"}
+                          </span>
                         </div>
-                        <div className="mt-1 text-[10px] text-[#ece7da]/75">
-                          VMPL0: {att.vmpl0StatesChecked} states | Entropy:{" "}
-                          {att.entropyBitsPerByte} bits/byte | Repeated 16B blocks:{" "}
-                          {att.repeated16ByteBlocks}
+                        <div className="mt-1">
+                          States checked: {att.vmpl0StatesChecked} | Entropy:{" "}
+                          {att.entropyBitsPerByte} bits/byte | Repeated 16B
+                          blocks: {att.repeated16ByteBlocks}
                         </div>
                         {att.remediationApplied && (
-                          <div className="mt-1.5 border-t border-[#ffb85c]/30 pt-1.5 text-[11px] text-[#ece7da]">
-                            <strong>Self-Healing Action:</strong> {att.remediationApplied}
+                          <div className="mt-1 text-ink">
+                            Remediation: {att.remediationApplied}
                           </div>
                         )}
                       </div>
                     ))}
                   </div>
-                </div>
+                </details>
+              </li>
 
-                {/* Stage 4 */}
-                <div className="rounded-xl border border-[rgba(236,231,218,0.14)] bg-[#090d0b] p-4">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-mono text-xs font-semibold text-[#a6ff72]">
-                      Stage 4 · {runResult.stages.stage4.stageName}
-                    </span>
-                    <span className="rounded border border-[#a6ff72]/40 bg-[#a6ff72]/10 px-2 py-0.5 font-mono text-[10px] text-[#a6ff72]">
-                      PASS (Homomorphic Restore)
-                    </span>
-                  </div>
-                  <div className="mt-1 font-mono text-[11px] text-[#ffb85c]">
-                    Orchestrator: gemini-4-argon -&gt; Attested Enclave:{" "}
-                    {runResult.stages.stage4.routedEnclaveModel}
-                  </div>
-                  <div className="mt-2 space-y-2 font-mono text-[11px]">
-                    <div className="rounded border border-[rgba(236,231,218,0.1)] bg-[#050706] p-2 text-[#ece7da]/70">
-                      <span className="text-[10px] uppercase text-[#ffb85c]">
-                        Enclave Output (Still Masked in Cloud):
-                      </span>
-                      <p className="mt-1">{runResult.stages.stage4.enclaveCompletionMasked}</p>
-                    </div>
-                    <div className="rounded border border-[#a6ff72]/30 bg-[#050706] p-2 text-[#ece7da]">
-                      <span className="text-[10px] uppercase text-[#a6ff72]">
-                        Locally Unmasked Output:
-                      </span>
-                      <p className="mt-1">{runResult.stages.stage4.restoredClientOutput}</p>
+              {/* Stage 4 */}
+              <li className="relative space-y-2">
+                <span className="absolute -left-[31px] top-1 h-3 w-3 rounded-full bg-ink border-2 border-paper" />
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="space-y-0.5">
+                    <h3 className="font-serif text-lg font-medium text-ink">
+                      Stage 4: Gemini 4 Argon synthesis and enclave routing
+                    </h3>
+                    <div className="font-mono text-xs text-ink-3">
+                      Model: {GEMINI_4_ARGON_MODEL_ID} -&gt;{" "}
+                      {runResult.stages.stage4.routedEnclaveModel}
                     </div>
                   </div>
+                  <span
+                    className={
+                      runResult.stages.stage4.passed ? "ep-pass" : "ep-fail"
+                    }
+                  >
+                    {runResult.stages.stage4.passed ? "Pass" : "Fail"}
+                  </span>
                 </div>
-
-                {/* Stage 5 */}
-                <div className="rounded-xl border border-[rgba(236,231,218,0.14)] bg-[#090d0b] p-4">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-mono text-xs font-semibold text-[#a6ff72]">
-                      Stage 5 · {runResult.stages.stage5.stageName}
-                    </span>
-                    <span className="rounded border border-[#ffb85c]/40 bg-[#ffb85c]/10 px-2 py-0.5 font-mono text-[10px] text-[#ffb85c]">
-                      {runResult.stages.stage5.externalActionStatus}
-                    </span>
+                <p className="max-w-[70ch] text-sm text-ink-2">
+                  Validated Argon config (thinking_level=&quot;
+                  {runResult.stages.stage4.thinkingLevel}&quot;, background=
+                  {String(runResult.stages.stage4.background)}) and restored
+                  original local placeholders on the enclave response.
+                </p>
+                <details className="text-xs text-ink-3">
+                  <summary className="cursor-pointer font-mono text-ink-2 hover:text-ink select-none">
+                    Show details
+                  </summary>
+                  <div className="mt-2 ep-inset p-3 font-mono text-xs space-y-2 text-ink-2">
+                    <div>
+                      <span className="text-ink font-medium">
+                        Masked enclave output:
+                      </span>{" "}
+                      {runResult.stages.stage4.enclaveCompletionMasked}
+                    </div>
+                    <div>
+                      <span className="text-ink font-medium">
+                        Gemini call note:
+                      </span>{" "}
+                      {runResult.stages.stage4.liveGeminiCall.liveSummaryText ??
+                        runResult.stages.stage4.liveGeminiCall.fallbackReason ??
+                        "Simulated locally"}
+                    </div>
                   </div>
-                  <ul className="mt-2 space-y-2 text-xs">
+                </details>
+              </li>
+
+              {/* Stage 5 */}
+              <li className="relative space-y-2">
+                <span className="absolute -left-[31px] top-1 h-3 w-3 rounded-full bg-ink border-2 border-paper" />
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="space-y-0.5">
+                    <h3 className="font-serif text-lg font-medium text-ink">
+                      Stage 5: Human approval gate for on-chain actions
+                    </h3>
+                    <div className="font-mono text-xs text-ink-3">
+                      Model: Human-in-the-loop policy gate (Circle Arc Testnet 5042002)
+                    </div>
+                  </div>
+                  <span className={isGatePending ? "ep-fail" : "ep-pass"}>
+                    {isGatePending ? "Waiting for human" : "Approved"}
+                  </span>
+                </div>
+                <p className="max-w-[70ch] text-sm text-ink-2">
+                  {isGatePending
+                    ? `Paused: holding ${runResult.stages.stage5.pendingActions.length} external Circle Arc action(s) until you explicitly approve below.`
+                    : `Human approved: ${runResult.stages.stage5.pendingActions.length} Circle Arc action(s) recorded (Simulated tx hash).`}
+                </p>
+                <details className="text-xs text-ink-3">
+                  <summary className="cursor-pointer font-mono text-ink-2 hover:text-ink select-none">
+                    Show details
+                  </summary>
+                  <div className="mt-2 ep-inset p-3 font-mono text-xs space-y-1.5 text-ink-2">
+                    <div>
+                      Arc Testnet registry: 0xbc8085c2b6fe6e0db05f169925c0b841828f4481 (chain 5042002)
+                    </div>
                     {runResult.stages.stage5.pendingActions.map((act) => (
-                      <li
-                        key={act.actionId}
-                        className="rounded border border-[rgba(236,231,218,0.12)] bg-[#050706] p-2.5"
-                      >
-                        <div className="flex items-center justify-between font-mono text-[11px]">
-                          <span className="text-[#ece7da]">{act.kind}</span>
-                          <span
-                            className={
-                              act.status === "executed"
-                                ? "text-[#a6ff72]"
-                                : "text-[#ffb85c]"
-                            }
-                          >
-                            {act.status.toUpperCase()}
-                          </span>
-                        </div>
-                        <p className="mt-1 text-[11px] text-[#ece7da]/70">
-                          {act.description}
-                        </p>
-                        {act.txHashHex && (
-                          <div className="mt-1 font-mono text-[10px] text-[#a6ff72]">
-                            Circle Arc Tx: {act.txHashHex}
-                          </div>
-                        )}
-                      </li>
+                      <div key={act.actionId}>
+                        {act.kind} ({act.status}): {act.description}
+                        {act.txHashHex ? ` | Tx: ${act.txHashHex}` : ""}
+                      </div>
                     ))}
-                  </ul>
-                </div>
+                  </div>
+                </details>
+              </li>
 
-                {/* Stage 6 */}
-                <div className="rounded-xl border border-[rgba(236,231,218,0.14)] bg-[#090d0b] p-4">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-mono text-xs font-semibold text-[#a6ff72]">
-                      Stage 6 · {runResult.stages.stage6.stageName}
-                    </span>
-                    <span className="rounded border border-[#a6ff72]/40 bg-[#a6ff72]/10 px-2 py-0.5 font-mono text-[10px] text-[#a6ff72]">
-                      PASS (Ed25519 Signed)
-                    </span>
+              {/* Stage 6 */}
+              <li className="relative space-y-2">
+                <span className="absolute -left-[31px] top-1 h-3 w-3 rounded-full bg-ink border-2 border-paper" />
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="space-y-0.5">
+                    <h3 className="font-serif text-lg font-medium text-ink">
+                      Stage 6: Signed audit digest and briefing
+                    </h3>
+                    <div className="font-mono text-xs text-ink-3">
+                      Model: {runResult.stages.stage6.modelsUsed.join(", ")} (Simulated briefing)
+                    </div>
                   </div>
-                  <div className="mt-1 font-mono text-[11px] text-[#ffb85c]">
-                    Models: {runResult.stages.stage6.modelsUsed.join(" + ")}
-                  </div>
-                  <p className="mt-2 rounded border border-[rgba(236,231,218,0.1)] bg-[#050706] p-2.5 text-xs leading-relaxed text-[#ece7da]/85">
-                    &ldquo;{runResult.stages.stage6.voiceTranscript}&rdquo;
-                  </p>
-                  <div className="mt-2 font-mono text-[10px] text-[#ece7da]/60 break-all">
-                    Ed25519 Sig: 0x{runResult.stages.stage6.ed25519SignatureHex.slice(0, 48)}...
-                  </div>
+                  <span
+                    className={
+                      runResult.stages.stage6.passed ? "ep-pass" : "ep-fail"
+                    }
+                  >
+                    {runResult.stages.stage6.passed ? "Pass" : "Fail"}
+                  </span>
                 </div>
+                <p className="max-w-[70ch] text-sm text-ink-2">
+                  Signed SHA-256 run digest{" "}
+                  <code className="font-mono text-xs">
+                    0x{runResult.stages.stage6.forensicProofDigestHex.slice(0, 16)}...
+                  </code>{" "}
+                  with Ed25519.
+                </p>
+                <details className="text-xs text-ink-3">
+                  <summary className="cursor-pointer font-mono text-ink-2 hover:text-ink select-none">
+                    Show details
+                  </summary>
+                  <div className="mt-2 ep-inset p-3 font-mono text-xs space-y-2 text-ink-2">
+                    <div className="font-sans text-ink">
+                      &ldquo;{runResult.stages.stage6.voiceTranscript}&rdquo;
+                    </div>
+                    <div className="break-all">
+                      Ed25519 signature: 0x{runResult.stages.stage6.ed25519SignatureHex}
+                    </div>
+                  </div>
+                </details>
+              </li>
+            </ol>
+          </section>
+        ) : (
+          <div className="ep-card p-6 font-mono text-xs text-ink-2">
+            Loading agent trace...
+          </div>
+        )}
+
+        {/* 5. Human Approval Gate Blocking Card */}
+        {runResult && (
+          <section
+            aria-label="Human approval gate"
+            className={`ep-card p-5 sm:p-6 space-y-4 ${
+              isGatePending ? "border-accent bg-accent-soft/40" : ""
+            }`}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="ep-label">Human-in-the-loop gate</div>
+                <h2 className="font-serif text-xl sm:text-2xl text-ink">
+                  {isGatePending
+                    ? "Action required: approve or reject external on-chain actions"
+                    : "External actions approved by human"}
+                </h2>
               </div>
+              <span className={isGatePending ? "ep-fail" : "ep-pass"}>
+                {isGatePending ? "Pending approval" : "Approved"}
+              </span>
             </div>
-          ) : (
-            <div className="p-6 font-mono text-xs text-[#ece7da]/70">
-              Initializing 6-stage Gemini 4 Argon verification harness...
-            </div>
-          )}
-        </ExhibitSection>
 
-        {/* Exhibit 03: Gemini 4 Argon API Contract & SDK Inspector */}
-        <ExhibitSection
-          number="03"
-          tag="GEMINI 4 ARGON API CONTRACT & SDK"
-          title="Interactions API (client.interactions.create) & Rule Validator"
-          subtitle="Enforces thinking_level and background long-decode while rejecting deprecated thinking_budget, temperature, top_p, top_k, and explicit cached_content."
-        >
-          <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-            {/* Validator Badge & Forbidden Params Tester */}
-            <div className="lg:col-span-5 space-y-4">
-              <div className="rounded-xl border border-[#a6ff72]/35 bg-[#090d0b] p-4">
-                <div className="flex items-center justify-between">
-                  <span className="font-mono text-xs uppercase tracking-[0.12em] text-[#a6ff72]">
-                    Argon API Rule Compliance Badge
-                  </span>
-                  <span className="rounded bg-[#a6ff72]/20 px-2 py-0.5 font-mono text-[10px] text-[#a6ff72]">
-                    VALIDATED
-                  </span>
+            <p className="max-w-[70ch] text-sm text-ink-2">
+              The agent cannot anchor receipts or submit slash reports to Circle
+              Arc Testnet (registry{" "}
+              <code className="font-mono text-xs break-all">
+                0xbc8085c2b6fe6e0db05f169925c0b841828f4481
+              </code>
+              , chain 5042002) without your confirmation.
+            </p>
+
+            <ul className="space-y-2 text-xs">
+              {runResult.stages.stage5.pendingActions.map((act) => (
+                <li key={act.actionId} className="ep-inset p-3 space-y-1">
+                  <div className="flex flex-wrap items-center justify-between gap-2 font-mono">
+                    <span className="text-ink font-medium">{act.kind}</span>
+                    <span className="text-ink-3">{act.status}</span>
+                  </div>
+                  <p className="text-ink-2">{act.description}</p>
+                  {act.txHashHex && (
+                    <div className="font-mono text-[11px] text-ink-2 break-all">
+                      Simulated Arc tx: {act.txHashHex}
+                    </div>
+                  )}
+                </li>
+              ))}
+            </ul>
+
+            <div className="flex flex-wrap items-center gap-3 pt-1">
+              <button
+                type="button"
+                disabled={isRunning}
+                onClick={() => void handleExecuteWorkflow(true)}
+                className="ep-btn cursor-pointer"
+              >
+                Approve
+              </button>
+              <button
+                type="button"
+                disabled={isRunning}
+                onClick={() => void handleExecuteWorkflow(false)}
+                className="ep-btn-ghost cursor-pointer"
+              >
+                Reject
+              </button>
+            </div>
+          </section>
+        )}
+
+        {/* 6. Final Locally Restored Answer */}
+        {runResult && (
+          <section
+            aria-label="Final locally restored answer"
+            className="ep-card p-5 sm:p-6 space-y-3"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="ep-label">Final answer</div>
+                <h2 className="font-serif text-xl sm:text-2xl text-ink">
+                  Locally restored output
+                </h2>
+              </div>
+              <span className="ep-pass">Placeholders restored on device</span>
+            </div>
+            <p className="text-xs text-ink-3">
+              The enclave returned a masked completion using shifted dates,
+              scaled numbers, and placeholders. Your device restored the real
+              names and figures locally:
+            </p>
+            <div className="ep-inset p-4 font-mono text-xs sm:text-sm leading-relaxed text-ink">
+              {runResult.stages.stage4.restoredClientOutput}
+            </div>
+          </section>
+        )}
+
+        {/* 7. Compact modelCalls Table */}
+        {runResult && (
+          <section
+            aria-label="Model calls"
+            className="ep-card p-5 sm:p-6 space-y-3"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="ep-label">Model telemetry</div>
+                <h2 className="font-serif text-xl text-ink">
+                  Model calls in this run
+                </h2>
+              </div>
+              <span className="ep-muted-chip">Mode: {apiMode}</span>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs border-collapse">
+                <thead>
+                  <tr className="border-b border-rule font-mono text-[11px] uppercase text-ink-3">
+                    <th className="py-2 pr-3">Model</th>
+                    <th className="py-2 pr-3">Purpose</th>
+                    <th className="py-2 pr-3">Status</th>
+                    <th className="py-2 text-right">Latency</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-rule font-mono text-xs">
+                  {modelCallsList.map((call, idx) => (
+                    <tr key={`${call.model}-${idx}`}>
+                      <td className="py-2.5 pr-3 text-ink font-medium">
+                        {call.model}
+                      </td>
+                      <td className="py-2.5 pr-3 font-sans text-ink-2">
+                        {call.purpose}
+                        {call.error ? (
+                          <span className="block font-mono text-[11px] text-ink-3">
+                            {call.error}
+                          </span>
+                        ) : null}
+                      </td>
+                      <td className="py-2.5 pr-3">
+                        <span className={call.ok ? "ep-pass" : "ep-fail"}>
+                          {call.ok ? "ok" : "error"}
+                        </span>
+                      </td>
+                      <td className="py-2.5 text-right text-ink-2">
+                        {call.latencyMs} ms
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+
+        {/* 8. Developer Details (Collapsed) */}
+        <section aria-label="Developer details">
+          <details className="ep-card p-5 sm:p-6">
+            <summary className="cursor-pointer font-serif text-lg font-medium text-ink select-none">
+              Developer details (SDK snippet, parameter rules, and raw JSON)
+            </summary>
+
+            <div className="mt-5 space-y-6 border-t border-rule pt-5">
+              {/* Interactions SDK snippet */}
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="ep-label">
+                    @google/genai client.interactions.create
+                  </div>
+                  <div className="flex gap-1.5">
+                    {(["typescript", "python", "payload"] as const).map(
+                      (tab) => (
+                        <button
+                          key={tab}
+                          type="button"
+                          onClick={() => setSdkTab(tab)}
+                          className={
+                            sdkTab === tab
+                              ? "ep-btn py-1 px-2.5 text-xs font-mono uppercase cursor-pointer"
+                              : "ep-btn-ghost py-1 px-2.5 text-xs font-mono uppercase cursor-pointer"
+                          }
+                        >
+                          {tab}
+                        </button>
+                      ),
+                    )}
+                  </div>
                 </div>
-                <ul className="mt-3 space-y-1.5 font-mono text-xs text-[#ece7da]/80">
+
+                <pre className="ep-inset p-4 overflow-x-auto font-mono text-xs leading-relaxed text-ink">
+                  {runResult
+                    ? sdkTab === "typescript"
+                      ? runResult.stages.stage4.sdkSnippets.typescript
+                      : sdkTab === "python"
+                        ? runResult.stages.stage4.sdkSnippets.python
+                        : JSON.stringify(
+                            runResult.stages.stage4.interactionsPayload,
+                            null,
+                            2,
+                          )
+                    : "Loading snippet..."}
+                </pre>
+              </div>
+
+              {/* Argon rule compliance list */}
+              <div className="space-y-3">
+                <div className="ep-label">Argon parameter validator</div>
+                <ul className="ep-inset p-4 space-y-1.5 font-mono text-xs text-ink-2">
                   <li>
-                    + model:{" "}
-                    <span className="text-[#a6ff72]">
-                      &quot;{activeConfigValidation.normalizedConfig?.model}&quot;
-                    </span>
+                    model: &quot;{activeConfigValidation.normalizedConfig?.model}
+                    &quot;
                   </li>
                   <li>
-                    + thinking_level:{" "}
-                    <span className="text-[#a6ff72]">
-                      &quot;{activeConfigValidation.normalizedConfig?.thinking_level}&quot;
-                    </span>
+                    thinking_level: &quot;
+                    {activeConfigValidation.normalizedConfig?.thinking_level}&quot;
                   </li>
                   <li>
-                    + background:{" "}
-                    <span className="text-[#a6ff72]">
-                      {String(activeConfigValidation.normalizedConfig?.background)}
-                    </span>
+                    background:{" "}
+                    {String(activeConfigValidation.normalizedConfig?.background)}
                   </li>
+                  <li>implicit_caching: &quot;enabled&quot;</li>
                   <li>
-                    + implicit_caching:{" "}
-                    <span className="text-[#a6ff72]">&quot;enabled&quot;</span>
-                  </li>
-                  <li>
-                    - Rejected Legacy Params:{" "}
-                    <span className="text-[#ffb85c]">
-                      {FORBIDDEN_ARGON_PARAMETERS.join(", ")}
-                    </span>
+                    Rejected legacy parameters:{" "}
+                    {FORBIDDEN_ARGON_PARAMETERS.join(", ")}
                   </li>
                 </ul>
 
                 <button
                   type="button"
                   onClick={handleTestForbiddenParams}
-                  className="mt-4 w-full rounded-lg border border-[#ffb85c]/45 bg-[#ffb85c]/10 px-3 py-2 font-mono text-xs text-[#ffb85c] hover:bg-[#ffb85c]/20"
+                  className="ep-btn-ghost text-xs font-mono cursor-pointer"
                 >
-                  Test Validator Against Legacy Config (temperature / thinking_budget)
+                  Test validator with forbidden legacy parameters
                 </button>
 
                 {legacyTestResult && (
-                  <div className="mt-3 rounded-lg border border-[#ffb85c]/40 bg-[#050706] p-3 font-mono text-[11px] text-[#ffb85c]">
-                    <div>
-                      validateArgonRequestConfig valid: {String(legacyTestResult.valid)}
+                  <div className="ep-inset p-3.5 font-mono text-xs text-ink-2 space-y-1">
+                    <div className="text-ink font-medium">
+                      Valid: {String(legacyTestResult.valid)} | Rejected:{" "}
+                      {legacyTestResult.rejectedParameters.join(", ")}
                     </div>
-                    <div className="mt-1 text-[#ece7da]/80">
-                      Rejected: {legacyTestResult.rejectedParameters.join(", ")}
-                    </div>
-                    <ul className="mt-1.5 list-disc pl-4 text-[10px] text-[#ece7da]/70">
+                    <ul className="list-disc pl-4 space-y-0.5">
                       {legacyTestResult.errors.map((err, idx) => (
                         <li key={idx}>{err}</li>
                       ))}
@@ -730,71 +979,47 @@ export default function ArgonShowcasePage() {
                 )}
               </div>
 
-              {/* Companion Toolkit Table */}
-              <div className="rounded-xl border border-[rgba(236,231,218,0.14)] bg-[#090d0b] p-4">
-                <div className="font-mono text-xs uppercase tracking-[0.12em] text-[#ece7da]/70">
-                  Gemini 4 Argon Companion Model Toolkit
-                </div>
-                <ul className="mt-3 space-y-2 text-xs">
+              {/* Companion toolkit */}
+              <div className="space-y-2">
+                <div className="ep-label">Model manifest</div>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   {ARGON_TOOLKIT_MANIFEST.map((item) => (
-                    <li
+                    <div
                       key={item.id}
-                      className="rounded border border-[rgba(236,231,218,0.1)] bg-[#050706] p-2"
+                      className="ep-inset p-3 text-xs space-y-1"
                     >
-                      <div className="flex items-center justify-between font-mono text-[11px]">
-                        <span className="text-[#a6ff72]">{item.id}</span>
-                        <span className="text-[10px] text-[#ffb85c]">
-                          {item.trustBoundary}
-                        </span>
+                      <div className="flex items-center justify-between font-mono">
+                        <span className="text-ink font-medium">{item.id}</span>
+                        <span className="text-ink-3">{item.trustBoundary}</span>
                       </div>
-                      <div className="mt-0.5 text-[11px] text-[#ece7da]/75">
-                        {item.role}
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-
-            {/* SDK Code Inspector */}
-            <div className="lg:col-span-7 rounded-xl border border-[rgba(236,231,218,0.14)] bg-[#090d0b] p-4">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="font-mono text-xs uppercase tracking-[0.12em] text-[#a6ff72]">
-                  Official @google/genai (&gt;= 2.3.0) client.interactions.create
-                </span>
-                <div className="flex gap-1.5">
-                  {(["typescript", "python", "payload"] as const).map((tab) => (
-                    <button
-                      key={tab}
-                      type="button"
-                      onClick={() => setSdkTab(tab)}
-                      className={`rounded-lg border px-2.5 py-1 font-mono text-xs uppercase ${
-                        sdkTab === tab
-                          ? "border-[#a6ff72] bg-[#a6ff72]/15 text-[#a6ff72]"
-                          : "border-[rgba(236,231,218,0.14)] bg-[#050706] text-[#ece7da]/70"
-                      }`}
-                    >
-                      {tab}
-                    </button>
+                      <p className="text-ink-2">{item.role}</p>
+                    </div>
                   ))}
                 </div>
               </div>
 
-              <pre className="mt-3 max-h-[540px] overflow-auto rounded-xl border border-[rgba(236,231,218,0.1)] bg-[#050706] p-4 font-mono text-xs leading-relaxed text-[#ece7da]">
-                {runResult
-                  ? sdkTab === "typescript"
-                    ? runResult.stages.stage4.sdkSnippets.typescript
-                    : sdkTab === "python"
-                      ? runResult.stages.stage4.sdkSnippets.python
-                      : JSON.stringify(
-                          runResult.stages.stage4.interactionsPayload,
-                          null,
-                          2,
-                        )
-                  : "Loading SDK snippet..."}
-              </pre>
+              {/* Raw JSON */}
+              {runResult && (
+                <div className="space-y-2">
+                  <div className="ep-label">Raw run JSON</div>
+                  <pre className="ep-inset p-4 max-h-80 overflow-auto font-mono text-[11px] text-ink-2">
+                    {JSON.stringify(runResult, null, 2)}
+                  </pre>
+                </div>
+              )}
             </div>
-          </div>
+          </details>
+        </section>
+
+        </div>
+
+        {/* 9. Knowledge search (MongoDB Atlas) */}
+        <ExhibitSection
+          tag="Retrieval tool"
+          title="Knowledge search (MongoDB Atlas)"
+          subtitle="Agent retrieval tool for confidential provider specifications and hardware advisories."
+        >
+          <AtlasExplorer />
         </ExhibitSection>
       </main>
 

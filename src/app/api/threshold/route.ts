@@ -1,12 +1,29 @@
 import { connection, NextResponse } from "next/server";
 import {
+  BodyTooLargeError,
+  createTokenBucketLimiter,
+  readBoundedBytes,
+} from "@/lib/ratelimit";
+import {
   authorizeThresholdKeyRelease,
   combineShares,
   splitSecret,
 } from "@/lib/threshold/shamir";
 
-export async function GET() {
+const MAX_THRESHOLD_BODY_BYTES = 8192;
+
+const thresholdLimiter = createTokenBucketLimiter({
+  name: "threshold-route",
+  capacity: 60,
+  refillPerSec: 2,
+});
+
+export async function GET(request?: Request) {
   await connection();
+  if (request) {
+    const limited = thresholdLimiter.check(request);
+    if (limited) return limited;
+  }
 
   const sessionId = "sess-threshold-demo-01";
   const chipId = "H200-SXM-NV-0042";
@@ -66,20 +83,33 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  const limited = thresholdLimiter.check(request);
+  if (limited) return limited;
+
   let body: Record<string, unknown> = {};
   try {
-    body = (await request.json()) as Record<string, unknown>;
-  } catch {
-    body = {};
+    const rawBytes = await readBoundedBytes(request, MAX_THRESHOLD_BODY_BYTES);
+    if (rawBytes.byteLength > 0) {
+      const parsed = JSON.parse(new TextDecoder().decode(rawBytes));
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+      }
+      body = parsed as Record<string, unknown>;
+    }
+  } catch (err) {
+    if (err instanceof BodyTooLargeError) {
+      return NextResponse.json({ error: err.message }, { status: 413 });
+    }
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
   const sessionId =
     typeof body.sessionId === "string" && body.sessionId.trim().length > 0
-      ? body.sessionId.trim()
+      ? body.sessionId.trim().slice(0, 128)
       : "sess-threshold-custom";
   const chipId =
     typeof body.chipId === "string" && body.chipId.trim().length > 0
-      ? body.chipId.trim()
+      ? body.chipId.trim().slice(0, 128)
       : "H200-SXM-NV-0042";
   const measurementOk =
     typeof body.measurementOk === "boolean" ? body.measurementOk : true;
@@ -87,8 +117,16 @@ export async function POST(request: Request) {
     typeof body.registryActive === "boolean" ? body.registryActive : true;
   const notFlagged =
     typeof body.notFlagged === "boolean" ? body.notFlagged : true;
-  const k = typeof body.k === "number" ? body.k : 3;
-  const n = typeof body.n === "number" ? body.n : 5;
+  const rawK = typeof body.k === "number" && Number.isInteger(body.k) ? body.k : 3;
+  const rawN = typeof body.n === "number" && Number.isInteger(body.n) ? body.n : 5;
+  if (rawK < 2 || rawN > 16 || rawK > rawN) {
+    return NextResponse.json(
+      { error: "Threshold parameters must satisfy 2 <= k <= n <= 16" },
+      { status: 400 },
+    );
+  }
+  const k = rawK;
+  const n = rawN;
 
   const result = authorizeThresholdKeyRelease({
     sessionId,

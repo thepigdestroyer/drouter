@@ -1,5 +1,6 @@
 import { gunzipSync } from "node:zlib";
 import { connection, NextResponse } from "next/server";
+import { createTokenBucketLimiter } from "@/lib/ratelimit";
 import {
   decodeSnpReportBytes,
   parseDeploymentConfigYaml,
@@ -7,6 +8,12 @@ import {
   type ModelEnclaveAttestation,
   type RouterSnpHardwareReport,
 } from "@/lib/tinfoil/deep-inspect";
+
+const matrixLimiter = createTokenBucketLimiter({
+  name: "relay-enclave-matrix",
+  capacity: 60,
+  refillPerSec: 2,
+});
 
 const ATC_ATTESTATION_URL = "https://atc.tinfoil.sh/attestation";
 const TINFOIL_PROXY_WELL_KNOWN_URL = "https://inference.tinfoil.sh/.well-known/tinfoil-proxy";
@@ -298,7 +305,10 @@ async function buildModelAttestation(
   const tag = proxyEntry?.tag ?? fb.tag;
 
   const deploymentUrl = `https://github.com/${repo}/releases/download/${encodeURIComponent(tag)}/tinfoil-deployment.json`;
-  const manifest = await fetchJsonWithTimeout<GitHubDeploymentManifest>(deploymentUrl, 5000);
+  const manifest =
+    process.env.DROUTER_STUB_UPSTREAM === "1"
+      ? null
+      : await fetchJsonWithTimeout<GitHubDeploymentManifest>(deploymentUrl, 5000);
 
   let parsedYaml = {
     containerImageDigest: fb.containerImageDigest,
@@ -395,18 +405,26 @@ async function buildModelAttestation(
   };
 }
 
-export async function GET(): Promise<Response> {
+export async function GET(request?: Request): Promise<Response> {
   await connection();
+
+  if (request) {
+    const limited = matrixLimiter.check(request);
+    if (limited) return limited;
+  }
 
   const now = Date.now();
   if (cachedBundle && cachedBundle.expiresAt > now) {
     return NextResponse.json(cachedBundle.bundle);
   }
 
-  const [atc, proxy] = await Promise.all([
-    fetchJsonWithTimeout<AtcResponse>(ATC_ATTESTATION_URL, 5000),
-    fetchJsonWithTimeout<ProxyWellKnownResponse>(TINFOIL_PROXY_WELL_KNOWN_URL, 5000),
-  ]);
+  const isStub = process.env.DROUTER_STUB_UPSTREAM === "1";
+  const [atc, proxy] = isStub
+    ? [null, null]
+    : await Promise.all([
+        fetchJsonWithTimeout<AtcResponse>(ATC_ATTESTATION_URL, 5000),
+        fetchJsonWithTimeout<ProxyWellKnownResponse>(TINFOIL_PROXY_WELL_KNOWN_URL, 5000),
+      ]);
 
   let routerSnpReport: RouterSnpHardwareReport | undefined;
   if (atc?.enclaveAttestationReport?.body) {
@@ -459,10 +477,11 @@ export async function GET(): Promise<Response> {
 
   const chipId = routerSnpReport?.chipIdHex ?? "";
   const tcb = routerSnpReport?.tcb;
+  const productName = routerSnpReport?.productName ?? "Genoa";
   const amdKdsUrl =
     chipId && tcb
-      ? `https://kdsintf.amd.com/vcek/v1/Milan/${chipId}?blSPL=${tcb.bootloader}&teeSPL=${tcb.tee}&snpSPL=${tcb.snp}&ucodeSPL=${tcb.microcode}`
-      : "https://kdsintf.amd.com/vcek/v1/Milan";
+      ? `https://kdsintf.amd.com/vcek/v1/${productName}/${chipId}?blSPL=${tcb.bootloader}&teeSPL=${tcb.tee}&snpSPL=${tcb.snp}&ucodeSPL=${tcb.microcode}`
+      : `https://kdsintf.amd.com/vcek/v1/${productName}`;
 
   const bundle: DeepAttestationBundle = {
     routerHost,

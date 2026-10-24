@@ -1,5 +1,4 @@
-import { NextResponse } from "next/server";
-import { connection } from "next/server";
+import { NextResponse, connection } from "next/server";
 import { utf8ToBytes } from "@noble/hashes/utils.js";
 import {
   CustodyCtrDrbg,
@@ -7,9 +6,20 @@ import {
   PrefixCachePool,
   runMemoryBusAndPopAudit,
 } from "@/lib/custody";
+import { createTokenBucketLimiter } from "@/lib/ratelimit";
 
-export async function GET() {
+const custodyLimiter = createTokenBucketLimiter({
+  name: "custody-get",
+  capacity: 120,
+  refillPerSec: 4,
+});
+
+export async function GET(request?: Request) {
   await connection();
+  if (request) {
+    const limited = custodyLimiter.check(request);
+    if (limited) return limited;
+  }
 
   // 1. Run V1 (memory-bus probe) and V6 (pop zeroization) audit
   const audit = runMemoryBusAndPopAudit();

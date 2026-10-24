@@ -1,8 +1,19 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
+import { TinfoilAI } from "tinfoil";
 import type { CheckResult, NodeRecord, PopReceipt, QuorumTicket } from "@/lib/types";
-import { openTinfoilSession } from "@/lib/tinfoil/client";
-import type { DeepAttestationBundle } from "@/lib/tinfoil/deep-inspect";
+import { padJsonPayloadToBucket } from "@/lib/relay";
+import { toHex } from "@/lib/sim/bytes";
+import {
+  checksFromDocument,
+  openTinfoilSession,
+  type TinfoilEvidence,
+  type TinfoilSession,
+} from "@/lib/tinfoil/client";
+import type {
+  DeepAttestationBundle,
+  ModelEnclaveAttestation,
+} from "@/lib/tinfoil/deep-inspect";
 import { openSimSession } from "@/lib/sim/client";
 
 export interface RegistryResponse {
@@ -98,6 +109,163 @@ export async function registryAndQuorumCheck(node: NodeRecord, registry: Registr
   };
 }
 
+/**
+ * Fallback for plain HTTP localhost dev servers where the Tinfoil SDK rejects
+ * non-HTTPS attestationBundleURL values. Routes attestation via local relay.
+ */
+async function openLocalHttpTinfoilSession(
+  selectedModel = "kimi-k3",
+): Promise<TinfoilSession> {
+  const origin = window.location.origin;
+  const secretBytes = new Uint8Array(32);
+  crypto.getRandomValues(secretBytes);
+  const userCacheSecret = toHex(secretBytes);
+
+  const baseURL = `${origin}/api/relay/v1/`;
+  const virtualHttpsRelay = "https://local-relay.drouter.internal/api/relay";
+
+  const origFetch = window.fetch.bind(window);
+  window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const urlStr =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+    if (urlStr.startsWith(virtualHttpsRelay)) {
+      const rewritten = urlStr.replace(virtualHttpsRelay, `${origin}/api/relay`);
+      return origFetch(rewritten, init);
+    }
+    return origFetch(input, init);
+  };
+
+  try {
+    const client = new TinfoilAI({
+      bearerToken: "drouter-demo",
+      baseURL,
+      attestationBundleURL: virtualHttpsRelay,
+      userCacheSecret,
+    });
+
+    const matrixPromise: Promise<DeepAttestationBundle | undefined> = origFetch(
+      `${origin}/api/relay/enclave-matrix`,
+    )
+      .then(async (res) =>
+        res.ok ? ((await res.json()) as DeepAttestationBundle) : undefined,
+      )
+      .catch(() => undefined);
+
+    const [, deepBundle] = await Promise.all([client.ready(), matrixPromise]);
+    const doc = await client.getVerificationDocument();
+    const selectedModelAttestation: ModelEnclaveAttestation | undefined =
+      deepBundle?.models[selectedModel] ?? deepBundle?.models["kimi-k3"];
+
+    const internalTransport = (
+      client as unknown as {
+        secureClient?: {
+          _transport?: {
+            fetch: (
+              input: RequestInfo | URL,
+              init?: RequestInit,
+            ) => Promise<Response>;
+          };
+        };
+      }
+    ).secureClient?._transport;
+
+    if (internalTransport && typeof internalTransport.fetch === "function") {
+      const origTransportFetch = internalTransport.fetch.bind(internalTransport);
+      internalTransport.fetch = async (
+        input: RequestInfo | URL,
+        init?: RequestInit,
+      ) => {
+        if (init && typeof init.body === "string") {
+          try {
+            const parsed = JSON.parse(init.body) as Record<string, unknown>;
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              if (!parsed.user_cache_secret) {
+                parsed.user_cache_secret = userCacheSecret;
+              }
+              const { paddedJson } = padJsonPayloadToBucket(
+                JSON.stringify(parsed),
+              );
+              init = { ...init, body: paddedJson };
+            }
+          } catch {
+            // Leave non-JSON body unchanged
+          }
+        }
+        return origTransportFetch(input, init);
+      };
+    }
+
+    const snp = deepBundle?.routerSnpReport;
+    const chipId = snp
+      ? `${snp.chipIdHex.slice(0, 16)}…${snp.chipIdHex.slice(-8)}`
+      : undefined;
+    const tcb = snp
+      ? `bl=${snp.tcb.bootloader} tee=${snp.tcb.tee} snp=${snp.tcb.snp} ucode=${snp.tcb.microcode} fmc=${snp.tcb.fmc}`
+      : undefined;
+    const guestPolicy = snp
+      ? `${snp.policyHex} (debug=${snp.debugAllowed ? "on" : "off"}, smt=${snp.smtAllowed ? "on" : "off"}, migrate=${snp.migrationAllowed ? "on" : "off"})`
+      : undefined;
+    const primaryGpuHost = selectedModelAttestation?.enclaveHosts[0]?.host;
+    const gpuEnclaveHost = selectedModelAttestation
+      ? `${primaryGpuHost ?? selectedModelAttestation.repo} (${selectedModelAttestation.healthyHosts}/${selectedModelAttestation.configuredHosts} healthy)`
+      : undefined;
+    const gpuVmShape = selectedModelAttestation
+      ? `${selectedModelAttestation.vmShape.gpus}× GPU · ${selectedModelAttestation.vmShape.cpus} vCPU · ${Math.round(selectedModelAttestation.vmShape.memoryMb / 1024)} GB RAM`
+      : undefined;
+    const pinnedWeights = selectedModelAttestation
+      ? `${selectedModelAttestation.weightRepoCommit} (mpk-${selectedModelAttestation.weightMpkHash.replace(/^mpk-/, "").slice(0, 12)}…)`
+      : undefined;
+    const dmVerityRoot = selectedModelAttestation?.dmVerityRootHash;
+
+    const evidence: TinfoilEvidence = {
+      enclaveHost: doc.enclaveHost,
+      releaseTag: doc.releaseTag,
+      releaseDigest: doc.releaseDigest,
+      codeFingerprint: doc.codeFingerprint,
+      enclaveFingerprint: doc.enclaveFingerprint,
+      measurementType: doc.enclaveMeasurement.measurement.type,
+      hpkePublicKey: doc.hpkePublicKey,
+      configRepo: doc.configRepo,
+      verifiedAt: doc.verifiedAt,
+      ...(chipId ? { chipId, "Chip ID": chipId } : {}),
+      ...(tcb ? { tcb, TCB: tcb } : {}),
+      ...(guestPolicy ? { guestPolicy, "Guest policy": guestPolicy } : {}),
+      ...(gpuEnclaveHost
+        ? { gpuEnclaveHost, "GPU enclave host": gpuEnclaveHost }
+        : {}),
+      ...(gpuVmShape ? { gpuVmShape, "GPU VM shape": gpuVmShape } : {}),
+      ...(pinnedWeights
+        ? { pinnedWeights, "Pinned weights": pinnedWeights }
+        : {}),
+      ...(dmVerityRoot ? { dmVerityRoot, "dm-verity root": dmVerityRoot } : {}),
+    };
+
+    return {
+      checks: checksFromDocument(doc, selectedModelAttestation),
+      evidence,
+      relayHop: "relay-a",
+      deepBundle,
+      selectedModelAttestation,
+      async *send(model, messages) {
+        const stream = await client.chat.completions.create(
+          { model, messages, stream: true },
+          { headers: { "X-Tinfoil-Model": model, "X-DRouter-Cadence-Ms": "50" } },
+        );
+        for await (const chunk of stream) {
+          const delta = chunk.choices[0]?.delta?.content;
+          if (delta) yield delta;
+        }
+      },
+    };
+  } finally {
+    window.fetch = origFetch;
+  }
+}
+
 export async function openSession(
   node: NodeRecord,
   registry: RegistryResponse,
@@ -107,7 +275,17 @@ export async function openSession(
   const c6 = await registryAndQuorumCheck(node, registry);
 
   if (node.kind === "tinfoil") {
-    const session = await openTinfoilSession(selectedModel);
+    let session: TinfoilSession;
+    try {
+      session = await openTinfoilSession(selectedModel);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("attestationBundleURL must use HTTPS")) {
+        session = await openLocalHttpTinfoilSession(selectedModel);
+      } else {
+        throw err;
+      }
+    }
     const checks = session.checks.map((c) => (c.id === "C6" ? c6 : c));
     checks.forEach(onCheck);
     const evidence: Record<string, string> = {

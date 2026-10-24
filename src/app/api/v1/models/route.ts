@@ -1,5 +1,12 @@
 import { connection } from "next/server";
 import { SUPPORTED_GATEWAY_MODELS } from "@/lib/gateway/harness-config";
+import { createTokenBucketLimiter } from "@/lib/ratelimit";
+
+const modelsLimiter = createTokenBucketLimiter({
+  name: "v1-models",
+  capacity: 120,
+  refillPerSec: 5,
+});
 
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
@@ -8,8 +15,12 @@ const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
 };
 
-export async function GET(): Promise<Response> {
+export async function GET(req?: Request): Promise<Response> {
   await connection();
+  if (req) {
+    const limited = modelsLimiter.check(req, CORS_HEADERS);
+    if (limited) return limited;
+  }
   return Response.json(
     {
       object: "list",

@@ -4,7 +4,14 @@ import {
   SUPPORTED_GATEWAY_MODELS,
   buildHarnessConfigs,
 } from "@/lib/gateway/harness-config";
+import { createTokenBucketLimiter } from "@/lib/ratelimit";
 import { checksFromDocument } from "@/lib/tinfoil/client";
+
+const verifyLimiter = createTokenBucketLimiter({
+  name: "v1-verify",
+  capacity: 60,
+  refillPerSec: 2,
+});
 
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
@@ -23,6 +30,9 @@ interface CachedVerification {
 let cachedVerification: CachedVerification | null = null;
 
 async function getLiveOrCachedVerification(): Promise<VerificationDocument | null> {
+  if (process.env.DROUTER_STUB_UPSTREAM === "1") {
+    return null;
+  }
   const now = Date.now();
   if (cachedVerification && now - cachedVerification.fetchedAt < CACHE_TTL_MS) {
     return cachedVerification.doc;
@@ -51,10 +61,18 @@ export async function OPTIONS(): Promise<Response> {
 export async function GET(req: Request): Promise<Response> {
   await connection();
 
+  const limited = verifyLimiter.check(req, CORS_HEADERS);
+  if (limited) return limited;
+
   let baseUrl = "https://drouter-demo.vercel.app";
   try {
     const url = new URL(req.url);
-    if (url.origin && url.origin !== "null") {
+    if (
+      (url.protocol === "http:" || url.protocol === "https:") &&
+      url.origin &&
+      url.origin !== "null" &&
+      /^[a-zA-Z0-9.:-]+$/.test(url.host)
+    ) {
       baseUrl = url.origin;
     }
   } catch {

@@ -1,7 +1,13 @@
 "use client";
 
-import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { AuthPill } from "@/components/auth-pill";
+import {
+  ExhibitSection,
+  SpecimenFooter,
+  SpecimenHeader,
+} from "@/components/specimen-chrome";
+import { ThreatMatrix } from "@/components/threat-matrix";
 import type { HardwareManifest, QuorumTicket } from "@/lib/types";
 
 interface TransparencyEntryView {
@@ -12,8 +18,16 @@ interface TransparencyEntryView {
   approvedAt: number;
   reviewWindowDays: number;
   emergency: boolean;
-  builderSignatures: { builderId: string; publicKey: string; signature: string }[];
-  reviewerSignatures: { reviewerId: string; publicKey: string; signature: string }[];
+  builderSignatures: {
+    builderId: string;
+    publicKey: string;
+    signature: string;
+  }[];
+  reviewerSignatures: {
+    reviewerId: string;
+    publicKey: string;
+    signature: string;
+  }[];
 }
 
 interface InclusionProofView {
@@ -97,20 +111,16 @@ interface FreezeResponse {
 
 function shortHex(value: unknown, lead = 10, tail = 6): string {
   const s = String(value ?? "");
-  if (s.length <= lead + tail + 2) return s;
-  return `${s.slice(0, lead)}…${s.slice(-tail)}`;
+  if (s.length <= lead + tail + 3) return s;
+  return `${s.slice(0, lead)}...${s.slice(-tail)}`;
 }
 
 function formatUnixSec(sec: number): string {
-  if (!sec || !Number.isFinite(sec)) return "—";
+  if (!sec || !Number.isFinite(sec)) return "n/a";
   return new Date(sec * 1000).toISOString().replace("T", " ").slice(0, 19);
 }
 
-/**
- * Inline exhaustive VMPL0 Inner Monitor state-space verifier (3 × 7 × 4 × 2^4 = 1,344 states)
- * matching Spec §2.2 V3 without importing server/sibling modules.
- */
-function runClientMonitorProofSummary() {
+function runClientMonitorPolicyCheck() {
   const vmpls = [0, 1, 2] as const;
   const channels = [
     "relay-stream",
@@ -121,7 +131,12 @@ function runClientMonitorProofSummary() {
     "shell-exec",
     "snp-attest",
   ] as const;
-  const encryptions = ["custody-aes-gcm", "freeze-aes-gcm", "plaintext", "control-schema"] as const;
+  const encryptions = [
+    "custody-aes-gcm",
+    "freeze-aes-gcm",
+    "plaintext",
+    "control-schema",
+  ] as const;
   const bools = [false, true] as const;
 
   let statesChecked = 0;
@@ -140,9 +155,13 @@ function runClientMonitorProofSummary() {
                 if (actorVmpl === 0) {
                   if (channel === "relay-stream") {
                     allowed =
-                      payloadEncryption === "custody-aes-gcm" && nonceFresh && fixedFrameCadence;
+                      payloadEncryption === "custody-aes-gcm" &&
+                      nonceFresh &&
+                      fixedFrameCadence;
                   } else if (channel === "control-plane") {
-                    allowed = payloadEncryption === "control-schema" && !hasPerSessionFields;
+                    allowed =
+                      payloadEncryption === "control-schema" &&
+                      !hasPerSessionFields;
                   } else if (channel === "blob-storage") {
                     allowed =
                       (payloadEncryption === "custody-aes-gcm" ||
@@ -166,44 +185,52 @@ function runClientMonitorProofSummary() {
     statesChecked,
     allowedStates,
     deniedStates,
-    invariants: [
-      {
-        id: "I1_NoPlaintextEgress",
-        rule: 'payloadEncryption !== "plaintext" on every allowed network or storage channel',
-        detail:
-          "Ensures raw prompts, KV caches, and token streams can never exit the CVM in plaintext even if the VMPL1 inference engine is compromised.",
-      },
-      {
-        id: "I2_NoNonceReuse",
-        rule: "nonceFresh === true on every allowed custody-aes-gcm and freeze-aes-gcm egress",
-        detail:
-          "Monotonic hardware-counter IV discipline inside VMPL0 prevents catastrophic AES-GCM keystream reuse across turns and frozen bubbles.",
-      },
-      {
-        id: "I3_NoEngineBypass",
-        rule: "actorVmpl === 0 required for all external I/O and SNP_GET_REPORT calls",
-        detail:
-          "Hardware AMD SEV-SNP VMPL permission masks trap any direct ring-0/VMPL1/VMPL2 network, disk, shell, or attestation access.",
-      },
-      {
-        id: "I4_NoPerSessionControlLeak",
-        rule: 'channel === "control-plane" implies hasPerSessionFields === false',
-        detail:
-          "Restricts control-plane telemetry to coarse epoch aggregates so per-request token counts or timings cannot leak.",
-      },
-      {
-        id: "I5_ForbiddenPrefixNeverSigned",
-        rule: 'channel === "snp-attest" implies startsWithForbiddenPrefix === false',
-        detail:
-          'VMPL0 refuses to sign any REPORT_DATA prefixed with F = sha256("drouter/forbidden-report-data/v1"), making any signature over F cryptographic proof of key extraction.',
-      },
-    ],
   };
 }
 
+const VERIFIABLE_CLAIMS = [
+  {
+    title: "Enclave source and build releases (GitHub)",
+    claim:
+      "Inspect the open-source Tinfoil confidential router and model container releases that produce the enclave measurements.",
+    href: "https://github.com/tinfoilsh",
+    linkLabel: "github.com/tinfoilsh",
+  },
+  {
+    title: "Build provenance log (Sigstore Rekor)",
+    claim:
+      "Verify that enclave container digests are recorded in the public append-only Sigstore transparency log.",
+    href: "https://search.sigstore.dev",
+    linkLabel: "search.sigstore.dev",
+  },
+  {
+    title: "Silicon root certificates (AMD KDS)",
+    claim:
+      "Fetch AMD Key Distribution Service VCEK certificate chains used to verify the AMD SEV-SNP hardware quote from router-0.tinfoil.sh.",
+    href: "https://kdsintf.amd.com/vcek/v1/Milan/cert_chain",
+    linkLabel: "kdsintf.amd.com/vcek/v1/Milan/cert_chain",
+  },
+  {
+    title: "Live enclave routing table (Tinfoil proxy)",
+    claim:
+      "Check the live proxy manifest mapping router-0.tinfoil.sh (AMD SEV-SNP) to model enclaves such as kimi-k3 (Intel TDX + NVIDIA CC GPUs, 262,144 max tokens).",
+    href: "https://inference.tinfoil.sh/.well-known/tinfoil-proxy",
+    linkLabel: "inference.tinfoil.sh/.well-known/tinfoil-proxy",
+  },
+  {
+    title: "On-chain attestation registry (Circle Arc Testnet)",
+    claim:
+      "Inspect contract 0xbc8085c2b6fe6e0db05f169925c0b841828f4481 on Circle Arc Testnet (chain 5042002).",
+    href: "https://explorer.testnet.arc.io/address/0xbc8085c2b6fe6e0db05f169925c0b841828f4481",
+    linkLabel: "explorer.testnet.arc.io/address/0xbc80...4481",
+  },
+];
+
 export default function AuditLabPage() {
-  const [transparency, setTransparency] = useState<TransparencyResponse | null>(null);
-  const [accountability, setAccountability] = useState<AccountabilityResponse | null>(null);
+  const [transparency, setTransparency] =
+    useState<TransparencyResponse | null>(null);
+  const [accountability, setAccountability] =
+    useState<AccountabilityResponse | null>(null);
   const [credits, setCredits] = useState<CreditsResponse | null>(null);
   const [freeze, setFreeze] = useState<FreezeResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -214,16 +241,24 @@ export default function AuditLabPage() {
     payload: unknown;
   } | null>(null);
 
-  const monitorProof = useMemo(() => runClientMonitorProofSummary(), []);
+  const monitorPolicyCheck = useMemo(() => runClientMonitorPolicyCheck(), []);
 
   const refreshAll = useCallback(async () => {
     setLoading(true);
     try {
       const [tRes, aRes, cRes, fRes] = await Promise.all([
-        fetch("/api/transparency").then((r) => (r.ok ? r.json() : null)).catch(() => null),
-        fetch("/api/accountability").then((r) => (r.ok ? r.json() : null)).catch(() => null),
-        fetch("/api/credits").then((r) => (r.ok ? r.json() : null)).catch(() => null),
-        fetch("/api/freeze").then((r) => (r.ok ? r.json() : null)).catch(() => null),
+        fetch("/api/transparency")
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null),
+        fetch("/api/accountability")
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null),
+        fetch("/api/credits")
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null),
+        fetch("/api/freeze")
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null),
       ]);
       if (tRes) setTransparency(tRes as TransparencyResponse);
       if (aRes) setAccountability(aRes as AccountabilityResponse);
@@ -239,7 +274,11 @@ export default function AuditLabPage() {
   }, [refreshAll]);
 
   const runAccountabilityAction = async (
-    action: "trigger-canary" | "claim-key-bounty" | "simulate-restart" | "simulate-clone",
+    action:
+      | "trigger-canary"
+      | "claim-key-bounty"
+      | "simulate-restart"
+      | "simulate-clone",
     nodeId: string,
     title: string,
   ) => {
@@ -255,17 +294,22 @@ export default function AuditLabPage() {
         setAccountability({
           ...accountability,
           rampStates: data.rampStates as Record<string, RampEvaluationView>,
-          activeCanaries: data.activeCanaries as Record<string, CanarySessionView>,
-          recentClaims: (data.recentClaims as RecordedClaimEventView[]) ?? accountability.recentClaims,
+          activeCanaries:
+            data.activeCanaries as Record<string, CanarySessionView>,
+          recentClaims:
+            (data.recentClaims as RecordedClaimEventView[]) ??
+            accountability.recentClaims,
         });
       }
-      const verdictObj = (data.verdict ?? data.evaluation ?? {}) as Record<string, unknown>;
+      const verdictObj = (data.verdict ??
+        data.evaluation ??
+        {}) as Record<string, unknown>;
       const summary =
         typeof verdictObj.reason === "string"
           ? verdictObj.reason
           : typeof verdictObj.detail === "string"
             ? verdictObj.detail
-            : `Executed ${action} on ${nodeId}`;
+            : `Simulated ${action} on ${nodeId}`;
       setSimResult({
         title,
         verdictSummary: summary,
@@ -286,8 +330,8 @@ export default function AuditLabPage() {
       });
       const data = (await res.json()) as Record<string, unknown>;
       setSimResult({
-        title: "Batch-Redeem Node Credits (Spec §7)",
-        verdictSummary: `Flushed ${String(data.redeemedCount ?? 0)} unredeemed nullifier(s) (${String(data.totalCredits ?? 0)} credits) into batch settlement hash ${shortHex(data.batchHash ?? "", 14, 10)}.`,
+        title: "Simulated batch credit settlement",
+        verdictSummary: `Settled ${String(data.redeemedCount ?? 0)} unredeemed nullifier(s) (${String(data.totalCredits ?? 0)} credits) into batch digest ${shortHex(data.batchHash ?? "", 14, 10)}.`,
         payload: data,
       });
       const refreshed = await fetch("/api/credits")
@@ -300,481 +344,437 @@ export default function AuditLabPage() {
   };
 
   return (
-    <main className="mx-auto flex max-w-7xl flex-col gap-5 p-4">
-      <header className="flex flex-wrap items-end justify-between gap-3 border-b border-zinc-800 pb-4">
-        <div>
-          <h1 className="text-xl font-semibold text-zinc-50">
-            Security, Quorum &amp; Remote Accountability Lab
+    <div className="min-h-screen flex flex-col bg-paper text-ink overflow-x-hidden">
+      <SpecimenHeader activePath="/audit" rightSlot={<AuthPill />} />
+
+      <main className="flex-1 w-full min-w-0">
+        <div className="mx-auto w-full max-w-5xl px-4 pt-10 pb-4 sm:px-6 space-y-10">
+        {/* Header */}
+        <header className="space-y-3 border-b border-rule pb-8">
+          <div className="ep-label">Proof and audit</div>
+          <h1 className="ep-display text-3xl sm:text-4xl lg:text-5xl">
+            Check our work
           </h1>
-          <p className="text-sm text-zinc-400">
-            Live verification of the Software Transparency Log (§4), 5-of-7 Verifier Quorum (§5), VMPL0 Inner Monitor
-            invariants (§2.2 V3), Blind Credits (§7), Zero-Knowledge Freeze Store, and Cryptographic Slashing (§8).
+          <p className="max-w-[70ch] text-base sm:text-lg text-ink-2 leading-relaxed">
+            Every live hardware and registry claim below links to an external
+            authority you can verify yourself, while our slashing and quorum
+            mechanisms run as interactive simulations on test nodes.
           </p>
-        </div>
-        <nav className="flex items-center gap-4 text-sm text-zinc-400">
-          <Link className="hover:text-zinc-100" href="/">
-            ← Console
-          </Link>
-          <Link className="hover:text-zinc-100" href="/network">
-            Network &amp; transparency log
-          </Link>
-          <button
-            type="button"
-            onClick={() => void refreshAll()}
-            className="rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-xs text-zinc-200 hover:bg-zinc-800"
-          >
-            {loading ? "Refreshing…" : "Refresh state"}
-          </button>
-        </nav>
-      </header>
+        </header>
 
-      {/* Interactive Simulation Console */}
-      <section className="rounded-lg border border-emerald-900/70 bg-zinc-950 p-4">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-emerald-400">
-              Interactive Fault, Slashing &amp; Settlement Simulator (Spec §7 &amp; §8)
+        {/* 1. External Claims You Can Verify Yourself */}
+        <section
+          aria-label="Claims you can verify yourself"
+          className="space-y-4"
+        >
+          <div className="space-y-1">
+            <div className="ep-label">Independent verification</div>
+            <h2 className="font-serif text-2xl text-ink">
+              Claims you can verify yourself
             </h2>
-            <p className="text-xs text-zinc-400">
-              Trigger live cryptographic enforcement actions against the accountability and blind-credit endpoints.
-            </p>
-          </div>
-          {accountability?.forbiddenPrefix && (
-            <span className="rounded border border-zinc-800 bg-zinc-900 px-2 py-1 font-mono text-[11px] text-zinc-400">
-              Forbidden Prefix F = sha256(&quot;drouter/forbidden-report-data/v1&quot;) ={" "}
-              <strong className="text-amber-300">{shortHex(accountability.forbiddenPrefix, 12, 8)}</strong>
-            </span>
-          )}
-        </div>
-
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
-          {/* Action 1: Canary Honeytoken Leak */}
-          <div className="flex flex-col justify-between gap-2 rounded-md border border-zinc-800 bg-zinc-900/50 p-3">
-            <div>
-              <h3 className="text-xs font-semibold text-zinc-100">
-                1. Trigger Canary Honeytoken Leak (Spec §8.4)
-              </h3>
-              <p className="mt-1 text-xs text-zinc-400">
-                Reveals <code className="font-mono">(honeytoken, salt)</code> matching{" "}
-                <code className="font-mono">sim-1</code>&apos;s on-chain commitment{" "}
-                <code className="font-mono">H(t || salt || pk_N || epoch)</code>: 10% reporter bounty + 90% user
-                compensation pool slash.
-              </p>
-            </div>
-            <button
-              type="button"
-              disabled={busyAction !== null}
-              onClick={() =>
-                void runAccountabilityAction(
-                  "trigger-canary",
-                  "sim-1",
-                  "Canary Honeytoken Leak Verdict (Spec §8.4 — sim-1)",
-                )
-              }
-              className="mt-2 rounded bg-amber-600/90 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-500 disabled:opacity-40"
-            >
-              {busyAction === "trigger-canary:sim-1" ? "Verifying opening…" : "Trigger Canary Leak (sim-1)"}
-            </button>
           </div>
 
-          {/* Action 2: Key-Compromise Bounty Proof */}
-          <div className="flex flex-col justify-between gap-2 rounded-md border border-zinc-800 bg-zinc-900/50 p-3">
-            <div>
-              <h3 className="text-xs font-semibold text-zinc-100">
-                2. Submit Key-Compromise Bounty Proof (Spec §8.5)
-              </h3>
-              <p className="mt-1 text-xs text-zinc-400">
-                Submits a P-384 VCEK signature over <code className="font-mono">REPORT_DATA</code> starting with
-                forbidden prefix <code className="font-mono">F</code> on <code className="font-mono">sim-2</code>,
-                proving attestation key extraction and awarding the 50% bounty.
-              </p>
-            </div>
-            <button
-              type="button"
-              disabled={busyAction !== null}
-              onClick={() =>
-                void runAccountabilityAction(
-                  "claim-key-bounty",
-                  "sim-2",
-                  "Key-Compromise Bounty Proof Verdict (Spec §8.5 — sim-2)",
-                )
-              }
-              className="mt-2 rounded bg-rose-600/90 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-500 disabled:opacity-40"
-            >
-              {busyAction === "claim-key-bounty:sim-2" ? "Verifying P-384 proof…" : "Claim 50% Key Bounty (sim-2)"}
-            </button>
-          </div>
-
-          {/* Action 3: Unannounced Node Restart / Cloned Identity Key */}
-          <div className="flex flex-col justify-between gap-2 rounded-md border border-zinc-800 bg-zinc-900/50 p-3">
-            <div>
-              <h3 className="text-xs font-semibold text-zinc-100">
-                3. Node Restart / Cloned Identity Key (Spec §8.2–8.3)
-              </h3>
-              <p className="mt-1 text-xs text-zinc-400">
-                Simulate an unannounced <code className="font-mono">sim-3</code> reboot (entering the 24–96h
-                canary-only probation ramp at 0 bps) or dual <code className="font-mono">pk_N</code> heartbeats within
-                15s (immediate suspension).
-              </p>
-            </div>
-            <div className="mt-2 flex gap-2">
-              <button
-                type="button"
-                disabled={busyAction !== null}
-                onClick={() =>
-                  void runAccountabilityAction(
-                    "simulate-restart",
-                    "sim-3",
-                    "Unannounced Restart → Canary-Only Probation Ramp (Spec §8.3 — sim-3)",
-                  )
-                }
-                className="flex-1 rounded border border-sky-700 bg-sky-950/70 px-2 py-1.5 text-xs font-semibold text-sky-200 hover:bg-sky-900/70 disabled:opacity-40"
+          <div className="ep-card divide-y divide-rule">
+            {VERIFIABLE_CLAIMS.map((item) => (
+              <div
+                key={item.href}
+                className="p-4 sm:p-5 flex flex-col gap-2 sm:flex-row sm:items-baseline sm:justify-between"
               >
-                {busyAction === "simulate-restart:sim-3" ? "Running…" : "Simulate Restart"}
-              </button>
-              <button
-                type="button"
-                disabled={busyAction !== null}
-                onClick={() =>
-                  void runAccountabilityAction(
-                    "simulate-clone",
-                    "sim-3",
-                    "Cloned Identity Key Detection (Spec §8.2 — sim-3)",
-                  )
-                }
-                className="flex-1 rounded border border-rose-800 bg-rose-950/70 px-2 py-1.5 text-xs font-semibold text-rose-200 hover:bg-rose-900/70 disabled:opacity-40"
-              >
-                {busyAction === "simulate-clone:sim-3" ? "Running…" : "Simulate Clone"}
-              </button>
-            </div>
-          </div>
-
-          {/* Action 4: Batch-Redeem Node Credits */}
-          <div className="flex flex-col justify-between gap-2 rounded-md border border-zinc-800 bg-zinc-900/50 p-3">
-            <div>
-              <h3 className="text-xs font-semibold text-zinc-100">
-                4. Batch-Redeem Node Credits (Spec §7)
-              </h3>
-              <p className="mt-1 text-xs text-zinc-400">
-                Flushes unredeemed blind-credit nullifiers accumulated by{" "}
-                <code className="font-mono">tinfoil-router</code> into a single unlinkable batch settlement digest.
-              </p>
-            </div>
-            <button
-              type="button"
-              disabled={busyAction !== null}
-              onClick={() => void runRedeemCredits()}
-              className="mt-2 rounded bg-emerald-600/90 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-40"
-            >
-              {busyAction === "redeem-credits" ? "Settling batch…" : "Batch-Redeem Credits"}
-            </button>
-          </div>
-        </div>
-
-        {simResult && (
-          <div className="mt-4 rounded-md border border-emerald-800/80 bg-zinc-900/90 p-3 text-xs">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="font-semibold text-emerald-300">{simResult.title}</span>
-              <button
-                type="button"
-                onClick={() => setSimResult(null)}
-                className="text-zinc-400 hover:text-zinc-200"
-              >
-                Dismiss ✕
-              </button>
-            </div>
-            <p className="mt-1 text-zinc-200">{simResult.verdictSummary}</p>
-            <pre className="mt-2 max-h-60 overflow-auto rounded border border-zinc-800 bg-zinc-950 p-2.5 font-mono text-[11px] text-zinc-300">
-              {JSON.stringify(simResult.payload, null, 2)}
-            </pre>
-          </div>
-        )}
-      </section>
-
-      {/* VMPL0 Inner Monitor Formal Proof Card */}
-      <section className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-300">
-              VMPL0 Inner Monitor Formal Proof (Spec §2.2 V3)
-            </h2>
-            <p className="text-xs text-zinc-400">
-              Exhaustive state-machine verification across all{" "}
-              <strong className="font-mono text-zinc-200">
-                {monitorProof.statesChecked.toLocaleString()}
-              </strong>{" "}
-              (actorVmpl × channel × encryption × nonceFresh × fixedFrameCadence × hasPerSessionFields ×
-              startsWithForbiddenPrefix) combinations.
-            </p>
-          </div>
-          <div className="flex items-center gap-2 text-xs font-mono">
-            <span className="rounded bg-emerald-500/15 px-2 py-1 text-emerald-300">
-              {monitorProof.statesChecked.toLocaleString()} states checked ✓
-            </span>
-            <span className="rounded bg-sky-500/15 px-2 py-1 text-sky-300">
-              {monitorProof.allowedStates} allowed / {monitorProof.deniedStates.toLocaleString()} denied
-            </span>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 gap-2.5 md:grid-cols-5">
-          {monitorProof.invariants.map((inv) => (
-            <div key={inv.id} className="rounded-md border border-zinc-800 bg-zinc-900/50 p-3 text-xs">
-              <div className="flex items-center justify-between gap-1">
-                <span className="font-mono font-semibold text-emerald-300">{inv.id}</span>
-                <span className="text-emerald-400">PASS ✓</span>
-              </div>
-              <p className="mt-1 font-mono text-[11px] text-zinc-300">{inv.rule}</p>
-              <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-400">{inv.detail}</p>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      {/* Software Transparency Log & 5-of-7 Verifier Quorum */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <section className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-400">
-              Software Transparency Log (Spec §4)
-            </h2>
-            {transparency?.log?.root && (
-              <span className="font-mono text-xs text-emerald-300">
-                Merkle Root: {shortHex(transparency.log.root, 12, 8)}
-              </span>
-            )}
-          </div>
-          <p className="mb-3 text-xs text-zinc-400">
-            RFC 6962 append-only Merkle tree requiring 3-of-3 reproducible builder signatures, 4-of-7 security reviewer
-            signatures, and a 14-day public review window before any enclave measurement is admitted.
-          </p>
-          <div className="space-y-2.5 text-xs">
-            {(transparency?.log?.entries ?? []).map((entry, idx) => {
-              const proof = transparency?.proofs?.[idx];
-              return (
-                <div key={entry.index} className="rounded-md border border-zinc-800 bg-zinc-900/50 p-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="font-semibold text-zinc-100">
-                      #{entry.index} · {entry.imageId}{" "}
-                      <span className="font-mono text-zinc-400">({entry.version})</span>
-                    </span>
-                    <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 font-mono text-[10px] text-emerald-300">
-                      {entry.builderSignatures.length}/3 builders · {entry.reviewerSignatures.length}/7 reviewers ·{" "}
-                      {entry.reviewWindowDays}d window
-                    </span>
-                  </div>
-                  <div className="mt-1.5 space-y-1 font-mono text-[11px] text-zinc-400">
-                    <div>Measurement (SHA-384): {shortHex(entry.measurement, 18, 12)}</div>
-                    {proof && (
-                      <div>
-                        Leaf Hash: {shortHex(proof.leafHash, 14, 10)} · Audit Path:{" "}
-                        {proof.auditPath.map((s) => `${s.side}:${shortHex(s.hash, 6, 4)}`).join(" → ")}
-                      </div>
-                    )}
-                  </div>
+                <div className="space-y-1 max-w-[60ch]">
+                  <h3 className="font-serif text-base font-medium text-ink">
+                    {item.title}
+                  </h3>
+                  <p className="text-xs sm:text-sm text-ink-2 leading-relaxed">
+                    {item.claim}
+                  </p>
                 </div>
-              );
-            })}
+                <a
+                  href={item.href}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="ep-link font-mono text-xs shrink-0 break-all"
+                >
+                  {item.linkLabel} -&gt;
+                </a>
+              </div>
+            ))}
+          </div>
+
+          <div className="ep-inset p-4 text-xs text-ink-2 space-y-1">
+            <div className="font-mono text-ink font-medium">
+              Disclosure on upstream Tinfoil router sidecars:
+            </div>
+            <p className="max-w-[70ch] leading-relaxed">
+              The live Tinfoil router (router-0.tinfoil.sh) attests with AMD
+              SEV-SNP and runs an acceptable-use safeguards classifier sidecar
+              reporting policy violations to https://api.tinfoil.sh, plus an
+              attested usage reporter. The Kimi K3 model enclave runs on Intel
+              TDX plus NVIDIA confidential-computing GPUs with a 262,144-token
+              maximum context length.
+            </p>
           </div>
         </section>
 
-        <section className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-400">
-              5-of-7 Verifier Quorum Tickets (Spec §5)
-            </h2>
-            <span className="text-xs text-zinc-500">
-              {transparency?.verifierSet?.length ?? 7} independent Ed25519 verifiers
-            </span>
+        {/* 2. Accountability Simulations */}
+        <section
+          aria-label="Accountability simulations"
+          className="space-y-4"
+        >
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <div className="space-y-1">
+              <div className="ep-label">Interactive sandbox</div>
+              <h2 className="font-serif text-2xl text-ink">
+                Accountability and slashing simulations
+              </h2>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="ep-muted-chip">Simulated nodes: sim-1, sim-2, sim-3</span>
+              <button
+                type="button"
+                onClick={() => void refreshAll()}
+                className="ep-btn-ghost text-xs py-1 px-2.5 cursor-pointer"
+              >
+                {loading ? "Refreshing..." : "Refresh state"}
+              </button>
+            </div>
           </div>
-          <p className="mb-3 text-xs text-zinc-400">
-            Nodes are admitted to routing only with at least 5 of 7 verifier signatures over{" "}
-            <code className="font-mono">(nodeId, chipId, nodeIdentityPk, epoch, status, weight)</code>.
+
+          <p className="max-w-[70ch] text-sm text-ink-2">
+            Nodes <code className="font-mono text-xs">sim-1</code>,{" "}
+            <code className="font-mono text-xs">sim-2</code>, and{" "}
+            <code className="font-mono text-xs">sim-3</code> are simulated test
+            nodes. Trigger any fault below to test how our accountability rules
+            penalize misbehavior.
           </p>
-          <div className="space-y-2.5 text-xs">
-            {Object.values(transparency?.tickets ?? {}).map((ticket) => (
-              <div key={ticket.nodeId} className="rounded-md border border-zinc-800 bg-zinc-900/50 p-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="font-semibold text-zinc-100">{ticket.nodeId}</span>
-                  <span className="rounded bg-sky-500/15 px-1.5 py-0.5 font-mono text-[10px] text-sky-300">
-                    {ticket.signatures.length}/7 sigs · status={ticket.status} · {ticket.weight} bps
-                  </span>
+
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            {/* Sim 1: Canary Honeytoken */}
+            <div className="ep-card p-4 sm:p-5 flex flex-col justify-between space-y-4">
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-serif text-base font-medium text-ink">
+                    1. Canary honeytoken leak (sim-1)
+                  </h3>
+                  <span className="ep-muted-chip">Simulated</span>
                 </div>
-                <div className="mt-1 font-mono text-[11px] text-zinc-400">
-                  Chip ID: {shortHex(ticket.chipId, 14, 10)} · Identity PK: {shortHex(ticket.nodeIdentityPk, 12, 8)}
+                <p className="text-xs text-ink-2 leading-relaxed">
+                  Reveals a canary honeytoken and salt matching sim-1&apos;s
+                  commitment to simulate a 10% reporter bounty and 90% user pool
+                  slash.
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() =>
+                  void runAccountabilityAction(
+                    "trigger-canary",
+                    "sim-1",
+                    "Simulated canary honeytoken leak (sim-1)",
+                  )
+                }
+                className="ep-btn text-xs self-start cursor-pointer"
+              >
+                {busyAction === "trigger-canary:sim-1"
+                  ? "Running..."
+                  : "Simulate canary leak"}
+              </button>
+            </div>
+
+            {/* Sim 2: Key-Compromise Bounty */}
+            <div className="ep-card p-4 sm:p-5 flex flex-col justify-between space-y-4">
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-serif text-base font-medium text-ink">
+                    2. Key-compromise bounty proof (sim-2)
+                  </h3>
+                  <span className="ep-muted-chip">Simulated</span>
                 </div>
-                <div className="mt-1 flex flex-wrap gap-1">
-                  {ticket.signatures.map((sig) => (
-                    <span
-                      key={sig.verifierId}
-                      className="rounded border border-zinc-800 bg-zinc-950 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400"
-                    >
-                      {sig.verifierId} ✓
-                    </span>
+                <p className="text-xs text-ink-2 leading-relaxed">
+                  Submits a signature over the forbidden prefix{" "}
+                  <code className="font-mono">
+                    {accountability?.forbiddenPrefix
+                      ? shortHex(accountability.forbiddenPrefix, 10, 6)
+                      : "F"}
+                  </code>{" "}
+                  on sim-2, proving key extraction and awarding a 50% bounty.
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() =>
+                  void runAccountabilityAction(
+                    "claim-key-bounty",
+                    "sim-2",
+                    "Simulated key-compromise bounty (sim-2)",
+                  )
+                }
+                className="ep-btn text-xs self-start cursor-pointer"
+              >
+                {busyAction === "claim-key-bounty:sim-2"
+                  ? "Running..."
+                  : "Simulate key bounty"}
+              </button>
+            </div>
+
+            {/* Sim 3: Restart or Clone */}
+            <div className="ep-card p-4 sm:p-5 flex flex-col justify-between space-y-4">
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-serif text-base font-medium text-ink">
+                    3. Unannounced restart or cloned key (sim-3)
+                  </h3>
+                  <span className="ep-muted-chip">Simulated</span>
+                </div>
+                <p className="text-xs text-ink-2 leading-relaxed">
+                  Puts sim-3 into canary-only probation (0 bps routing weight)
+                  after an unannounced reboot, or suspends it on duplicate key
+                  heartbeats.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled={busyAction !== null}
+                  onClick={() =>
+                    void runAccountabilityAction(
+                      "simulate-restart",
+                      "sim-3",
+                      "Simulated unannounced restart (sim-3)",
+                    )
+                  }
+                  className="ep-btn-ghost text-xs py-1.5 px-3 cursor-pointer"
+                >
+                  {busyAction === "simulate-restart:sim-3"
+                    ? "Running..."
+                    : "Simulate restart"}
+                </button>
+                <button
+                  type="button"
+                  disabled={busyAction !== null}
+                  onClick={() =>
+                    void runAccountabilityAction(
+                      "simulate-clone",
+                      "sim-3",
+                      "Simulated cloned key detection (sim-3)",
+                    )
+                  }
+                  className="ep-btn-ghost text-xs py-1.5 px-3 cursor-pointer"
+                >
+                  {busyAction === "simulate-clone:sim-3"
+                    ? "Running..."
+                    : "Simulate clone"}
+                </button>
+              </div>
+            </div>
+
+            {/* Sim 4: Batch Redeem Blind Credits */}
+            <div className="ep-card p-4 sm:p-5 flex flex-col justify-between space-y-4">
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-serif text-base font-medium text-ink">
+                    4. Batch-redeem blind credits
+                  </h3>
+                  <span className="ep-muted-chip">Simulated</span>
+                </div>
+                <p className="text-xs text-ink-2 leading-relaxed">
+                  Flushes unredeemed Chaumian RSA-2048 blind-credit nullifiers
+                  into a single batch settlement digest.
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() => void runRedeemCredits()}
+                className="ep-btn-ghost text-xs py-1.5 px-3 self-start cursor-pointer"
+              >
+                {busyAction === "redeem-credits"
+                  ? "Settling..."
+                  : "Batch-redeem credits"}
+              </button>
+            </div>
+          </div>
+
+          {/* Simulation Verdict Output */}
+          {simResult && (
+            <div className="ep-inset p-4 space-y-2 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-serif text-sm font-medium text-ink">
+                  {simResult.title}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setSimResult(null)}
+                  className="ep-link font-mono text-xs cursor-pointer"
+                >
+                  Dismiss
+                </button>
+              </div>
+              <p className="text-ink-2">{simResult.verdictSummary}</p>
+              <details>
+                <summary className="cursor-pointer font-mono text-ink-2 hover:text-ink select-none">
+                  Show details
+                </summary>
+                <pre className="mt-2 ep-card p-3 max-h-60 overflow-auto font-mono text-[11px] text-ink-2">
+                  {JSON.stringify(simResult.payload, null, 2)}
+                </pre>
+              </details>
+            </div>
+          )}
+
+          {/* Collapsible Simulated State Details */}
+          <details className="ep-card p-4 sm:p-5">
+            <summary className="cursor-pointer font-serif text-base font-medium text-ink select-none">
+              Show simulated node state, quorum tickets, credit counters, and
+              frozen blobs
+            </summary>
+
+            <div className="mt-4 space-y-6 border-t border-rule pt-4 text-xs">
+              {/* Node Ramp States */}
+              <div className="space-y-2">
+                <div className="ep-label">Simulated node ramp state</div>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                  {Object.values(accountability?.rampStates ?? {}).map((r) => (
+                    <div key={r.nodeId} className="ep-inset p-3 space-y-1">
+                      <div className="flex items-center justify-between font-mono">
+                        <span className="text-ink font-medium">{r.nodeId}</span>
+                        <span
+                          className={
+                            r.status === "full" ? "ep-pass" : "ep-fail"
+                          }
+                        >
+                          {r.phase} ({r.weightBps} bps)
+                        </span>
+                      </div>
+                      <p className="text-ink-2">{r.detail}</p>
+                    </div>
                   ))}
                 </div>
               </div>
-            ))}
-          </div>
-        </section>
-      </div>
 
-      {/* Hardware Manifests & Heartbeat / Canary State */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <section className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
-            Signed Hardware Manifests (Spec §8.1)
-          </h2>
-          <p className="mb-3 text-xs text-zinc-400">
-            Operators sign hardware declarations bound to stake (board model, BMC firmware, RoT, DIMM speed/slots,
-            SPDM-bound GPUs). Any mismatch with attested hardware triggers slashing.
-          </p>
-          <div className="space-y-2.5 text-xs">
-            {(accountability?.manifests ?? []).map((m) => (
-              <div key={m.nodeId} className="rounded-md border border-zinc-800 bg-zinc-900/50 p-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="font-semibold text-zinc-100">
-                    {m.nodeId} · {m.declared.board}
-                  </span>
-                  <span className="font-mono text-[11px] text-emerald-300">
-                    {m.declared.region} · {m.gpuIds.length}× H100 SPDM
-                  </span>
+              {/* Monitor Policy Table Check */}
+              <div className="space-y-1.5">
+                <div className="ep-label">
+                  Monitor exit policy table (JavaScript state enumeration)
                 </div>
-                <div className="mt-1 text-[11px] text-zinc-400">
-                  BMC: <code className="font-mono">{m.declared.bmcFirmware}</code> · RoT:{" "}
-                  <code className="font-mono">{m.declared.platformRot}</code> · DIMMs:{" "}
-                  <code className="font-mono">
-                    {m.declared.dimmSlotsPopulated}/{m.declared.dimmSlotsTotal} @ {m.declared.dimmSpeedMt} MT/s
-                  </code>
+                <p className="text-ink-2">
+                  Checked {monitorPolicyCheck.statesChecked.toLocaleString()}{" "}
+                  combinations in browser memory:{" "}
+                  {monitorPolicyCheck.allowedStates} allowed,{" "}
+                  {monitorPolicyCheck.deniedStates.toLocaleString()} denied.
+                </p>
+              </div>
+
+              {/* Simulated Transparency & Quorum */}
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <div className="ep-label">
+                    Simulated transparency log entries
+                  </div>
+                  <div className="space-y-2">
+                    {(transparency?.log?.entries ?? []).map((entry) => (
+                      <div
+                        key={entry.index}
+                        className="ep-inset p-2.5 font-mono space-y-1 text-ink-2"
+                      >
+                        <div className="text-ink font-medium">
+                          #{entry.index} {entry.imageId} ({entry.version})
+                        </div>
+                        <div>
+                          Measurement: {shortHex(entry.measurement, 14, 8)}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-                <div className="mt-1 font-mono text-[11px] text-zinc-500">
-                  Sig: {shortHex(m.signature, 14, 10)} · PK: {shortHex(m.signerPublicKey, 12, 8)}
+
+                <div className="space-y-2">
+                  <div className="ep-label">
+                    Simulated 5-of-7 quorum tickets
+                  </div>
+                  <div className="space-y-2">
+                    {Object.values(transparency?.tickets ?? {}).map((ticket) => (
+                      <div
+                        key={ticket.nodeId}
+                        className="ep-inset p-2.5 font-mono space-y-1 text-ink-2"
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-ink font-medium">
+                            {ticket.nodeId}
+                          </span>
+                          <span>
+                            {ticket.signatures.length}/7 sigs ({ticket.weight}{" "}
+                            bps)
+                          </span>
+                        </div>
+                        <div>Chip ID: {shortHex(ticket.chipId, 12, 8)}</div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </div>
-            ))}
-          </div>
-        </section>
 
-        <section className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
-            Heartbeat Continuity, Post-Restart Ramp &amp; Active Canaries (Spec §8.2–8.4)
-          </h2>
-          <p className="mb-3 text-xs text-zinc-400">
-            Unannounced restarts force nodes into a 24–96h canary-only probation phase (0 bps user weight) followed by a
-            72h linear ramp. Simultaneous identity keys trigger instant suspension.
-          </p>
-          <div className="space-y-2.5 text-xs">
-            {Object.values(accountability?.rampStates ?? {}).map((r) => {
-              const canary = accountability?.activeCanaries?.[r.nodeId];
-              return (
-                <div key={r.nodeId} className="rounded-md border border-zinc-800 bg-zinc-900/50 p-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="font-semibold text-zinc-100">{r.nodeId}</span>
-                    <span
-                      className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase ${
-                        r.status === "full"
-                          ? "bg-emerald-500/15 text-emerald-300"
-                          : r.status === "ramp"
-                            ? "bg-amber-500/15 text-amber-300"
-                            : "bg-rose-500/20 text-rose-300"
-                      }`}
-                    >
-                      {r.phase} · {r.weightBps} bps · {r.restartsIn30d} restart(s)/30d
-                    </span>
+              {/* Blind Credits & Client-Encrypted Frozen Blobs */}
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <div className="ep-label">Blind-signed credit counters</div>
+                  {credits ? (
+                    <div className="ep-inset p-3 font-mono space-y-1 text-ink-2">
+                      <div>Modulus (n): {shortHex(credits.n, 16, 10)}</div>
+                      <div>
+                        Spent nullifiers: {credits.stats.spentCount} | Unredeemed:{" "}
+                        {credits.stats.unredeemedCount} | Batches:{" "}
+                        {credits.stats.redeemedBatches}
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-ink-3">Loading credit stats...</p>
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <div className="ep-label">
+                    Client-encrypted frozen session blobs (AES-256-GCM)
                   </div>
-                  <p className="mt-1 text-[11px] text-zinc-400">{r.detail}</p>
-                  {canary && (
-                    <div className="mt-1.5 rounded border border-zinc-800 bg-zinc-950 px-2 py-1 font-mono text-[10px] text-zinc-400">
-                      Canary commitment ({canary.decoyKind}): {shortHex(canary.commitment, 16, 10)}
+                  {freeze?.blobs && freeze.blobs.length > 0 ? (
+                    <div className="ep-inset p-3 font-mono space-y-1 text-ink-2">
+                      {freeze.blobs.map((b) => (
+                        <div
+                          key={b.blobId}
+                          className="flex items-center justify-between"
+                        >
+                          <span>{shortHex(b.blobId, 10, 6)}</span>
+                          <span>
+                            {b.byteLength} B ({formatUnixSec(b.createdAt)})
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="ep-inset p-3 text-ink-3">
+                      No frozen ciphertext blobs currently stored.
                     </div>
                   )}
                 </div>
-              );
-            })}
-          </div>
-        </section>
-      </div>
-
-      {/* Blind Credits & Zero-Knowledge Frozen Blobs */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <section className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
-            Unlinkable Blind-Signed Credits Ledger (Spec §7)
-          </h2>
-          <p className="mb-3 text-xs text-zinc-400">
-            Chaumian RSA-2048 blind signatures decouple credit purchase from per-turn spending. The router records only
-            one-time nullifiers <code className="font-mono">sha256(&quot;drouter/v1/nullifier:&quot; || token)</code>.
-          </p>
-          {credits ? (
-            <dl className="space-y-2 text-xs">
-              <div className="grid grid-cols-[10rem_1fr] gap-2">
-                <dt className="text-zinc-500">RSA Modulus (n)</dt>
-                <dd className="break-all font-mono text-zinc-300">{shortHex(credits.n, 24, 16)}</dd>
               </div>
-              <div className="grid grid-cols-[10rem_1fr] gap-2">
-                <dt className="text-zinc-500">Public Exponent (e)</dt>
-                <dd className="font-mono text-zinc-300">0x{credits.e}</dd>
-              </div>
-              <div className="grid grid-cols-[10rem_1fr] gap-2">
-                <dt className="text-zinc-500">Denominations</dt>
-                <dd className="font-mono text-zinc-300">{credits.denominations.join(", ")} credits</dd>
-              </div>
-              <div className="grid grid-cols-[10rem_1fr] gap-2">
-                <dt className="text-zinc-500">Spent Nullifiers</dt>
-                <dd className="font-mono text-emerald-300">{credits.stats.spentCount}</dd>
-              </div>
-              <div className="grid grid-cols-[10rem_1fr] gap-2">
-                <dt className="text-zinc-500">Unredeemed Pool</dt>
-                <dd className="font-mono text-amber-300">{credits.stats.unredeemedCount}</dd>
-              </div>
-              <div className="grid grid-cols-[10rem_1fr] gap-2">
-                <dt className="text-zinc-500">Redeemed Batches</dt>
-                <dd className="font-mono text-sky-300">{credits.stats.redeemedBatches}</dd>
-              </div>
-            </dl>
-          ) : (
-            <p className="text-xs text-zinc-500">Loading blind credit issuer parameters…</p>
-          )}
+            </div>
+          </details>
         </section>
 
-        <section className="rounded-lg border border-zinc-800 bg-zinc-950 p-4">
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
-            Zero-Knowledge Frozen Session Blobs (MongoDB Ciphertext Store)
-          </h2>
-          <p className="mb-3 text-xs text-zinc-400">
-            Frozen session bubbles store only opaque AES-256-GCM ciphertext. The server explicitly rejects any payload
-            containing <code className="font-mono">freezeSecretHex</code> or plaintext{" "}
-            <code className="font-mono">messages</code>.
-          </p>
-          {freeze?.blobs && freeze.blobs.length > 0 ? (
-            <table className="w-full text-left text-xs">
-              <thead className="text-zinc-500">
-                <tr>
-                  <th className="py-1">Blob ID</th>
-                  <th>Ciphertext size</th>
-                  <th>Created (UTC)</th>
-                  <th>Plaintext stored</th>
-                </tr>
-              </thead>
-              <tbody className="text-zinc-300">
-                {freeze.blobs.map((b) => (
-                  <tr key={b.blobId} className="border-t border-zinc-900">
-                    <td className="py-1.5 font-mono">{shortHex(b.blobId, 10, 6)}</td>
-                    <td className="font-mono">{b.byteLength} B</td>
-                    <td>{formatUnixSec(b.createdAt)}</td>
-                    <td className="font-mono text-emerald-400">0 bytes (opaque GCM)</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          ) : (
-            <p className="rounded border border-zinc-800 bg-zinc-900/40 p-3 text-xs text-zinc-400">
-              No frozen blobs currently stored in MongoDB/memory. Freeze a session bubble from the console to see its
-              opaque ciphertext record here.
-            </p>
-          )}
-        </section>
-      </div>
-    </main>
+        </div>
+
+        {/* 3. What if someone cheats? */}
+        <ExhibitSection
+          tag="Threat matrix"
+          title="What if someone cheats?"
+          subtitle="Inspect seven real-world compromise scenarios and the technical checks that block them."
+        >
+          <ThreatMatrix />
+        </ExhibitSection>
+      </main>
+
+      <SpecimenFooter />
+    </div>
   );
 }

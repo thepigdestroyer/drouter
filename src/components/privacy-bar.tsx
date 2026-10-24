@@ -12,6 +12,8 @@ export interface PrivacyBarProps {
   onMintCredits: () => Promise<void>;
   mintingCredits?: boolean;
   lastNullifier?: string | null;
+  zeroTelemetry?: boolean;
+  onToggleZeroTelemetry?: (next: boolean) => void;
 }
 
 function scrubDraftPreview(input: string): ScrubResult {
@@ -31,29 +33,27 @@ function scrubDraftPreview(input: string): ScrubResult {
 
   let scrubbed = input;
 
-  // API keys / bearer secrets (tk_..., sk-...)
-  scrubbed = scrubbed.replace(/\b(?:sk-[A-Za-z0-9_-]{6,}|tk_[A-Za-z0-9_-]{6,})\b/g, () =>
-    nextTag("SECRET", "api-key"),
+  scrubbed = scrubbed.replace(
+    /\b(?:sk-[A-Za-z0-9_-]{6,}|tk_[A-Za-z0-9_-]{6,})\b/g,
+    () => nextTag("SECRET", "api-key"),
   );
 
-  // Emails
-  scrubbed = scrubbed.replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, () =>
-    nextTag("EMAIL", "email"),
+  scrubbed = scrubbed.replace(
+    /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g,
+    () => nextTag("EMAIL", "email"),
   );
 
-  // 0x hex addresses / keys
   scrubbed = scrubbed.replace(/\b0x[a-fA-F0-9]{8,}\b/g, () =>
     nextTag("ADDR", "hex-address"),
   );
 
-  // IPv4 addresses
   scrubbed = scrubbed.replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, () =>
     nextTag("IP", "ip"),
   );
 
-  // Phone numbers
-  scrubbed = scrubbed.replace(/(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b/g, () =>
-    nextTag("PHONE", "phone"),
+  scrubbed = scrubbed.replace(
+    /(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b/g,
+    () => nextTag("PHONE", "phone"),
   );
 
   return { scrubbed, replacements };
@@ -61,22 +61,22 @@ function scrubDraftPreview(input: string): ScrubResult {
 
 function computeBucketMetrics(draftText: string): {
   estimatedTokens: number;
-  exponentJ: number;
   bucketTokens: number;
 } {
   const trimmed = draftText.trim();
-  const estimatedTokens = trimmed.length === 0 ? 0 : Math.max(1, Math.ceil(trimmed.length / 4));
+  const estimatedTokens =
+    trimmed.length === 0 ? 0 : Math.max(1, Math.ceil(trimmed.length / 4));
   if (estimatedTokens <= 1024) {
-    return { estimatedTokens, exponentJ: 0, bucketTokens: 1024 };
+    return { estimatedTokens, bucketTokens: 1024 };
   }
   const exponentJ = Math.max(0, Math.ceil(Math.log2(estimatedTokens / 1024)));
   const bucketTokens = Math.pow(2, exponentJ) * 1024;
-  return { estimatedTokens, exponentJ, bucketTokens };
+  return { estimatedTokens, bucketTokens };
 }
 
 function shortHex(hex: string, lead = 10, tail = 6): string {
   if (hex.length <= lead + tail + 2) return hex;
-  return `${hex.slice(0, lead)}…${hex.slice(-tail)}`;
+  return `${hex.slice(0, lead)}...${hex.slice(-tail)}`;
 }
 
 export function PrivacyBar({
@@ -88,6 +88,8 @@ export function PrivacyBar({
   onMintCredits,
   mintingCredits = false,
   lastNullifier,
+  zeroTelemetry = true,
+  onToggleZeroTelemetry,
 }: PrivacyBarProps) {
   const liveScrub = useMemo(() => {
     if (draftText.trim().length > 0) {
@@ -99,104 +101,93 @@ export function PrivacyBar({
   const bucket = useMemo(() => computeBucketMetrics(draftText), [draftText]);
 
   return (
-    <div className="border-t border-zinc-800 bg-zinc-950/90 px-3 py-2 text-xs">
-      <div className="grid grid-cols-1 gap-2 xl:grid-cols-3">
-        {/* Pill 1: Client PII Scrubber */}
-        <div className="flex flex-col justify-between gap-1.5 rounded-md border border-zinc-800 bg-zinc-900/50 px-2.5 py-2">
-          <div className="flex items-center justify-between gap-2">
-            <span className="font-medium text-zinc-300">Client PII Scrubber</span>
+    <div className="space-y-3 text-xs text-ink-2">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="max-w-[70ch]">
+          <strong className="font-medium text-ink">How this turn is protected:</strong>{" "}
+          Your browser scrubs personal identifiers locally, pads the payload to{" "}
+          <span className="font-mono text-ink">
+            {bucket.bucketTokens.toLocaleString()}
+          </span>{" "}
+          tokens, spends one blind-signed credit, and encrypts the message with HPKE so the relay cannot read it.
+        </p>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => onToggleScrub(!scrubEnabled)}
+            className="ep-btn-ghost px-2.5 py-1 text-xs"
+          >
+            PII scrubber: {scrubEnabled ? "On" : "Off"}
+          </button>
+
+          {onToggleZeroTelemetry && (
             <button
               type="button"
-              onClick={() => onToggleScrub(!scrubEnabled)}
-              className={`rounded px-2 py-0.5 text-[11px] font-semibold transition ${
-                scrubEnabled
-                  ? "bg-emerald-500/20 text-emerald-300 border border-emerald-700/60"
-                  : "bg-zinc-800 text-zinc-400 border border-zinc-700"
-              }`}
+              onClick={() => onToggleZeroTelemetry(!zeroTelemetry)}
+              className="ep-btn-ghost px-2.5 py-1 text-xs"
             >
-              Scrubber: {scrubEnabled ? "ON" : "OFF"}
+              Zero telemetry: {zeroTelemetry ? "On" : "Off"}
             </button>
-          </div>
-          {scrubEnabled ? (
-            liveScrub.replacements.length > 0 ? (
-              <div className="space-y-1">
-                <div className="flex flex-wrap gap-1">
-                  {liveScrub.replacements.map((r, i) => (
-                    <span
-                      key={`${r.placeholder}-${i}`}
-                      className="rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[10px] text-amber-300"
-                    >
-                      {r.placeholder} ({r.kind})
-                    </span>
-                  ))}
-                </div>
-                <p className="truncate font-mono text-[11px] text-zinc-400" title={liveScrub.scrubbed}>
-                  {liveScrub.scrubbed}
-                </p>
-              </div>
-            ) : (
-              <p className="text-[11px] text-zinc-500">
-                Replaces emails, phones, keys (<code className="font-mono">tk_…</code>,{" "}
-                <code className="font-mono">sk-…</code>), IPs &amp; <code className="font-mono">0x</code> addrs with{" "}
-                <code className="font-mono">[EMAIL_1]</code>, <code className="font-mono">[SECRET_1]</code> pre-HPKE.
-              </p>
-            )
-          ) : (
-            <p className="text-[11px] text-zinc-500">
-              Scrubbing paused — raw prompt goes directly into client HPKE encryption.
-            </p>
           )}
-        </div>
 
-        {/* Pill 2: Bucket Padding & Cadence (Spec §6) */}
-        <div className="flex flex-col justify-between gap-1.5 rounded-md border border-zinc-800 bg-zinc-900/50 px-2.5 py-2">
-          <div className="flex items-center justify-between gap-2">
-            <span className="font-medium text-zinc-300">Bucket Padding &amp; Cadence (§6)</span>
-            <span className="rounded bg-sky-500/15 px-1.5 py-0.5 font-mono text-[10px] text-sky-300">
-              50 ms fixed frame cadence
-            </span>
-          </div>
-          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-zinc-400">
-            <span>
-              Draft: <strong className="font-mono text-zinc-200">{bucket.estimatedTokens}</strong> est. tok
-            </span>
-            <span>
-              Bucket:{" "}
-              <strong className="font-mono text-emerald-300">
-                {bucket.bucketTokens.toLocaleString()} tok
-              </strong>{" "}
-              <span className="font-mono text-zinc-500">(2^{bucket.exponentJ} × 1,024)</span>
-            </span>
-          </div>
+          <button
+            type="button"
+            onClick={() => void onMintCredits()}
+            disabled={mintingCredits}
+            className="ep-btn-ghost px-2.5 py-1 text-xs"
+          >
+            {mintingCredits
+              ? "Minting..."
+              : `Blind credits: ${creditBalance} (+5)`}
+          </button>
         </div>
+      </div>
 
-        {/* Pill 3: Unlinkable Blind Credits (Spec §7) */}
-        <div className="flex flex-col justify-between gap-1.5 rounded-md border border-zinc-800 bg-zinc-900/50 px-2.5 py-2">
-          <div className="flex items-center justify-between gap-2">
-            <span className="font-medium text-zinc-300">
-              Unlinkable Blind Credits (§7):{" "}
-              <strong className="font-mono text-emerald-300">{creditBalance}</strong>
-            </span>
-            <button
-              type="button"
-              onClick={() => void onMintCredits()}
-              disabled={mintingCredits}
-              className="rounded border border-emerald-700/70 bg-emerald-950/60 px-2 py-0.5 text-[11px] font-semibold text-emerald-200 hover:bg-emerald-900/60 disabled:opacity-40"
-            >
-              {mintingCredits ? "Minting…" : "Mint +5 blind credits"}
-            </button>
-          </div>
-          <div className="text-[11px] text-zinc-500">
-            {lastNullifier ? (
-              <span>
-                Spent nullifier:{" "}
-                <code className="font-mono text-zinc-300">{shortHex(lastNullifier)}</code>
+      {scrubEnabled && liveScrub.replacements.length > 0 && (
+        <div className="ep-inset p-2.5">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="ep-label">Scrubbed in browser:</span>
+            {liveScrub.replacements.map((r, i) => (
+              <span key={`${r.placeholder}-${i}`} className="ep-pass">
+                {r.placeholder} ({r.kind})
               </span>
-            ) : (
-              <span>RSA blind-signed tokens prevent payment-to-session correlation.</span>
-            )}
+            ))}
           </div>
+          <p className="mt-1 ep-mono">{liveScrub.scrubbed}</p>
         </div>
+      )}
+
+      {lastNullifier && (
+        <div className="font-mono text-[11px] text-ink-3">
+          Last unlinkable credit nullifier: {shortHex(lastNullifier)}
+        </div>
+      )}
+
+      <div className="ep-inset p-3">
+        <div className="ep-label">What this does not hide</div>
+        <ul className="mt-1.5 list-disc space-y-1 pl-4 text-xs text-ink-2 break-words">
+          <li>
+            Tinfoil&apos;s safeguards classifier (gpt-oss-safeguard-120b with kimi-k3 review) sees prompts inside the enclave and reports policy violations to{" "}
+            <span className="font-mono">https://api.tinfoil.sh</span>.
+          </li>
+          <li>
+            Tinfoil&apos;s usage reporter counts token usage inside the enclave.
+          </li>
+          <li>
+            Kimi K3 context here is 262,144 tokens (not 1M).
+          </li>
+          <li>
+            Nodes sim-1, sim-2, and sim-3 are simulated in software.
+          </li>
+          <li>
+            The Circle Arc registry (
+            <span className="font-mono break-all">
+              0xbc8085c2b6fe6e0db05f169925c0b841828f4481
+            </span>
+            , chain 5042002) is a testnet.
+          </li>
+        </ul>
       </div>
     </div>
   );

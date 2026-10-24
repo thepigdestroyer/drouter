@@ -1,4 +1,5 @@
 import { connection } from "next/server";
+import { createTokenBucketLimiter } from "@/lib/ratelimit";
 import {
   applyOperatorShareCaps,
   evaluateCanaryRealismAuc,
@@ -18,8 +19,18 @@ import {
   verifyTierAPlusEvidence,
 } from "@/lib/tiers/tdx-spdm";
 
-export async function GET() {
+const tiersLimiter = createTokenBucketLimiter({
+  name: "tiers-get",
+  capacity: 120,
+  refillPerSec: 4,
+});
+
+export async function GET(request?: Request) {
   await connection();
+  if (request) {
+    const limited = tiersLimiter.check(request);
+    if (limited) return limited;
+  }
 
   // 1. Tier A baseline summary
   const tierA = {

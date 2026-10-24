@@ -2,8 +2,8 @@ import { connection } from "next/server";
 import { respond } from "@/lib/sim/http";
 import { simRoots } from "@/lib/sim/roots";
 
-export async function GET() {
+export async function GET(request?: Request) {
   // Reads the hardware seed from the environment, so keep this out of build-time prerendering.
   await connection();
-  return respond(simRoots);
+  return respond(simRoots, request);
 }

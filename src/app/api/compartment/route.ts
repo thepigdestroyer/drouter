@@ -5,6 +5,21 @@ import {
   reassembleCompartmentOutputs,
   splitTaskIntoCompartments,
 } from "@/lib/compartment/splitter";
+import {
+  BodyTooLargeError,
+  InvalidJsonBodyError,
+  createTokenBucketLimiter,
+  readBoundedJson,
+} from "@/lib/ratelimit";
+
+const MAX_COMPARTMENT_BODY_BYTES = 65_536;
+const MAX_PROMPT_CHARS = 32_768;
+
+const compartmentLimiter = createTokenBucketLimiter({
+  name: "compartment-route",
+  capacity: 60,
+  refillPerSec: 2,
+});
 
 const SAMPLE_FIVE_FRAGMENT_PROMPT = [
   "## 1. M&A Valuation Model",
@@ -19,8 +34,12 @@ const SAMPLE_FIVE_FRAGMENT_PROMPT = [
   "Draft the HSR Second Request compliance checklist and antitrust divestiture remedies.",
 ].join("\n\n");
 
-export async function GET() {
+export async function GET(request?: NextRequest) {
   await connection();
+  if (request) {
+    const limited = compartmentLimiter.check(request);
+    if (limited) return limited;
+  }
 
   const compromisedNodeFraction = 0.02;
   const plan = splitTaskIntoCompartments(
@@ -57,20 +76,23 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  const limited = compartmentLimiter.check(request);
+  if (limited) return limited;
+
   try {
-    const body = (await request.json()) as {
+    const body = await readBoundedJson<{
       prompt?: string;
       compromisedNodeFraction?: number;
       availableNodes?: string[];
-    };
+    }>(request, MAX_COMPARTMENT_BODY_BYTES);
 
     const prompt =
-      typeof body.prompt === "string" && body.prompt.trim().length > 0
-        ? body.prompt
+      typeof body?.prompt === "string" && body.prompt.trim().length > 0
+        ? body.prompt.slice(0, MAX_PROMPT_CHARS)
         : SAMPLE_FIVE_FRAGMENT_PROMPT;
 
     const rawFraction =
-      typeof body.compromisedNodeFraction === "number"
+      typeof body?.compromisedNodeFraction === "number"
         ? body.compromisedNodeFraction
         : 0.02;
     const compromisedNodeFraction =
@@ -78,10 +100,13 @@ export async function POST(request: NextRequest) {
         ? rawFraction
         : 0.02;
 
+    const validNodes = Array.isArray(body?.availableNodes)
+      ? body.availableNodes
+          .filter((n): n is string => typeof n === "string" && n.trim().length > 0 && n.length <= 64)
+          .slice(0, 16)
+      : [];
     const availableNodes =
-      Array.isArray(body.availableNodes) && body.availableNodes.length > 0
-        ? body.availableNodes
-        : DEFAULT_COMPARTMENT_NODES;
+      validNodes.length > 0 ? validNodes : DEFAULT_COMPARTMENT_NODES;
 
     const plan = splitTaskIntoCompartments(prompt, availableNodes);
     const riskMetrics = computeFragmentCompromiseRisk(
@@ -101,10 +126,15 @@ export async function POST(request: NextRequest) {
       riskCurve,
     });
   } catch (err) {
+    if (err instanceof BodyTooLargeError) {
+      return NextResponse.json({ error: err.message }, { status: 413 });
+    }
     return NextResponse.json(
       {
         error:
-          err instanceof Error ? err.message : "Invalid compartment request body",
+          err instanceof InvalidJsonBodyError
+            ? err.message
+            : "Invalid compartment request body",
       },
       { status: 400 }
     );
