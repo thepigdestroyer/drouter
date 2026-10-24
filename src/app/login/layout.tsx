@@ -1,9 +1,9 @@
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Passphrase Vault",
+  title: "Sign in",
   description:
-    "Derive client-side vault keys from a 6-word passphrase, manage custom scrub terms that feed the encrypted console, and export or import AES-256-GCM encrypted vault bundles.",
+    "Sign in to deRoute with your fingerprint, face, device, or 6 secret words. No email. No password. We never learn who you are.",
 };
 
 export default function LoginLayout({

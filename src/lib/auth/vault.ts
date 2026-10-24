@@ -50,6 +50,8 @@ export interface ExportedVaultFile {
   exportedAt: number;
 }
 
+export type VaultAuthMethod = "passkey" | "passphrase";
+
 export interface VaultSession {
   vaultId: string;
   ed25519PublicKeyHex: string;
@@ -59,6 +61,7 @@ export interface VaultSession {
   persistEncrypted: boolean;
   unlockedAt: number;
   payload: VaultPayload;
+  authMethod?: VaultAuthMethod;
 }
 
 const VAULT_PBKDF2_SALT = utf8ToBytes("drouter/v1/zk-vault-salt");
@@ -159,30 +162,7 @@ export function generatePassphrase(wordCount = 6): string {
   return words.join(" ");
 }
 
-/**
- * Deterministically derives a client-side vault identity from a passphrase.
- * Note: This is client-side PBKDF2/HKDF key derivation, not a zero-knowledge proof system.
- * Uses PBKDF2-HMAC-SHA-512 (210,000 rounds by default per OWASP guidance) followed by HKDF-SHA-384 subkey expansion.
- */
-export function deriveVaultIdentity(
-  passphrase: string,
-  options?: { iterations?: number },
-): VaultIdentity {
-  const normalized = normalizePassphrase(passphrase);
-  if (!normalized) {
-    throw new Error("Passphrase cannot be empty");
-  }
-
-  const iterations =
-    options?.iterations !== undefined
-      ? Math.max(10_000, Math.floor(options.iterations))
-      : VAULT_PBKDF2_ITERATIONS;
-
-  const masterSeed = pbkdf2(sha512, utf8ToBytes(normalized), VAULT_PBKDF2_SALT, {
-    c: iterations,
-    dkLen: 64,
-  });
-
+function deriveIdentityFromMasterSeed(masterSeed: Uint8Array): VaultIdentity {
   const ed25519PrivateKey = hkdf(
     sha384,
     masterSeed,
@@ -219,12 +199,63 @@ export function deriveVaultIdentity(
     vaultKeyHex: bytesToHex(vaultKey),
   };
 
-  masterSeed.fill(0);
   ed25519PrivateKey.fill(0);
   x25519PrivateKey.fill(0);
   vaultKey.fill(0);
 
   return result;
+}
+
+/**
+ * Deterministically derives a client-side vault identity from raw high-entropy key material
+ * (for example, 32-byte WebAuthn PRF output) using HKDF-SHA-384.
+ */
+export function deriveVaultIdentityFromKeyMaterial(ikm: Uint8Array): VaultIdentity {
+  if (!(ikm instanceof Uint8Array) || ikm.byteLength < 16) {
+    throw new Error("Key material must be a Uint8Array of at least 16 bytes");
+  }
+  const masterSeed = hkdf(
+    sha384,
+    ikm,
+    VAULT_PBKDF2_SALT,
+    utf8ToBytes("drouter/v1/passkey-prf-master"),
+    64,
+  );
+  try {
+    return deriveIdentityFromMasterSeed(masterSeed);
+  } finally {
+    masterSeed.fill(0);
+  }
+}
+
+/**
+ * Deterministically derives a client-side vault identity from a passphrase.
+ * Note: This is client-side PBKDF2/HKDF key derivation, not a zero-knowledge proof system.
+ * Uses PBKDF2-HMAC-SHA-512 (210,000 rounds by default per OWASP guidance) followed by HKDF-SHA-384 subkey expansion.
+ */
+export function deriveVaultIdentity(
+  passphrase: string,
+  options?: { iterations?: number },
+): VaultIdentity {
+  const normalized = normalizePassphrase(passphrase);
+  if (!normalized) {
+    throw new Error("Passphrase cannot be empty");
+  }
+
+  const iterations =
+    options?.iterations !== undefined
+      ? Math.max(10_000, Math.floor(options.iterations))
+      : VAULT_PBKDF2_ITERATIONS;
+
+  const masterSeed = pbkdf2(sha512, utf8ToBytes(normalized), VAULT_PBKDF2_SALT, {
+    c: iterations,
+    dkLen: 64,
+  });
+  try {
+    return deriveIdentityFromMasterSeed(masterSeed);
+  } finally {
+    masterSeed.fill(0);
+  }
 }
 
 /**
@@ -396,15 +427,11 @@ export function getPersistedVaultMetadata(): {
   return { exists: false };
 }
 
-/**
- * Derives keys in-browser from `passphrase` and unlocks the session.
- * If an encrypted vault matching this identity exists in local storage, it is verified and decrypted automatically.
- */
-export function unlockVaultWithPassphrase(
-  passphrase: string,
-  persistEncrypted = false,
+function openSessionFromIdentity(
+  identity: VaultIdentity,
+  persistEncrypted: boolean,
+  authMethod: VaultAuthMethod,
 ): VaultSession {
-  const identity = deriveVaultIdentity(passphrase);
   let payload: VaultPayload = {
     customScrubTerms: [],
     notes: "",
@@ -448,7 +475,7 @@ export function unlockVaultWithPassphrase(
         }
       }
     } catch {
-      // If stored vault belongs to a different passphrase or is corrupted, start fresh session
+      // If stored vault belongs to a different identity or is corrupted, start fresh session
     }
   }
 
@@ -457,6 +484,7 @@ export function unlockVaultWithPassphrase(
     persistEncrypted,
     unlockedAt: Date.now(),
     payload,
+    authMethod,
   };
 
   if (persistEncrypted) {
@@ -465,6 +493,31 @@ export function unlockVaultWithPassphrase(
 
   notifyListeners();
   return activeSession;
+}
+
+/**
+ * Derives keys in-browser from `passphrase` and unlocks the session.
+ * If an encrypted vault matching this identity exists in local storage, it is verified and decrypted automatically.
+ */
+export function unlockVaultWithPassphrase(
+  passphrase: string,
+  persistEncrypted = false,
+): VaultSession {
+  const identity = deriveVaultIdentity(passphrase);
+  return openSessionFromIdentity(identity, persistEncrypted, "passphrase");
+}
+
+/**
+ * Derives keys in-browser from raw key material (for example, 32-byte WebAuthn PRF output)
+ * and unlocks a Client Vault session.
+ */
+export function unlockVaultWithKeyMaterial(
+  ikm: Uint8Array,
+  persistEncrypted = true,
+  authMethod: VaultAuthMethod = "passkey",
+): VaultSession {
+  const identity = deriveVaultIdentityFromKeyMaterial(ikm);
+  return openSessionFromIdentity(identity, persistEncrypted, authMethod);
 }
 
 /**
@@ -653,9 +706,98 @@ export function importEncryptedVaultJson(
     persistEncrypted,
     unlockedAt: Date.now(),
     payload,
+    authMethod: "passphrase",
   };
 
   if (persistEncrypted) {
+    persistSessionIfConfigured(activeSession);
+  }
+
+  notifyListeners();
+  return activeSession;
+}
+
+/**
+ * Imports and decrypts an `.drouter-vault.json` string using the currently unlocked
+ * Client Vault session (useful for passkey-backed accounts where no passphrase exists).
+ */
+export function importEncryptedVaultWithActiveSession(
+  jsonStr: string,
+  persistEncrypted?: boolean,
+): VaultSession {
+  if (!activeSession) {
+    throw new Error("Client Vault is currently locked");
+  }
+
+  let parsed: ExportedVaultFile;
+  try {
+    parsed = JSON.parse(jsonStr) as ExportedVaultFile;
+  } catch {
+    throw new Error("Invalid vault JSON format");
+  }
+
+  if (
+    !parsed ||
+    parsed.format !== "drouter-zk-vault-v1" ||
+    typeof parsed.nonceHex !== "string" ||
+    typeof parsed.ciphertextHex !== "string" ||
+    typeof parsed.vaultId !== "string" ||
+    typeof parsed.ed25519PublicKeyHex !== "string" ||
+    typeof parsed.signatureHex !== "string" ||
+    !parsed.ed25519PublicKeyHex.trim() ||
+    !parsed.signatureHex.trim()
+  ) {
+    throw new Error("Unrecognized vault file schema");
+  }
+
+  if (!constantTimeEqualAscii(parsed.vaultId, activeSession.vaultId)) {
+    throw new Error("Backup file belongs to a different account");
+  }
+
+  const filePubKeyHex = normalizeHex(parsed.ed25519PublicKeyHex).toLowerCase();
+  const expectedPubKeyHex = activeSession.ed25519PublicKeyHex.toLowerCase();
+  if (!constantTimeEqualAscii(filePubKeyHex, expectedPubKeyHex)) {
+    throw new Error("Backup public key does not match current account");
+  }
+
+  const msg = buildCanonicalExportMessage(
+    parsed.vaultId,
+    parsed.ed25519PublicKeyHex,
+    parsed.nonceHex,
+    parsed.ciphertextHex,
+  );
+  let validSig = false;
+  try {
+    const sigBytes = hexToBytes(normalizeHex(parsed.signatureHex));
+    const pubBytes = hexToBytes(expectedPubKeyHex);
+    if (sigBytes.byteLength === 64 && pubBytes.byteLength === 32) {
+      validSig = ed25519.verify(sigBytes, msg, pubBytes);
+    }
+  } catch {
+    validSig = false;
+  }
+  if (!validSig) {
+    throw new Error("Vault signature verification failed");
+  }
+
+  const payload = openVaultBundle(
+    { nonceHex: parsed.nonceHex, ciphertextHex: parsed.ciphertextHex },
+    activeSession.vaultKeyHex,
+  );
+
+  const nextPersist =
+    typeof persistEncrypted === "boolean"
+      ? persistEncrypted
+      : activeSession.persistEncrypted;
+
+  activeSession = {
+    ...activeSession,
+    persistEncrypted: nextPersist,
+    unlockedAt: Date.now(),
+    payload,
+  };
+
+  if (nextPersist) {
     persistSessionIfConfigured(activeSession);
   }
 
