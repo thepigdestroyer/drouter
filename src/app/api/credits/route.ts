@@ -3,7 +3,6 @@ import {
   issuerPublicInfo,
   ledgerStats,
   mintBlindedBatch,
-  verifyAndMintPaidBatch,
 } from "@/lib/credits/ledger";
 import {
   BodyTooLargeError,
@@ -60,19 +59,36 @@ export async function POST(request: Request) {
   if (limited) return limited;
 
   try {
-    const body = await readBoundedJson<{
-      blinded?: string[];
-      denomination?: number;
-      txHash?: string;
-    }>(request, MAX_CREDITS_MINT_BODY_BYTES);
-    if (!body || !Array.isArray(body.blinded) || body.blinded.length === 0) {
+    const body = await readBoundedJson<Record<string, unknown>>(
+      request,
+      MAX_CREDITS_MINT_BODY_BYTES
+    );
+
+    if (
+      body &&
+      ("txHash" in body ||
+        "payerAddress" in body ||
+        "walletAddress" in body ||
+        "sender" in body)
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "Direct txHash and static-address payments have been removed. Request a one-time deposit address at POST /api/credits/invoice and claim via POST /api/credits/claim.",
+        },
+        { status: 400 }
+      );
+    }
+
+    const blinded = body?.blinded;
+    if (!Array.isArray(blinded) || blinded.length === 0) {
       return NextResponse.json(
         { error: "Request body must provide a non-empty 'blinded' array" },
         { status: 400 }
       );
     }
 
-    if (body.blinded.some((b) => typeof b !== "string" || b.length > 1024)) {
+    if (blinded.some((b) => typeof b !== "string" || b.length > 1024)) {
       return NextResponse.json(
         { error: "Each blinded token must be a hex string <= 1024 chars" },
         { status: 400 }
@@ -82,46 +98,20 @@ export async function POST(request: Request) {
     const denomination =
       typeof body.denomination === "number" ? body.denomination : 1;
 
-    // Paid path: verify Arc testnet USDC payment on-chain via viem
-    if (typeof body.txHash === "string" && body.txHash.trim().length > 0) {
-      const paid = await verifyAndMintPaidBatch({
-        txHash: body.txHash,
-        blindedHexes: body.blinded,
-        denomination,
-      });
-      if (!paid.ok) {
-        return NextResponse.json(
-          {
-            error: paid.error,
-            issuerAddress: issuerPublicInfo().issuerAddress,
-            chainId: issuerPublicInfo().chainId,
-            usdcPerCredit: issuerPublicInfo().usdcPerCredit,
-          },
-          { status: paid.status }
-        );
-      }
-      return NextResponse.json({
-        signatures: paid.signatures,
-        denomination: paid.denomination,
-        keyBits: paid.keyBits,
-        mode: "paid",
-        payment: paid.payment,
-        stats: ledgerStats(),
-      });
-    }
-
     // Free path: enforce daily allowance per salted IP hash (cost = count * denomination)
-    const creditCost = body.blinded.length * Math.max(1, denomination);
+    const creditCost = blinded.length * Math.max(1, denomination);
     const allowance = freeDailyAllowanceLimiter.consume(request, creditCost);
     if (!allowance.allowed) {
       const info = issuerPublicInfo();
       return NextResponse.json(
         {
-          error: `Free daily credit allowance (${FREE_DAILY_CREDIT_ALLOWANCE} credits/day) exhausted. Send Arc testnet USDC (chain ${info.chainId}, ${info.usdcPerCredit} USDC/credit) to ${info.issuerAddress} and include 'txHash' to mint paid credits.`,
+          error: `Free daily credit allowance (${FREE_DAILY_CREDIT_ALLOWANCE} credits/day) exhausted. Request a one-time deposit address at POST /api/credits/invoice and claim blind credits via POST /api/credits/claim.`,
           retryAfterSec: allowance.retryAfterSec,
-          issuerAddress: info.issuerAddress,
           chainId: info.chainId,
+          usdcContract: info.usdcContract,
+          usdcDecimals: info.usdcDecimals,
           usdcPerCredit: info.usdcPerCredit,
+          invoiceDenominationsUsdc: info.invoiceDenominationsUsdc,
         },
         {
           status: 402,
@@ -133,7 +123,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const result = mintBlindedBatch(body.blinded, denomination);
+    const result = mintBlindedBatch(blinded as string[], denomination);
 
     return NextResponse.json({
       ...result,

@@ -1,6 +1,7 @@
 import { gcm } from "@noble/ciphers/aes.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
-import type { BlindCreditToken } from "@/lib/types";
+import type { BlindCreditToken, Hex } from "@/lib/types";
 import { getCurrentVaultSession } from "@/lib/auth/vault";
 import {
   blindToken,
@@ -96,6 +97,32 @@ function randomSecretHex(byteLength = 32): string {
   return bytesToHex(bytes);
 }
 
+/**
+ * Computes `sha256(claimSecret)` as a 64-char hex string from a 32-byte hex `claimSecret`.
+ */
+export function hashClaimSecret(claimSecretHex: string): string {
+  const cleaned = claimSecretHex.trim().toLowerCase().replace(/^0x/, "");
+  if (!/^[0-9a-f]{64}$/.test(cleaned)) {
+    throw new Error("claimSecret must be a 32-byte (64-hex-char) secret");
+  }
+  return bytesToHex(sha256(hexToBytes(cleaned)));
+}
+
+/**
+ * Generates a fresh 32-byte random `claimSecret` and its corresponding `claimHash = sha256(claimSecret)`.
+ * Only `claimHash` is sent when requesting an invoice; `claimSecret` is kept in the browser until claiming.
+ */
+export function generateClaimSecret(): {
+  claimSecret: string;
+  claimHash: string;
+} {
+  const claimSecret = randomSecretHex(32);
+  return {
+    claimSecret,
+    claimHash: hashClaimSecret(claimSecret),
+  };
+}
+
 export function getStoredCredits(): BlindCreditToken[] {
   return readStorage();
 }
@@ -134,11 +161,154 @@ export async function takeCreditHeader(): Promise<string | null> {
   return formatCreditHeader(token);
 }
 
+export interface CreditInvoiceClientHandle {
+  invoiceId: string;
+  depositAddress: Hex;
+  amountUsdc: string;
+  denomination: number;
+  chainId: number;
+  usdcContract: Hex;
+  usdcDecimals: number;
+  expiresAt: number;
+  claimSecret: string;
+  claimHash: string;
+}
+
+/**
+ * Requests a one-time deposit address invoice (`POST /api/credits/invoice`) by sending ONLY `sha256(claimSecret)`.
+ */
+export async function requestCreditInvoice(
+  baseUrl: string,
+  denomination = 1,
+  claimSecretOverride?: string
+): Promise<CreditInvoiceClientHandle> {
+  const prefix = baseUrl.replace(/\/$/, "");
+  const claimSecret = claimSecretOverride
+    ? claimSecretOverride.trim().toLowerCase().replace(/^0x/, "")
+    : randomSecretHex(32);
+  const claimHash = hashClaimSecret(claimSecret);
+
+  const res = await fetch(`${prefix}/api/credits/invoice`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ claimHash, denomination }),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error(
+      (errBody as { error?: string }).error ||
+        `Failed to create credit invoice (${res.status})`
+    );
+  }
+
+  const data = (await res.json()) as {
+    invoiceId: string;
+    depositAddress: Hex;
+    amountUsdc: string;
+    denomination: number;
+    chainId: number;
+    usdcContract: Hex;
+    usdcDecimals: number;
+    expiresAt: number;
+  };
+
+  return {
+    ...data,
+    claimSecret,
+    claimHash,
+  };
+}
+
+/**
+ * Claims blind-signed credits for a paid one-time deposit invoice (`POST /api/credits/claim`),
+ * unblinds and verifies the RSA signatures, stores the tokens locally, and returns them.
+ */
+export async function claimPaidCredits(
+  baseUrl: string,
+  params: {
+    invoiceId?: string;
+    claimSecret: string;
+    count?: number;
+    denomination?: number;
+  }
+): Promise<BlindCreditToken[]> {
+  const prefix = baseUrl.replace(/\/$/, "");
+  const infoRes = await fetch(`${prefix}/api/credits`);
+  if (!infoRes.ok) {
+    throw new Error(`Failed to fetch credit issuer public key (${infoRes.status})`);
+  }
+  const pub = (await infoRes.json()) as {
+    n: string;
+    e: string;
+    denominations: number[];
+  };
+
+  const count = params.count ?? 1;
+  const denomination = params.denomination ?? 1;
+
+  const pending = Array.from({ length: count }, () => {
+    const tokenHex = randomSecretHex(32);
+    const { blindedHex, rHex } = blindToken(tokenHex, denomination, pub);
+    return { tokenHex, blindedHex, rHex };
+  });
+
+  const claimRes = await fetch(`${prefix}/api/credits/claim`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...(params.invoiceId ? { invoiceId: params.invoiceId } : {}),
+      claimSecret: params.claimSecret,
+      blinded: pending.map((p) => p.blindedHex),
+      denomination,
+    }),
+  });
+
+  if (!claimRes.ok) {
+    const errBody = await claimRes.json().catch(() => ({}));
+    throw new Error(
+      (errBody as { error?: string }).error ||
+        `Failed to claim paid credits (${claimRes.status})`
+    );
+  }
+
+  const signed = (await claimRes.json()) as {
+    signatures: string[];
+    denomination: number;
+  };
+
+  if (
+    !Array.isArray(signed.signatures) ||
+    signed.signatures.length !== pending.length
+  ) {
+    throw new Error("Issuer returned mismatched signature count");
+  }
+
+  const minted: BlindCreditToken[] = pending.map((item, idx) => {
+    const signature = unblindSignature(signed.signatures[idx], item.rHex, pub);
+    const creditToken: BlindCreditToken = {
+      token: item.tokenHex,
+      signature,
+      denomination: signed.denomination ?? denomination,
+    };
+    if (!verifyTokenSignature(creditToken, pub)) {
+      throw new Error("Unblinded RSA signature failed local verification");
+    }
+    return creditToken;
+  });
+
+  const existing = readStorage();
+  writeStorage([...existing, ...minted]);
+  return minted;
+}
+
+/**
+ * Mints free daily-allowance blind credits via `POST /api/credits`.
+ */
 export async function mintCredits(
   baseUrl: string,
   count = 4,
-  denomination = 1,
-  opts?: { txHash?: string }
+  denomination = 1
 ): Promise<BlindCreditToken[]> {
   const prefix = baseUrl.replace(/\/$/, "");
   const infoRes = await fetch(`${prefix}/api/credits`);
@@ -163,7 +333,6 @@ export async function mintCredits(
     body: JSON.stringify({
       blinded: pending.map((p) => p.blindedHex),
       denomination,
-      ...(opts?.txHash ? { txHash: opts.txHash } : {}),
     }),
   });
 
@@ -236,7 +405,6 @@ export async function spendOneCredit(
       body: JSON.stringify({ token, nodeId }),
     });
   } catch (err) {
-    // Network error before spend reached server: restore token to wallet
     writeStorage([token, ...rest]);
     const restoredBalance = [token, ...rest].reduce((sum, t) => sum + (t.denomination || 0), 0);
     return {
