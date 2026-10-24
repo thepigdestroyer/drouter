@@ -82,7 +82,7 @@ node --env-file=.env.local scripts/atlas-indexes.mjs
 This script ensures:
 1. Unique B-tree indexes on `enclave_intelligence.docId` and `agent_verification_receipts.receiptId`.
 2. **Atlas Search Index (`drouter_text_search`)**: Lucene `standard` analyzer on `title`, `summary`, and `tags`, plus `keyword` analyzer on `category`.
-3. **Atlas Vector Search Index (`drouter_vector_index`)**: 128-dimension `cosine` similarity vector index on `embedding` with pre-filtering on `category`.
+3. **Atlas Vector Search Index (`drouter_vector_index`)**: 768-dimension `cosine` similarity vector index on `embedding` with pre-filtering on `category`.
 
 Wait until both indexes report `status: "READY"` in the script output so MongoDB 8.0 native `$rankFusion` (`$vectorSearch` + `$search`) executes on Atlas.
 
