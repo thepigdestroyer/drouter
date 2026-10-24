@@ -6,7 +6,10 @@ import { TechDetails } from "@/components/ink/tech-details";
 import {
   formatPlainAtlasResult,
   PLAIN_ATLAS_PRESET_QUERIES,
+  resolveEffectiveAtlasQuery,
 } from "@/components/argon/argon-helpers";
+import { getActiveCustomScrubTerms } from "@/lib/auth/vault";
+import { mechanicalRedact } from "@/lib/privacy/mechanical";
 
 interface AtlasSearchResultItem {
   docId: string;
@@ -104,11 +107,20 @@ export function AtlasExplorer() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const runSearch = useCallback(async (q: string) => {
+  const runSearch = useCallback(async (rawInputQuery: string) => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/atlas?q=${encodeURIComponent(q)}`);
+      const effectiveQuery = resolveEffectiveAtlasQuery(rawInputQuery);
+      const customTerms =
+        typeof window !== "undefined" ? getActiveCustomScrubTerms() : [];
+      const scrubbedQuery = mechanicalRedact(effectiveQuery, {
+        customTerms,
+      }).text;
+
+      const res = await fetch(
+        `/api/atlas?q=${encodeURIComponent(scrubbedQuery)}`,
+      );
       const body = (await res.json().catch(() => null)) as AtlasResponse | null;
       if (!res.ok || !body) {
         const msg =
@@ -192,10 +204,7 @@ export function AtlasExplorer() {
         className="flex flex-col gap-2 sm:flex-row"
         onSubmit={(e) => {
           e.preventDefault();
-          const matchedPreset = PLAIN_ATLAS_PRESET_QUERIES.find(
-            (p) => p.label.toLowerCase() === query.trim().toLowerCase(),
-          );
-          void runSearch(matchedPreset ? matchedPreset.query : query);
+          void runSearch(query);
         }}
       >
         <label htmlFor="atlas-search-input" className="sr-only">
@@ -221,19 +230,26 @@ export function AtlasExplorer() {
       {/* Preset queries in plain words */}
       <div className="flex flex-wrap items-center gap-2">
         <span className="ep-label">Try asking:</span>
-        {PLAIN_ATLAS_PRESET_QUERIES.map((preset) => (
-          <button
-            key={preset.label}
-            type="button"
-            onClick={() => {
-              setQuery(preset.label);
-              void runSearch(preset.query);
-            }}
-            className="ep-muted-chip max-w-full whitespace-normal text-left hover:border-ink hover:text-ink transition-colors cursor-pointer"
-          >
-            {preset.label}
-          </button>
-        ))}
+        {PLAIN_ATLAS_PRESET_QUERIES.map((preset) => {
+          const isSelected =
+            query.trim().toLowerCase() === preset.label.toLowerCase();
+          return (
+            <button
+              key={preset.label}
+              type="button"
+              aria-pressed={isSelected}
+              onClick={() => {
+                setQuery(preset.label);
+                void runSearch(preset.query);
+              }}
+              className={`ep-muted-chip max-w-full whitespace-normal text-left hover:border-ink hover:text-ink transition-colors cursor-pointer ${
+                isSelected ? "border-ink text-ink" : ""
+              }`}
+            >
+              {preset.label}
+            </button>
+          );
+        })}
       </div>
 
       {/* Error banner with retry */}
@@ -259,7 +275,10 @@ export function AtlasExplorer() {
       )}
 
       {/* Simple results list */}
-      <div className="divide-y divide-rule border-t border-b border-rule">
+      <div
+        aria-live="polite"
+        className="divide-y divide-rule border-t border-b border-rule"
+      >
         {(data?.results ?? []).slice(0, 4).map((item) => {
           const sourceUrl = resolveItemSourceUrl(item);
           const plain = formatPlainAtlasResult(item);

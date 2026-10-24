@@ -2,7 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { ATLAS_SEED_DOCS, runAtlasHybridSearch } from "@/lib/atlas";
-import { runArgonAutonomousWorkflow } from "@/lib/gemini";
+import {
+  HONEST_DATA_HANDLING_STATEMENT,
+  runArgonAutonomousWorkflow,
+} from "@/lib/gemini";
 import {
   AGENT_INTRO_SENTENCE,
   APPROVAL_CARD_QUESTION,
@@ -10,36 +13,58 @@ import {
   DEFAULT_PLAIN_TASK_PROMPT,
   EXAMPLE_AGENT_TASKS,
   findForbiddenPlainTerms,
+  formatCleanRunJsonForDisplay,
   formatPlainAtlasResult,
+  formatPlainDataHandling,
+  formatPlainRedactionCounts,
   formatPlainRestoredOutput,
+  formatPlainStage1Summary,
   PLAIN_ATLAS_PRESET_QUERIES,
+  resolveEffectiveAtlasQuery,
   resolvePlannerModeBadgeText,
+  resolvePlannerSubtitleText,
   sanitizeJargonToPlainWords,
+  WHAT_GOOGLE_RECEIVED_PROMPT,
 } from "@/components/argon/argon-helpers";
 
-describe("deRoute wave 4 Argon & Atlas plain-language helpers", () => {
-  it("uses exact required intro sentence, approval question, and 2 plain example tasks with zero forbidden terms", () => {
+describe("deRoute wave 4/5 Argon & Atlas plain-language helpers", () => {
+  it("uses exact required intro sentence, approval question, Google descriptor heading, and 2 plain example tasks with zero forbidden terms", () => {
     expect(AGENT_INTRO_SENTENCE).toBe(
       "Give it a private task. It hides your personal details, checks the sealed computer, does the work, and asks you before it records anything in public.",
     );
     expect(APPROVAL_CARD_QUESTION).toBe(
       "Allow the agent to record a receipt in the public receipt book?",
     );
+    expect(WHAT_GOOGLE_RECEIVED_PROMPT).toBe(
+      "Gemini planned the steps without seeing your words. What Google received:",
+    );
     expect(EXAMPLE_AGENT_TASKS).toHaveLength(2);
     expect(DEFAULT_PLAIN_TASK_PROMPT).toBe(EXAMPLE_AGENT_TASKS[0].prompt);
+
+    const dataHandlingView = formatPlainDataHandling(
+      HONEST_DATA_HANDLING_STATEMENT,
+    );
 
     for (const str of [
       AGENT_INTRO_SENTENCE,
       APPROVAL_CARD_QUESTION,
+      WHAT_GOOGLE_RECEIVED_PROMPT,
+      dataHandlingView.headline,
+      dataHandlingView.sentToGooglePlain,
+      dataHandlingView.sealedComputerCanSeePlain,
+      ...dataHandlingView.googleCanSeePlain,
+      ...dataHandlingView.googleCannotSeePlain,
       ...EXAMPLE_AGENT_TASKS.flatMap((t) => [t.label, t.description, t.prompt]),
     ]) {
       expect(findForbiddenPlainTerms(str)).toEqual([]);
       expect(str).not.toContain("dRouter");
       expect(str).not.toMatch(/[\u2013\u2014]/);
+      expect(str.toLowerCase()).not.toContain("simulat");
+      expect(str.toLowerCase()).not.toContain("practice");
     }
   });
 
-  it("formats honest planner line for Gemini 4 Argon and fallback models", () => {
+  it("formats honest planner line and subtitle for Gemini 4 Argon, failed user key, initial preview, and fallback models", () => {
     expect(
       resolvePlannerModeBadgeText({
         planner: { provider: "gemini", model: "gemini-4-argon" },
@@ -50,19 +75,81 @@ describe("deRoute wave 4 Argon & Atlas plain-language helpers", () => {
     expect(
       resolvePlannerModeBadgeText({
         planner: { provider: "tinfoil", model: "gemma4-31b" },
-        mode: "simulated",
       }),
     ).toBe("Planned by gemma4-31b because no Gemini key is set");
 
     expect(
       resolvePlannerModeBadgeText({
         planner: { provider: "tinfoil", model: "kimi-k3" },
-        mode: "simulated",
       }),
     ).toBe("Planned by kimi-k3 because no Gemini key is set");
+
+    const liveSub = resolvePlannerSubtitleText({
+      isLiveGeminiBadge: true,
+      attemptedLiveCall: true,
+      liveGeminiReached: true,
+    });
+    expect(liveSub).toContain(
+      "Gemini planned the steps without seeing your words.",
+    );
+    expect(findForbiddenPlainTerms(liveSub)).toEqual([]);
+
+    const failedKeySub = resolvePlannerSubtitleText({
+      isLiveGeminiBadge: false,
+      attemptedLiveCall: true,
+      liveGeminiReached: false,
+    });
+    expect(failedKeySub).toContain("provided key");
+    expect(findForbiddenPlainTerms(failedKeySub)).toEqual([]);
+
+    const previewSub = resolvePlannerSubtitleText({
+      isLiveGeminiBadge: false,
+      attemptedLiveCall: false,
+      liveGeminiReached: false,
+      isInitialPreview: true,
+    });
+    expect(previewSub).toContain("initial preview");
+    expect(findForbiddenPlainTerms(previewSub)).toEqual([]);
   });
 
-  it("builds 5 plain timeline steps with zero forbidden jargon words and passes Stage 1 & Stage 4 with both example tasks", async () => {
+  it("shows stage1.redactionCounts and attestedFilter in plain words ('N personal details hidden; second check inside a sealed computer: yes/no')", async () => {
+    const runNoAttested = await runArgonAutonomousWorkflow({
+      taskPrompt: EXAMPLE_AGENT_TASKS[0].prompt,
+      enableLiveEnclaveInference: false,
+    });
+
+    const summaryNo = formatPlainStage1Summary(runNoAttested.stages.stage1);
+    expect(summaryNo).toContain(
+      `${runNoAttested.stages.stage1.redactionCount} personal details hidden; second check inside a sealed computer: no`,
+    );
+    expect(findForbiddenPlainTerms(summaryNo)).toEqual([]);
+
+    const runWithAttested = await runArgonAutonomousWorkflow({
+      taskPrompt: EXAMPLE_AGENT_TASKS[0].prompt,
+      enableLiveEnclaveInference: true,
+      attestedFilterRunner: async (text) => ({
+        text,
+        redactionCount: 2,
+        model: "pii-filter",
+        verified: true,
+      }),
+    });
+
+    const summaryYes = formatPlainStage1Summary(runWithAttested.stages.stage1);
+    expect(summaryYes).toContain(
+      `${runWithAttested.stages.stage1.redactionCount} personal details hidden; second check inside a sealed computer: yes`,
+    );
+    expect(findForbiddenPlainTerms(summaryYes)).toEqual([]);
+
+    const countsStr = formatPlainRedactionCounts(
+      runWithAttested.stages.stage1.redactionCounts,
+    );
+    expect(countsStr).toContain("email");
+    expect(countsStr).toContain("secret key");
+    expect(findForbiddenPlainTerms(countsStr)).toEqual([]);
+  });
+
+  it("builds 5 plain timeline steps using checksPassed/checksTotal with zero forbidden jargon words and passes Stage 1 & Stage 4 with both example tasks", async () => {
     for (const task of EXAMPLE_AGENT_TASKS) {
       const run = await runArgonAutonomousWorkflow({
         taskPrompt: task.prompt,
@@ -82,7 +169,6 @@ describe("deRoute wave 4 Argon & Atlas plain-language helpers", () => {
 
       const plannerBadgeText = resolvePlannerModeBadgeText({
         planner: run.planner,
-        mode: run.mode,
       });
 
       const steps = buildPlainTimelineSteps({
@@ -100,10 +186,20 @@ describe("deRoute wave 4 Argon & Atlas plain-language helpers", () => {
       ]);
 
       expect(steps[0].passed).toBe(true);
+      expect(steps[0].plainResult).toContain(
+        `${run.stages.stage1.redactionCount} personal details hidden; second check inside a sealed computer: no`,
+      );
       expect(steps[1].passed).toBe(true);
+      expect(steps[1].plainResult).toContain(
+        `${run.stages.stage2.verificationSignal.checksPassed} of ${run.stages.stage2.verificationSignal.checksTotal} safety checks passed`,
+      );
       expect(steps[2].passed).toBe(true);
-      expect(steps[3].passed).toBe(false); // Waiting for human approval
+      expect(steps[2].plainResult).toContain(
+        "Gemini planned the steps without seeing your words.",
+      );
+      expect(steps[3].passed).toBe(false);
       expect(steps[4].passed).toBe(true);
+      expect(steps[4].plainResult).not.toContain("$INPUT");
 
       for (const step of steps) {
         expect(findForbiddenPlainTerms(step.title)).toEqual([]);
@@ -111,13 +207,26 @@ describe("deRoute wave 4 Argon & Atlas plain-language helpers", () => {
         expect(findForbiddenPlainTerms(step.plainResult)).toEqual([]);
         expect(step.plainResult).not.toContain("dRouter");
         expect(step.plainResult).not.toMatch(/[\u2013\u2014]/);
+        expect(step.plainResult.toLowerCase()).not.toContain("simulat");
+        expect(step.plainResult.toLowerCase()).not.toContain("practice");
       }
 
       const plainRestored = formatPlainRestoredOutput(
         run.stages.stage4.restoredClientOutput,
+        false,
       );
       expect(findForbiddenPlainTerms(plainRestored)).toEqual([]);
       expect(plainRestored).toContain("Riverside Teaching Hospital");
+      expect(plainRestored).not.toContain("$INPUT");
+      expect(plainRestored.toLowerCase()).not.toContain("simulat");
+      expect(plainRestored.toLowerCase()).not.toContain("practice");
+
+      const cleanJson = JSON.stringify(formatCleanRunJsonForDisplay(run));
+      expect(cleanJson).not.toContain("quorumValidSignatures");
+      expect(cleanJson).not.toContain("vmpl0StatesChecked");
+      expect(cleanJson).not.toContain("vmpl0All1344Passed");
+      expect(cleanJson).not.toContain("sandboxReceipt");
+      expect(cleanJson).not.toContain('"simulated"');
     }
   });
 
@@ -125,6 +234,7 @@ describe("deRoute wave 4 Argon & Atlas plain-language helpers", () => {
     for (const preset of PLAIN_ATLAS_PRESET_QUERIES) {
       expect(findForbiddenPlainTerms(preset.label)).toEqual([]);
       expect(findForbiddenPlainTerms(preset.query)).toEqual([]);
+      expect(resolveEffectiveAtlasQuery(preset.label)).toBe(preset.query);
       const res = await runAtlasHybridSearch(preset.query, { limit: 4 });
       expect(res.results.length).toBeGreaterThan(0);
     }
@@ -137,9 +247,9 @@ describe("deRoute wave 4 Argon & Atlas plain-language helpers", () => {
       expect(plain.title).not.toContain("dRouter");
       expect(plain.summary).not.toContain("dRouter");
       expect(plain.summary).not.toMatch(/[\u2013\u2014]/);
+      expect(plain.summary).not.toContain("1,344");
     }
 
-    // Dynamic fallback sanitization
     const dynamic = sanitizeJargonToPlainWords(
       "dRouter verifies AMD SEV-SNP and Intel TDX enclave attestation with HPKE RFC 9180, RSA nullifiers, Sigstore Rekor, dm-verity measurement, ciphertext digest, and Arc testnet.",
     );
@@ -193,9 +303,9 @@ describe("deRoute wave 4 Argon & Atlas plain-language helpers", () => {
     });
 
     expect(stepsSkippedBroadcast[3].passed).toBe(true);
-    expect(findForbiddenPlainTerms(stepsSkippedBroadcast[3].plainResult)).toEqual(
-      [],
-    );
+    expect(
+      findForbiddenPlainTerms(stepsSkippedBroadcast[3].plainResult),
+    ).toEqual([]);
 
     const pendingRun = await runArgonAutonomousWorkflow({
       taskPrompt: EXAMPLE_AGENT_TASKS[0].prompt,
@@ -215,7 +325,7 @@ describe("deRoute wave 4 Argon & Atlas plain-language helpers", () => {
     expect(findForbiddenPlainTerms(stepsNotNow[3].plainResult)).toEqual([]);
   });
 
-  it("ensures unexpanded JSX outside TechDetails in src/app/argon/page.tsx and src/components/atlas-explorer.tsx contains zero forbidden jargon or dRouter", () => {
+  it("ensures unexpanded JSX outside TechDetails in src/app/argon/page.tsx and src/components/atlas-explorer.tsx contains zero forbidden jargon, dRouter, or simulated items", () => {
     const repoRoot = path.resolve(__dirname, "../..");
     const filesToCheck = [
       "src/app/argon/page.tsx",
@@ -224,6 +334,17 @@ describe("deRoute wave 4 Argon & Atlas plain-language helpers", () => {
 
     for (const relPath of filesToCheck) {
       const fullSource = fs.readFileSync(path.join(repoRoot, relPath), "utf8");
+
+      // Ensure removed items and preview backdoor do not exist anywhere in page/component source
+      expect(fullSource).not.toContain("slash_faulty_node");
+      expect(fullSource).not.toContain("pipelineReport");
+      expect(fullSource).not.toContain("quorumValidSignatures");
+      expect(fullSource).not.toContain("vmpl0StatesChecked");
+      expect(fullSource).not.toContain("memory-bus");
+      expect(fullSource).not.toContain("unlockVaultWithKeyMaterial");
+      expect(fullSource.toLowerCase()).not.toContain("simulat");
+      expect(fullSource.toLowerCase()).not.toContain("practice");
+
       // Remove TechDetails blocks (<TechDetails ...>...</TechDetails>)
       const withoutTechDetails = fullSource.replace(
         /<TechDetails[\s\S]*?<\/TechDetails>/g,

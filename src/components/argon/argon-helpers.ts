@@ -1,11 +1,17 @@
 import { GEMINI_4_ARGON_MODEL_ID } from "@/lib/gemini/interactions";
-import type { ArgonAutonomousRunResult } from "@/lib/gemini/orchestrator";
+import type {
+  ArgonAutonomousRunResult,
+  DataHandlingStatement,
+} from "@/lib/gemini/orchestrator";
 
 export const AGENT_INTRO_SENTENCE =
   "Give it a private task. It hides your personal details, checks the sealed computer, does the work, and asks you before it records anything in public." as const;
 
 export const APPROVAL_CARD_QUESTION =
   "Allow the agent to record a receipt in the public receipt book?" as const;
+
+export const WHAT_GOOGLE_RECEIVED_PROMPT =
+  "Gemini planned the steps without seeing your words. What Google received:" as const;
 
 export interface ExampleAgentTask {
   id: string;
@@ -93,9 +99,12 @@ export const FORBIDDEN_PLAIN_VIEW_TERMS: readonly string[] = [
  */
 export function sanitizeJargonToPlainWords(input: string): string {
   if (!input) return "";
-  let out = input
+  const out = input
     .replace(/[\u2013\u2014]/g, "-")
     .replace(/\bdRouter\b/g, "deRoute")
+    .replace(/\bover\s+server-resolved\s+handle\s+\$INPUT\s*/gi, "")
+    .replace(/\$INPUT\b/g, "your task")
+    .replace(/\$RESULT_\d+\b/g, "the result")
     .replace(/\bArc\s+testnet\b/gi, "public receipt book")
     .replace(/\bCircle\s+Arc\b/gi, "public receipt book")
     .replace(/\brelay\s+hops?\b/gi, "routing steps")
@@ -130,7 +139,9 @@ export function sanitizeJargonToPlainWords(input: string): string {
     .replace(/\bciphertexts?\b/gi, "locked message")
     .replace(/\bhashes\b/gi, "fingerprints")
     .replace(/\bhash\b/gi, "fingerprint")
-    .replace(/\bdigests?\b/gi, "summary code");
+    .replace(/\bdigests?\b/gi, "summary code")
+    .replace(/\bsimulated\b/gi, "preview")
+    .replace(/\bsimulation\b/gi, "preview");
 
   return out.replace(/\s+/g, " ").trim();
 }
@@ -151,13 +162,13 @@ export function findForbiddenPlainTerms(text: string): string[] {
 }
 
 /**
- * Honest plain-language planner line (Requirement 4):
+ * Honest plain-language planner line:
  * - "Planned by Gemini 4 Argon" when Gemini 4 Argon did the planning
  * - "Planned by <model> because no Gemini key is set" when a fallback model planned the run
  */
 export function resolvePlannerModeBadgeText(params: {
   planner?: ArgonPlannerInfo | null;
-  mode?: "live" | "simulated";
+  mode?: string;
   liveGeminiReached?: boolean;
   enclaveModel?: string;
 }): string {
@@ -183,21 +194,139 @@ export function resolvePlannerModeBadgeText(params: {
   return `Planned by ${fallbackModel} because no Gemini key is set`;
 }
 
+export function resolvePlannerSubtitleText(params: {
+  isLiveGeminiBadge: boolean;
+  attemptedLiveCall?: boolean;
+  liveGeminiReached?: boolean;
+  isInitialPreview?: boolean;
+}): string {
+  const {
+    isLiveGeminiBadge,
+    attemptedLiveCall = false,
+    liveGeminiReached = false,
+    isInitialPreview = false,
+  } = params;
+
+  if (isLiveGeminiBadge) {
+    return "Gemini planned the steps without seeing your words. The sealed computer did the content work after your device hid your personal details.";
+  }
+
+  if (attemptedLiveCall && !liveGeminiReached) {
+    return "We tried to reach Gemini 4 Argon with the provided key, but the call did not succeed, so a sealed computer model planned the steps instead.";
+  }
+
+  if (isInitialPreview) {
+    return "This initial preview was planned by a sealed computer model so no paid call ran on page load. Click Run below or add a Gemini key in the expert section.";
+  }
+
+  return "Our server has no Gemini key set right now, so a sealed computer model planned the steps instead. You can add your own Gemini key in the expert section below.";
+}
+
+const REDACTION_CATEGORY_LABELS: Readonly<
+  Record<string, { singular: string; plural: string }>
+> = {
+  EMAIL: { singular: "email", plural: "emails" },
+  SECRET: { singular: "secret key", plural: "secret keys" },
+  PHONE: { singular: "phone number", plural: "phone numbers" },
+  DATE: { singular: "date", plural: "dates" },
+  DIGITS: { singular: "number", plural: "numbers" },
+  NAME: { singular: "name", plural: "names" },
+  ADDRESS: { singular: "address", plural: "addresses" },
+  URL: { singular: "web link", plural: "web links" },
+  IP: { singular: "network address", plural: "network addresses" },
+  ACCT: { singular: "account number", plural: "account numbers" },
+  ENTITY: { singular: "private term", plural: "private terms" },
+  ENTROPY: { singular: "random code", plural: "random codes" },
+  SYMMETRY: { singular: "shifted code", plural: "shifted codes" },
+  ATTESTED_PII: {
+    singular: "extra sealed-computer match",
+    plural: "extra sealed-computer matches",
+  },
+};
+
+export function formatPlainRedactionCounts(
+  redactionCounts?: Record<string, number> | null,
+): string {
+  if (!redactionCounts) return "";
+  const parts: string[] = [];
+  for (const [rawKey, count] of Object.entries(redactionCounts)) {
+    const key = rawKey.toUpperCase();
+    if (key === "TOTAL" || typeof count !== "number" || count <= 0) {
+      continue;
+    }
+    const label = REDACTION_CATEGORY_LABELS[key] ?? {
+      singular: "detail",
+      plural: "details",
+    };
+    parts.push(`${count} ${count === 1 ? label.singular : label.plural}`);
+  }
+  return parts.join(", ");
+}
+
+export function formatPlainStage1Summary(
+  stage1: ArgonAutonomousRunResult["stages"]["stage1"],
+): string {
+  const secondCheckYesNo = stage1.attestedFilter?.verified ? "yes" : "no";
+  const breakdown = formatPlainRedactionCounts(stage1.redactionCounts);
+  const breakdownClause = breakdown ? ` (${breakdown})` : "";
+  const secondCheckSentence = stage1.attestedFilter?.verified
+    ? `The second check inside a sealed computer removed ${stage1.attestedFilter.redactionCount} extra items.`
+    : "The on-device check handled all hiding before anything left your device.";
+
+  return `${stage1.redactionCount} personal details hidden; second check inside a sealed computer: ${secondCheckYesNo}${breakdownClause}. ${secondCheckSentence} Every message looks the same size from outside.`;
+}
+
+export interface PlainDataHandlingView {
+  headline: string;
+  sentToGooglePlain: string;
+  googleCanSeePlain: string[];
+  googleCannotSeePlain: string[];
+  sealedComputerCanSeePlain: string;
+}
+
+export function formatPlainDataHandling(
+  dataHandling?: DataHandlingStatement | null,
+): PlainDataHandlingView {
+  const sentRaw =
+    dataHandling?.dataSentToGoogle ?? "content-free task descriptor only";
+  return {
+    headline: WHAT_GOOGLE_RECEIVED_PROMPT,
+    sentToGooglePlain: sanitizeJargonToPlainWords(sentRaw),
+    googleCanSeePlain: [
+      "Task kind (such as review or summarize), estimated word count, count of hidden details, and whether each safety check passed",
+      "Tool step status codes, item counts, and numbered placeholders with zero user words",
+      "Server network address and your single-use Gemini key if you entered one",
+    ],
+    googleCannotSeePlain: [
+      "Your prompt words or any sentence you typed",
+      "Names, emails, phone numbers, dates, budgets, or secret keys",
+      "The answer written by the sealed computer",
+      "Your knowledge search questions or your browser address",
+    ],
+    sealedComputerCanSeePlain:
+      "Your task after your device hides personal details, locked so only the sealed computer can open it.",
+  };
+}
+
 /**
  * Formats the restored client output into a clean, jargon-free plain text result
  * while preserving the restored personal details (names, dates, budgets, emails).
  */
-export function formatPlainRestoredOutput(rawRestoredOutput: string): string {
+export function formatPlainRestoredOutput(
+  rawRestoredOutput: string,
+  isLiveRun = true,
+): string {
   if (!rawRestoredOutput) return "";
-  let cleaned = rawRestoredOutput;
+  const prefix = isLiveRun
+    ? "Answer from the sealed computer (with your real details put back on your device): "
+    : "Restored output on your device: ";
 
+  let cleaned = rawRestoredOutput;
+  cleaned = cleaned.replace(/^\[Live Attested Enclave\s+[^\]]*\]\s*/i, prefix);
+  cleaned = cleaned.replace(/^\[Simulated Enclave Output\s+[^\]]*\]\s*/i, prefix);
   cleaned = cleaned.replace(
-    /^\[Live Attested Enclave\s+[^\]]*\]\s*/i,
-    "Live answer from the sealed computer (with your real details put back on your device): ",
-  );
-  cleaned = cleaned.replace(
-    /^\[Simulated Enclave Output\s+[^\]]*\]\s*/i,
-    "Practice answer (your real details were put back on your device): ",
+    /\bover\s+server-resolved\s+handle\s+\$INPUT\s*/gi,
+    "",
   );
 
   return sanitizeJargonToPlainWords(cleaned);
@@ -237,27 +366,30 @@ export function buildPlainTimelineSteps(params: {
     hasLiveModelCalls = false,
   } = params;
   const { stage1, stage2, stage3, stage4, stage5, stage6 } = run.stages;
+  const isLiveRun =
+    Boolean(stage4.liveGeminiCall.liveEndpointReached) || hasLiveModelCalls;
 
   // Step 1: Hiding your details
   const step1Passed = stage1.passed;
   const step1Result = step1Passed
-    ? `We hid ${stage1.redactionCount} personal details on your device (such as names, emails, dates, budgets, and secret keys) and made your message a standard size so nobody watching the network can guess what is inside.`
+    ? formatPlainStage1Summary(stage1)
     : "We found a personal detail that was not hidden, so we stopped before anything left your device.";
 
   // Step 2: Checking the seal (Stage 2 + Stage 3)
+  const checksPassed = stage2.verificationSignal.checksPassed;
+  const checksTotal = stage2.verificationSignal.checksTotal;
   const step2Passed = stage2.passed && stage3.passed;
   const step2Result = !step2Passed
-    ? "The seal check failed, so we refused to send your task to that computer."
+    ? `The seal check failed (${checksPassed} of ${checksTotal} safety checks passed), so we refused to send your task to that computer.`
     : stage3.faultInjected && stage3.selfHealed
-      ? `We checked the seal is intact with ${stage2.verificationSignal.quorumValidSignatures} of 7 independent checkers. During a practice fault test, we spotted a tampered computer, blocked it, and switched to a clean sealed computer automatically.`
-      : `We checked the seal is intact with ${stage2.verificationSignal.quorumValidSignatures} of 7 independent checkers and confirmed the sealed computer follows all 1,344 safety rules.`;
+      ? `We checked the seal is intact (${checksPassed} of ${checksTotal} safety checks passed). When we tested a faulty computer, we caught the broken seal, blocked it, and switched to a clean sealed computer automatically.`
+      : `We checked the seal is intact (${checksPassed} of ${checksTotal} safety checks passed) and confirmed the sealed computer software matches the public software log.`;
 
   // Step 3: Thinking (Stage 4)
   const step3Passed = stage4.passed;
-  const runKindNote =
-    run.mode === "live" || hasLiveModelCalls
-      ? "The sealed computer finished the work and your device put your real names, dates, and numbers back in place."
-      : "This initial preview used a practice response so no paid call ran on page load. Click Run above to run the live task, and your device will put your real names, dates, and numbers back in place.";
+  const runKindNote = isLiveRun
+    ? "Gemini planned the steps without seeing your words. The sealed computer finished the work and your device put your real names, dates, and numbers back in place."
+    : "Gemini planned the steps without seeing your words. This initial preview loaded without making a paid call on page load. Click Run above to run the live task, and your device will put your real names, dates, and numbers back in place.";
   const step3Result = step3Passed
     ? `${plannerBadgeText}. ${runKindNote}`
     : `${plannerBadgeText}. The thinking step could not finish all safety checks.`;
@@ -288,13 +420,16 @@ export function buildPlainTimelineSteps(params: {
     step4StatusText = "Allowed";
     const plainReason = arcAnchor?.reason
       ? sanitizeJargonToPlainWords(arcAnchor.reason)
-      : "practice mode only";
+      : "live wallet not configured on this server";
     step4Result = `You allowed it. The public receipt book was not updated on the live network (${plainReason}).`;
   }
 
   // Step 5: Done (Stage 6)
   const step5Passed = stage6.passed && stage4.passed;
-  const plainAnswer = formatPlainRestoredOutput(stage4.restoredClientOutput);
+  const plainAnswer = formatPlainRestoredOutput(
+    stage4.restoredClientOutput,
+    isLiveRun,
+  );
   const step5Result = step5Passed
     ? `${plainAnswer} Your result is signed with a tamper-proof seal so you can verify it anytime.`
     : "The final summary could not be signed.";
@@ -343,6 +478,85 @@ export function buildPlainTimelineSteps(params: {
   ];
 }
 
+/**
+ * Formats a clean JSON representation of `ArgonAutonomousRunResult` for expert
+ * inspection, omitting deprecated compatibility aliases (`quorumValidSignatures`,
+ * `quorumRequired`, `vmpl0StatesChecked`, `vmpl0Verified`, `vmpl0All1344Passed`,
+ * `sandboxReceipt`, and `mode: "simulated"`).
+ */
+export function formatCleanRunJsonForDisplay(
+  run: ArgonAutonomousRunResult,
+): Record<string, unknown> {
+  const { stage1, stage2, stage3, stage4, stage5, stage6 } = run.stages;
+
+  return {
+    runId: run.runId,
+    timestampIso: run.timestampIso,
+    planner: run.planner,
+    dataSentToGoogle: run.dataSentToGoogle,
+    dataHandling: run.dataHandling,
+    taskDescriptor: run.taskDescriptor,
+    modelCalls: run.modelCalls,
+    overallPassed: run.overallPassed,
+    selfHealingTriggeredAndResolved: run.selfHealingTriggeredAndResolved,
+    humanGateState: run.humanGateState,
+    stages: {
+      stage1,
+      stage2: {
+        stageNumber: stage2.stageNumber,
+        stageName: stage2.stageName,
+        modelsUsed: stage2.modelsUsed,
+        passed: stage2.passed,
+        verificationSignal: {
+          allSevenChecksPassed: stage2.verificationSignal.allSevenChecksPassed,
+          checksPassed: stage2.verificationSignal.checksPassed,
+          checksTotal: stage2.verificationSignal.checksTotal,
+          formula: stage2.verificationSignal.formula,
+        },
+        subagents: stage2.subagents,
+        sevenChecks: stage2.sevenChecks,
+        selectedEnclaveProvider: stage2.selectedEnclaveProvider,
+        selectedEnclaveModel: stage2.selectedEnclaveModel,
+        selectedEnclaveHost: stage2.selectedEnclaveHost,
+        routerHost: stage2.routerHost,
+      },
+      stage3: {
+        stageNumber: stage3.stageNumber,
+        stageName: stage3.stageName,
+        modelsUsed: stage3.modelsUsed,
+        passed: stage3.passed,
+        faultInjected: stage3.faultInjected,
+        selfHealed: stage3.selfHealed,
+        attempts: stage3.attempts.map((att) => ({
+          attemptNumber: att.attemptNumber,
+          candidateNodeId: att.candidateNodeId,
+          candidateModelId: att.candidateModelId,
+          enclaveAttestationVerified: att.enclaveAttestationVerified,
+          failedInvariants: att.failedInvariants,
+          entropyBitsPerByte: att.entropyBitsPerByte,
+          repeated16ByteBlocks: att.repeated16ByteBlocks,
+          plaintextLeakMatches: att.plaintextLeakMatches,
+          passed: att.passed,
+          remediationApplied: att.remediationApplied,
+        })),
+        enclaveMeasurementReceipt: {
+          enclaveHost: stage3.sandboxReceipt.sandboxId,
+          dmVerityRootHashHex: stage3.sandboxReceipt.imageMeasurementHex,
+          rtmrMeasurementHex: stage3.sandboxReceipt.rtmr3Hex,
+        },
+        verificationSignal: {
+          enclaveAttestationVerified: stage3.verificationSignal.vmpl0All1344Passed,
+          entropyBitsPerByte: stage3.verificationSignal.entropyBitsPerByte,
+          repeated16ByteBlocks: stage3.verificationSignal.repeated16ByteBlocks,
+        },
+      },
+      stage4,
+      stage5,
+      stage6,
+    },
+  };
+}
+
 export const PLAIN_ATLAS_PRESET_QUERIES: readonly {
   label: string;
   query: string;
@@ -364,6 +578,14 @@ export const PLAIN_ATLAS_PRESET_QUERIES: readonly {
     query: "VoltPillager voltage fault injection",
   },
 ] as const;
+
+export function resolveEffectiveAtlasQuery(rawQuery: string): string {
+  const trimmed = rawQuery.trim();
+  const matchedPreset = PLAIN_ATLAS_PRESET_QUERIES.find(
+    (p) => p.label.toLowerCase() === trimmed.toLowerCase(),
+  );
+  return matchedPreset ? matchedPreset.query : trimmed;
+}
 
 interface PlainDocOverride {
   title: string;
@@ -442,7 +664,7 @@ const PLAIN_DOC_OVERRIDES: Record<string, PlainDocOverride> = {
     title: "Memory write-dropping attack (DDRop) and safety checks",
     categoryLabel: "Hardware safety note",
     summary:
-      "Researchers showed an attacker touching server memory wires can block new memory writes so old data stays behind. deRoute checks all 1,344 safety rules and requires multiple independent checkers before trusting a sealed computer.",
+      "Researchers showed an attacker touching server memory wires can block new memory writes so old data stays behind. deRoute runs hardware seal checks and hides your personal details on your device before trusting a sealed computer.",
   },
   "advisory-cipherleaks": {
     title: "Memory pattern leaks (Cipherleaks & BadRAM) and fixes",
@@ -457,7 +679,8 @@ const PLAIN_DOC_OVERRIDES: Record<string, PlainDocOverride> = {
       "An attacker with physical access to a server motherboard can jolt its power wires to cause calculation errors. Because physical tampering is possible on a single machine, deRoute combines device-side detail hiding, independent seal checkers, and the public receipt book.",
   },
   "arch-vmpl0-inner-monitor": {
-    title: "How deRoute uses anonymous tokens, detail hiding, and the public receipt book",
+    title:
+      "How deRoute uses anonymous tokens, detail hiding, and the public receipt book",
     categoryLabel: "How deRoute works",
     summary:
       "deRoute separates payment from your identity using prepaid anonymous tokens that cannot be traced back to you. Before your message leaves your device, deRoute hides your personal details and pads every message to a standard size, then records verification receipts in the public receipt book.",
