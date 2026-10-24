@@ -387,9 +387,13 @@ export function buildPlainTimelineSteps(params: {
 
   // Step 3: Thinking (Stage 4)
   const step3Passed = stage4.passed;
+  const plannedByGemini = plannerBadgeText === "Planned by Gemini 4 Argon";
+  const plannerPrivacyNote = plannedByGemini
+    ? "Gemini planned the steps without seeing your words."
+    : "The sealed computer planned the steps itself, so your words never left it.";
   const runKindNote = isLiveRun
-    ? "Gemini planned the steps without seeing your words. The sealed computer finished the work and your device put your real names, dates, and numbers back in place."
-    : "Gemini planned the steps without seeing your words. This initial preview loaded without making a paid call on page load. Click Run above to run the live task, and your device will put your real names, dates, and numbers back in place.";
+    ? `${plannerPrivacyNote} The sealed computer finished the work and your device put your real names, dates, and numbers back in place.`
+    : `${plannerPrivacyNote} This initial preview loaded without making a paid call on page load. Click Run above to run the live task, and your device will put your real names, dates, and numbers back in place.`;
   const step3Result = step3Passed
     ? `${plannerBadgeText}. ${runKindNote}`
     : `${plannerBadgeText}. The thinking step could not finish all safety checks.`;

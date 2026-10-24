@@ -194,8 +194,11 @@ describe("deRoute wave 4/5 Argon & Atlas plain-language helpers", () => {
         `${run.stages.stage2.verificationSignal.checksPassed} of ${run.stages.stage2.verificationSignal.checksTotal} safety checks passed`,
       );
       expect(steps[2].passed).toBe(true);
+      // Without a Gemini key the sealed computer plans, so the note must not credit Gemini.
       expect(steps[2].plainResult).toContain(
-        "Gemini planned the steps without seeing your words.",
+        steps[2].plainResult.startsWith("Planned by Gemini 4 Argon")
+          ? "Gemini planned the steps without seeing your words."
+          : "The sealed computer planned the steps itself, so your words never left it.",
       );
       expect(steps[3].passed).toBe(false);
       expect(steps[4].passed).toBe(true);
