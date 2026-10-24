@@ -1,4 +1,10 @@
 import { TinfoilAI, type VerificationDocument } from "tinfoil";
+import { toHex } from "@/lib/sim/bytes";
+import {
+  verifyModelEnclaveStatus,
+  type DeepAttestationBundle,
+  type ModelEnclaveAttestation,
+} from "@/lib/tinfoil/deep-inspect";
 import type { CheckResult } from "@/lib/types";
 
 /** Models served inside Tinfoil's attested enclaves that the demo offers. */
@@ -20,11 +26,27 @@ export interface TinfoilEvidence {
   hpkePublicKey: string;
   configRepo: string;
   verifiedAt?: string;
+  chipId?: string;
+  tcb?: string;
+  guestPolicy?: string;
+  gpuEnclaveHost?: string;
+  gpuVmShape?: string;
+  pinnedWeights?: string;
+  dmVerityRoot?: string;
+  "Chip ID"?: string;
+  TCB?: string;
+  "Guest policy"?: string;
+  "GPU enclave host"?: string;
+  "GPU VM shape"?: string;
+  "Pinned weights"?: string;
+  "dm-verity root"?: string;
 }
 
 export interface TinfoilSession {
   checks: CheckResult[];
   evidence: TinfoilEvidence;
+  deepBundle?: DeepAttestationBundle;
+  selectedModelAttestation?: ModelEnclaveAttestation;
   send(model: string, messages: { role: "user" | "assistant"; content: string }[]): AsyncIterable<string>;
 }
 
@@ -45,16 +67,29 @@ function stepDetail(step: Step | undefined, ok: string): string {
 }
 
 /** Maps Tinfoil's verification document onto the dRouter checklist (C1–C7). */
-export function checksFromDocument(doc: VerificationDocument): CheckResult[] {
+export function checksFromDocument(
+  doc: VerificationDocument,
+  modelAttestation?: ModelEnclaveAttestation,
+): CheckResult[] {
   const s = doc.steps;
   const both = (a: Step | undefined, b: Step | undefined): CheckResult["status"] =>
-    stepStatus(a) === "fail" || stepStatus(b) === "fail" ? "fail" : stepStatus(a) === "pass" && stepStatus(b) === "pass" ? "pass" : "skip";
+    stepStatus(a) === "fail" || stepStatus(b) === "fail"
+      ? "fail"
+      : stepStatus(a) === "pass" && stepStatus(b) === "pass"
+        ? "pass"
+        : "skip";
+
+  const modelStatus = modelAttestation ? verifyModelEnclaveStatus(modelAttestation) : null;
+
   return [
     {
       id: "C1",
       label: "Hardware signature chain",
       status: stepStatus(s.verifyEnclave),
-      detail: stepDetail(s.verifyEnclave, `AMD SEV-SNP report verified to AMD's root (${doc.enclaveMeasurement.measurement.type})`),
+      detail: stepDetail(
+        s.verifyEnclave,
+        `AMD SEV-SNP report verified to AMD's root (${doc.enclaveMeasurement.measurement.type})`,
+      ),
     },
     {
       id: "C2",
@@ -69,7 +104,10 @@ export function checksFromDocument(doc: VerificationDocument): CheckResult[] {
       id: "C3",
       label: "Fresh and bound to this session",
       status: stepStatus(s.verifyCertificate),
-      detail: stepDetail(s.verifyCertificate, "Encryption key is committed to by the attestation; requests are HPKE-encrypted to it"),
+      detail: stepDetail(
+        s.verifyCertificate,
+        "Encryption key is committed to by the attestation; requests are HPKE-encrypted to it",
+      ),
     },
     {
       id: "C4",
@@ -80,8 +118,10 @@ export function checksFromDocument(doc: VerificationDocument): CheckResult[] {
     {
       id: "C5",
       label: "GPUs in confidential mode",
-      status: "skip",
-      detail: "Tinfoil's browser verifier does not expose GPU reports; the router enclave attests the model enclaves",
+      status: modelStatus ? (modelStatus.c5Pass ? "pass" : "fail") : "skip",
+      detail: modelStatus
+        ? modelStatus.c5Detail
+        : "Tinfoil's browser verifier does not expose GPU reports; the router enclave attests the model enclaves",
     },
     {
       id: "C6",
@@ -92,13 +132,40 @@ export function checksFromDocument(doc: VerificationDocument): CheckResult[] {
     {
       id: "C7",
       label: "Committed model",
-      status: "pass",
-      detail: "Model name is sent in a header and the enclave rejects requests whose encrypted body names a different model",
+      status: modelStatus ? (modelStatus.c7Pass ? "pass" : "fail") : "pass",
+      detail: modelStatus
+        ? modelStatus.c7Detail
+        : "Model name is sent in a header and the enclave rejects requests whose encrypted body names a different model",
     },
   ];
 }
 
-function evidenceFromDocument(doc: VerificationDocument): TinfoilEvidence {
+function evidenceFromDocument(
+  doc: VerificationDocument,
+  deepBundle?: DeepAttestationBundle,
+  modelAttestation?: ModelEnclaveAttestation,
+): TinfoilEvidence {
+  const snp = deepBundle?.routerSnpReport;
+  const chipId = snp ? `${snp.chipIdHex.slice(0, 16)}…${snp.chipIdHex.slice(-8)}` : undefined;
+  const tcb = snp
+    ? `bl=${snp.tcb.bootloader} tee=${snp.tcb.tee} snp=${snp.tcb.snp} ucode=${snp.tcb.microcode} fmc=${snp.tcb.fmc}`
+    : undefined;
+  const guestPolicy = snp
+    ? `${snp.policyHex} (debug=${snp.debugAllowed ? "on" : "off"}, smt=${snp.smtAllowed ? "on" : "off"}, migrate=${snp.migrationAllowed ? "on" : "off"})`
+    : undefined;
+
+  const primaryGpuHost = modelAttestation?.enclaveHosts[0]?.host;
+  const gpuEnclaveHost = modelAttestation
+    ? `${primaryGpuHost ?? modelAttestation.repo} (${modelAttestation.healthyHosts}/${modelAttestation.configuredHosts} healthy)`
+    : undefined;
+  const gpuVmShape = modelAttestation
+    ? `${modelAttestation.vmShape.gpus}× GPU · ${modelAttestation.vmShape.cpus} vCPU · ${Math.round(modelAttestation.vmShape.memoryMb / 1024)} GB RAM`
+    : undefined;
+  const pinnedWeights = modelAttestation
+    ? `${modelAttestation.weightRepoCommit} (mpk-${modelAttestation.weightMpkHash.replace(/^mpk-/, "").slice(0, 12)}…)`
+    : undefined;
+  const dmVerityRoot = modelAttestation?.dmVerityRootHash;
+
   return {
     enclaveHost: doc.enclaveHost,
     releaseTag: doc.releaseTag,
@@ -109,6 +176,13 @@ function evidenceFromDocument(doc: VerificationDocument): TinfoilEvidence {
     hpkePublicKey: doc.hpkePublicKey,
     configRepo: doc.configRepo,
     verifiedAt: doc.verifiedAt,
+    ...(chipId ? { chipId, "Chip ID": chipId } : {}),
+    ...(tcb ? { tcb, TCB: tcb } : {}),
+    ...(guestPolicy ? { guestPolicy, "Guest policy": guestPolicy } : {}),
+    ...(gpuEnclaveHost ? { gpuEnclaveHost, "GPU enclave host": gpuEnclaveHost } : {}),
+    ...(gpuVmShape ? { gpuVmShape, "GPU VM shape": gpuVmShape } : {}),
+    ...(pinnedWeights ? { pinnedWeights, "Pinned weights": pinnedWeights } : {}),
+    ...(dmVerityRoot ? { dmVerityRoot, "dm-verity root": dmVerityRoot } : {}),
   };
 }
 
@@ -117,16 +191,29 @@ function evidenceFromDocument(doc: VerificationDocument): TinfoilEvidence {
  * to that enclave and sent through the dRouter relay. The relay adds the API key but cannot read
  * prompts or completions.
  */
-export async function openTinfoilSession(): Promise<TinfoilSession> {
+export async function openTinfoilSession(selectedModel = "kimi-k3"): Promise<TinfoilSession> {
   const origin = window.location.origin;
+  const secretBytes = new Uint8Array(32);
+  crypto.getRandomValues(secretBytes);
+  const userCacheSecret = toHex(secretBytes);
+
   const client = new TinfoilAI({
     bearerToken: "drouter-demo",
     baseURL: `${origin}/api/relay/v1/`,
     attestationBundleURL: `${origin}/api/relay`,
+    userCacheSecret,
   });
 
+  const matrixPromise: Promise<DeepAttestationBundle | undefined> = fetch(
+    `${origin}/api/relay/enclave-matrix`,
+  )
+    .then(async (res) => (res.ok ? ((await res.json()) as DeepAttestationBundle) : undefined))
+    .catch(() => undefined);
+
+  let deepBundle: DeepAttestationBundle | undefined;
   try {
-    await client.ready();
+    const [, fetchedBundle] = await Promise.all([client.ready(), matrixPromise]);
+    deepBundle = fetchedBundle;
   } catch (error) {
     let checks: CheckResult[] = [];
     try {
@@ -135,13 +222,21 @@ export async function openTinfoilSession(): Promise<TinfoilSession> {
       // Verification failed before a document existed.
     }
     const failed = checks.find((c) => c.status === "fail");
-    throw Object.assign(new Error(failed ? `${failed.id} ${failed.label}: ${failed.detail}` : String(error)), { checks });
+    throw Object.assign(
+      new Error(failed ? `${failed.id} ${failed.label}: ${failed.detail}` : String(error)),
+      { checks },
+    );
   }
 
   const doc = await client.getVerificationDocument();
+  const selectedModelAttestation =
+    deepBundle?.models[selectedModel] ?? deepBundle?.models["kimi-k3"];
+
   return {
-    checks: checksFromDocument(doc),
-    evidence: evidenceFromDocument(doc),
+    checks: checksFromDocument(doc, selectedModelAttestation),
+    evidence: evidenceFromDocument(doc, deepBundle, selectedModelAttestation),
+    deepBundle,
+    selectedModelAttestation,
     async *send(model, messages) {
       const stream = await client.chat.completions.create(
         { model, messages, stream: true },

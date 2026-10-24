@@ -1,30 +1,16 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
-
 export const metadata: Metadata = {
-  title: "dRouter · TEE-trusted inference",
+  title: "dRouter · Verifiable Confidential AI Router",
   description:
-    "Route to a confidential-compute enclave, verify its hardware and code in your browser, and talk to a frontier model over an end-to-end encrypted channel.",
+    "End-to-end encrypted, hardware-attested AI inference router with two-hop AMD SEV-SNP + Confidential GPU verification, blind-signed credits, and on-chain accountability on Circle Arc.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html
-      lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
-    >
-      <body className="min-h-full flex flex-col">{children}</body>
+    <html lang="en" className="h-full antialiased">
+      <body className="min-h-full flex flex-col bg-[#050506] text-zinc-100">{children}</body>
     </html>
   );
 }

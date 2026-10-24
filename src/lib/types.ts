@@ -42,3 +42,67 @@ export interface PopReceipt {
   signerPublicKey: string; // hex
   verified: boolean;
 }
+
+/** Unlinkable blind-signed credit token (Spec §7). */
+export interface BlindCreditToken {
+  token: string; // hex random 32-byte secret
+  signature: string; // hex unblinded RSA signature
+  denomination: number; // credits (e.g. 1, 5, 20)
+}
+
+/** Plaintext session state encrypted under K_freeze on the client (Spec §Freeze, resume and pop). */
+export interface FrozenSessionState {
+  modelId: string;
+  nodeKind: NodeKind;
+  messages: { role: "user" | "assistant"; content: string }[];
+  simContextTokens: number;
+  createdAt: number;
+  turnCount: number;
+}
+
+/** Client-held handle returned when freezing a session bubble. */
+export interface FreezeReceipt {
+  blobId: string;
+  freezeSecretHex: string;
+  sessionIdHex: string;
+  createdAt: number;
+}
+
+/** Signed hardware manifest tied to operator stake (Spec §8.1). */
+export interface HardwareManifest {
+  nodeId: string;
+  chipId: string;
+  tcb: string;
+  gpuIds: string[];
+  spdmDevices: string[];
+  declared: {
+    board: string;
+    bmcFirmware: string;
+    platformRot: string;
+    dimmSlotsTotal: number;
+    dimmSlotsPopulated: number;
+    dimmSpeedMt: number;
+    pcieSlotsPopulated: number;
+    region: string;
+  };
+  timestamp: number;
+  signature: string;
+  signerPublicKey: string;
+}
+
+/** k-of-n verifier admission ticket (Spec §5). */
+export interface QuorumTicket {
+  nodeId: string;
+  chipId: string;
+  nodeIdentityPk: string;
+  epoch: number;
+  status: "full" | "ramp" | "suspended";
+  weight: number; // 0..10000 basis points
+  signatures: { verifierId: string; publicKey: string; signature: string }[];
+}
+
+/** Client-side PII placeholder scrubbing summary. */
+export interface ScrubResult {
+  scrubbed: string;
+  replacements: { placeholder: string; kind: string }[];
+}

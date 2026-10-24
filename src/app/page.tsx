@@ -15,9 +15,15 @@ export default function Home() {
           </p>
         </div>
         <nav className="flex gap-4 text-sm text-zinc-400">
+          <Link className="hover:text-zinc-100" href="/audit">
+            Security &amp; Accountability Lab
+          </Link>
           <Link className="hover:text-zinc-100" href="/network">
             Network &amp; transparency log
           </Link>
+          <a className="hover:text-zinc-100" href="/api/v1/verify" target="_blank" rel="noreferrer">
+            Terminal / Harness API ↗
+          </a>
           <a className="hover:text-zinc-100" href="https://explorer.testnet.arc.io" target="_blank" rel="noreferrer">
             Arc testnet ↗
           </a>
