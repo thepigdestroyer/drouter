@@ -373,16 +373,20 @@ export function PacketSniffer({
     const padCharCount = Math.max(0, bucketBytes - unpaddedByteLen);
 
     // 3. Perform genuine RFC 9180 HPKE Base mode encapsulation to the enclave's X25519 public key
+    // Sealing needs a random ephemeral key, which the browser creates after mount;
+    // nothing is sealed during prerender.
     const recipientPubKeyBytes = hexToBytes(liveEnclaveKeyHex);
-    const senderSecretBytes = ephemeralSecretHex
-      ? hexToBytes(ephemeralSecretHex)
-      : sha256(utf8ToBytes(`drouter:hpke:ssr-ephemeral:${liveHost}:${modelId}`));
-
     const {
       encapsulatedKeyBytes,
       ciphertextBytes,
       ehbpWireFrameBytes,
-    } = sealEhbpHpkeFrame(paddedBytes, recipientPubKeyBytes, senderSecretBytes);
+    } = ephemeralSecretHex
+      ? sealEhbpHpkeFrame(paddedBytes, recipientPubKeyBytes, hexToBytes(ephemeralSecretHex))
+      : {
+          encapsulatedKeyBytes: new Uint8Array(0),
+          ciphertextBytes: new Uint8Array(0),
+          ehbpWireFrameBytes: new Uint8Array(0),
+        };
 
     const frameDigest = sha256(ehbpWireFrameBytes);
     const rawEntropy = computeShannonEntropy(ciphertextBytes);
