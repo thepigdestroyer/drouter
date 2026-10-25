@@ -393,6 +393,9 @@ export function SpecimenFooter() {
           <Link href="/about" className="ep-link text-xs">
             About
           </Link>
+          <Link href="/about#backend-partners" className="ep-link text-xs">
+            Backend partners
+          </Link>
           <a
             href="https://testnet.arcscan.app/address/0xbc8085c2b6fe6e0db05f169925c0b841828f4481"
             target="_blank"

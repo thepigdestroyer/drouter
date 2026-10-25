@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { AuthPill } from "@/components/auth-pill";
 import { EnclaveGauntlet } from "@/components/game/enclave-gauntlet";
 import { InkButton } from "@/components/ink/ink-button";
@@ -387,6 +388,16 @@ export default function ExplainPage() {
         {/* What each person can see */}
         <section className="space-y-3">
           <PacketSniffer />
+          <p className="text-sm text-ink-2 pt-2">
+            Curious how Google Gemini and MongoDB Atlas fit in without ever
+            seeing your words?{" "}
+            <Link
+              href="/about#backend-partners"
+              className="ep-link font-medium text-ink"
+            >
+              Read about our backend partners -&gt;
+            </Link>
+          </p>
         </section>
       </main>
 
