@@ -1261,4 +1261,423 @@ describe("K2: deroute-proxy unit & integration tests", () => {
       fs.rmSync(isolatedDir, { recursive: true, force: true });
     }
   });
+
+  it("restores streamed tool_calls[].function.arguments across 3-chunk placeholder splits, two parallel tool calls, two choices, finish_reason flush, and streams ending without finish_reason", async () => {
+    const tmpDir = makeTempDir("deroute-proxy-stream-tool-calls");
+    const spentPath = path.join(tmpDir, "spent.json");
+    let streamScenario: "finish_reason" | "no_finish_reason" = "finish_reason";
+
+    const mockStreamClient: DerouteProxyClientLike = {
+      async ready() {},
+      async getVerificationDocument() {
+        return {
+          securityVerified: true,
+          enclaveHost: "router-0.tinfoil.sh",
+          checks: ALL_PASS_CHECKS,
+        };
+      },
+      chat: {
+        completions: {
+          async create() {
+            if (streamScenario === "finish_reason") {
+              async function* genWithFinishReason() {
+                // Chunk 1: initial metadata + start of 3-chunk split placeholders across two parallel tool calls and two choices
+                yield {
+                  id: "chatcmpl-stream-tc-1",
+                  object: "chat.completion.chunk",
+                  choices: [
+                    {
+                      index: 0,
+                      delta: {
+                        role: "assistant",
+                        content: "Choice0 [EM",
+                        tool_calls: [
+                          {
+                            index: 0,
+                            id: "call_0_0",
+                            type: "function",
+                            function: {
+                              name: "send_email",
+                              arguments: '{"to":"[EM',
+                            },
+                          },
+                          {
+                            index: 1,
+                            id: "call_0_1",
+                            type: "function",
+                            function: {
+                              name: "ping_host",
+                              arguments: '{"host":"[I',
+                            },
+                          },
+                        ],
+                      },
+                      finish_reason: null,
+                    },
+                    {
+                      index: 1,
+                      delta: {
+                        role: "assistant",
+                        content: "Choice1 [IP",
+                        tool_calls: [
+                          {
+                            index: 0,
+                            id: "call_1_0",
+                            type: "function",
+                            function: {
+                              name: "use_secret",
+                              arguments: '{"key":"[SEC',
+                            },
+                          },
+                        ],
+                      },
+                      finish_reason: null,
+                    },
+                  ],
+                };
+
+                // Chunk 2: middle fragment of placeholders (no closing ']' yet -> held back)
+                yield {
+                  id: "chatcmpl-stream-tc-1",
+                  object: "chat.completion.chunk",
+                  choices: [
+                    {
+                      index: 0,
+                      delta: {
+                        content: "AIL",
+                        tool_calls: [
+                          {
+                            index: 0,
+                            function: { arguments: "AIL_" },
+                          },
+                          {
+                            index: 1,
+                            function: { arguments: "P_1" },
+                          },
+                        ],
+                      },
+                      finish_reason: null,
+                    },
+                    {
+                      index: 1,
+                      delta: {
+                        content: "_1",
+                        tool_calls: [
+                          {
+                            index: 0,
+                            function: { arguments: "RET_" },
+                          },
+                        ],
+                      },
+                      finish_reason: null,
+                    },
+                  ],
+                };
+
+                // Chunk 3: closing ']' of placeholders + trailing unclosed '[UNCLOSED' to test finish_reason flush
+                yield {
+                  id: "chatcmpl-stream-tc-1",
+                  object: "chat.completion.chunk",
+                  choices: [
+                    {
+                      index: 0,
+                      delta: {
+                        content: "_1]!",
+                        tool_calls: [
+                          {
+                            index: 0,
+                            function: { arguments: '1]","tag":"[UNCLOSED0' },
+                          },
+                          {
+                            index: 1,
+                            function: { arguments: ']"}' },
+                          },
+                        ],
+                      },
+                      finish_reason: null,
+                    },
+                    {
+                      index: 1,
+                      delta: {
+                        content: "]!",
+                        tool_calls: [
+                          {
+                            index: 0,
+                            function: { arguments: '1]"}' },
+                          },
+                        ],
+                      },
+                      finish_reason: null,
+                    },
+                  ],
+                };
+
+                // Chunk 4: finish_reason arrives -> flushes any held-back text on that choice
+                yield {
+                  id: "chatcmpl-stream-tc-1",
+                  object: "chat.completion.chunk",
+                  choices: [
+                    {
+                      index: 0,
+                      delta: {},
+                      finish_reason: "tool_calls",
+                    },
+                    {
+                      index: 1,
+                      delta: {},
+                      finish_reason: "tool_calls",
+                    },
+                  ],
+                };
+              }
+              return genWithFinishReason();
+            }
+
+            async function* genWithoutFinishReason() {
+              // Stream that ends without finish_reason while holding back partial bracket prefixes
+              yield {
+                id: "chatcmpl-stream-tc-2",
+                object: "chat.completion.chunk",
+                choices: [
+                  {
+                    index: 0,
+                    delta: {
+                      content: "Stream [EMAIL",
+                      tool_calls: [
+                        {
+                          index: 0,
+                          id: "call_nf_0",
+                          type: "function",
+                          function: {
+                            name: "notify",
+                            arguments: '{"to":"[EM',
+                          },
+                        },
+                      ],
+                    },
+                  },
+                  {
+                    index: 1,
+                    delta: {
+                      tool_calls: [
+                        {
+                          index: 0,
+                          id: "call_nf_1",
+                          type: "function",
+                          function: {
+                            name: "connect",
+                            arguments: '{"ip":"[IP_1]","tail":"[TAIL_OPEN',
+                          },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              };
+              yield {
+                id: "chatcmpl-stream-tc-2",
+                object: "chat.completion.chunk",
+                choices: [
+                  {
+                    index: 0,
+                    delta: {
+                      content: "_1] [OPEN_END",
+                      tool_calls: [
+                        {
+                          index: 0,
+                          function: {
+                            arguments: "AIL",
+                          },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              };
+              yield {
+                id: "chatcmpl-stream-tc-2",
+                object: "chat.completion.chunk",
+                choices: [
+                  {
+                    index: 0,
+                    delta: {
+                      tool_calls: [
+                        {
+                          index: 0,
+                          function: {
+                            arguments: '_1]","note":"[PARTIAL_AT_EOF',
+                          },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              };
+              // Ends without any finish_reason chunk!
+            }
+            return genWithoutFinishReason();
+          },
+        },
+      },
+    };
+
+    const started = await startDerouteProxy({
+      port: 0,
+      spentFilePath: spentPath,
+      clientFactory: () => mockStreamClient,
+      stderr: () => {},
+      stdout: () => {},
+    });
+
+    const parseSseStream = (rawSse: string) => {
+      const dataLines = rawSse
+        .split("\n")
+        .filter((l) => l.startsWith("data: ") && l !== "data: [DONE]");
+      const contentByChoice = new Map<number, string>();
+      const toolArgsByChoiceAndIndex = new Map<string, string>();
+      const allEmittedFragments: string[] = [];
+
+      for (const line of dataLines) {
+        const parsed = JSON.parse(line.slice("data: ".length)) as {
+          choices?: Array<{
+            index?: number;
+            delta?: {
+              content?: string;
+              tool_calls?: Array<{
+                index?: number;
+                function?: { arguments?: string };
+              }>;
+            };
+          }>;
+        };
+        const choices = parsed.choices ?? [];
+        for (let i = 0; i < choices.length; i += 1) {
+          const ch = choices[i];
+          const cIdx = typeof ch.index === "number" ? ch.index : i;
+          const cDelta = ch.delta?.content;
+          if (typeof cDelta === "string" && cDelta.length > 0) {
+            allEmittedFragments.push(cDelta);
+            contentByChoice.set(
+              cIdx,
+              (contentByChoice.get(cIdx) ?? "") + cDelta,
+            );
+          }
+          const tcs = ch.delta?.tool_calls ?? [];
+          for (let j = 0; j < tcs.length; j += 1) {
+            const tc = tcs[j];
+            const tcIdx = typeof tc.index === "number" ? tc.index : j;
+            const argDelta = tc.function?.arguments;
+            if (typeof argDelta === "string" && argDelta.length > 0) {
+              allEmittedFragments.push(argDelta);
+              const key = `${cIdx}:${tcIdx}`;
+              toolArgsByChoiceAndIndex.set(
+                key,
+                (toolArgsByChoiceAndIndex.get(key) ?? "") + argDelta,
+              );
+            }
+          }
+        }
+      }
+
+      return {
+        contentByChoice,
+        toolArgsByChoiceAndIndex,
+        allEmittedFragments,
+      };
+    };
+
+    try {
+      // Scenario 1: 3-chunk split placeholders, two parallel tool calls, two choices, and finish_reason flush
+      streamScenario = "finish_reason";
+      const res1 = await fetch(
+        `http://127.0.0.1:${started.port}/v1/chat/completions`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "kimi-k3",
+            stream: true,
+            messages: [
+              {
+                role: "user",
+                content:
+                  "Contact dana.reyes@example.com on 10.42.7.19 with key sk_live_51HxYzAbCdEfGhIjKlMn.",
+              },
+            ],
+          }),
+        },
+      );
+      expect(res1.status).toBe(200);
+      const rawSse1 = await res1.text();
+      expect(rawSse1).toContain("data: [DONE]");
+
+      const parsed1 = parseSseStream(rawSse1);
+      // Never emits a partial placeholder fragment for EMAIL_1, IP_1, or SECRET_1
+      for (const frag of parsed1.allEmittedFragments) {
+        expect(frag).not.toContain("[EMAIL");
+        expect(frag).not.toContain("AIL_1]");
+        expect(frag).not.toContain("[IP");
+        expect(frag).not.toContain("P_1]");
+        expect(frag).not.toContain("[SEC");
+        expect(frag).not.toContain("RET_1]");
+      }
+
+      expect(parsed1.contentByChoice.get(0)).toBe(
+        "Choice0 dana.reyes@example.com!",
+      );
+      expect(parsed1.contentByChoice.get(1)).toBe("Choice1 10.42.7.19!");
+      expect(parsed1.toolArgsByChoiceAndIndex.get("0:0")).toBe(
+        '{"to":"dana.reyes@example.com","tag":"[UNCLOSED0',
+      );
+      expect(parsed1.toolArgsByChoiceAndIndex.get("0:1")).toBe(
+        '{"host":"10.42.7.19"}',
+      );
+      expect(parsed1.toolArgsByChoiceAndIndex.get("1:0")).toBe(
+        '{"key":"sk_live_51HxYzAbCdEfGhIjKlMn"}',
+      );
+
+      // Scenario 2: Stream ending without finish_reason flushes on [DONE]
+      streamScenario = "no_finish_reason";
+      const res2 = await fetch(
+        `http://127.0.0.1:${started.port}/v1/chat/completions`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "kimi-k3",
+            stream: true,
+            messages: [
+              {
+                role: "user",
+                content:
+                  "Contact dana.reyes@example.com on 10.42.7.19 with key sk_live_51HxYzAbCdEfGhIjKlMn.",
+              },
+            ],
+          }),
+        },
+      );
+      expect(res2.status).toBe(200);
+      const rawSse2 = await res2.text();
+      expect(rawSse2).toContain("data: [DONE]");
+
+      const parsed2 = parseSseStream(rawSse2);
+      for (const frag of parsed2.allEmittedFragments) {
+        expect(frag).not.toContain("[EMAIL");
+        expect(frag).not.toContain("AIL_1]");
+        expect(frag).not.toContain("[IP_1]");
+      }
+      expect(parsed2.contentByChoice.get(0)).toBe(
+        "Stream dana.reyes@example.com [OPEN_END",
+      );
+      expect(parsed2.toolArgsByChoiceAndIndex.get("0:0")).toBe(
+        '{"to":"dana.reyes@example.com","note":"[PARTIAL_AT_EOF',
+      );
+      expect(parsed2.toolArgsByChoiceAndIndex.get("1:0")).toBe(
+        '{"ip":"10.42.7.19","tail":"[TAIL_OPEN',
+      );
+    } finally {
+      await started.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });

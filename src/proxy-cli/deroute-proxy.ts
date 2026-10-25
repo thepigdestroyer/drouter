@@ -1225,48 +1225,260 @@ export function createDerouteProxyServer(
             ...responseHeaders,
           });
 
-          const restorer = createMechanicalStreamRestorer(session);
+          const contentRestorers = new Map<number, StreamRestorer>();
+          const toolArgRestorers = new Map<string, StreamRestorer>();
           let lastChunkTemplate: Record<string, unknown> | null = null;
+
+          const getContentRestorer = (choiceIdx: number): StreamRestorer => {
+            let r = contentRestorers.get(choiceIdx);
+            if (!r) {
+              r = createMechanicalStreamRestorer(session);
+              contentRestorers.set(choiceIdx, r);
+            }
+            return r;
+          };
+
+          const getToolArgRestorer = (
+            choiceIdx: number,
+            tcIdx: number,
+          ): StreamRestorer => {
+            const key = `${choiceIdx}:${tcIdx}`;
+            let r = toolArgRestorers.get(key);
+            if (!r) {
+              r = createMechanicalStreamRestorer(session);
+              toolArgRestorers.set(key, r);
+            }
+            return r;
+          };
 
           for await (const chunk of stream) {
             lastChunkTemplate = chunk;
-            const choices = Array.isArray(chunk?.choices)
-              ? (chunk.choices as Array<{
-                  delta?: { content?: string };
-                  [key: string]: unknown;
-                }>)
-              : [];
-            const delta = choices[0]?.delta?.content ?? "";
-            if (!delta) {
+            const rawChoices = Array.isArray(chunk?.choices)
+              ? (chunk.choices as Array<Record<string, unknown>>)
+              : null;
+            if (!rawChoices || rawChoices.length === 0) {
               res.write(`data: ${JSON.stringify(chunk)}\n\n`);
               continue;
             }
-            const restoredDelta = restorer.push(delta);
-            if (restoredDelta) {
-              const outChunk = structuredClone(chunk) as {
-                choices: Array<{ delta: { content: string } }>;
-              };
-              outChunk.choices[0].delta.content = restoredDelta;
+
+            const outChunk = structuredClone(chunk) as {
+              choices: Array<Record<string, unknown>>;
+              [key: string]: unknown;
+            };
+
+            let hadStreamableField = false;
+            let shouldEmitChunk = false;
+
+            for (let i = 0; i < outChunk.choices.length; i += 1) {
+              const choice = outChunk.choices[i];
+              if (!choice || typeof choice !== "object") continue;
+
+              const choiceIdx =
+                typeof choice.index === "number" ? choice.index : i;
+              const delta =
+                choice.delta && typeof choice.delta === "object"
+                  ? (choice.delta as Record<string, unknown>)
+                  : null;
+              const hasFinishReason =
+                choice.finish_reason !== undefined &&
+                choice.finish_reason !== null;
+
+              let choiceShouldEmit = false;
+
+              if (delta) {
+                const otherDeltaKeys = Object.keys(delta).filter(
+                  (k) => k !== "content" && k !== "tool_calls",
+                );
+                if (otherDeltaKeys.some((k) => delta[k] !== undefined)) {
+                  choiceShouldEmit = true;
+                }
+
+                if (typeof delta.content === "string" && delta.content.length > 0) {
+                  hadStreamableField = true;
+                  const restoredContent =
+                    getContentRestorer(choiceIdx).push(delta.content);
+                  delta.content = restoredContent;
+                  if (restoredContent.length > 0) {
+                    choiceShouldEmit = true;
+                  }
+                }
+
+                if (Array.isArray(delta.tool_calls)) {
+                  const rawToolCalls = delta.tool_calls as Array<
+                    Record<string, unknown>
+                  >;
+                  const nextToolCalls: Array<Record<string, unknown>> = [];
+
+                  for (let j = 0; j < rawToolCalls.length; j += 1) {
+                    const tc = rawToolCalls[j];
+                    if (!tc || typeof tc !== "object") {
+                      nextToolCalls.push(tc);
+                      choiceShouldEmit = true;
+                      continue;
+                    }
+
+                    const tcIdx = typeof tc.index === "number" ? tc.index : j;
+                    const fnObj =
+                      tc.function && typeof tc.function === "object"
+                        ? (tc.function as Record<string, unknown>)
+                        : null;
+                    const hasMetadata =
+                      tc.id !== undefined ||
+                      tc.type !== undefined ||
+                      (fnObj !== null && fnObj.name !== undefined);
+
+                    if (
+                      fnObj &&
+                      typeof fnObj.arguments === "string" &&
+                      fnObj.arguments.length > 0
+                    ) {
+                      hadStreamableField = true;
+                      const restoredArgs = getToolArgRestorer(
+                        choiceIdx,
+                        tcIdx,
+                      ).push(fnObj.arguments);
+                      fnObj.arguments = restoredArgs;
+                      if (restoredArgs.length > 0 || hasMetadata) {
+                        nextToolCalls.push(tc);
+                        choiceShouldEmit = true;
+                      }
+                    } else {
+                      nextToolCalls.push(tc);
+                      choiceShouldEmit = true;
+                    }
+                  }
+
+                  if (nextToolCalls.length > 0) {
+                    delta.tool_calls = nextToolCalls;
+                  } else {
+                    delete delta.tool_calls;
+                  }
+                }
+              }
+
+              if (hasFinishReason) {
+                choiceShouldEmit = true;
+                const targetDelta: Record<string, unknown> = delta ?? {};
+
+                const existingContentRestorer =
+                  contentRestorers.get(choiceIdx);
+                if (existingContentRestorer) {
+                  const flushedContent = existingContentRestorer.flush();
+                  if (flushedContent.length > 0) {
+                    targetDelta.content =
+                      (typeof targetDelta.content === "string"
+                        ? targetDelta.content
+                        : "") + flushedContent;
+                  }
+                }
+
+                const choicePrefix = `${choiceIdx}:`;
+                for (const [key, r] of toolArgRestorers.entries()) {
+                  if (!key.startsWith(choicePrefix)) continue;
+                  const flushedArgs = r.flush();
+                  if (!flushedArgs) continue;
+                  const tcIdx = Number(key.slice(choicePrefix.length));
+                  if (!Array.isArray(targetDelta.tool_calls)) {
+                    targetDelta.tool_calls = [];
+                  }
+                  const tcList = targetDelta.tool_calls as Array<
+                    Record<string, unknown>
+                  >;
+                  let existingTc = tcList.find(
+                    (item, idx) =>
+                      (typeof item?.index === "number" ? item.index : idx) ===
+                      tcIdx,
+                  );
+                  if (!existingTc) {
+                    existingTc = {
+                      index: tcIdx,
+                      function: { arguments: flushedArgs },
+                    };
+                    tcList.push(existingTc);
+                  } else {
+                    const fnObj =
+                      existingTc.function &&
+                      typeof existingTc.function === "object"
+                        ? (existingTc.function as Record<string, unknown>)
+                        : {};
+                    fnObj.arguments =
+                      (typeof fnObj.arguments === "string"
+                        ? fnObj.arguments
+                        : "") + flushedArgs;
+                    existingTc.function = fnObj;
+                  }
+                }
+
+                choice.delta = targetDelta;
+              }
+
+              if (choiceShouldEmit) {
+                shouldEmitChunk = true;
+              }
+            }
+
+            if (!hadStreamableField || shouldEmitChunk) {
               res.write(`data: ${JSON.stringify(outChunk)}\n\n`);
             }
           }
 
-          const tail = restorer.flush();
-          if (tail) {
-            const flushChunk = lastChunkTemplate
-              ? (structuredClone(lastChunkTemplate) as {
-                  choices?: Array<{ delta?: { content?: string } }>;
-                })
+          const flushChoicesMap = new Map<
+            number,
+            {
+              index: number;
+              delta: {
+                content?: string;
+                tool_calls?: Array<{
+                  index: number;
+                  function: { arguments: string };
+                }>;
+              };
+            }
+          >();
+
+          const ensureFlushChoice = (choiceIdx: number) => {
+            let entry = flushChoicesMap.get(choiceIdx);
+            if (!entry) {
+              entry = { index: choiceIdx, delta: {} };
+              flushChoicesMap.set(choiceIdx, entry);
+            }
+            return entry;
+          };
+
+          for (const [choiceIdx, r] of contentRestorers.entries()) {
+            const tail = r.flush();
+            if (tail) {
+              ensureFlushChoice(choiceIdx).delta.content = tail;
+            }
+          }
+
+          for (const [key, r] of toolArgRestorers.entries()) {
+            const tail = r.flush();
+            if (!tail) continue;
+            const sep = key.indexOf(":");
+            const choiceIdx = Number(key.slice(0, sep));
+            const tcIdx = Number(key.slice(sep + 1));
+            const entry = ensureFlushChoice(choiceIdx);
+            if (!entry.delta.tool_calls) {
+              entry.delta.tool_calls = [];
+            }
+            entry.delta.tool_calls.push({
+              index: tcIdx,
+              function: { arguments: tail },
+            });
+          }
+
+          if (flushChoicesMap.size > 0) {
+            const flushChoices = [...flushChoicesMap.values()].sort(
+              (a, b) => a.index - b.index,
+            );
+            const flushChunk: Record<string, unknown> = lastChunkTemplate
+              ? (structuredClone(lastChunkTemplate) as Record<string, unknown>)
               : {
                   id: "chatcmpl-deroute-flush",
                   object: "chat.completion.chunk",
-                  choices: [{ index: 0, delta: { content: tail } }],
                 };
-            if (flushChunk.choices?.[0]?.delta) {
-              flushChunk.choices[0].delta.content = tail;
-            } else {
-              flushChunk.choices = [{ delta: { content: tail } }];
-            }
+            flushChunk.choices = flushChoices;
             res.write(`data: ${JSON.stringify(flushChunk)}\n\n`);
           }
 

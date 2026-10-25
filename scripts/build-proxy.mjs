@@ -30,7 +30,7 @@ export function resolveSourceCommit() {
   }
   try {
     const commit = execSync(
-      "git log -n 1 --format=%h --abbrev=12 HEAD -- src/ scripts/build-proxy.mjs package.json",
+      "git log -n 1 --format=%h --abbrev=12 HEAD -- src/proxy-cli src/lib scripts/build-proxy.mjs package.json package-lock.json",
       {
         cwd: ROOT,
         encoding: "utf8",
