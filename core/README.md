@@ -32,7 +32,7 @@ With `CORE_KEY_SOURCE=boot` (Google Cloud Confidential Space), `deroute-core` se
 
 `deroute-core` loads `MONGODB_URI`, `GEMINI_API_KEY`, and `CORE_OPERATOR_TOKEN` before serving and refuses to start on any unknown `CORE_SECRETS_SOURCE`:
 
-- `CORE_SECRETS_SOURCE=gcp-secret-manager`: Fetches a service-account access token (`http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token`) and project ID (`.../computeMetadata/v1/project/project-id`) with `Metadata-Flavor: Google`, then reads `mongodb-uri`, `gemini-api-key`, and `core-operator-token` from `https://secretmanager.googleapis.com/v1/projects/<p>/secrets/<name>/versions/latest:access`. Holds secret values in memory only (non-enumerable, redacted from `util.inspect`), never logs them, and fails closed if any secret is missing.
+- `CORE_SECRETS_SOURCE=gcp-secret-manager`: Fetches a service-account access token (`http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token`) and project ID (`.../computeMetadata/v1/project/project-id`) with `Metadata-Flavor: Google`, then reads `MONGODB_URI`, `GEMINI_API_KEY`, and `CORE_OPERATOR_TOKEN` from `https://secretmanager.googleapis.com/v1/projects/<p>/secrets/<name>/versions/latest:access`. Holds secret values in memory only (non-enumerable, redacted from `util.inspect`), never logs them, never falls back to `process.env`, and fails closed if any secret is missing.
 - `CORE_SECRETS_SOURCE=env` (default for Tinfoil): Reads `MONGODB_URI`, `GEMINI_API_KEY`, and `CORE_OPERATOR_TOKEN` from environment variables.
 
 ## Confidential Space launch policy and non-root socket access (`core/Dockerfile`)

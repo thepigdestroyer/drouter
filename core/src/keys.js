@@ -281,7 +281,7 @@ export function computePublicKeysBindingSha256(ring = getKeyRing()) {
   return sha256Hex(canonicalJson({ egress, tree }));
 }
 
-export function getPublicKeysResponse(ring = getKeyRing()) {
+export function getPublicKeysResponse(ring = getKeyRing(), options = {}) {
   const egress = serializePublicKeyEntry(ring["egress-signing"]);
   const tree = serializePublicKeyEntry(ring["tree-signing"]);
   const keySource = ring.keySource ?? ring["egress-signing"].keySource;
@@ -291,6 +291,10 @@ export function getPublicKeysResponse(ring = getKeyRing()) {
       tree: tree.publicKeyHex,
     }),
   );
+  const resolvedTlsSpkiSha256 =
+    typeof options.tlsSpkiSha256 === "string" && /^[0-9a-f]{64}$/.test(options.tlsSpkiSha256)
+      ? options.tlsSpkiSha256
+      : tlsSpkiSha256;
   return {
     ok: true,
     keySource,
@@ -298,7 +302,7 @@ export function getPublicKeysResponse(ring = getKeyRing()) {
     publicKeysSha256: keysDigest,
     bindingSha256: keysDigest,
     rawPublicKeysSha256: keysDigest,
-    ...(keySource === "boot" ? { tlsSpkiSha256 } : {}),
+    ...(keySource === "boot" ? { tlsSpkiSha256: resolvedTlsSpkiSha256 } : {}),
     keys: {
       "egress-signing": egress,
       "tree-signing": tree,

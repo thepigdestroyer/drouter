@@ -107,6 +107,52 @@ export const tlsKeyPem = bootTlsMaterial.privateKey;
 export const tlsSpkiSha256 = bootTlsMaterial.tlsSpkiSha256;
 export const spkiSha256 = bootTlsMaterial.tlsSpkiSha256;
 
+/**
+ * Validates that a TLS X.509 certificate PEM and private key PEM match and
+ * returns the normalized certificate PEM, private key PEM, and recomputed
+ * SubjectPublicKeyInfo (SPKI) SHA-256 hex digest from the certificate.
+ * If `expectedSpkiSha256` is provided, throws on mismatch.
+ */
+export function validateTlsCertAndKeyMatch(certPemInput, privateKeyInput, expectedSpkiSha256) {
+  if (typeof certPemInput !== "string" || !certPemInput.includes("BEGIN CERTIFICATE")) {
+    throw new Error("Invalid TLS certificate PEM provided.");
+  }
+  if (typeof privateKeyInput !== "string" || !privateKeyInput.includes("PRIVATE KEY")) {
+    throw new Error("Invalid TLS private key PEM provided.");
+  }
+
+  let x509Cert;
+  let privKeyObj;
+  try {
+    x509Cert = new crypto.X509Certificate(certPemInput.trim());
+    privKeyObj = crypto.createPrivateKey({ key: privateKeyInput.trim(), format: "pem" });
+  } catch {
+    throw new Error("Failed to parse TLS certificate or private key PEM.");
+  }
+
+  if (!x509Cert.checkPrivateKey(privKeyObj)) {
+    throw new Error("TLS certificate public key does not match the provided TLS private key.");
+  }
+
+  const spkiDer = x509Cert.publicKey.export({ type: "spki", format: "der" });
+  const computedSpkiSha256 = sha256Hex(new Uint8Array(spkiDer));
+
+  if (expectedSpkiSha256 !== undefined && expectedSpkiSha256 !== null) {
+    const cleanExpected = String(expectedSpkiSha256).trim().replace(/^0x/i, "").toLowerCase();
+    if (cleanExpected !== computedSpkiSha256) {
+      throw new Error(
+        `Provided tlsSpkiSha256 (${cleanExpected}) does not match certificate SPKI SHA-256 (${computedSpkiSha256}).`,
+      );
+    }
+  }
+
+  return {
+    tlsCertPem: x509Cert.toString().trim(),
+    tlsPrivateKey: privateKeyInput.trim(),
+    tlsSpkiSha256: computedSpkiSha256,
+  };
+}
+
 export function getBootTlsMaterial() {
   return bootTlsMaterial;
 }

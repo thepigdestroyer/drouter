@@ -43,7 +43,9 @@ export function resolveSecretsSource(explicitSource = process.env.CORE_SECRETS_S
   return trimmed;
 }
 
-function normalizeBaseUrl(rawUrl, label) {
+const ALLOWED_TEST_LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+function normalizeTestLoopbackBaseUrl(rawUrl, label) {
   if (typeof rawUrl !== "string" || rawUrl.trim().length === 0) {
     throw new Error(`Invalid ${label}: must be a non-empty URL string.`);
   }
@@ -57,6 +59,16 @@ function normalizeBaseUrl(rawUrl, label) {
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new Error(`Invalid ${label}: unsupported protocol '${parsed.protocol}'.`);
   }
+  if (!ALLOWED_TEST_LOOPBACK_HOSTNAMES.has(parsed.hostname)) {
+    throw new Error(
+      `Invalid ${label}: custom test base URL overrides are only accepted for loopback hosts (127.0.0.1, localhost, [::1]); got '${parsed.hostname}'.`,
+    );
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error(
+      `Invalid ${label}: URL credentials, query parameters, and hash fragments are forbidden.`,
+    );
+  }
   return clean;
 }
 
@@ -64,17 +76,27 @@ function resolveInjectableBaseUrls(options = {}) {
   const hasCustomMetadata = options.metadataBaseUrl !== undefined;
   const hasCustomSecretManager = options.secretManagerBaseUrl !== undefined;
 
-  if ((hasCustomMetadata || hasCustomSecretManager) && process.env.NODE_ENV === "production") {
-    throw new Error(
-      "Custom metadataBaseUrl and secretManagerBaseUrl overrides are only permitted in tests.",
-    );
+  if (hasCustomMetadata || hasCustomSecretManager) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error(
+        "Custom metadataBaseUrl and secretManagerBaseUrl overrides are forbidden in production.",
+      );
+    }
+    const explicitTestFlag =
+      options.allowTestBaseUrlOverride === true ||
+      process.env.DEROUTE_ALLOW_TEST_BASE_URL_OVERRIDE === "1";
+    if (!explicitTestFlag) {
+      throw new Error(
+        "Custom metadataBaseUrl and secretManagerBaseUrl overrides require explicit allowTestBaseUrlOverride: true.",
+      );
+    }
   }
 
   const metadataBaseUrl = hasCustomMetadata
-    ? normalizeBaseUrl(options.metadataBaseUrl, "metadataBaseUrl")
+    ? normalizeTestLoopbackBaseUrl(options.metadataBaseUrl, "metadataBaseUrl")
     : DEFAULT_GCP_METADATA_BASE_URL;
   const secretManagerBaseUrl = hasCustomSecretManager
-    ? normalizeBaseUrl(options.secretManagerBaseUrl, "secretManagerBaseUrl")
+    ? normalizeTestLoopbackBaseUrl(options.secretManagerBaseUrl, "secretManagerBaseUrl")
     : DEFAULT_SECRET_MANAGER_BASE_URL;
 
   return { metadataBaseUrl, secretManagerBaseUrl };
@@ -86,6 +108,7 @@ async function fetchWithTimeout(url, init, timeoutMs = SECRETS_REQUEST_TIMEOUT_M
   try {
     return await fetch(url, {
       ...init,
+      redirect: "error",
       signal: controller.signal,
     });
   } finally {

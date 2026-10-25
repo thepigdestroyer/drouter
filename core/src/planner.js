@@ -20,6 +20,7 @@ import {
 } from "./firewall.js";
 import { getKeyRing } from "./keys.js";
 import { signGeminiEgressReceipt } from "./receipts.js";
+import { getLoadedSecret, resolveSecretsSource } from "./secrets-gcp.js";
 
 const ALLOWED_INTERACTION_STATUSES = new Set([
   "completed",
@@ -108,9 +109,17 @@ export async function planWithGemini({
   const signingKey = egressKeyPair ?? getKeyRing()["egress-signing"];
   const egressReceipt = signGeminiEgressReceipt(createRequest, signingKey, timestampSec);
 
+  const secretsSource = resolveSecretsSource(process.env.CORE_SECRETS_SOURCE);
+  const envFallbackKey =
+    secretsSource === "gcp-secret-manager"
+      ? ""
+      : typeof process.env.GEMINI_API_KEY === "string"
+        ? process.env.GEMINI_API_KEY.trim()
+        : "";
   const resolvedKey =
     (typeof apiKey === "string" ? apiKey.trim() : "") ||
-    (typeof process.env.GEMINI_API_KEY === "string" ? process.env.GEMINI_API_KEY.trim() : "");
+    (getLoadedSecret("GEMINI_API_KEY") ?? "") ||
+    envFallbackKey;
 
   if (!resolvedKey && !genaiClient) {
     return {

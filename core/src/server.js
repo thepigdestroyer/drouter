@@ -3,7 +3,11 @@ import http from "node:http";
 import https from "node:https";
 import { pathToFileURL } from "node:url";
 import { MongoClient } from "mongodb";
-import { configureAttestation, getAttestation } from "./attestation-gcp.js";
+import {
+  configureAttestation,
+  getAttestation,
+  validateLauncherJwtClaims,
+} from "./attestation-gcp.js";
 import { ATLAS_DATABASE_NAME, getWholeKnowledgeCorpus } from "./corpus.js";
 import {
   ContentFreeEgressError,
@@ -12,7 +16,11 @@ import {
   TaskDescriptorValidationError,
   ToolPolicyViolationError,
 } from "./firewall.js";
-import { getKeyRing, getPublicKeysResponse } from "./keys.js";
+import {
+  computePublicKeysBindingSha256,
+  getKeyRing,
+  getPublicKeysResponse,
+} from "./keys.js";
 import { planWithGemini } from "./planner.js";
 import {
   TreeHeadStateVerificationError,
@@ -28,6 +36,7 @@ import {
   privateKey as bootTlsPrivateKey,
   tlsCertPem as bootTlsCertPem,
   tlsSpkiSha256 as bootTlsSpkiSha256,
+  validateTlsCertAndKeyMatch,
 } from "./tls.js";
 
 export const ALLOWED_CORS_ORIGINS = new Set([
@@ -215,13 +224,28 @@ function readBoundedJsonBody(req, maxBytes = MAX_BODY_BYTES) {
   });
 }
 
+function resolveDefaultOperatorSecret(explicitSecretsSource) {
+  const loaded = getLoadedSecret("CORE_OPERATOR_TOKEN");
+  if (loaded) {
+    return loaded;
+  }
+  const source = resolveSecretsSource(
+    explicitSecretsSource !== undefined ? explicitSecretsSource : process.env.CORE_SECRETS_SOURCE,
+  );
+  if (source === "gcp-secret-manager") {
+    return undefined;
+  }
+  return process.env.CORE_OPERATOR_TOKEN;
+}
+
 /**
  * Constant-time Bearer token check against `CORE_OPERATOR_TOKEN`.
- * Always fails closed when `CORE_OPERATOR_TOKEN` is unset or empty.
+ * Always fails closed when `CORE_OPERATOR_TOKEN` is unset or empty, and never falls back
+ * to `process.env` when `CORE_SECRETS_SOURCE=gcp-secret-manager`.
  */
 export function verifyOperatorBearer(
   req,
-  expectedSecret = getLoadedSecret("CORE_OPERATOR_TOKEN") ?? process.env.CORE_OPERATOR_TOKEN,
+  expectedSecret = resolveDefaultOperatorSecret(),
 ) {
   if (typeof expectedSecret !== "string" || expectedSecret.length === 0) {
     return false;
@@ -252,14 +276,88 @@ const ALLOWED_PATHS = new Set([
   "/keys",
 ]);
 
+function verifyAttestationMatchesServerState(att, {
+  expectedEgress,
+  expectedTree,
+  expectedKeysDigest,
+  expectedTlsSpkiSha256,
+  expectedTlsCertPem,
+  nowSec,
+}) {
+  const token = typeof att?.token === "string" ? att.token.trim() : "";
+  const egress = typeof att?.keys?.egress === "string" ? att.keys.egress.trim() : "";
+  const tree = typeof att?.keys?.tree === "string" ? att.keys.tree.trim() : "";
+  const keysDigest = typeof att?.keysDigest === "string" ? att.keysDigest.trim() : "";
+  const tlsSpkiSha256 =
+    typeof att?.tlsSpkiSha256 === "string" ? att.tlsSpkiSha256.trim() : "";
+  const tlsCertPem = typeof att?.tlsCertPem === "string" ? att.tlsCertPem.trim() : "";
+  const refreshedAtSec =
+    typeof att?.refreshedAtSec === "number" && Number.isFinite(att.refreshedAtSec)
+      ? Math.floor(att.refreshedAtSec)
+      : null;
+  const expiresAtSec =
+    typeof att?.expiresAtSec === "number" && Number.isFinite(att.expiresAtSec)
+      ? Math.floor(att.expiresAtSec)
+      : null;
+
+  if (
+    !token ||
+    token.split(".").length !== 3 ||
+    !egress ||
+    !tree ||
+    !keysDigest ||
+    !tlsSpkiSha256 ||
+    !tlsCertPem ||
+    refreshedAtSec === null ||
+    expiresAtSec === null ||
+    expiresAtSec <= nowSec ||
+    egress !== expectedEgress ||
+    tree !== expectedTree ||
+    keysDigest !== expectedKeysDigest ||
+    tlsSpkiSha256 !== expectedTlsSpkiSha256 ||
+    tlsCertPem !== expectedTlsCertPem
+  ) {
+    return null;
+  }
+
+  const { expiresAtSec: jwtExpSec } = validateLauncherJwtClaims(
+    token,
+    [expectedKeysDigest, expectedTlsSpkiSha256],
+    nowSec,
+  );
+  if (jwtExpSec <= nowSec) {
+    return null;
+  }
+
+  return {
+    token,
+    keys: {
+      egress,
+      tree,
+    },
+    keysDigest,
+    tlsSpkiSha256,
+    tlsCertPem,
+    refreshedAtSec,
+    expiresAtSec,
+  };
+}
+
 let inMemoryMongoClientPromise = null;
 let inMemoryMongoUri = null;
 
-async function resolveDatabaseDep(explicitDb) {
+async function resolveDatabaseDep(explicitDb, explicitMongodbUri, explicitSecretsSource) {
   if (explicitDb !== undefined) {
     return explicitDb;
   }
-  const secretUri = getLoadedSecret("MONGODB_URI");
+  const source = resolveSecretsSource(
+    explicitSecretsSource !== undefined ? explicitSecretsSource : process.env.CORE_SECRETS_SOURCE,
+  );
+  const secretUri =
+    explicitMongodbUri !== undefined
+      ? explicitMongodbUri
+      : getLoadedSecret("MONGODB_URI") ??
+        (source === "gcp-secret-manager" ? undefined : process.env.MONGODB_URI);
   if (!secretUri) {
     return undefined;
   }
@@ -349,42 +447,80 @@ export async function handleCoreRequest(req, res, deps = {}) {
       return;
     }
 
+    const effectiveKeySource = keyRing.keySource ?? keyRing["egress-signing"]?.keySource;
+    if (effectiveKeySource !== "boot") {
+      sendJson(
+        res,
+        503,
+        {
+          ok: false,
+          error: "attestation_unavailable",
+          message:
+            "Confidential Space attestation token is only served in CORE_KEY_SOURCE=boot mode.",
+        },
+        cors.headers,
+      );
+      return;
+    }
+
     const nowSec =
       typeof deps.nowSec === "function" ? deps.nowSec() : Math.floor(Date.now() / 1000);
+    const expectedEgress = keyRing["egress-signing"].publicKeyHex;
+    const expectedTree = keyRing["tree-signing"].publicKeyHex;
+    const expectedKeysDigest = computePublicKeysBindingSha256(keyRing);
+    const expectedTlsSpkiSha256 = (deps.tlsSpkiSha256 ?? bootTlsSpkiSha256).trim();
+    const expectedTlsCertPem = (deps.tlsCertPem ?? bootTlsCertPem).trim();
+
+    const triggerBackgroundRefresh = () => {
+      try {
+        if (typeof deps.refreshAttestation === "function") {
+          Promise.resolve(deps.refreshAttestation()).catch(() => {});
+        } else if (deps.attestationManager && typeof deps.attestationManager.refresh === "function") {
+          Promise.resolve(deps.attestationManager.refresh()).catch(() => {});
+        } else if (typeof deps.getAttestation === "function") {
+          Promise.resolve(deps.getAttestation({ forceRefresh: true })).catch(() => {});
+        } else {
+          Promise.resolve(
+            getAttestation({
+              keyRing,
+              tlsCertPem: expectedTlsCertPem,
+              tlsSpkiSha256: expectedTlsSpkiSha256,
+              forceRefresh: true,
+            }),
+          ).catch(() => {});
+        }
+      } catch {
+        // Ignore synchronous errors from background refresh trigger
+      }
+    };
 
     try {
       const att = await (typeof deps.getAttestation === "function"
         ? deps.getAttestation()
-        : getAttestation());
+        : deps.attestationManager && typeof deps.attestationManager.getAttestation === "function"
+          ? deps.attestationManager.getAttestation()
+          : getAttestation({
+              keyRing,
+              tlsCertPem: expectedTlsCertPem,
+              tlsSpkiSha256: expectedTlsSpkiSha256,
+            }));
 
-      const token = typeof att?.token === "string" ? att.token.trim() : "";
-      const egress = typeof att?.keys?.egress === "string" ? att.keys.egress.trim() : "";
-      const tree = typeof att?.keys?.tree === "string" ? att.keys.tree.trim() : "";
-      const keysDigest = typeof att?.keysDigest === "string" ? att.keysDigest.trim() : "";
-      const tlsSpkiSha256 =
-        typeof att?.tlsSpkiSha256 === "string" ? att.tlsSpkiSha256.trim() : "";
-      const tlsCertPem = typeof att?.tlsCertPem === "string" ? att.tlsCertPem.trim() : "";
-      const refreshedAtSec =
-        typeof att?.refreshedAtSec === "number" && Number.isFinite(att.refreshedAtSec)
-          ? Math.floor(att.refreshedAtSec)
-          : null;
-      const expiresAtSec =
-        typeof att?.expiresAtSec === "number" && Number.isFinite(att.expiresAtSec)
-          ? Math.floor(att.expiresAtSec)
-          : null;
+      let verified = null;
+      try {
+        verified = verifyAttestationMatchesServerState(att, {
+          expectedEgress,
+          expectedTree,
+          expectedKeysDigest,
+          expectedTlsSpkiSha256,
+          expectedTlsCertPem,
+          nowSec,
+        });
+      } catch {
+        verified = null;
+      }
 
-      if (
-        !token ||
-        token.split(".").length !== 3 ||
-        !egress ||
-        !tree ||
-        !keysDigest ||
-        !tlsSpkiSha256 ||
-        !tlsCertPem ||
-        refreshedAtSec === null ||
-        expiresAtSec === null ||
-        expiresAtSec <= nowSec
-      ) {
+      if (!verified) {
+        triggerBackgroundRefresh();
         sendJson(
           res,
           503,
@@ -392,32 +528,17 @@ export async function handleCoreRequest(req, res, deps = {}) {
             ok: false,
             error: "attestation_unavailable",
             message:
-              "Confidential Space attestation token is missing, expired, or unavailable.",
+              "Confidential Space attestation token is missing, expired, or does not match current keys and TLS certificate.",
           },
           cors.headers,
         );
         return;
       }
 
-      sendJson(
-        res,
-        200,
-        {
-          token,
-          keys: {
-            egress,
-            tree,
-          },
-          keysDigest,
-          tlsSpkiSha256,
-          tlsCertPem,
-          refreshedAtSec,
-          expiresAtSec,
-        },
-        cors.headers,
-      );
+      sendJson(res, 200, verified, cors.headers);
       return;
     } catch {
+      triggerBackgroundRefresh();
       sendJson(
         res,
         503,
@@ -469,7 +590,14 @@ export async function handleCoreRequest(req, res, deps = {}) {
       sendJson(res, 400, { ok: false, error: "query_parameters_forbidden" }, cors.headers);
       return;
     }
-    sendJson(res, 200, getPublicKeysResponse(keyRing), cors.headers);
+    sendJson(
+      res,
+      200,
+      getPublicKeysResponse(keyRing, {
+        tlsSpkiSha256: deps.tlsSpkiSha256 ?? bootTlsSpkiSha256,
+      }),
+      cors.headers,
+    );
     return;
   }
 
@@ -492,7 +620,7 @@ export async function handleCoreRequest(req, res, deps = {}) {
       );
       return;
     }
-    const db = await resolveDatabaseDep(deps.db);
+    const db = await resolveDatabaseDep(deps.db, deps.mongodbUri, deps.secretsSource);
     const corpus = await getWholeKnowledgeCorpus({ db });
     sendJson(res, 200, corpus, {
       ...cors.headers,
@@ -633,7 +761,7 @@ export async function handleCoreRequest(req, res, deps = {}) {
     const expectedToken =
       deps.operatorToken !== undefined
         ? deps.operatorToken
-        : getLoadedSecret("CORE_OPERATOR_TOKEN") ?? process.env.CORE_OPERATOR_TOKEN;
+        : resolveDefaultOperatorSecret(deps.secretsSource);
     if (!verifyOperatorBearer(req, expectedToken)) {
       sendJson(
         res,
@@ -672,7 +800,7 @@ export async function handleCoreRequest(req, res, deps = {}) {
     }
 
     try {
-      const db = await resolveDatabaseDep(deps.db);
+      const db = await resolveDatabaseDep(deps.db, deps.mongodbUri, deps.secretsSource);
       const signed = await verifyAndSignTreeHead(body, {
         keyPair: keyRing["tree-signing"],
         db,
@@ -785,11 +913,18 @@ export function createCoreServer(deps = {}) {
 
   if (resolvedKeyRing.keySource === "boot") {
     const tlsMaterial = deps.tlsMaterial ?? getBootTlsMaterial();
-    const certPem = deps.tlsCertPem ?? tlsMaterial.tlsCertPem ?? bootTlsCertPem;
-    const keyPem = deps.tlsPrivateKey ?? tlsMaterial.privateKey ?? bootTlsPrivateKey;
-    const spkiSha256 = deps.tlsSpkiSha256 ?? tlsMaterial.tlsSpkiSha256 ?? bootTlsSpkiSha256;
+    const rawCertPem = deps.tlsCertPem ?? tlsMaterial.tlsCertPem ?? bootTlsCertPem;
+    const rawKeyPem = deps.tlsPrivateKey ?? tlsMaterial.privateKey ?? bootTlsPrivateKey;
+    const validatedTls = validateTlsCertAndKeyMatch(
+      rawCertPem,
+      rawKeyPem,
+      deps.tlsSpkiSha256,
+    );
+    const certPem = validatedTls.tlsCertPem;
+    const keyPem = validatedTls.tlsPrivateKey;
+    const spkiSha256 = validatedTls.tlsSpkiSha256;
 
-    configureAttestation({
+    const attestationManager = configureAttestation({
       keyRing: resolvedKeyRing,
       tlsCertPem: certPem,
       tlsSpkiSha256: spkiSha256,
@@ -800,6 +935,10 @@ export function createCoreServer(deps = {}) {
         : {}),
       ...(deps.nowSec ? { nowSec: deps.nowSec } : {}),
     });
+
+    serverDeps.tlsCertPem = certPem;
+    serverDeps.tlsSpkiSha256 = spkiSha256;
+    serverDeps.attestationManager = attestationManager;
 
     const httpsServer = https.createServer(
       {
@@ -813,58 +952,13 @@ export function createCoreServer(deps = {}) {
     httpsServer.tlsCertPem = certPem;
     httpsServer.keySource = "boot";
     httpsServer.defaultPort = DEFAULT_BOOT_HTTPS_PORT;
+    httpsServer.attestationManager = attestationManager;
 
-    if (!deps.tlsOnly) {
-      const httpFallback = http.createServer(requestHandler);
-      applyServerHardeningTimeouts(httpFallback);
-      const fallbackSockets = new Set();
-      const origClose = httpsServer.close.bind(httpsServer);
-      httpsServer.close = (cb) => {
-        for (const s of fallbackSockets) {
-          s.destroy();
-        }
-        fallbackSockets.clear();
-        httpFallback.close();
-        return origClose(cb);
-      };
-      const tlsListeners = httpsServer.listeners("connection");
-      httpsServer.removeAllListeners("connection");
-      httpsServer.on("connection", (socket) => {
-        const preHandshakeTimer = setTimeout(() => {
-          socket.destroy();
-        }, httpsServer.headersTimeout);
-
-        const cleanup = () => {
-          clearTimeout(preHandshakeTimer);
-          socket.removeListener("readable", onReadable);
-          socket.removeListener("error", cleanup);
-          socket.removeListener("close", cleanup);
-        };
-
-        const onReadable = () => {
-          const firstByte = socket.read(1);
-          if (firstByte === null) {
-            return;
-          }
-          cleanup();
-          socket.unshift(firstByte);
-          // 0x16 is the TLS Record ContentType for Handshake (ClientHello)
-          if (firstByte[0] === 0x16) {
-            for (const fn of tlsListeners) {
-              fn.call(httpsServer, socket);
-            }
-          } else {
-            fallbackSockets.add(socket);
-            socket.once("close", () => fallbackSockets.delete(socket));
-            httpFallback.emit("connection", socket);
-          }
-        };
-
-        socket.on("readable", onReadable);
-        socket.once("error", cleanup);
-        socket.once("close", cleanup);
-      });
-    }
+    const origClose = httpsServer.close.bind(httpsServer);
+    httpsServer.close = (cb) => {
+      attestationManager.stop();
+      return origClose(cb);
+    };
 
     return httpsServer;
   }
@@ -910,10 +1004,44 @@ export async function startCoreServer(options = {}) {
     ...options,
     keyRing: resolvedKeyRing,
     secretsSource,
-    tlsOnly: options.tlsOnly ?? resolvedKeyRing.keySource === "boot",
+    mongodbUri: options.mongodbUri ?? loadedSecrets.MONGODB_URI,
     geminiApiKey: options.geminiApiKey ?? loadedSecrets.GEMINI_API_KEY,
     operatorToken: options.operatorToken ?? loadedSecrets.CORE_OPERATOR_TOKEN,
   });
+
+  if (resolvedKeyRing.keySource === "boot") {
+    const nowSec =
+      typeof options.nowSec === "function" ? options.nowSec() : Math.floor(Date.now() / 1000);
+    const expectedEgress = resolvedKeyRing["egress-signing"].publicKeyHex;
+    const expectedTree = resolvedKeyRing["tree-signing"].publicKeyHex;
+    const expectedKeysDigest = computePublicKeysBindingSha256(resolvedKeyRing);
+    const expectedTlsSpkiSha256 = server.tlsSpkiSha256;
+    const expectedTlsCertPem = server.tlsCertPem;
+
+    try {
+      const initialAtt = await (typeof options.getAttestation === "function"
+        ? options.getAttestation()
+        : server.attestationManager.getAttestation());
+
+      const verified = verifyAttestationMatchesServerState(initialAtt, {
+        expectedEgress,
+        expectedTree,
+        expectedKeysDigest,
+        expectedTlsSpkiSha256,
+        expectedTlsCertPem,
+        nowSec,
+      });
+
+      if (!verified) {
+        throw new Error(
+          "Initial Confidential Space attestation token does not match server keys or TLS certificate.",
+        );
+      }
+    } catch (err) {
+      server.attestationManager?.stop?.();
+      throw err;
+    }
+  }
 
   await new Promise((resolve, reject) => {
     const onError = (err) => {

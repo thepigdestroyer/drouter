@@ -65,6 +65,15 @@ function makeValidDescriptor(overrides = {}) {
   };
 }
 
+// The HTTP hardening and planner tests run on the plain HTTP path (Tinfoil mode, where the shim terminates TLS);
+// boot mode is HTTPS-only and is covered by test/server-gcp.test.js.
+function makeTinfoilTestKeysDir() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "deroute-core-http-keys-"));
+  writeTestAttestedKeyPemFiles(dir, "egress-signing", "33".repeat(32));
+  writeTestAttestedKeyPemFiles(dir, "tree-signing", "44".repeat(32));
+  return dir;
+}
+
 function makeMockTransparencyDb(leaves) {
   return {
     collection(name) {
@@ -899,7 +908,8 @@ test("HTTP server enforces CORS, timeouts, duplicate-key rejection, bearer auth 
   const testOperatorToken = "operator-secret-token-2026";
 
   const server = createCoreServer({
-    keySource: "boot",
+    keySource: "tinfoil",
+    keysDir: makeTinfoilTestKeysDir(),
     db: mockDb,
     operatorToken: testOperatorToken,
     timestampSec: 1792886400,
@@ -928,7 +938,7 @@ test("HTTP server enforces CORS, timeouts, duplicate-key rejection, bearer auth 
     const healthJson = await healthRes.json();
     assert.equal(healthJson.ok, true);
     assert.equal(healthJson.service, "deroute-core");
-    assert.equal(healthJson.keySource, "boot");
+    assert.equal(healthJson.keySource, "tinfoil");
 
     // 2. Disallowed CORS origin returns 403
     const badCorsRes = await fetch(`${baseUrl}/health`, {
@@ -1092,7 +1102,8 @@ test("HTTP server enforces CORS, timeouts, duplicate-key rejection, bearer auth 
 
   // Test POST /agent/plan with mocked Gemini Interactions client
   const serverWithGemini = createCoreServer({
-    keySource: "boot",
+    keySource: "tinfoil",
+    keysDir: makeTinfoilTestKeysDir(),
     db: null,
     genaiClient: mockedGenaiClient,
     timestampSec: 1792886400,
@@ -1169,7 +1180,8 @@ test("HTTP server returns 422 on untrusted model tool policy violation, fails cl
   };
 
   const server = createCoreServer({
-    keySource: "boot",
+    keySource: "tinfoil",
+    keysDir: makeTinfoilTestKeysDir(),
     db: null,
     operatorToken: "",
     genaiClient: maliciousGenaiClient,
