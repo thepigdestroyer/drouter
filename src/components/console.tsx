@@ -42,6 +42,10 @@ import {
 } from "@/components/console/proof-exporter";
 import { ReceiptView } from "@/components/trust-panel";
 import { PrivacyBar } from "@/components/privacy-bar";
+import {
+  FilterFingerprintBadge,
+  useFilterFingerprintStatus,
+} from "@/components/privacy/filter-fingerprint-badge";
 import { FreezeDrawer } from "@/components/freeze-drawer";
 import {
   VisualTrustDashboard,
@@ -166,6 +170,7 @@ export function Console() {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("overview");
   const [terminalModalOpen, setTerminalModalOpen] = useState(false);
+  const filterFingerprintStatus = useFilterFingerprintStatus();
   const scrubberRef = useRef(createSessionScrubber());
   const scrollRef = useRef<HTMLDivElement>(null);
   const didAutoConnectRef = useRef(false);
@@ -337,10 +342,12 @@ export function Console() {
   );
 
   const hasFailedCheck = checks.some((c) => c.status === "fail");
+  const filterBlocked = filterFingerprintStatus.blockingSend;
   const canSend =
     phase === "ready" &&
     Boolean(session) &&
     !hasFailedCheck &&
+    !filterBlocked &&
     checks.length > 0;
 
   const send = useCallback(async () => {
@@ -808,6 +815,16 @@ export function Console() {
         </div>
 
         {/* Big friendly input form */}
+        {filterBlocked && (
+          <div
+            role="alert"
+            data-testid="console-filter-mismatch-block"
+            className="border-t border-accent bg-accent-soft px-4 py-2.5 text-xs text-accent"
+          >
+            {filterFingerprintStatus.blockReason ??
+              "Sending is blocked because the personal-detail filter running in this browser does not match the published version in the public receipt book."}
+          </div>
+        )}
         <form
           className="flex items-end gap-2.5 border-t border-rule bg-paper-2 p-3 sm:p-4"
           onSubmit={(e) => {
@@ -833,11 +850,13 @@ export function Console() {
             placeholder={
               canSend
                 ? "Type a message... Personal details are hidden automatically."
-                : phase === "verifying"
-                  ? "Checking the seal on the computer..."
-                  : phase === "error" || hasFailedCheck
-                    ? "Not safe to send right now (seal check did not pass)"
-                    : "Check the seal first to unlock the chat"
+                : filterBlocked
+                  ? "Sending is paused because the personal-detail filter does not match the published version"
+                  : phase === "verifying"
+                    ? "Checking the seal on the computer..."
+                    : phase === "error" || hasFailedCheck
+                      ? "Not safe to send right now (seal check did not pass)"
+                      : "Check the seal first to unlock the chat"
             }
             className="ep-input min-h-[3.5rem] min-w-0 flex-1 resize-y py-2.5 leading-snug text-sm sm:text-base"
           />
@@ -861,6 +880,8 @@ export function Console() {
 
       {/* Plain-language Privacy Summary, Pause/Lock, and Technical Disclosures */}
       <div className="ep-card space-y-4 p-4 sm:p-5">
+        <FilterFingerprintBadge status={filterFingerprintStatus} />
+
         <PrivacyBar
           scrubEnabled={scrubEnabled}
           onToggleScrub={setScrubEnabled}

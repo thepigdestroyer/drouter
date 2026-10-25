@@ -6,6 +6,11 @@ import {
   takeCreditHeader,
 } from "@/lib/credits/client";
 import { preparePrompt, type PreparedPrompt } from "@/lib/pipeline";
+import {
+  evaluateLocalFilterFingerprint,
+  type PublishedFilterFingerprint,
+} from "@/lib/privacy/fingerprint";
+import type { MechanicalRuleset } from "@/lib/privacy/mechanical-ruleset";
 import type { SessionScrubber } from "@/lib/privacy/scrubber";
 
 export interface MessagePrivacyReport {
@@ -25,6 +30,42 @@ export interface PrepareTurnOptions {
   normalizeStyle?: boolean;
   scrubber?: SessionScrubber;
   customTermsOverride?: string[];
+  rulesetOverride?: MechanicalRuleset;
+  publishedFingerprintOverride?: PublishedFilterFingerprint;
+}
+
+export class FilterFingerprintMismatchError extends Error {
+  readonly computedFingerprint: string;
+  readonly publishedFingerprint: string | null;
+
+  constructor(
+    message: string,
+    computedFingerprint: string,
+    publishedFingerprint: string | null,
+  ) {
+    super(message);
+    this.name = "FilterFingerprintMismatchError";
+    this.computedFingerprint = computedFingerprint;
+    this.publishedFingerprint = publishedFingerprint;
+  }
+}
+
+export function assertFilterFingerprintAllowsSend(opts?: {
+  ruleset?: MechanicalRuleset;
+  published?: PublishedFilterFingerprint;
+}): void {
+  const status = evaluateLocalFilterFingerprint({
+    ruleset: opts?.ruleset,
+    published: opts?.published,
+  });
+  if (status.blockingSend) {
+    throw new FilterFingerprintMismatchError(
+      status.blockReason ??
+        "Sending is blocked because the personal-detail filter running in this browser does not match the published version in the public receipt book.",
+      status.computedFingerprint,
+      status.publishedFingerprint,
+    );
+  }
 }
 
 export interface PreparedTurn {
@@ -101,6 +142,11 @@ export async function prepareOutboundTurn(
   rawText: string,
   opts?: PrepareTurnOptions,
 ): Promise<PreparedTurn> {
+  assertFilterFingerprintAllowsSend({
+    ruleset: opts?.rulesetOverride,
+    published: opts?.publishedFingerprintOverride,
+  });
+
   const customTerms = opts?.customTermsOverride ?? getActiveCustomScrubTerms();
 
   const prepared = preparePrompt(rawText, {
