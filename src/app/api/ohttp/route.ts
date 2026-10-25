@@ -103,7 +103,6 @@ async function dispatchAllowlistedInternalTarget(
       const lower = k.toLowerCase();
       if (
         lower === "authorization" ||
-        lower === "x-drouter-scrub-pii" ||
         lower === "x-drouter-credit" ||
         lower === "x-drouter-credit-token" ||
         lower === "x-tinfoil-model"
@@ -203,6 +202,9 @@ async function dispatchAllowlistedInternalTarget(
         "x-ohttp-target": target.canonicalPath,
         ...(res.headers.get("x-drouter-attested")
           ? { "x-drouter-attested": res.headers.get("x-drouter-attested")! }
+          : {}),
+        ...(res.headers.get("x-drouter-redactions")
+          ? { "x-drouter-redactions": res.headers.get("x-drouter-redactions")! }
           : {}),
       },
       body: data,

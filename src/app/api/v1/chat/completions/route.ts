@@ -13,7 +13,11 @@ import {
   fetchLiveGatewayModels,
   parseGatewayChatRequest,
 } from "@/lib/gateway/harness-config";
-import { createSessionScrubber, type SessionScrubber } from "@/lib/privacy/scrubber";
+import {
+  createHostedDeltaChunkRestorer,
+  filterHostedChatRequest,
+  restoreHostedChatCompletion,
+} from "@/lib/gateway/hosted-filter";
 import {
   BodyTooLargeError,
   InvalidJsonBodyError,
@@ -44,32 +48,6 @@ const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Expose-Headers":
     "X-DRouter-Attested, X-DRouter-Node, X-DRouter-Enclave-Host, X-DRouter-Release, X-DRouter-Code-Fingerprint, X-DRouter-Enclave-Fingerprint, X-DRouter-Redactions, X-DRouter-Credit-Verified, X-DRouter-Credit-Nullifier, X-DRouter-Credit-Denomination, X-DRouter-Credits-Remaining",
 };
-
-function createChunkRestorer(scrubber: SessionScrubber | null) {
-  let pending = "";
-  return {
-    push(chunkText: string): string {
-      if (!scrubber) return chunkText;
-      pending += chunkText;
-      const openIdx = pending.lastIndexOf("[");
-      const closeIdx = pending.lastIndexOf("]");
-      if (openIdx !== -1 && openIdx > closeIdx && pending.length - openIdx < 24) {
-        const ready = pending.slice(0, openIdx);
-        pending = pending.slice(openIdx);
-        return scrubber.restore(ready);
-      }
-      const out = scrubber.restore(pending);
-      pending = "";
-      return out;
-    },
-    flush(): string {
-      if (!pending) return "";
-      const out = scrubber ? scrubber.restore(pending) : pending;
-      pending = "";
-      return out;
-    },
-  };
-}
 
 export async function OPTIONS(): Promise<Response> {
   return new Response(null, {
@@ -105,10 +83,41 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
-  let parsed = parseGatewayChatRequest(rawBody);
+  const filtered = filterHostedChatRequest(rawBody);
+  if (!filtered.ok) {
+    return Response.json(
+      {
+        error: {
+          message: filtered.error,
+          type: "invalid_request_error",
+        },
+      },
+      { status: filtered.status, headers: CORS_HEADERS },
+    );
+  }
+
+  const validationBody: Record<string, unknown> = {
+    ...filtered.body,
+    messages: Array.isArray(filtered.body.messages)
+      ? filtered.body.messages.map((m) => {
+          if (!m || typeof m !== "object" || Array.isArray(m)) return m;
+          const msgObj = m as Record<string, unknown>;
+          const hasAltPayload =
+            Boolean(msgObj.function_call) ||
+            typeof msgObj.reasoning_content === "string" ||
+            (Array.isArray(msgObj.tool_calls) && msgObj.tool_calls.length > 0);
+          if ((msgObj.content === null || msgObj.content === undefined) && hasAltPayload) {
+            return { ...msgObj, content: "" };
+          }
+          return msgObj;
+        })
+      : filtered.body.messages,
+  };
+
+  let parsed = parseGatewayChatRequest(validationBody);
   if (!parsed.ok && parsed.error.startsWith("Unsupported model")) {
     const liveModels = await fetchLiveGatewayModels();
-    parsed = parseGatewayChatRequest(rawBody, {
+    parsed = parseGatewayChatRequest(validationBody, {
       allowedModelIds: liveModels.map((m) => m.id),
     });
   }
@@ -291,49 +300,8 @@ export async function POST(req: Request): Promise<Response> {
     creditResponseHeaders["X-DRouter-Credits-Remaining"] = String(remainingTokens);
   }
 
-  // Server-side PII scrubbing is enabled by default unless explicitly disabled via header or body
-  const headerScrub = req.headers.get("x-drouter-scrub-pii")?.trim().toLowerCase();
-  const bodyRecord = rawBody as Record<string, unknown>;
-  const explicitDisableScrub =
-    headerScrub === "0" ||
-    headerScrub === "false" ||
-    bodyRecord.scrubPii === false ||
-    bodyRecord.scrub_pii === false;
-  const shouldScrub = !explicitDisableScrub;
-  const scrubber = shouldScrub ? createSessionScrubber() : null;
-
-  const preparedMessages = parsed.messages.map((m) => {
-    const scrubbedContent =
-      typeof m.content === "string"
-        ? scrubber
-          ? scrubber.scrub(m.content).scrubbed
-          : m.content
-        : m.content;
-
-    const scrubbedToolCalls =
-      m.tool_calls && m.tool_calls.length > 0
-        ? m.tool_calls.map((tc) => ({
-            ...tc,
-            function: {
-              ...tc.function,
-              arguments:
-                scrubber && typeof tc.function.arguments === "string"
-                  ? scrubber.scrub(tc.function.arguments).scrubbed
-                  : tc.function.arguments,
-            },
-          }))
-        : undefined;
-
-    return {
-      role: m.role,
-      content: scrubbedContent,
-      ...(m.name ? { name: m.name } : {}),
-      ...(m.tool_call_id ? { tool_call_id: m.tool_call_id } : {}),
-      ...(scrubbedToolCalls ? { tool_calls: scrubbedToolCalls } : {}),
-    };
-  });
-
-  const redactionCount = scrubber ? scrubber.entries().length : 0;
+  const preparedMessages = filtered.messages;
+  const redactionCount = filtered.redactionCount;
 
   try {
     const client = new TinfoilAI({ apiKey });
@@ -388,60 +356,35 @@ export async function POST(req: Request): Promise<Response> {
       );
 
       const encoder = new TextEncoder();
-      const restorer = createChunkRestorer(scrubber);
+      const deltaRestorer = createHostedDeltaChunkRestorer(filtered.session);
       let lastChunkMeta: Record<string, unknown> | null = null;
 
       const readable = new ReadableStream<Uint8Array>({
         async start(controller) {
           try {
             for await (const rawChunk of upstreamStream) {
-              const chunk = structuredClone(rawChunk) as unknown as Record<string, unknown>;
+              const chunk = deltaRestorer.restoreChunk(
+                rawChunk as unknown as Record<string, unknown>,
+              );
               lastChunkMeta = chunk;
-              const choices = Array.isArray(chunk.choices)
-                ? (chunk.choices as Array<Record<string, unknown>>)
-                : [];
-              const firstDelta =
-                choices[0]?.delta && typeof choices[0].delta === "object"
-                  ? (choices[0].delta as Record<string, unknown>)
-                  : null;
-
-              if (firstDelta) {
-                if (typeof firstDelta.content === "string" && firstDelta.content.length > 0) {
-                  firstDelta.content = restorer.push(firstDelta.content);
-                }
-                if (scrubber && Array.isArray(firstDelta.tool_calls)) {
-                  firstDelta.tool_calls = (
-                    firstDelta.tool_calls as Array<Record<string, unknown>>
-                  ).map((tc) => {
-                    const fn =
-                      tc?.function && typeof tc.function === "object"
-                        ? (tc.function as Record<string, unknown>)
-                        : null;
-                    if (fn && typeof fn.arguments === "string") {
-                      return {
-                        ...tc,
-                        function: {
-                          ...fn,
-                          arguments: scrubber.restore(fn.arguments),
-                        },
-                      };
-                    }
-                    return tc;
-                  });
-                }
-              }
-
               controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
             }
 
-            const tail = restorer.flush();
-            if (tail && lastChunkMeta) {
+            const remaining = deltaRestorer.flushRemaining();
+            if ((remaining.content || remaining.reasoning_content) && lastChunkMeta) {
+              const deltaObj: Record<string, unknown> = {};
+              if (remaining.content) {
+                deltaObj.content = remaining.content;
+              }
+              if (remaining.reasoning_content) {
+                deltaObj.reasoning_content = remaining.reasoning_content;
+              }
               const flushChunk = {
                 ...lastChunkMeta,
                 choices: [
                   {
                     index: 0,
-                    delta: { content: tail },
+                    delta: deltaObj,
                     finish_reason: null,
                   },
                 ],
@@ -476,44 +419,11 @@ export async function POST(req: Request): Promise<Response> {
       { headers: { "X-Tinfoil-Model": parsed.model } },
     );
 
-    const choices = Array.isArray(completion.choices)
-      ? completion.choices.map((c) => {
-          if (!scrubber || !c?.message) return c;
-          const nextMsg = { ...c.message } as Record<string, unknown>;
-          if (typeof nextMsg.content === "string") {
-            nextMsg.content = scrubber.restore(nextMsg.content);
-          }
-          if (Array.isArray(nextMsg.tool_calls)) {
-            nextMsg.tool_calls = (nextMsg.tool_calls as Array<Record<string, unknown>>).map(
-              (tc) => {
-                const fn =
-                  tc?.function && typeof tc.function === "object"
-                    ? (tc.function as Record<string, unknown>)
-                    : null;
-                if (fn && typeof fn.arguments === "string") {
-                  return {
-                    ...tc,
-                    function: {
-                      ...fn,
-                      arguments: scrubber.restore(fn.arguments),
-                    },
-                  };
-                }
-                return tc;
-              },
-            );
-          }
-          return {
-            ...c,
-            message: nextMsg,
-          };
-        })
-      : completion.choices;
+    const restoredCompletion = restoreHostedChatCompletion(completion, filtered.session);
 
     return Response.json(
       {
-        ...completion,
-        choices,
+        ...restoredCompletion,
         drouter_attestation: {
           securityVerified: doc.securityVerified,
           enclaveHost: doc.enclaveHost,

@@ -6,7 +6,7 @@ import {
   splitTaskIntoCompartments,
 } from "@/lib/compartment/splitter";
 import { listNodes } from "@/lib/arc/registry";
-import { preparePrompt } from "@/lib/pipeline";
+import { prepareHostedCompartmentPrompt } from "@/lib/gateway/hosted-filter";
 import {
   BodyTooLargeError,
   InvalidJsonBodyError,
@@ -113,7 +113,7 @@ export async function POST(request: NextRequest) {
         ? body.prompt.slice(0, MAX_PROMPT_CHARS)
         : SPECIFICATION_FIVE_FRAGMENT_PROMPT;
 
-    const prepared = preparePrompt(rawPrompt, {
+    const prepared = prepareHostedCompartmentPrompt(rawPrompt, {
       customTerms: Array.isArray(body?.customTerms) ? body.customTerms : undefined,
       normalizeStyle: Boolean(body?.normalizeStyle),
     });
