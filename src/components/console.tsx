@@ -217,8 +217,12 @@ export function Console() {
   const [lastScrubbed, setLastScrubbed] = useState<ScrubResult | null>(null);
   const [lastPrivacyReport, setLastPrivacyReport] =
     useState<MessagePrivacyReport | null>(null);
-  const [customTermsCount, setCustomTermsCount] = useState(0);
-  const [creditBalance, setCreditBalance] = useState<number | null>(null);
+  const [customTermsCount, setCustomTermsCount] = useState(
+    () => getActiveCustomScrubTerms().length,
+  );
+  const [creditBalance, setCreditBalance] = useState<number | null>(() =>
+    storedCreditBalance(),
+  );
   const [mintingCredits, setMintingCredits] = useState(false);
   const [lastNullifier, setLastNullifier] = useState<string | null>(null);
   const [exportedProof, setExportedProof] =
@@ -235,8 +239,6 @@ export function Console() {
   const didAutoConnectRef = useRef(false);
 
   useEffect(() => {
-    setCreditBalance(storedCreditBalance());
-    setCustomTermsCount(getActiveCustomScrubTerms().length);
     const unsub = subscribeVaultSession(() => {
       if (!getCurrentVaultSession()) {
         mechanicalSessionRef.current?.clear();
