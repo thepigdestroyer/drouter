@@ -8,13 +8,20 @@ import { canonicalJson, coarsenEpochSecToHour, sha256Hex } from "../src/canonica
 import { EMBEDDING_DIMENSIONS, getWholeKnowledgeCorpus } from "../src/corpus.js";
 import {
   ALLOWED_PLANNER_TOOLS,
+  ARGON_CONFIDENTIAL_TOOLS,
   assertContentFree,
   assertValidToolCall,
   bucketTaskDescriptor,
   ContentFreeEgressError,
+  createDigestHandleMapState,
+  GEMINI_4_ARGON_MODEL_ID,
   LOOKUP_TOPICS,
+  MAX_GOOGLE_BOUND_HEX_LENGTH,
+  replaceDigestsWithOpaqueHandles,
+  SPLIT_KNOWLEDGE_SYSTEM_INSTRUCTION,
   ToolPolicyViolationError,
   validateTaskDescriptor,
+  validateToolCallArguments,
 } from "../src/firewall.js";
 import {
   computePublicKeysBindingSha256,
@@ -369,6 +376,244 @@ test("assertContentFree blocks all 5 CRITICAL-2 bypasses as well as free text an
     deep = { result: deep };
   }
   assert.throws(() => assertContentFree(deep), ContentFreeEgressError);
+
+  // =========================================================================
+  // PASS-2 ADVERSARIAL CASES (IMPORTANT-1, IMPORTANT-2, MINOR-1 & HEX ROOT CAUSE)
+  // =========================================================================
+
+  // IMPORTANT-1.1: Numeric-only, boolean-only, object-only, and object-array keys reject string enums and handles
+  assert.throws(
+    () =>
+      assertContentFree({
+        EMAIL: "provider:tinfoil",
+        SECRET: "attack:voltage-glitching",
+        inputTokenEstimate: "$RESULT_42",
+        background: "provider:venice-ai",
+      }),
+    ContentFreeEgressError,
+  );
+  assert.throws(() => assertContentFree({ EMAIL: "provider:tinfoil" }), ContentFreeEgressError);
+  assert.throws(
+    () => assertContentFree({ SECRET: "attack:voltage-glitching" }),
+    ContentFreeEgressError,
+  );
+  assert.throws(() => assertContentFree({ inputTokenEstimate: "$RESULT_42" }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ background: "provider:venice-ai" }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ store: "ok" }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ redactionCounts: "ok" }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ verification: "$INPUT" }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ input: "ok" }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ tools: "$INPUT" }), ContentFreeEgressError);
+
+  // IMPORTANT-1.2: Exclusive key categories in isContentFreeString (no fallthrough)
+  assert.throws(() => assertContentFree({ contentSha256: "$INPUT" }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ contentSha256: "ok" }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ topDocSha256: "$DOC_1" }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ receiptSha256: "$RECEIPT_1" }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ id: "provider:tinfoil" }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ call_id: "$RESULT_19" }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ tool_call_id: "ok" }), ContentFreeEgressError);
+  assert.throws(
+    () => assertContentFree({ previous_interaction_id: "provider:tinfoil" }),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () => assertContentFree({ system_instruction: "provider:tinfoil" }),
+    ContentFreeEgressError,
+  );
+  assert.throws(() => assertContentFree({ description: "ok" }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ required: ["$RESULT_1"] }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ required: ["ok"] }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ inputHandle: "ok" }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ outputHandle: "verified" }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ resultHandle: "provider:tinfoil" }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ topDocHandle: "ok" }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ receiptHandle: "executed" }), ContentFreeEgressError);
+
+  // IMPORTANT-1.3: Plain objects rejected under primitive-only keys
+  assert.throws(() => assertContentFree({ text: { status: "ok" } }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ EMAIL: { status: "ok" } }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ contentSha256: { status: "ok" } }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ status: { status: "ok" } }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ inputHandle: { status: "ok" } }), ContentFreeEgressError);
+
+  // IMPORTANT-2.1: Alternating high-bit (0x80) ASCII bypass
+  const alternatingHighBitHex =
+    "0x50e174e965ee74a04ae16ee520c46fe520d353ce20b132b32db435ad36b738b9";
+  assert.throws(
+    () => assertContentFree({ contentSha256: alternatingHighBitHex }),
+    ContentFreeEgressError,
+  );
+
+  // IMPORTANT-2.2: Non-null control-byte separators (0x01..0x1f) + digits/punctuation bypass
+  const controlByteSeparatorHex =
+    "0x4a616e65446f65013132332d34352d02363738393a484903562b736563720421";
+  assert.throws(
+    () => assertContentFree({ contentSha256: controlByteSeparatorHex }),
+    ContentFreeEgressError,
+  );
+
+  // Short hex defense-in-depth (<= 16 chars)
+  const shortAsciiHex = "0x" + Buffer.from("Patient", "utf8").toString("hex");
+  assert.ok(shortAsciiHex.length <= MAX_GOOGLE_BOUND_HEX_LENGTH);
+  assert.throws(
+    () => assertContentFree({ contentSha256: shortAsciiHex }, "$.googleBound"),
+    ContentFreeEgressError,
+  );
+  assert.doesNotThrow(() => {
+    assertContentFree({ contentSha256: "0x9f86d081884c" }, "$.googleBound");
+  });
+
+  // Any hex string > 16 chars is rejected in Google-bound payloads (even a genuine SHA-256 digest!)
+  const genuineSha256 =
+    "0x9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+  assert.throws(
+    () => assertContentFree({ contentSha256: genuineSha256 }, "$.createRequest"),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () => assertContentFree({ topDocSha256: genuineSha256 }, "$.followUpRequest(1)"),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () =>
+      assertContentFree(
+        { receiptSha256: genuineSha256 },
+        "$.functionResult(anchor_arc_settlement_with_human_gate)",
+      ),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () =>
+      assertContentFree({
+        type: "function_result",
+        call_id: "call-1",
+        name: "scrub_and_symmetry_mask",
+        result: canonicalJson({ status: "ok", contentSha256: genuineSha256 }),
+      }),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () => assertContentFree({ contentSha256: "0x9f86d081884c7d65" }),
+    ContentFreeEgressError,
+  );
+
+  // MINOR-1: LOOKUP_TOPICS accepted in search_atlas_hybrid_kb
+  for (const lookupTopic of LOOKUP_TOPICS) {
+    const validated = validateToolCallArguments("search_atlas_hybrid_kb", {
+      topic: lookupTopic,
+      inputHandle: "$INPUT",
+      category: "provider",
+    });
+    assert.equal(validated.valid, true);
+    assert.equal(validated.sanitizedArgs.topic, lookupTopic);
+  }
+
+  // Legitimate orchestrator request shapes and local handle mapping for digests
+  const descriptor = makeValidDescriptor();
+  assert.doesNotThrow(() => assertContentFree(descriptor, "$.taskDescriptor"));
+
+  const createRequest = {
+    model: GEMINI_4_ARGON_MODEL_ID,
+    background: true,
+    store: false,
+    system_instruction: SPLIT_KNOWLEDGE_SYSTEM_INSTRUCTION,
+    generation_config: {
+      thinking_level: "medium",
+      max_output_tokens: 131_072,
+    },
+    input: [{ type: "text", text: canonicalJson(descriptor) }],
+    tools: ARGON_CONFIDENTIAL_TOOLS,
+  };
+  assert.doesNotThrow(() => assertContentFree(createRequest, "$.createRequest"));
+
+  const digestState = createDigestHandleMapState();
+  const rawToolResults = {
+    scrub_and_symmetry_mask: {
+      status: "ok",
+      passed: true,
+      outputHandle: "$RESULT_1",
+      redactionCount: 3,
+      mechanicalRedactionCount: 3,
+      attestedRedactionCount: 0,
+      bucketBytes: 4096,
+      plaintextLeakCount: 0,
+      contentSha256: genuineSha256,
+    },
+    verify_two_hop_enclave_and_quorum: {
+      status: "verified",
+      passed: true,
+      providerId: "tinfoil",
+      enclaveModel: "gemma4-31b",
+      checksPassed: 7,
+      checksTotal: 7,
+      selfHealed: false,
+      routerDigestHex: "0x4b227777d4dd1fc61c6f884f48641d02b4d121d3fd328cb08b5531fcacdabf8a",
+      enclaveMeasurementHex: "0xe3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    },
+    search_atlas_hybrid_kb: {
+      status: "ok",
+      outputHandle: "$RESULT_2",
+      vectorEngine: "app-fallback",
+      textEngine: "app-fallback",
+      fusionEngine: "app-rrf",
+      totalDocs: 16,
+      matchingReceiptsCount: 0,
+      topDocSha256: "0x2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+    },
+    invoke_attested_enclave: {
+      status: "completed",
+      outputHandle: "$RESULT_3",
+      enclaveModel: "gemma4-31b",
+      outputTokenEstimate: 128,
+      outputSha256: "0x49960de5880e8c687434170f6476605b8fe4aeb9a28632c7995cf3ba831d9763",
+      attested: true,
+    },
+    anchor_arc_settlement_with_human_gate: {
+      status: "blocked_pending_human",
+      requiresHumanApproval: true,
+      humanApproved: false,
+      stateChangedOnChain: false,
+      receiptSha256: "0x5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
+    },
+  };
+
+  const fnResults = [];
+  let idx = 0;
+  for (const [toolName, rawRes] of Object.entries(rawToolResults)) {
+    idx += 1;
+    assert.doesNotThrow(() => assertContentFree(rawRes, `$.toolExecutor.result(${toolName})`));
+    const googleSafe = replaceDigestsWithOpaqueHandles(rawRes, digestState);
+    assert.equal(/0x[0-9a-f]{16,}/i.test(JSON.stringify(googleSafe)), false);
+    assert.doesNotThrow(() => assertContentFree(googleSafe, `$.toolResult(${toolName})`));
+    const resultStep = {
+      type: "function_result",
+      call_id: `call-1-${idx}`,
+      name: toolName,
+      result: canonicalJson(googleSafe),
+    };
+    assert.doesNotThrow(() => assertContentFree(resultStep, `$.functionResult(${toolName})`));
+    fnResults.push(resultStep);
+  }
+  assert.equal(digestState.byHandle["$DOC_1"], rawToolResults.search_atlas_hybrid_kb.topDocSha256);
+  assert.equal(
+    digestState.byHandle["$RECEIPT_1"],
+    rawToolResults.anchor_arc_settlement_with_human_gate.receiptSha256,
+  );
+
+  const followUpRequest = {
+    model: GEMINI_4_ARGON_MODEL_ID,
+    background: true,
+    store: false,
+    previous_interaction_id: "inter-argon-turn-1",
+    generation_config: {
+      thinking_level: "medium",
+      max_output_tokens: 131_072,
+    },
+    input: fnResults,
+    tools: ARGON_CONFIDENTIAL_TOOLS,
+  };
+  assert.doesNotThrow(() => assertContentFree(followUpRequest, "$.followUpRequest(1)"));
 });
 
 test("Explicit CORE_KEY_SOURCE supports 'tinfoil' and 'boot', refuses missing/unknown values, and protects secretKey", async () => {

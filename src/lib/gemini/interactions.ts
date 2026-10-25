@@ -84,6 +84,33 @@ export const ALLOWED_ATLAS_CATEGORIES = [
 
 export type AllowedAtlasCategory = (typeof ALLOWED_ATLAS_CATEGORIES)[number];
 
+export const LOOKUP_TOPICS = [
+  "provider:tinfoil",
+  "provider:phala-redpill",
+  "provider:near-ai-cloud",
+  "provider:venice-ai",
+  "provider:prem-ai",
+  "provider:ppq-ai",
+  "provider:confidential-ai",
+  "provider:chutes-bittensor",
+  "provider:privatemode-cosmian",
+  "provider:nanogpt",
+  "hardware:intel-tdx",
+  "hardware:amd-sev-snp",
+  "hardware:nvidia-cc",
+  "attack:memory-bus",
+  "attack:side-channel",
+  "attack:voltage-glitching",
+  "crypto:hpke",
+  "crypto:blind-signatures",
+  "crypto:pqc-ml-kem",
+  "policy:data-retention",
+  "policy:sigstore-rekor",
+  "policy:arc-settlement",
+] as const;
+
+export type LookupTopic = (typeof LOOKUP_TOPICS)[number];
+
 export const MAX_PLANNER_STEPS = 5;
 export const MAX_PLANNER_WALL_CLOCK_MS = 20_000;
 
@@ -403,7 +430,7 @@ export const ARGON_CONFIDENTIAL_TOOLS: readonly ArgonInteractionToolDeclaration[
           type: "STRING",
           description:
             "Content-free technical topic enum (tinfoil_enclave, sev_snp_router, tdx_gpu_cc, hpke_ehbp, arc_registry, blind_credits, pii_redaction).",
-          enum: ALLOWED_ATLAS_TOPICS,
+          enum: [...ALLOWED_ATLAS_TOPICS, ...LOOKUP_TOPICS],
         },
         inputHandle: {
           type: "STRING",
@@ -473,8 +500,22 @@ export const ARGON_CONFIDENTIAL_TOOLS: readonly ArgonInteractionToolDeclaration[
   },
 ] as const;
 
-const OPAQUE_HANDLE_REGEX = /^(?:\$INPUT|\$RESULT_(?:[1-9]|[1-5]\d|6[0-4]))$/;
+const OPAQUE_HANDLE_REGEX =
+  /^(?:\$INPUT|\$(?:RESULT|DOC|RECEIPT|DIGEST|ROUTER|MEASUREMENT)_(?:[1-9]|[1-5]\d|6[0-4]))$/;
+const SHORT_HEX_REGEX = /^0x(?:[0-9a-f]{2}){1,7}$/;
 const FIXED_SHA256_HEX_REGEX = /^0x[0-9a-f]{64}$/;
+export const MAX_GOOGLE_BOUND_HEX_LENGTH = 16;
+
+/**
+ * Compatibility flag allowing legacy 64-char SHA-256 digests ONLY on unmigrated local
+ * `orchestrator.ts` `toolExecutor` outputs (`path === "$"` or `$.toolExecutor.result(...)`
+ * when `insideJsonString === false`) until the controller applies the orchestrator diff.
+ * Google-bound payloads (`createRequest`, `followUpRequest`, `functionResult`, `toolResult`,
+ * `payload`, `interactionsPayload`, `outboundGeminiRequest`, `canonicalRequest`, `taskDescriptor`,
+ * and all JSON-encoded strings `insideJsonString === true`) unconditionally reject any hex > 16 chars.
+ */
+export const ALLOW_LEGACY_ORCHESTRATOR_SHA256_UNTIL_MIGRATED = true;
+
 export const SAFE_CALL_ID_REGEX =
   /^(?:call|tc|inter)-(?:[1-9]\d{0,2}|turn-[1-9]\d{0,1}|argon-turn-[1-9]|(?:[1-9]-)?(?:scrub_and_symmetry_mask|verify_two_hop_enclave_and_quorum|search_atlas_hybrid_kb|invoke_attested_enclave|anchor_arc_settlement_with_human_gate)|[1-9]-[1-9]\d{0,1})$/;
 
@@ -511,6 +552,20 @@ export const ALLOWED_VERIFICATION_KEYS: ReadonlySet<string> = new Set<string>([
   "arcRegistryVerified",
 ]);
 
+export const ALLOWED_HANDLE_KEYS: ReadonlySet<string> = new Set<string>([
+  "inputHandle",
+  "outputHandle",
+  "resultHandle",
+  "docHandle",
+  "topDocHandle",
+  "receiptHandle",
+  "digestHandle",
+  "contentHandle",
+  "outputDigestHandle",
+  "routerHandle",
+  "enclaveMeasurementHandle",
+]);
+
 export const ALLOWED_HASH_KEYS: ReadonlySet<string> = new Set<string>([
   "contentSha256",
   "routerDigestHex",
@@ -545,6 +600,7 @@ export const ALLOWED_BOOLEAN_KEYS: ReadonlySet<string> = new Set<string>([
   "humanApproved",
   "passed",
   "selfHealed",
+  "failedOver",
   "attested",
   "requiresHumanApproval",
   "stateChangedOnChain",
@@ -574,6 +630,18 @@ const ALLOWED_JSON_STRING_KEYS: ReadonlySet<string> = new Set<string>([
   "result",
 ]);
 
+const ALLOWED_OBJECT_ONLY_KEYS: ReadonlySet<string> = new Set<string>([
+  "taskDescriptor",
+  "redactionCounts",
+  "verification",
+  "generation_config",
+  "subagent_routing",
+  "metadata",
+  "parameters",
+  "properties",
+  "arguments",
+]);
+
 const ALLOWED_INTERACTION_STATUSES: ReadonlySet<string> = new Set<string>([
   "completed",
   "in_progress",
@@ -581,31 +649,6 @@ const ALLOWED_INTERACTION_STATUSES: ReadonlySet<string> = new Set<string>([
   "failed",
   "cancelled",
 ]);
-
-export const LOOKUP_TOPICS = [
-  "provider:tinfoil",
-  "provider:phala-redpill",
-  "provider:near-ai-cloud",
-  "provider:venice-ai",
-  "provider:prem-ai",
-  "provider:ppq-ai",
-  "provider:confidential-ai",
-  "provider:chutes-bittensor",
-  "provider:privatemode-cosmian",
-  "provider:nanogpt",
-  "hardware:intel-tdx",
-  "hardware:amd-sev-snp",
-  "hardware:nvidia-cc",
-  "attack:memory-bus",
-  "attack:side-channel",
-  "attack:voltage-glitching",
-  "crypto:hpke",
-  "crypto:blind-signatures",
-  "crypto:pqc-ml-kem",
-  "policy:data-retention",
-  "policy:sigstore-rekor",
-  "policy:arc-settlement",
-] as const;
 
 const ALLOWED_STATIC_SCHEMA_DESCRIPTIONS = new Set<string>([
   SPLIT_KNOWLEDGE_SYSTEM_INSTRUCTION,
@@ -801,6 +844,14 @@ export const ALLOWED_CONTENT_FREE_KEYS: ReadonlySet<string> = new Set<string>([
   "actionKind",
   "resultHandle",
   "outputHandle",
+  "docHandle",
+  "topDocHandle",
+  "receiptHandle",
+  "digestHandle",
+  "contentHandle",
+  "outputDigestHandle",
+  "routerHandle",
+  "enclaveMeasurementHandle",
   "humanApproved",
   "status",
   "passed",
@@ -813,6 +864,7 @@ export const ALLOWED_CONTENT_FREE_KEYS: ReadonlySet<string> = new Set<string>([
   "checksPassed",
   "checksTotal",
   "selfHealed",
+  "failedOver",
   "routerDigestHex",
   "enclaveMeasurementHex",
   "vectorEngine",
@@ -829,13 +881,74 @@ export const ALLOWED_CONTENT_FREE_KEYS: ReadonlySet<string> = new Set<string>([
   "receiptSha256",
 ]);
 
+const ALLOWED_REQUIRED_PARAM_NAMES = new Set<string>([
+  "inputHandle",
+  "bucketQuantumBytes",
+  "providerId",
+  "enclaveModel",
+  "topic",
+  "category",
+  "taskKind",
+  "actionKind",
+  "resultHandle",
+  "humanApproved",
+]);
+
+export const ALLOWED_OBJECT_KEYS: ReadonlySet<string> = new Set<string>([
+  "taskDescriptor",
+  "redactionCounts",
+  "verification",
+  "generation_config",
+  "subagent_routing",
+  "metadata",
+  "parameters",
+  "properties",
+  "arguments",
+  "result",
+  "function",
+  // Object-array element contexts
+  "input",
+  "tools",
+  "messages",
+  "tool_calls",
+]);
+
+const GOOGLE_BOUND_PATH_PREFIXES = [
+  "$.createRequest",
+  "$.followUpRequest",
+  "$.functionResult",
+  "$.toolResult",
+  "$.tinfoilToolResult",
+  "$.payload",
+  "$.interactionsPayload",
+  "$.outboundGeminiRequest",
+  "$.canonicalRequest",
+  "$.taskDescriptor",
+  "$.mockedGeminiReceived",
+  "$.googleBound",
+] as const;
+
+function isStrictGoogleBoundPath(path: string, insideJsonString: boolean): boolean {
+  if (insideJsonString) {
+    return true;
+  }
+  for (let i = 0; i < GOOGLE_BOUND_PATH_PREFIXES.length; i++) {
+    if (path.startsWith(GOOGLE_BOUND_PATH_PREFIXES[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function hasAsciiRunOrCount(byteValues: readonly number[]): boolean {
   let consecutivePrintableAscii = 0;
   let totalPrintableLettersOrSpaces = 0;
+  let totalPrintableAscii = 0;
   for (let i = 0; i < byteValues.length; i++) {
     const byteVal = byteValues[i];
     if (byteVal >= 0x20 && byteVal <= 0x7e) {
       consecutivePrintableAscii += 1;
+      totalPrintableAscii += 1;
       if (
         byteVal === 0x20 ||
         (byteVal >= 0x41 && byteVal <= 0x5a) ||
@@ -850,16 +963,34 @@ function hasAsciiRunOrCount(byteValues: readonly number[]): boolean {
       consecutivePrintableAscii = 0;
     }
   }
-  return totalPrintableLettersOrSpaces >= 18;
+  if (byteValues.length > 0 && byteValues.length < 16) {
+    return (
+      consecutivePrintableAscii >= 4 ||
+      totalPrintableLettersOrSpaces >= 4 ||
+      totalPrintableAscii >= Math.max(3, Math.ceil(byteValues.length * 0.7))
+    );
+  }
+  return totalPrintableLettersOrSpaces >= 18 || totalPrintableAscii >= 20;
 }
 
-function hasSmuggledAsciiInHex(hexWithoutPrefix: string): boolean {
-  // Reject 64-digit decimal number strings disguised with a 0x prefix
-  if (/^\d{64}$/.test(hexWithoutPrefix)) {
+export function hasSmuggledAsciiInHex(hexWithoutPrefix: string): boolean {
+  if (
+    typeof hexWithoutPrefix !== "string" ||
+    hexWithoutPrefix.length < 2 ||
+    hexWithoutPrefix.length % 2 !== 0 ||
+    !/^[0-9a-f]+$/.test(hexWithoutPrefix)
+  ) {
+    return true;
+  }
+  // Reject all-decimal digit strings disguised with a 0x prefix
+  if (/^\d+$/.test(hexWithoutPrefix)) {
     return true;
   }
   // Reject trivial repeating sequences (e.g., 0000000000000000 or 1234123412341234)
-  if (/^([0-9a-f]{1,4})\1{15,}$/.test(hexWithoutPrefix)) {
+  if (
+    /^([0-9a-f]{1,4})\1{15,}$/.test(hexWithoutPrefix) ||
+    (hexWithoutPrefix.length <= 14 && /^([0-9a-f]{1,2})\1{2,}$/.test(hexWithoutPrefix))
+  ) {
     return true;
   }
   const bytes: number[] = [];
@@ -874,8 +1005,14 @@ function hasSmuggledAsciiInHex(hexWithoutPrefix: string): boolean {
       maxFreq = count;
     }
   }
-  if (freq.size < 12 || maxFreq >= 6) {
-    return true;
+  if (bytes.length >= 16) {
+    if (freq.size < 12 || maxFreq >= 6) {
+      return true;
+    }
+  } else if (bytes.length >= 4) {
+    if (freq.size < Math.ceil(bytes.length * 0.75) || maxFreq >= 3) {
+      return true;
+    }
   }
   if (hasAsciiRunOrCount(bytes)) {
     return true;
@@ -886,6 +1023,8 @@ function hasSmuggledAsciiInHex(hexWithoutPrefix: string): boolean {
   }
   let consecutiveHighBitText = 0;
   let totalHighBitLettersOrSpaces = 0;
+  let consecutiveLow7Text = 0;
+  let totalLow7Text = 0;
   for (let i = 0; i < bytes.length; i++) {
     const b = bytes[i];
     const low7 = b & 0x7f;
@@ -898,70 +1037,171 @@ function hasSmuggledAsciiInHex(hexWithoutPrefix: string): boolean {
       low7 === 0x2d ||
       low7 === 0x5f ||
       low7 === 0x2e;
-    if ((b & 0x80) !== 0 && (isLetterOrSpace || isDigitOrCommonPunct)) {
-      consecutiveHighBitText += 1;
-      if (isLetterOrSpace) {
-        totalHighBitLettersOrSpaces += 1;
-      }
-      if (consecutiveHighBitText >= 8) {
+    if (isLetterOrSpace || isDigitOrCommonPunct) {
+      consecutiveLow7Text += 1;
+      totalLow7Text += 1;
+      if (consecutiveLow7Text >= (bytes.length < 16 ? 4 : 16)) {
         return true;
+      }
+      if ((b & 0x80) !== 0) {
+        consecutiveHighBitText += 1;
+        if (isLetterOrSpace) {
+          totalHighBitLettersOrSpaces += 1;
+        }
+        if (consecutiveHighBitText >= (bytes.length < 16 ? 4 : 8)) {
+          return true;
+        }
+      } else {
+        consecutiveHighBitText = 0;
       }
     } else {
       consecutiveHighBitText = 0;
+      consecutiveLow7Text = 0;
     }
   }
-  return totalHighBitLettersOrSpaces >= 16;
+  if (bytes.length < 16) {
+    return (
+      totalHighBitLettersOrSpaces >= 4 ||
+      totalLow7Text >= Math.max(3, Math.ceil(bytes.length * 0.7))
+    );
+  }
+  return totalHighBitLettersOrSpaces >= 16 || totalLow7Text >= 28;
 }
 
-const ALLOWED_REQUIRED_PARAM_NAMES = new Set<string>([
-  "inputHandle",
-  "bucketQuantumBytes",
-  "providerId",
-  "enclaveModel",
-  "topic",
-  "category",
-  "taskKind",
-  "actionKind",
-  "resultHandle",
-  "humanApproved",
-]);
-
-export function isContentFreeString(value: string, keyContext?: string): boolean {
-  if (typeof value !== "string" || value.length === 0) {
+export function isContentFreeString(
+  value: string,
+  keyContext?: string,
+  strictGoogleBound = false,
+): boolean {
+  if (typeof value !== "string" || value.length === 0 || !keyContext) {
+    return false;
+  }
+  if (
+    ALLOWED_NUMERIC_KEYS.has(keyContext) ||
+    ALLOWED_BOOLEAN_KEYS.has(keyContext) ||
+    ALLOWED_OBJECT_ONLY_KEYS.has(keyContext) ||
+    (ALLOWED_ARRAY_KEYS.has(keyContext) && !ALLOWED_STRING_ARRAY_KEYS.has(keyContext))
+  ) {
+    return false;
+  }
+  if (ALLOWED_HASH_KEYS.has(keyContext)) {
+    if (SHORT_HEX_REGEX.test(value) && value.length <= MAX_GOOGLE_BOUND_HEX_LENGTH) {
+      return !hasSmuggledAsciiInHex(value.slice(2));
+    }
+    if (
+      !strictGoogleBound &&
+      ALLOW_LEGACY_ORCHESTRATOR_SHA256_UNTIL_MIGRATED &&
+      FIXED_SHA256_HEX_REGEX.test(value)
+    ) {
+      return !hasSmuggledAsciiInHex(value.slice(2));
+    }
+    return false;
+  }
+  if (keyContext === "required") {
+    return ALLOWED_REQUIRED_PARAM_NAMES.has(value);
+  }
+  if (
+    keyContext === "id" ||
+    keyContext === "call_id" ||
+    keyContext === "tool_call_id" ||
+    keyContext === "previous_interaction_id"
+  ) {
+    return SAFE_CALL_ID_REGEX.test(value) && !/\d{4,}/.test(value);
+  }
+  if (keyContext === "system_instruction" || keyContext === "description") {
+    return ALLOWED_STATIC_SCHEMA_DESCRIPTIONS.has(value);
+  }
+  if (ALLOWED_HANDLE_KEYS.has(keyContext)) {
+    return OPAQUE_HANDLE_REGEX.test(value);
+  }
+  if (/^(?:0x)?[0-9a-fA-F]{15,}$/.test(value) && value.length > MAX_GOOGLE_BOUND_HEX_LENGTH) {
     return false;
   }
   if (OPAQUE_HANDLE_REGEX.test(value)) {
     return true;
   }
-  if (FIXED_SHA256_HEX_REGEX.test(value)) {
-    if (!keyContext || !ALLOWED_HASH_KEYS.has(keyContext)) {
-      return false;
-    }
-    return !hasSmuggledAsciiInHex(value.slice(2));
-  }
-  if (
-    keyContext === "required" &&
-    ALLOWED_REQUIRED_PARAM_NAMES.has(value)
-  ) {
-    return true;
-  }
-  if (
-    (keyContext === "id" ||
-      keyContext === "call_id" ||
-      keyContext === "tool_call_id" ||
-      keyContext === "previous_interaction_id") &&
-    SAFE_CALL_ID_REGEX.test(value) &&
-    !/\d{4,}/.test(value)
-  ) {
-    return true;
-  }
-  if (
-    (keyContext === "system_instruction" || keyContext === "description") &&
-    ALLOWED_STATIC_SCHEMA_DESCRIPTIONS.has(value)
-  ) {
-    return true;
-  }
   return ALLOWED_CONTENT_FREE_ENUMS.has(value);
+}
+
+export type DigestHandlePrefix =
+  | "DOC"
+  | "RECEIPT"
+  | "DIGEST"
+  | "ROUTER"
+  | "MEASUREMENT";
+
+export interface DigestHandleMapState {
+  byHandle: Record<string, string>;
+  byDigest: Map<string, string>;
+  counters: Record<DigestHandlePrefix, number>;
+}
+
+const HASH_KEY_TO_HANDLE_SPEC: Record<
+  string,
+  { handleKey: string; prefix: DigestHandlePrefix }
+> = {
+  topDocSha256: { handleKey: "topDocHandle", prefix: "DOC" },
+  receiptSha256: { handleKey: "receiptHandle", prefix: "RECEIPT" },
+  contentSha256: { handleKey: "contentHandle", prefix: "DIGEST" },
+  outputSha256: { handleKey: "outputDigestHandle", prefix: "DIGEST" },
+  routerDigestHex: { handleKey: "routerHandle", prefix: "ROUTER" },
+  enclaveMeasurementHex: {
+    handleKey: "enclaveMeasurementHandle",
+    prefix: "MEASUREMENT",
+  },
+};
+
+export function createDigestHandleMapState(): DigestHandleMapState {
+  return {
+    byHandle: {},
+    byDigest: new Map<string, string>(),
+    counters: {
+      DOC: 0,
+      RECEIPT: 0,
+      DIGEST: 0,
+      ROUTER: 0,
+      MEASUREMENT: 0,
+    },
+  };
+}
+
+/**
+ * Replaces any hex digest fields (`contentSha256`, `routerDigestHex`, `enclaveMeasurementHex`,
+ * `topDocSha256`, `outputSha256`, `receiptSha256`) in a tool result object with opaque handles
+ * (`$DOC_<n>`, `$RECEIPT_<n>`, `$DIGEST_<n>`, `$ROUTER_<n>`, `$MEASUREMENT_<n>`) before the
+ * tool result is serialized into a Google-bound request, keeping the real hashes only in
+ * `state.byHandle` on the server side.
+ */
+export function replaceDigestsWithOpaqueHandles(
+  rawResult: Record<string, unknown>,
+  state: DigestHandleMapState = createDigestHandleMapState(),
+): Record<string, unknown> {
+  if (!isPlainObject(rawResult)) {
+    return rawResult;
+  }
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(rawResult)) {
+    const spec = HASH_KEY_TO_HANDLE_SPEC[key];
+    if (spec && typeof value === "string") {
+      if (OPAQUE_HANDLE_REGEX.test(value)) {
+        out[spec.handleKey] = value;
+        continue;
+      }
+      const cacheKey = `${spec.prefix}:${value}`;
+      let handle = state.byDigest.get(cacheKey);
+      if (!handle) {
+        const nextIdx = Math.min(64, (state.counters[spec.prefix] ?? 0) + 1);
+        state.counters[spec.prefix] = nextIdx;
+        handle = `$${spec.prefix}_${nextIdx}`;
+        state.byDigest.set(cacheKey, handle);
+        state.byHandle[handle] = value;
+      }
+      out[spec.handleKey] = handle;
+      continue;
+    }
+    out[key] = value;
+  }
+  return out;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -980,9 +1220,9 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 /**
  * Egress firewall (D1): recursively inspects any outbound value before it leaves
  * for Google Gemini. Rejects any string not in the strict allowlist of opaque
- * handles (`$INPUT`, `$RESULT_<n>`), verified 32-byte lowercase SHA-256 hex hashes
- * under allowlisted hash keys, or allowlisted enum literals, and rejects any
- * unallowlisted object keys, numbers, arrays, or JSON-smuggled content.
+ * handles (`$INPUT`, `$RESULT_<n>`, `$DOC_<n>`, `$RECEIPT_<n>`, etc.) or allowlisted
+ * enum literals, rejects any hex string > 16 characters in Google-bound payloads,
+ * and rejects any unallowlisted object keys, numbers, arrays, or JSON-smuggled content.
  */
 export function assertContentFree(
   value: unknown,
@@ -990,6 +1230,7 @@ export function assertContentFree(
   keyContext?: string,
   depth = 0,
   insideJsonString = false,
+  isJsonRoot = false,
 ): void {
   if (depth > 8) {
     throw new ContentFreeEgressError("<max_depth_exceeded>", path);
@@ -1062,10 +1303,11 @@ export function assertContentFree(
       if (canonical !== str) {
         throw new ContentFreeEgressError(str, path);
       }
-      assertContentFree(parsed, `${path}(json)`, undefined, depth + 1, true);
+      assertContentFree(parsed, `${path}(json)`, undefined, depth + 1, true, true);
       return;
     }
-    if (!isContentFreeString(str, keyContext)) {
+    const strictGoogleBound = isStrictGoogleBoundPath(path, insideJsonString);
+    if (!isContentFreeString(str, keyContext, strictGoogleBound)) {
       throw new ContentFreeEgressError(str, path);
     }
     return;
@@ -1094,11 +1336,24 @@ export function assertContentFree(
         keyContext,
         depth + 1,
         insideJsonString,
+        false,
       );
     }
     return;
   }
   if (isPlainObject(value)) {
+    const isToolPropertySchemaDef =
+      typeof keyContext === "string" &&
+      ALLOWED_REQUIRED_PARAM_NAMES.has(keyContext) &&
+      path.endsWith(`.properties.${keyContext}`);
+    if (
+      depth > 0 &&
+      !isJsonRoot &&
+      !isToolPropertySchemaDef &&
+      (!keyContext || !ALLOWED_OBJECT_KEYS.has(keyContext))
+    ) {
+      throw new ContentFreeEgressError("<disallowed_object>", path);
+    }
     if (Object.getOwnPropertySymbols(value).length > 0) {
       throw new ContentFreeEgressError("<symbol_property>", path);
     }
@@ -1131,6 +1386,7 @@ export function assertContentFree(
         k,
         depth + 1,
         insideJsonString,
+        false,
       );
     }
     return;
@@ -1194,7 +1450,11 @@ export const TOOL_ARGUMENT_SCHEMAS: Record<
     },
   },
   search_atlas_hybrid_kb: {
-    topic: { type: "STRING", required: true, enum: ALLOWED_ATLAS_TOPICS },
+    topic: {
+      type: "STRING",
+      required: true,
+      enum: [...ALLOWED_ATLAS_TOPICS, ...LOOKUP_TOPICS],
+    },
     inputHandle: { type: "STRING", required: false, isHandle: true },
     category: {
       type: "STRING",
@@ -1858,6 +2118,7 @@ export interface LiveGeminiCallResult {
   interactionId?: string;
   interactionStatus?: string;
   toolCallsExecuted?: string[];
+  resolvedDigestHandles?: Record<string, string>;
   liveSummaryText?: string;
   fallbackReason?: string;
   modelCallRecord?: ArgonModelCallRecord;
@@ -2089,6 +2350,7 @@ export async function callGeminiInteractionsEndpoint(params: {
 
     let stepCount = 0;
     let turn = 0;
+    const digestHandleState = createDigestHandleMapState();
     while (params.toolExecutor && Array.isArray(interaction.steps)) {
       const fnCalls = interaction.steps.filter(
         (s) => s && s.type === "function_call" && typeof s.name === "string",
@@ -2107,12 +2369,17 @@ export async function callGeminiInteractionsEndpoint(params: {
         stepCount += 1;
         toolCallsExecuted.push(name);
 
-        const resultObj = await withWallClockBudget(
+        const rawResultObj = await withWallClockBudget(
           params.toolExecutor(name, validatedArgs),
           startedAt,
           wallClockBudgetMs,
         );
 
+        assertOutboundPrivacyInvariant(rawResultObj, sensitiveOriginals);
+        const resultObj = replaceDigestsWithOpaqueHandles(
+          rawResultObj,
+          digestHandleState,
+        );
         assertOutboundPrivacyInvariant(resultObj, sensitiveOriginals);
         assertContentFree(resultObj, `$.toolResult(${name})`);
 
@@ -2215,6 +2482,9 @@ export async function callGeminiInteractionsEndpoint(params: {
       interactionId: safeInteractionId,
       interactionStatus: safeInteractionStatus,
       toolCallsExecuted,
+      ...(Object.keys(digestHandleState.byHandle).length > 0
+        ? { resolvedDigestHandles: { ...digestHandleState.byHandle } }
+        : {}),
       liveSummaryText:
         safeTelemetrySummary ||
         `Gemini 4 Argon control-plane interaction completed (${toolCallsExecuted.length} tool call(s) executed over content-free handles).`,
@@ -2466,11 +2736,13 @@ export async function callTinfoilPlannerToolLoop(params: {
         stepCount += 1;
         toolCallsExecuted.push(fnName);
 
-        const toolResult = await withWallClockBudget(
+        const rawToolResult = await withWallClockBudget(
           params.toolExecutor(fnName, validatedArgs),
           startedAt,
           wallClockBudgetMs,
         );
+        assertOutboundPrivacyInvariant(rawToolResult, sensitiveOriginals);
+        const toolResult = replaceDigestsWithOpaqueHandles(rawToolResult);
         assertOutboundPrivacyInvariant(toolResult, sensitiveOriginals);
         assertContentFree(toolResult, `$.tinfoilToolResult(${fnName})`);
 
