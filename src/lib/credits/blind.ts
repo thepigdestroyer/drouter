@@ -197,6 +197,9 @@ function modulusBitLength(nHex: string): number {
 }
 
 function readEnvIssuerPrimes(): { p: bigint; q: bigint } | null {
+  // Issuer secrets exist only on the server. In the browser (for example the
+  // explainer game) keys are always derived from a public demo seed.
+  if (typeof window !== "undefined") return null;
   const raw =
     typeof process !== "undefined" ? process.env?.CREDITS_ISSUER_RSA_PQ?.trim() : undefined;
   if (!raw) {
