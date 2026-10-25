@@ -1,5 +1,8 @@
 import { connection } from "next/server";
-import { fetchLiveGatewayModels } from "@/lib/gateway/harness-config";
+import {
+  fetchLiveGatewayModels,
+  isChatCapableGatewayModel,
+} from "@/lib/gateway/harness-config";
 import { createTokenBucketLimiter } from "@/lib/ratelimit";
 
 const modelsLimiter = createTokenBucketLimiter({
@@ -26,7 +29,10 @@ export async function GET(req?: Request): Promise<Response> {
     if (limited) return limited;
   }
 
-  const models = await fetchLiveGatewayModels();
+  // Coding tools read this list to pick a model, so offer only chat-capable ones.
+  const models = (await fetchLiveGatewayModels()).filter((m) =>
+    isChatCapableGatewayModel(m.id),
+  );
 
   return Response.json(
     {
