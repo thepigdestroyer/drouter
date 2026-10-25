@@ -1,7 +1,7 @@
 {
-  "version": "1.0.4",
-  "fingerprint": "0x5bc6cc77d31374e8aaa633a43930cef64b86956d71f18e8bf93a792cec8d9e09",
-  "anchorTx": "0xff43cfff01759aed0c61eeef85d40235ea5c96c82f6b86f9c7f4e3b9eaef5e7d",
+  "version": "1.0.5",
+  "fingerprint": "0x6409906fc3f282f764cf9051842295ad31b3f1f42181c305621456e54e21a22d",
+  "anchorTx": "0xfad634d280cdb2a5b6dbf7010325f1d4ade646e2dc37765bab0e2037a140eaa3",
   "chainId": 5042002,
-  "anchoredAt": "2026-10-25T10:37:22.660Z"
+  "anchoredAt": "2026-10-25T11:17:45.068Z"
 }
