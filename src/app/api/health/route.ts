@@ -1,4 +1,5 @@
 import { cacheLife } from "next/cache";
+import { resolveDbName } from "@/lib/mongo/db-name";
 import { connection } from "next/server";
 import { MongoClient } from "mongodb";
 import { arcTestnet } from "viem/chains";
@@ -154,7 +155,7 @@ export async function runHealthChecks(
     const dbName =
       env.MONGODB_DB && env.MONGODB_DB.trim().length > 0
         ? env.MONGODB_DB.trim()
-        : "drouter";
+        : resolveDbName();
     try {
       await pingMongo(uri, dbName);
       return { ok: true, detail: `MongoDB ping succeeded on database ${dbName}` };
