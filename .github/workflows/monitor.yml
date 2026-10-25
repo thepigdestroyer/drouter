@@ -4,10 +4,9 @@ name: Hourly enclave monitor
 # sealed computers is triggered from here instead.
 on:
   schedule:
-    # GitHub sometimes delays or drops scheduled runs; the second slot is a backup and the
+    # GitHub often delays or drops scheduled runs, so this fires every 10 minutes and the
     # endpoint skips if this hour has already been checked.
-    - cron: "17 * * * *"
-    - cron: "47 * * * *"
+    - cron: "*/10 * * * *"
   workflow_dispatch:
 
 permissions: {}
