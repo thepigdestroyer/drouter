@@ -72,7 +72,7 @@ import {
   createStreamRestorer,
   parseDrouterCliArgs,
 } from "../../scripts/drouter-cli.mjs";
-import { PlaceholderVault } from "../../scripts/drouter-proxy.mjs";
+import { createMechanicalSession } from "@/lib/privacy/mechanical";
 
 const SAMPLE_LIVE_PROXY_TABLE = {
   updated: "2026-10-24T17:12:49Z",
@@ -337,9 +337,10 @@ describe("Gateway harness-config & Live Model Table", () => {
     expect(configs.openaiEnvExports).toContain("auth is the blind credit header");
     expect(configs.pythonSnippet).toContain("auth is the blind credit header");
     expect(configs.typescriptSnippet).toContain("auth is the blind credit header");
-    expect(configs.localProxyCommand).toBe(
-      "node scripts/drouter-cli.mjs proxy --port 4141 --upstream https://drouter-demo.vercel.app",
+    expect(configs.localProxyCommand).toContain(
+      "https://drouter-demo.vercel.app/downloads/deroute-proxy.mjs",
     );
+    expect(configs.localProxyCommand).toContain("node deroute-proxy.mjs --port 4141");
   });
 });
 
@@ -594,14 +595,14 @@ describe("drouter-cli & drouter-proxy shared helpers", () => {
     expect(proxyArgs.port).toBe(4242);
   });
 
-  it("restores [[DROUTER_EMAIL_1]] placeholders split across multiple streaming chunks", () => {
-    const vault = new PlaceholderVault();
-    const scrubbed = vault.scrub("Contact dana.reyes@example.org");
-    expect(scrubbed).toBe("Contact [[DROUTER_EMAIL_1]]");
+  it("restores [EMAIL_1] placeholders split across multiple streaming chunks", () => {
+    const session = createMechanicalSession();
+    const scrubbed = session.redact("Contact dana.reyes@example.org").text;
+    expect(scrubbed).toBe("Contact [EMAIL_1]");
 
-    const restorer = createStreamRestorer(vault);
+    const restorer = createStreamRestorer(session);
     const out1 = restorer.push("The email is [");
-    const out2 = restorer.push("[DROUTER_EMAIL_1]");
+    const out2 = restorer.push("EMAIL_1");
     const out3 = restorer.push("].");
     const out4 = restorer.flush();
 
