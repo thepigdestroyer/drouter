@@ -3,7 +3,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 import { canonicalJson, coarsenEpochSecToHour, sha256Hex } from "./canonical.js";
 import { getMongoDb } from "./corpus.js";
-import { assertContentFree } from "./firewall.js";
+import { assertContentFree, assertGoogleBoundMessage } from "./firewall.js";
 import { getKeyRing } from "./keys.js";
 
 export const GEMINI_EGRESS_RECEIPT_KIND = "gemini-egress";
@@ -34,7 +34,12 @@ export function signGeminiEgressReceipt(
   keyPair = getKeyRing()["egress-signing"],
   timestampSec = Math.floor(Date.now() / 1000),
 ) {
-  // Never sign or transmit a Gemini payload that violates the content-free firewall.
+  // Never sign or transmit a Gemini payload that violates the closed schema gate or content-free firewall.
+  assertGoogleBoundMessage(
+    "createRequest",
+    outboundRequest,
+    "$.outboundGeminiRequest",
+  );
   assertContentFree(outboundRequest, "$.outboundGeminiRequest");
 
   const canonicalRequest = canonicalJson(outboundRequest);
@@ -112,6 +117,11 @@ export function verifyGeminiEgressReceipt(receipt, expectedPublicKeyHex) {
     }
 
     try {
+      assertGoogleBoundMessage(
+        "createRequest",
+        parsedRequest,
+        "$.canonicalRequest",
+      );
       assertContentFree(parsedRequest, "$.canonicalRequest");
     } catch (err) {
       return {

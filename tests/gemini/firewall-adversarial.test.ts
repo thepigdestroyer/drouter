@@ -540,8 +540,8 @@ describe("Shared Content-Free Egress Firewall: Round 1 & Round 2 Adversarial Sui
         status: "ok",
         passed: true,
         outputHandle: "$RESULT_1",
-        redactionCount: 3,
-        mechanicalRedactionCount: 3,
+        redactionCount: 4,
+        mechanicalRedactionCount: 4,
         attestedRedactionCount: 0,
         bucketBytes: 4096,
         plaintextLeakCount: 0,
@@ -1221,8 +1221,8 @@ describe("Shared Content-Free Egress Firewall: Round 1 & Round 2 Adversarial Sui
         status: "ok",
         passed: true,
         outputHandle: "$RESULT_1",
-        redactionCount: 3,
-        mechanicalRedactionCount: 3,
+        redactionCount: 4,
+        mechanicalRedactionCount: 4,
         attestedRedactionCount: 0,
         bucketBytes: 4096,
         plaintextLeakCount: 0,
@@ -1379,6 +1379,153 @@ describe("Shared Content-Free Egress Firewall: Round 1 & Round 2 Adversarial Sui
       assertGoogleBoundMessage("followUpRequest", {
         ...validFollowUpRequest,
         previous_interaction_id: "inter-argon-turn-17", // > 16
+      }),
+    ).toThrow(ContentFreeEgressError);
+  });
+
+  // Round 4 MINOR-1, MINOR-2, MINOR-3 verification tests
+  it("enforces Round 4 MINOR-1, MINOR-2, and MINOR-3 (allowedTools subset in assertValidToolCall and tool schemas, raw args validation for undefined keys, and coarse redaction/scrub buckets + sum invariant)", () => {
+    // MINOR-1: assertValidToolCall enforces taskDescriptor.allowedTools subset
+    const subsetTools = [
+      "scrub_and_symmetry_mask",
+      "invoke_attested_enclave",
+    ] as const;
+    expect(() =>
+      assertValidToolCall(
+        "scrub_and_symmetry_mask",
+        { inputHandle: "$INPUT", bucketQuantumBytes: 4096 },
+        subsetTools,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertValidToolCall(
+        "search_atlas_hybrid_kb",
+        { topic: "tinfoil_enclave" },
+        subsetTools,
+      ),
+    ).toThrow(ToolPolicyViolationError);
+
+    // MINOR-1: createRequest and interactionsPayload accept any non-empty canonical subset of the 5 tools
+    const subsetDescriptor = buildTaskDescriptor({
+      taskKind: "review",
+      inputTokenEstimate: 1024,
+      redactionCounts: { SECRET: 1, TOTAL: 2 },
+      verification: { mechanicalRedactionPassed: true },
+      allowedTools: subsetTools,
+    });
+    const subsetToolDecls = ARGON_CONFIDENTIAL_TOOLS.filter((t) =>
+      (subsetTools as readonly string[]).includes(t.name),
+    );
+    const fullPayload = buildInteractionsCreatePayload({
+      taskDescriptor: subsetDescriptor,
+      thinkingLevel: "medium",
+      background: true,
+      maxOutputTokens: 131_072,
+    });
+    expect(() =>
+      assertGoogleBoundMessage("interactionsPayload", {
+        ...fullPayload,
+        tools: subsetToolDecls,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertGoogleBoundMessage("createRequest", {
+        model: GEMINI_4_ARGON_MODEL_ID,
+        background: true,
+        store: false,
+        system_instruction: SPLIT_KNOWLEDGE_SYSTEM_INSTRUCTION,
+        generation_config: {
+          thinking_level: "medium",
+          max_output_tokens: 131_072,
+        },
+        input: [{ type: "text", text: canonicalJson(subsetDescriptor) }],
+        tools: subsetToolDecls,
+      }),
+    ).not.toThrow();
+    // Non-canonical order or empty tools array is still rejected
+    expect(() =>
+      assertGoogleBoundMessage("createRequest", {
+        model: GEMINI_4_ARGON_MODEL_ID,
+        background: true,
+        store: false,
+        system_instruction: SPLIT_KNOWLEDGE_SYSTEM_INSTRUCTION,
+        generation_config: {
+          thinking_level: "medium",
+          max_output_tokens: 131_072,
+        },
+        input: [{ type: "text", text: canonicalJson(subsetDescriptor) }],
+        tools: [...subsetToolDecls].reverse(),
+      }),
+    ).toThrow(ContentFreeEgressError);
+
+    // MINOR-2: validateToolCallArguments and assertValidToolCall validate raw args and reject undefined-valued keys
+    const undefOptRes = validateToolCallArguments("search_atlas_hybrid_kb", {
+      topic: "tinfoil_enclave",
+      inputHandle: undefined,
+    });
+    expect(undefOptRes.valid).toBe(false);
+    expect(() =>
+      assertValidToolCall("search_atlas_hybrid_kb", {
+        topic: "tinfoil_enclave",
+        inputHandle: undefined,
+      }),
+    ).toThrow(ToolPolicyViolationError);
+
+    // MINOR-3: TaskDescriptor.redactionCounts coarse buckets {0, 1, 2} (2 means "2 or more")
+    expect(subsetDescriptor.redactionCounts.TOTAL).toBe(2);
+    expect(() =>
+      assertGoogleBoundMessage("taskDescriptor", {
+        ...subsetDescriptor,
+        redactionCounts: { SECRET: 1, TOTAL: 3 }, // > 2 rejected
+      }),
+    ).toThrow(ContentFreeEgressError);
+    expect(() => assertContentFree({ TOTAL: 3 })).toThrow(
+      ContentFreeEgressError,
+    );
+
+    // MINOR-3: scrub_and_symmetry_mask toolResult power-of-two buckets {0, 1, 2, 4, 8, 16, 32, 64} and sum invariant
+    expect(() =>
+      assertGoogleBoundMessage("toolResult:scrub_and_symmetry_mask", {
+        status: "ok",
+        passed: true,
+        outputHandle: "$RESULT_1",
+        redactionCount: 4,
+        mechanicalRedactionCount: 4,
+        attestedRedactionCount: 0,
+        bucketBytes: 4096,
+        plaintextLeakCount: 0,
+        contentHandle: "$DIGEST_1",
+      }),
+    ).not.toThrow();
+    // Non-power-of-two count (e.g. 3) is rejected
+    expect(() =>
+      assertGoogleBoundMessage("toolResult:scrub_and_symmetry_mask", {
+        status: "ok",
+        passed: true,
+        outputHandle: "$RESULT_1",
+        redactionCount: 3,
+        mechanicalRedactionCount: 3,
+        attestedRedactionCount: 0,
+        bucketBytes: 4096,
+        plaintextLeakCount: 0,
+        contentHandle: "$DIGEST_1",
+      }),
+    ).toThrow(ContentFreeEgressError);
+    expect(() => assertContentFree({ redactionCount: 3 })).toThrow(
+      ContentFreeEgressError,
+    );
+    // Sum mismatch (redactionCount !== min(64, mechanicalRedactionCount + attestedRedactionCount)) is rejected
+    expect(() =>
+      assertGoogleBoundMessage("toolResult:scrub_and_symmetry_mask", {
+        status: "ok",
+        passed: true,
+        outputHandle: "$RESULT_1",
+        redactionCount: 8,
+        mechanicalRedactionCount: 4,
+        attestedRedactionCount: 0,
+        bucketBytes: 4096,
+        plaintextLeakCount: 0,
+        contentHandle: "$DIGEST_1",
       }),
     ).toThrow(ContentFreeEgressError);
   });

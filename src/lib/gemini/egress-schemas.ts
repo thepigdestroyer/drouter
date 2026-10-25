@@ -34,6 +34,7 @@ import {
   GEMINI_4_ARGON_MODEL_ID,
   LOOKUP_TOPICS,
   MAX_PLANNER_STEPS,
+  MAX_PLAINTEXT_LEAK_COUNT,
   MAX_REDACTION_COUNT_PER_KIND,
   MAX_TOKEN_BUCKET,
   SPLIT_KNOWLEDGE_SYSTEM_INSTRUCTION,
@@ -150,6 +151,10 @@ export function isPowerOfTwoInRange(
   );
 }
 
+export function isScrubCountPowerOfTwoBucket(value: unknown): value is number {
+  return value === 0 || isPowerOfTwoInRange(value, 1, 64);
+}
+
 function boundedInteger(
   value: unknown,
   min: number,
@@ -258,8 +263,8 @@ function assertDeepEqualConstant(
 
 function assertValidToolsArray(
   toolsValue: unknown,
-  expectedToolNames: readonly string[],
-  path: string,
+  expectedToolNames?: readonly string[],
+  path = "$.tools",
 ): void {
   if (
     !Array.isArray(toolsValue) ||
@@ -268,13 +273,41 @@ function assertValidToolsArray(
   ) {
     throw new ContentFreeEgressError("<invalid_tools_array>", path);
   }
-  const expectedDecls: ArgonInteractionToolDeclaration[] =
-    ARGON_CONFIDENTIAL_TOOLS.filter((t) => expectedToolNames.includes(t.name));
-  if (toolsValue.length !== expectedDecls.length) {
-    throw new ContentFreeEgressError("<tools_length_mismatch>", path);
+  const seenNames = new Set<string>();
+  let lastCanonicalIdx = -1;
+  for (let i = 0; i < toolsValue.length; i++) {
+    const item = assertStrictPlainObject(toolsValue[i], `${path}[${i}]`);
+    const name = item.name;
+    if (typeof name !== "string") {
+      throw new ContentFreeEgressError(String(name), `${path}[${i}].name`);
+    }
+    const canonicalIdx = (ALLOWED_PLANNER_TOOLS as readonly string[]).indexOf(
+      name,
+    );
+    if (
+      canonicalIdx === -1 ||
+      seenNames.has(name) ||
+      canonicalIdx <= lastCanonicalIdx
+    ) {
+      throw new ContentFreeEgressError(name, `${path}[${i}].name`);
+    }
+    seenNames.add(name);
+    lastCanonicalIdx = canonicalIdx;
+    assertDeepEqualConstant(
+      item,
+      ARGON_CONFIDENTIAL_TOOLS[canonicalIdx],
+      `${path}[${i}]`,
+    );
   }
-  for (let i = 0; i < expectedDecls.length; i++) {
-    assertDeepEqualConstant(toolsValue[i], expectedDecls[i], `${path}[${i}]`);
+  if (expectedToolNames !== undefined) {
+    const expectedDecls: ArgonInteractionToolDeclaration[] =
+      ARGON_CONFIDENTIAL_TOOLS.filter((t) => expectedToolNames.includes(t.name));
+    if (toolsValue.length !== expectedDecls.length) {
+      throw new ContentFreeEgressError("<tools_length_mismatch>", path);
+    }
+    for (let i = 0; i < expectedDecls.length; i++) {
+      assertDeepEqualConstant(toolsValue[i], expectedDecls[i], `${path}[${i}]`);
+    }
   }
 }
 
@@ -545,7 +578,7 @@ export function assertInteractionsCreatePayloadSchema(
     );
   }
 
-  assertValidToolsArray(obj.tools, ALLOWED_PLANNER_TOOLS, `${path}.tools`);
+  assertValidToolsArray(obj.tools, undefined, `${path}.tools`);
   assertDeepEqualConstant(
     obj.subagent_routing,
     getExpectedSubagentRouting(),
@@ -635,16 +668,8 @@ export function assertGeminiCreateRequestSchema(
     throw new ContentFreeEgressError(inputItem.text, `${path}.input[0].text`);
   }
 
-  // `tools` must match either the full ARGON_CONFIDENTIAL_TOOLS list or the exact canonical subset in descriptor.allowedTools
-  const toolsList = obj.tools;
-  if (!Array.isArray(toolsList)) {
-    throw new ContentFreeEgressError("<invalid_tools>", `${path}.tools`);
-  }
-  const expectedSubset =
-    toolsList.length === ARGON_CONFIDENTIAL_TOOLS.length
-      ? ALLOWED_PLANNER_TOOLS
-      : descriptor.allowedTools;
-  assertValidToolsArray(toolsList, expectedSubset, `${path}.tools`);
+  // `tools` must be a non-empty canonical subset of ARGON_CONFIDENTIAL_TOOLS
+  assertValidToolsArray(obj.tools, undefined, `${path}.tools`);
 }
 
 /**
@@ -957,22 +982,31 @@ export function assertToolResultSchema(
           `${path}.outputHandle`,
         );
       }
-      if (!boundedInteger(obj.redactionCount, 0, 64)) {
+      if (!isScrubCountPowerOfTwoBucket(obj.redactionCount)) {
         throw new ContentFreeEgressError(
           String(obj.redactionCount),
           `${path}.redactionCount`,
         );
       }
-      if (!boundedInteger(obj.mechanicalRedactionCount, 0, 64)) {
+      if (!isScrubCountPowerOfTwoBucket(obj.mechanicalRedactionCount)) {
         throw new ContentFreeEgressError(
           String(obj.mechanicalRedactionCount),
           `${path}.mechanicalRedactionCount`,
         );
       }
-      if (!boundedInteger(obj.attestedRedactionCount, 0, 64)) {
+      if (!isScrubCountPowerOfTwoBucket(obj.attestedRedactionCount)) {
         throw new ContentFreeEgressError(
           String(obj.attestedRedactionCount),
           `${path}.attestedRedactionCount`,
+        );
+      }
+      if (
+        obj.redactionCount !==
+        Math.min(64, obj.mechanicalRedactionCount + obj.attestedRedactionCount)
+      ) {
+        throw new ContentFreeEgressError(
+          String(obj.redactionCount),
+          `${path}.redactionCount`,
         );
       }
       if (!isPowerOfTwoInRange(obj.bucketBytes, 512, 65_536)) {
@@ -982,7 +1016,7 @@ export function assertToolResultSchema(
         );
       }
       if (
-        !boundedInteger(obj.plaintextLeakCount, 0, MAX_REDACTION_COUNT_PER_KIND)
+        !boundedInteger(obj.plaintextLeakCount, 0, MAX_PLAINTEXT_LEAK_COUNT)
       ) {
         throw new ContentFreeEgressError(
           String(obj.plaintextLeakCount),

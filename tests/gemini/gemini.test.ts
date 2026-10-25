@@ -123,7 +123,7 @@ describe("Gemini 4 Argon Config Contract, TaskDescriptor & Content-Free Egress F
       taskKind: "review",
       inputHandle: "$INPUT",
       inputTokenEstimate: 128,
-      redactionCounts: { SECRET: 1, EMAIL: 1, DIGITS: 2, TOTAL: 4 },
+      redactionCounts: { SECRET: 1, EMAIL: 1, DIGITS: 2, TOTAL: 2 },
       verification: {
         mechanicalRedactionPassed: true,
         attestedPiiFilterVerified: true,
@@ -384,7 +384,7 @@ describe("Gemini 4 Argon Config Contract, TaskDescriptor & Content-Free Egress F
     expect(() => assertContentFree({ inputTokenEstimate: -0 })).toThrow(
       ContentFreeEgressError,
     );
-    expect(() => assertContentFree({ EMAIL: 6 })).toThrow(
+    expect(() => assertContentFree({ EMAIL: 3 })).toThrow(
       ContentFreeEgressError,
     );
 

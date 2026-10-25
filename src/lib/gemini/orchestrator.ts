@@ -54,6 +54,7 @@ import {
   assertGoogleBoundMessage,
   assertOutboundPrivacyInvariant,
   assertValidToolCall,
+  bucketScrubRedactionCount,
   buildInteractionsCreatePayload,
   buildTaskDescriptor,
   callGeminiInteractionsEndpoint,
@@ -1748,7 +1749,11 @@ export async function runArgonAutonomousWorkflow(
     toolName: string,
     rawArgs: Record<string, unknown>,
   ): Promise<Record<string, unknown>> => {
-    const args = assertValidToolCall(toolName, rawArgs);
+    const args = assertValidToolCall(
+      toolName,
+      rawArgs,
+      taskDescriptor.allowedTools,
+    );
     assertOutboundPrivacyInvariant(args, originalSensitiveTokens);
     assertGoogleBoundMessage(
       `toolCall:${toolName}`,
@@ -1763,16 +1768,23 @@ export async function runArgonAutonomousWorkflow(
         const resolvedInput = handleStore.get(inHandle) ?? papillonGeneralizedPrompt;
         const outHandle = registerHandle(1, resolvedInput);
         handleStore.set("$DIGEST_1", hashToContentFree32Hex(resolvedInput));
+        const mechanicalRedactionCount = bucketScrubRedactionCount(
+          stage1.mechanicalRedactionCount,
+        );
+        const attestedRedactionCount = bucketScrubRedactionCount(
+          stage1.attestedFilter.redactionCount,
+        );
+        const redactionCount = Math.min(
+          64,
+          mechanicalRedactionCount + attestedRedactionCount,
+        );
         const result = {
           status: stage1.passed ? "ok" : "failed",
           passed: stage1.passed,
           outputHandle: outHandle,
-          redactionCount: Math.min(64, stage1.redactionCount),
-          mechanicalRedactionCount: Math.min(64, stage1.mechanicalRedactionCount),
-          attestedRedactionCount: Math.min(
-            64,
-            stage1.attestedFilter.redactionCount,
-          ),
+          redactionCount,
+          mechanicalRedactionCount,
+          attestedRedactionCount,
           bucketBytes: stage1.verificationSignal.bucketBytes,
           plaintextLeakCount: Math.min(
             5,

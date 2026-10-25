@@ -54,7 +54,7 @@ function makeValidDescriptor(overrides = {}) {
     redactionCounts: {
       EMAIL: 2,
       NAME: 1,
-      TOTAL: 3,
+      TOTAL: 2,
     },
     verification: {
       mechanicalRedactionPassed: true,
@@ -136,9 +136,9 @@ test("TaskDescriptor validator accepts valid bucketed descriptor, canonicalizes 
     allowedTools: reversedTools,
   });
   assert.equal(bucketedPermuted.inputTokenEstimate, 2048);
-  assert.equal(bucketedPermuted.redactionCounts.EMAIL, 5);
-  assert.equal(bucketedPermuted.redactionCounts.SECRET, 5);
-  assert.equal(bucketedPermuted.redactionCounts.TOTAL, 5);
+  assert.equal(bucketedPermuted.redactionCounts.EMAIL, 2);
+  assert.equal(bucketedPermuted.redactionCounts.SECRET, 2);
+  assert.equal(bucketedPermuted.redactionCounts.TOTAL, 2);
   assert.deepEqual(bucketedPermuted.allowedTools, [...ALLOWED_PLANNER_TOOLS]);
   assert.equal(validateTaskDescriptor(bucketedPermuted).valid, true);
 
@@ -149,12 +149,12 @@ test("TaskDescriptor validator accepts valid bucketed descriptor, canonicalizes 
   assert.equal(nonBucketed.valid, false);
   assert.ok(nonBucketed.errors.some((e) => e.includes("power-of-two")));
 
-  // Rejects redactionCounts > 5 (Wave 6 A3 cap)
+  // Rejects redactionCounts > 2 (coarse bucket 0, 1, 2 where 2 means "2 or more")
   const uncappedCounts = validateTaskDescriptor(
-    makeValidDescriptor({ redactionCounts: { EMAIL: 6 } }),
+    makeValidDescriptor({ redactionCounts: { EMAIL: 3 } }),
   );
   assert.equal(uncappedCounts.valid, false);
-  assert.ok(uncappedCounts.errors.some((e) => e.includes("0..5")));
+  assert.ok(uncappedCounts.errors.some((e) => e.includes("0..2")));
 
   // Rejects wrong inputHandle and truncates/strips control chars in error messages (MINOR-2)
   const longBadHandle = "patient\u0000Alice\u0007Smith_" + "X".repeat(120);
@@ -543,8 +543,8 @@ test("assertContentFree blocks all 5 CRITICAL-2 bypasses as well as free text an
       status: "ok",
       passed: true,
       outputHandle: "$RESULT_1",
-      redactionCount: 3,
-      mechanicalRedactionCount: 3,
+      redactionCount: 4,
+      mechanicalRedactionCount: 4,
       attestedRedactionCount: 0,
       bucketBytes: 4096,
       plaintextLeakCount: 0,
@@ -881,6 +881,96 @@ test("assertContentFree blocks all 5 CRITICAL-2 bypasses as well as free text an
       }),
     ContentFreeEgressError,
   );
+
+  // Round 4 MINOR-1, MINOR-2, MINOR-3 checks in core/src/firewall.js
+  const subsetTools = ["scrub_and_symmetry_mask", "invoke_attested_enclave"];
+  assert.doesNotThrow(() =>
+    assertValidToolCall(
+      "scrub_and_symmetry_mask",
+      { inputHandle: "$INPUT", bucketQuantumBytes: 4096 },
+      subsetTools,
+    ),
+  );
+  assert.throws(
+    () =>
+      assertValidToolCall(
+        "search_atlas_hybrid_kb",
+        { topic: "tinfoil_enclave" },
+        subsetTools,
+      ),
+    ToolPolicyViolationError,
+  );
+
+  // Any non-empty canonical subset of the 5 tools is accepted in createRequest
+  const subsetToolDecls = ARGON_CONFIDENTIAL_TOOLS.filter((t) =>
+    subsetTools.includes(t.name),
+  );
+  assert.doesNotThrow(() =>
+    assertGoogleBoundMessage("createRequest", {
+      ...createRequest,
+      tools: subsetToolDecls,
+    }),
+  );
+  assert.throws(
+    () =>
+      assertGoogleBoundMessage("createRequest", {
+        ...createRequest,
+        tools: [...subsetToolDecls].reverse(),
+      }),
+    ContentFreeEgressError,
+  );
+
+  // MINOR-2: validateToolCallArguments rejects undefined-valued optional keys on raw args
+  const undefOpt = validateToolCallArguments("search_atlas_hybrid_kb", {
+    topic: "tinfoil_enclave",
+    inputHandle: undefined,
+  });
+  assert.equal(undefOpt.valid, false);
+  assert.throws(
+    () =>
+      assertValidToolCall("search_atlas_hybrid_kb", {
+        topic: "tinfoil_enclave",
+        inputHandle: undefined,
+      }),
+    ToolPolicyViolationError,
+  );
+
+  // MINOR-3: redactionCounts capped at 0..2, scrub counts power-of-two in {0,1,2,4,8,16,32,64} + sum invariant
+  assert.throws(() => assertContentFree({ TOTAL: 3 }), ContentFreeEgressError);
+  assert.throws(
+    () => assertContentFree({ redactionCount: 3 }),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () =>
+      assertGoogleBoundMessage("toolResult:scrub_and_symmetry_mask", {
+        status: "ok",
+        passed: true,
+        outputHandle: "$RESULT_1",
+        redactionCount: 3,
+        mechanicalRedactionCount: 3,
+        attestedRedactionCount: 0,
+        bucketBytes: 4096,
+        plaintextLeakCount: 0,
+        contentHandle: "$DIGEST_1",
+      }),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () =>
+      assertGoogleBoundMessage("toolResult:scrub_and_symmetry_mask", {
+        status: "ok",
+        passed: true,
+        outputHandle: "$RESULT_1",
+        redactionCount: 8,
+        mechanicalRedactionCount: 4,
+        attestedRedactionCount: 0,
+        bucketBytes: 4096,
+        plaintextLeakCount: 0,
+        contentHandle: "$DIGEST_1",
+      }),
+    ContentFreeEgressError,
+  );
 });
 
 test("Explicit CORE_KEY_SOURCE supports 'tinfoil' and 'boot', refuses missing/unknown values, and protects secretKey", async () => {
@@ -978,6 +1068,7 @@ test("Explicit CORE_KEY_SOURCE supports 'tinfoil' and 'boot', refuses missing/un
       model: "gemini-4-argon",
       background: true,
       store: false,
+      system_instruction: SPLIT_KNOWLEDGE_SYSTEM_INSTRUCTION,
       generation_config: {
         thinking_level: "medium",
         max_output_tokens: 131072,
@@ -988,7 +1079,20 @@ test("Explicit CORE_KEY_SOURCE supports 'tinfoil' and 'boot', refuses missing/un
           text: canonicalJson(makeValidDescriptor()),
         },
       ],
+      tools: ARGON_CONFIDENTIAL_TOOLS,
     };
+    // MINOR-2: signGeminiEgressReceipt rejects partial/malformed createRequest before signing
+    const { tools: _omitTools, ...partialGeminiPayload } = outboundGeminiPayload;
+    void _omitTools;
+    assert.throws(
+      () =>
+        signGeminiEgressReceipt(
+          partialGeminiPayload,
+          ring["egress-signing"],
+          1792886400,
+        ),
+      ContentFreeEgressError,
+    );
     const receipt = signGeminiEgressReceipt(
       outboundGeminiPayload,
       ring["egress-signing"],

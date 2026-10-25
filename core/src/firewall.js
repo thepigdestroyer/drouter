@@ -105,7 +105,8 @@ export const ALLOWED_VERIFICATION_KEYS = new Set([
   "arcRegistryVerified",
 ]);
 
-export const MAX_REDACTION_COUNT_PER_KIND = 5;
+export const MAX_REDACTION_COUNT_PER_KIND = 2;
+export const MAX_PLAINTEXT_LEAK_COUNT = 5;
 export const MAX_TOKEN_BUCKET = 1_048_576;
 export const MAX_PLANNER_STEPS = 5;
 export const MAX_PLANNER_WALL_CLOCK_MS = 20_000;
@@ -328,6 +329,20 @@ export function isPowerOfTwoInRange(value, min, max) {
     value <= max &&
     (value & (value - 1)) === 0
   );
+}
+
+export function isScrubCountPowerOfTwoBucket(value) {
+  return value === 0 || isPowerOfTwoInRange(value, 1, 64);
+}
+
+export function bucketScrubRedactionCount(n) {
+  const intVal = Math.max(0, Math.min(64, Math.ceil(Number(n) || 0)));
+  if (intVal === 0) return 0;
+  let bucket = 1;
+  while (bucket < intVal && bucket < 64) {
+    bucket *= 2;
+  }
+  return bucket;
 }
 
 const OPAQUE_HANDLE_REGEX =
@@ -1091,11 +1106,12 @@ export function assertContentFree(
     ) {
       throw new ContentFreeEgressError(String(value), path);
     }
-    if (
-      ALLOWED_REDACTION_COUNT_KEYS.has(keyContext) ||
-      keyContext === "plaintextLeakCount"
-    ) {
+    if (ALLOWED_REDACTION_COUNT_KEYS.has(keyContext)) {
       if (value > MAX_REDACTION_COUNT_PER_KIND) {
+        throw new ContentFreeEgressError(String(value), path);
+      }
+    } else if (keyContext === "plaintextLeakCount") {
+      if (value > MAX_PLAINTEXT_LEAK_COUNT) {
         throw new ContentFreeEgressError(String(value), path);
       }
     } else if (
@@ -1116,7 +1132,12 @@ export function assertContentFree(
     } else if (
       keyContext === "redactionCount" ||
       keyContext === "mechanicalRedactionCount" ||
-      keyContext === "attestedRedactionCount" ||
+      keyContext === "attestedRedactionCount"
+    ) {
+      if (value !== 0 && !isPowerOfTwoInRange(value, 1, 64)) {
+        throw new ContentFreeEgressError(String(value), path);
+      }
+    } else if (
       keyContext === "totalDocs" ||
       keyContext === "matchingReceiptsCount"
     ) {
@@ -1530,6 +1551,7 @@ export function validateTaskDescriptor(input) {
     );
   }
 
+  const sanitizedRedactionCounts = {};
   if (!isPlainObject(candidate.redactionCounts)) {
     errors.push("'redactionCounts' must be a non-null plain object.");
   } else {
@@ -1544,12 +1566,15 @@ export function validateTaskDescriptor(input) {
       if (
         typeof v !== "number" ||
         !Number.isInteger(v) ||
+        Object.is(v, -0) ||
         v < 0 ||
         v > MAX_REDACTION_COUNT_PER_KIND
       ) {
         errors.push(
           `Invalid redactionCounts['${previewToken(k)}'] = ${previewToken(v)}. Must be an integer capped in 0..${MAX_REDACTION_COUNT_PER_KIND}.`,
         );
+      } else {
+        sanitizedRedactionCounts[k] = v;
       }
     }
   }
@@ -1590,7 +1615,7 @@ export function validateTaskDescriptor(input) {
     taskKind: candidate.taskKind,
     inputHandle: "$INPUT",
     inputTokenEstimate: candidate.inputTokenEstimate,
-    redactionCounts: { ...candidate.redactionCounts },
+    redactionCounts: sanitizedRedactionCounts,
     verification: { ...candidate.verification },
     allowedTools: ALLOWED_PLANNER_TOOLS.filter((t) => candidate.allowedTools.includes(t)),
   };
@@ -1767,9 +1792,15 @@ export function validateToolCallArguments(toolName, args) {
     try {
       assertGoogleBoundMessage(
         `toolCall:${toolName}`,
+        args,
+        `$.toolCall(${toolName})`,
+      );
+      assertGoogleBoundMessage(
+        `toolCall:${toolName}`,
         sanitizedArgs,
         `$.toolCall(${toolName})`,
       );
+      assertContentFree(args, `$.toolCall(${toolName})`);
       assertContentFree(sanitizedArgs, `$.toolCall(${toolName})`);
     } catch (err) {
       errors.push(err instanceof Error ? err.message : "Failed content-free check.");
@@ -1920,7 +1951,7 @@ function assertDeepEqualConstant(actual, expected, path) {
   throw new ContentFreeEgressError(String(actual), path);
 }
 
-function assertValidToolsArray(toolsValue, expectedToolNames, path) {
+function assertValidToolsArray(toolsValue, expectedToolNames, path = "$.tools") {
   if (
     !Array.isArray(toolsValue) ||
     toolsValue.length === 0 ||
@@ -1928,14 +1959,40 @@ function assertValidToolsArray(toolsValue, expectedToolNames, path) {
   ) {
     throw new ContentFreeEgressError("<invalid_tools_array>", path);
   }
-  const expectedDecls = ARGON_CONFIDENTIAL_TOOLS.filter((t) =>
-    expectedToolNames.includes(t.name),
-  );
-  if (toolsValue.length !== expectedDecls.length) {
-    throw new ContentFreeEgressError("<tools_length_mismatch>", path);
+  const seenNames = new Set();
+  let lastCanonicalIdx = -1;
+  for (let i = 0; i < toolsValue.length; i++) {
+    const item = assertStrictPlainObject(toolsValue[i], `${path}[${i}]`);
+    const name = item.name;
+    if (typeof name !== "string") {
+      throw new ContentFreeEgressError(String(name), `${path}[${i}].name`);
+    }
+    const canonicalIdx = ALLOWED_PLANNER_TOOLS.indexOf(name);
+    if (
+      canonicalIdx === -1 ||
+      seenNames.has(name) ||
+      canonicalIdx <= lastCanonicalIdx
+    ) {
+      throw new ContentFreeEgressError(name, `${path}[${i}].name`);
+    }
+    seenNames.add(name);
+    lastCanonicalIdx = canonicalIdx;
+    assertDeepEqualConstant(
+      item,
+      ARGON_CONFIDENTIAL_TOOLS[canonicalIdx],
+      `${path}[${i}]`,
+    );
   }
-  for (let i = 0; i < expectedDecls.length; i++) {
-    assertDeepEqualConstant(toolsValue[i], expectedDecls[i], `${path}[${i}]`);
+  if (expectedToolNames !== undefined) {
+    const expectedDecls = ARGON_CONFIDENTIAL_TOOLS.filter((t) =>
+      expectedToolNames.includes(t.name),
+    );
+    if (toolsValue.length !== expectedDecls.length) {
+      throw new ContentFreeEgressError("<tools_length_mismatch>", path);
+    }
+    for (let i = 0; i < expectedDecls.length; i++) {
+      assertDeepEqualConstant(toolsValue[i], expectedDecls[i], `${path}[${i}]`);
+    }
   }
 }
 
@@ -2188,7 +2245,7 @@ export function assertInteractionsCreatePayloadSchema(
     );
   }
 
-  assertValidToolsArray(obj.tools, ALLOWED_PLANNER_TOOLS, `${path}.tools`);
+  assertValidToolsArray(obj.tools, undefined, `${path}.tools`);
   assertDeepEqualConstant(
     obj.subagent_routing,
     EXPECTED_SUBAGENT_ROUTING,
@@ -2275,15 +2332,7 @@ export function assertGeminiCreateRequestSchema(
     throw new ContentFreeEgressError(inputItem.text, `${path}.input[0].text`);
   }
 
-  const toolsList = obj.tools;
-  if (!Array.isArray(toolsList)) {
-    throw new ContentFreeEgressError("<invalid_tools>", `${path}.tools`);
-  }
-  const expectedSubset =
-    toolsList.length === ARGON_CONFIDENTIAL_TOOLS.length
-      ? ALLOWED_PLANNER_TOOLS
-      : descriptor.allowedTools;
-  assertValidToolsArray(toolsList, expectedSubset, `${path}.tools`);
+  assertValidToolsArray(obj.tools, undefined, `${path}.tools`);
 }
 
 export function assertToolCallArgumentsSchema(
@@ -2586,22 +2635,31 @@ export function assertToolResultSchema(
           `${path}.outputHandle`,
         );
       }
-      if (!boundedInteger(obj.redactionCount, 0, 64)) {
+      if (!isScrubCountPowerOfTwoBucket(obj.redactionCount)) {
         throw new ContentFreeEgressError(
           String(obj.redactionCount),
           `${path}.redactionCount`,
         );
       }
-      if (!boundedInteger(obj.mechanicalRedactionCount, 0, 64)) {
+      if (!isScrubCountPowerOfTwoBucket(obj.mechanicalRedactionCount)) {
         throw new ContentFreeEgressError(
           String(obj.mechanicalRedactionCount),
           `${path}.mechanicalRedactionCount`,
         );
       }
-      if (!boundedInteger(obj.attestedRedactionCount, 0, 64)) {
+      if (!isScrubCountPowerOfTwoBucket(obj.attestedRedactionCount)) {
         throw new ContentFreeEgressError(
           String(obj.attestedRedactionCount),
           `${path}.attestedRedactionCount`,
+        );
+      }
+      if (
+        obj.redactionCount !==
+        Math.min(64, obj.mechanicalRedactionCount + obj.attestedRedactionCount)
+      ) {
+        throw new ContentFreeEgressError(
+          String(obj.redactionCount),
+          `${path}.redactionCount`,
         );
       }
       if (!isPowerOfTwoInRange(obj.bucketBytes, 512, 65_536)) {
@@ -2610,7 +2668,7 @@ export function assertToolResultSchema(
           `${path}.bucketBytes`,
         );
       }
-      if (!boundedInteger(obj.plaintextLeakCount, 0, MAX_REDACTION_COUNT_PER_KIND)) {
+      if (!boundedInteger(obj.plaintextLeakCount, 0, MAX_PLAINTEXT_LEAK_COUNT)) {
         throw new ContentFreeEgressError(
           String(obj.plaintextLeakCount),
           `${path}.plaintextLeakCount`,

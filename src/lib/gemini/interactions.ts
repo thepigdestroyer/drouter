@@ -589,7 +589,8 @@ export const ALLOW_LEGACY_ORCHESTRATOR_SHA256_UNTIL_MIGRATED = false;
 
 export const SAFE_CALL_ID_REGEX = CLOSED_CALL_ID_REGEX;
 
-export const MAX_REDACTION_COUNT_PER_KIND = 5;
+export const MAX_REDACTION_COUNT_PER_KIND = 2;
+export const MAX_PLAINTEXT_LEAK_COUNT = 5;
 export const MAX_TOKEN_BUCKET = 1_048_576;
 
 export function isPowerOfTwo(n: unknown): n is number {
@@ -603,6 +604,16 @@ export function roundUpToPowerOfTwo(n: number): number {
   );
   let bucket = 1;
   while (bucket < clamped && bucket < MAX_TOKEN_BUCKET) {
+    bucket *= 2;
+  }
+  return bucket;
+}
+
+export function bucketScrubRedactionCount(n: number): number {
+  const intVal = Math.max(0, Math.min(64, Math.ceil(Number(n) || 0)));
+  if (intVal === 0) return 0;
+  let bucket = 1;
+  while (bucket < intVal && bucket < 64) {
     bucket *= 2;
   }
   return bucket;
@@ -1434,11 +1445,12 @@ export function assertContentFree(
     ) {
       throw new ContentFreeEgressError(String(value), path);
     }
-    if (
-      ALLOWED_REDACTION_COUNT_KEYS.has(keyContext) ||
-      keyContext === "plaintextLeakCount"
-    ) {
+    if (ALLOWED_REDACTION_COUNT_KEYS.has(keyContext)) {
       if (num > MAX_REDACTION_COUNT_PER_KIND) {
+        throw new ContentFreeEgressError(String(value), path);
+      }
+    } else if (keyContext === "plaintextLeakCount") {
+      if (num > MAX_PLAINTEXT_LEAK_COUNT) {
         throw new ContentFreeEgressError(String(value), path);
       }
     } else if (
@@ -1459,7 +1471,12 @@ export function assertContentFree(
     } else if (
       keyContext === "redactionCount" ||
       keyContext === "mechanicalRedactionCount" ||
-      keyContext === "attestedRedactionCount" ||
+      keyContext === "attestedRedactionCount"
+    ) {
+      if (num !== 0 && !isPowerOfTwoInRange(num, 1, 64)) {
+        throw new ContentFreeEgressError(String(value), path);
+      }
+    } else if (
       keyContext === "totalDocs" ||
       keyContext === "matchingReceiptsCount"
     ) {
@@ -1902,9 +1919,15 @@ export function validateToolCallArguments(
     try {
       assertGoogleBoundMessage(
         `toolCall:${toolName}`,
+        args,
+        `$.toolCall(${toolName})`,
+      );
+      assertGoogleBoundMessage(
+        `toolCall:${toolName}`,
         sanitizedArgs,
         `$.toolCall(${toolName})`,
       );
+      assertContentFree(args, `$.toolCall(${toolName})`);
       assertContentFree(sanitizedArgs, `$.toolCall(${toolName})`);
     } catch (err) {
       errors.push(err instanceof Error ? err.message : "Failed content-free check.");
@@ -1921,10 +1944,19 @@ export function validateToolCallArguments(
 export function assertValidToolCall(
   toolName: string,
   args: unknown,
+  allowedToolsSubset?: readonly string[],
 ): Record<string, unknown> {
   const res = validateToolCallArguments(toolName, args);
   if (!res.valid || !res.sanitizedArgs) {
     throw new ToolPolicyViolationError(toolName, res.errors);
+  }
+  if (
+    Array.isArray(allowedToolsSubset) &&
+    !allowedToolsSubset.includes(toolName)
+  ) {
+    throw new ToolPolicyViolationError(toolName, [
+      `Tool '${toolName}' is not permitted by this descriptor's allowedTools list.`,
+    ]);
   }
   return res.sanitizedArgs;
 }
@@ -2700,7 +2732,11 @@ export async function callGeminiInteractionsEndpoint(params: {
             "Function call step is missing tool name.",
           ]);
         }
-        const validatedArgs = assertValidToolCall(name, call.arguments ?? {});
+        const validatedArgs = assertValidToolCall(
+          name,
+          call.arguments ?? {},
+          params.payload.taskDescriptor.allowedTools,
+        );
         const safeCallId =
           typeof call.id === "string" &&
           SAFE_CALL_ID_REGEX.test(call.id) &&
@@ -3117,7 +3153,11 @@ export async function callTinfoilPlannerToolLoop(params: {
           ]);
         }
         assertOutboundPrivacyInvariant(parsedArgs, sensitiveOriginals);
-        const validatedArgs = assertValidToolCall(fnName, parsedArgs);
+        const validatedArgs = assertValidToolCall(
+          fnName,
+          parsedArgs,
+          params.taskDescriptor?.allowedTools,
+        );
         const safeTcId =
           typeof tc.id === "string" &&
           SAFE_CALL_ID_REGEX.test(tc.id) &&

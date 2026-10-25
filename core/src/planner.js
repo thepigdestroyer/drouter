@@ -59,7 +59,30 @@ async function withWallClockBudget(promise, startedAtMs, budgetMs) {
  * and verifies it passes `assertContentFree`.
  */
 export function buildGeminiInteractionsRequest(descriptor) {
-  const validated = assertValidTaskDescriptor(descriptor);
+  const bucketedIfComplete =
+    descriptor &&
+    typeof descriptor === "object" &&
+    !Array.isArray(descriptor) &&
+    descriptor.redactionCounts &&
+    typeof descriptor.redactionCounts === "object" &&
+    !Array.isArray(descriptor.redactionCounts)
+      ? {
+          ...descriptor,
+          redactionCounts: Object.fromEntries(
+            Object.entries(descriptor.redactionCounts).map(([k, v]) => [
+              k,
+              typeof v === "number" &&
+              Number.isInteger(v) &&
+              !Object.is(v, -0) &&
+              v >= 0 &&
+              v <= 5
+                ? Math.min(2, v)
+                : v,
+            ]),
+          ),
+        }
+      : descriptor;
+  const validated = assertValidTaskDescriptor(bucketedIfComplete);
   const tools = ARGON_CONFIDENTIAL_TOOLS.filter((t) =>
     validated.allowedTools.includes(t.name),
   );
