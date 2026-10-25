@@ -1,14 +1,14 @@
-# dRouter Data-at-Rest & MongoDB Atlas Privacy Audit
+# deRoute Data-at-Rest & MongoDB Atlas Privacy Audit
 
-Audit date: 2026-10-24
+Audit date: 2026-10-25 (updated for Wave 5 & Wave 6)
 Database: `drouter` (MongoDB Atlas 8.0, application role `drouter-app` with `readWrite` on `drouter` only)
-Scope: `src/lib/db.ts`, `src/app/api/log/route.ts`, `src/lib/credits/ledger.ts`, `src/lib/freeze/store.ts`, `src/lib/atlas/hybrid-search.ts`, and live inspection of all collections in `drouter`.
+Scope: `src/lib/db.ts`, `src/app/api/log/route.ts`, `src/lib/credits/ledger.ts`, `src/lib/freeze/store.ts`, `src/lib/atlas/hybrid-search.ts`, `src/lib/transparency/store.ts`, `src/lib/accountability/store.ts`, `src/lib/auditor/store.ts`, and live inspection of all collections in `drouter`.
 
 ---
 
 ## 1. Zero-PII & Timestamp Coarsening Policy
 
-dRouter enforces four strict invariants for all data at rest in MongoDB:
+deRoute enforces four strict invariants for all data at rest in MongoDB:
 1. **No plaintext prompts or completions**: User prompts and model completions are HPKE-encrypted in the browser directly to the verified enclave (`router-0.tinfoil.sh` / model enclave) or sealed with a client-only AES-256-GCM key (`K_freeze` in `frozen_blobs`) before leaving the browser.
 2. **No network identifiers or PII**: Raw IP addresses, User-Agent strings, email addresses, and authorization headers are never written to any collection. Rate limiting uses in-memory daily rotating salted SHA-256 hashes (`src/lib/ratelimit/index.ts`), and `/api/log` explicitly rejects any payload containing `prompt`, `completion`, `messages`, `ip`, `userAgent`, `email`, or email/IPv4 string patterns.
 3. **UTC hour coarsening**: All public transparency timestamps (`at`, `lastEpochHour`, `coarsenedAt`, `updatedAt`) are rounded down to the UTC hour boundary (`ms - (ms % 3_600_000)`) via `coarsenToHour()` so database records cannot be correlated with individual network requests.
@@ -29,7 +29,10 @@ Every collection in the `drouter` database was queried and scanned for prompts, 
 | `credit_nullifiers` | `src/lib/credits/ledger.ts` | 1 | 1 | 0 | Contained an exact millisecond timestamp in `spentAt` (`Date.now()`). No PII or prompts. |
 | `frozen_blobs` | `src/lib/freeze/store.ts` | 1 | 1 | 0 | Contained exact Unix second timestamps in `createdAt` / `expiresAt`. Payload was AES-256-GCM ciphertext (`ciphertextHex`). |
 | `agent_verification_receipts` | `src/lib/atlas/hybrid-search.ts` | 2 | 0 | 2 | Clean (`coarsenedAt` aligned to UTC hour `T...:00:00.000Z`; Ed25519-signed attestation summaries only). |
-| `enclave_intelligence` | `src/lib/atlas/hybrid-search.ts` | 16 | 0 | 16 | Clean (`updatedAt` aligned to UTC hour; static hardware/enclave reference documentation and 512-dim embeddings). |
+| `enclave_intelligence` | `src/lib/atlas/hybrid-search.ts` | 16 | 0 | 16 | Clean (`updatedAt` aligned to UTC hour; static hardware/enclave reference documentation and 768-dim embeddings). |
+| `transparency_log` & `verifier_submissions` | `src/lib/transparency/store.ts` | 0 (restarted 2026-10-25) | 0 | Live | Append-only RFC 6962 Merkle leaves and verifier public-key fingerprints (`epochHourSec` coarsened to UTC hour; see [docs/transparency-log-restart.md](../transparency-log-restart.md)). |
+| `monitor_runs` & `auditor_runs` | `src/lib/accountability/store.ts`, `src/lib/auditor/store.ts` | 0 | 0 | Live | Hourly 6-enclave continuous monitoring runs and daily SPRT mystery-shopper runs (`epochHourSec` / `at` coarsened to UTC hour). |
+| `credit_invoices` & `credit_payments` | `src/lib/credits/ledger.ts` | 0 | 0 | Live | One-time deposit address derivation indices (`CREDITS_DEPOSIT_XPUB`), `claimHash`, coarse `expiresAt`, and sender-stripped `{ txHash, amount }` records. |
 
 Total offending documents deleted across all collections: **7** (`verifications`: 4, `relay_events`: 1, `credit_nullifiers`: 1, `frozen_blobs`: 1). Zero documents contained plaintext prompts, completions, raw IPs, User-Agents, or emails.
 
@@ -115,5 +118,5 @@ Total offending documents deleted across all collections: **7** (`verifications`
 ### 3.8 `enclave_intelligence`
 - **Purpose**: Curated knowledge base of hardware attestation specifications (AMD SEV-SNP, Intel TDX, NVIDIA H100/B200 CC, Sigstore Rekor, EHBP/HPKE) queried via MongoDB 8.0 native `$vectorSearch`, `$search`, and `$rankFusion`.
 - **Owner**: `src/lib/atlas/hybrid-search.ts` (Agent 18).
-- **Fields**: `docId`, `title`, `category`, `summary`, `tags`, `metadata`, `updatedAt` (coarsened ISO hour), `embedding` (512-dim float array), `embeddingModel`, `embeddingDimensions`.
-- **Retention**: Static reference corpus (16 documents) seeded idempotently on startup.
+- **Fields**: `docId`, `title`, `category`, `summary`, `tags`, `metadata`, `updatedAt` (coarsened ISO hour), `embedding` (768-dim float array), `embeddingModel`, `embeddingDimensions`.
+- **Retention**: Static reference corpus (16 documents) seeded idempotently via `scripts/atlas-indexes.mjs` and served as a whole corpus via `GET /api/knowledge/corpus`.

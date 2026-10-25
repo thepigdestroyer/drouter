@@ -1,4 +1,6 @@
-# Client Leaks, Response Header, External Origin, and Seed Derivation Audit
+# deRoute Client Leaks, Response Header, External Origin, and Seed Derivation Audit
+
+*Wave 5 & Wave 6 update (2026-10-25): All findings below (`CL-01` through `CL-12`) have been remediated in production: `src/app/argon/page.tsx` and `src/lib/agent-client/**` import only client-safe modules (`@/lib/gemini/shared` and `@/lib/gemini/egress-schemas`) with zero `@google/genai` or server seed imports; `POST /api/gemini` was replaced by the content-free `POST /api/gemini/plan` route; `next.config.ts` sets `Content-Security-Policy` and `poweredByHeader: false`; `src/app/layout.tsx` sets `metadataBase`; and fallback seeds (`"01".repeat(32)`, `"02".repeat(32)`, `"03".repeat(32)`) are restricted to `process.env.VITEST` only.*
 
 ## Scope and Methodology
 

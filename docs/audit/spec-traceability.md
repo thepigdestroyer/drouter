@@ -1,6 +1,6 @@
-# Spec Traceability Report (`docs/audit/spec-traceability.md`)
+# deRoute Spec Traceability Report (`docs/audit/spec-traceability.md`)
 
-Date: 2026-10-24
+Date: 2026-10-24 (updated 2026-10-25: Wave 5 & Wave 6 replaced simulated nodes `sim-1..3`, simulated quorum/builders/reviewers, and simulated accountability canaries with continuous hourly monitoring of the 6 real Tinfoil enclaves via `.github/workflows/monitor.yml` and `/api/cron/monitor`, independent Ed25519 CLI verification via `scripts/drouter-cli.mjs verify --submit`, one-time BIP32 deposit addresses via `CREDITS_DEPOSIT_XPUB`, on-device `mechanicalRedact` anchored on Circle Arc Testnet `tx 0x09055dc1b5d6a79de9d96824ee76213b2c238a8bfd744ab143405d30db1fe730`, second-pass `attestedPiiFilter`, whole-library corpus retrieval `/api/knowledge/corpus`, and the closed-schema Gemini 4 Argon control plane `/api/gemini/plan`)
 Audited against:
 1. v1 Spec: `/Users/mj/Documents/Opencode/docs/superpowers/specs/2026-10-24-drouter-nested-enclave-design.md`
 2. v2 Spec: `/Users/mj/Documents/Opencode/docs/superpowers/specs/2026-10-24-drouter-v2-privacy-frontier-design.md`

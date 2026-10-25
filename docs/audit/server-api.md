@@ -1,6 +1,6 @@
-# dRouter Server API, Relay, Gateway & Attestation Verifier Security Audit
+# deRoute Server API, Relay, Gateway & Attestation Verifier Security Audit
 
-Audit date: 2026-10-24
+Audit date: 2026-10-24 (updated 2026-10-25 for Wave 5 & Wave 6: added `/api/gemini/plan`, `/api/knowledge/corpus`, `/api/core/[...path]`, `/api/credits/invoice`, `/api/credits/claim`, `/api/cron/monitor`, and `/api/transparency/verifications`, and removed simulated nodes and full-text `POST /api/gemini`)
 Target: Next.js 16.4.3 / React 19.3 / TypeScript server routes (`src/app/api/**`, `/v1/:path*` rewrite in `next.config.ts`, `src/proxy.ts`), oblivious relay (`src/lib/relay.ts`), OpenAI-compatible gateway (`src/lib/gateway/harness-config.ts`), Arc testnet registry (`src/lib/arc/**`), and Tinfoil attestation verifier (`src/lib/tinfoil/client.ts`, `src/lib/tinfoil/deep-inspect.ts`).
 
 ---

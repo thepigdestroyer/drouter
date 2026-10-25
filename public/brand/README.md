@@ -1,6 +1,8 @@
 # deRoute Brand Assets
 
-Visual system for **deRoute** (short for decentralized-encrypted route), a private AI router where your device checks the seal on a locked computer before sending your message. The art direction follows an e-paper field-notebook aesthetic: crisp black ink line work and living ink blots on warm off-white paper with a single signal-orange focal point per composition.
+Visual system for **deRoute** (short for decentralized-encrypted route), a private AI router where your device removes personal details and checks the hardware seal on a locked computer before sending your message. Internal file names keep the `drouter-*` prefix for compatibility across the codebase.
+
+The art direction follows an e-paper field-notebook aesthetic: crisp black ink line work and living ink blots on warm off-white paper with a single signal-orange focal point per composition.
 
 ## Files
 
@@ -29,9 +31,9 @@ Visual system for **deRoute** (short for decentralized-encrypted route), a priva
   - `drouter-wordmark.svg`: `140 px` minimum width so the monospace tag remains legible (below `140 px`, use `drouter-mark.svg` alone).
 - **Stroke & color discipline**: Never add gradients, drop shadows, glows, or a second orange accent to any composition.
 
-## PNG exports
+## PNG Exports
 
-- `drouter-mark.png`: 1024 x 1024, transparent outside the tile.
-- `drouter-wordmark.png`: 2112 x 432 (3x of the 704 x 144 SVG), transparent corners.
+- `drouter-mark.png`: `1024 x 1024`, transparent outside the tile.
+- `drouter-wordmark.png`: `2112 x 432` (3x of the `704 x 144` SVG), transparent corners.
 
 Re-export from the SVGs with headless Chrome if either SVG changes.

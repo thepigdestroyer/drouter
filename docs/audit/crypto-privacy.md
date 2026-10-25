@@ -1,7 +1,7 @@
-# Client Cryptography and Privacy Audit (`docs/audit/crypto-privacy.md`)
+# deRoute Client Cryptography and Privacy Audit (`docs/audit/crypto-privacy.md`)
 
-Date: 2026-10-24
-Scope: `src/lib/{auth,threshold,ohttp,forensics,credits,freeze,symmetry,stylometry,chaff,risk,localrag,compartment,privacy,custody,weights,redteam}/**`
+Date: 2026-10-25 (updated for Wave 5 & Wave 6 production architecture)
+Scope: `src/lib/{auth,threshold,ohttp,forensics,credits,freeze,symmetry,stylometry,chaff,risk,localrag,compartment,privacy,custody,weights,redteam,agent-client,broker,attestation}/**`
 
 ## 1. Findings Table
 
@@ -45,9 +45,10 @@ Scope: `src/lib/{auth,threshold,ohttp,forensics,credits,freeze,symmetry,stylomet
 
 | Area | Change | Evidence |
 |---|---|---|
-| Vault passphrases | Moved from a 256-word list (48 bits for 6 words) to the 2,048-word BIP39 English list (about 66 bits), with unbiased 11-bit word selection. Vault IDs now use a `vault-` prefix instead of `zk-`. | `src/lib/auth/vault.ts`, `tests/auth/auth.test.ts` |
-| Blind credits | Production issuer key is now 2,048-bit RSA from `CREDITS_ISSUER_RSA_PQ`, validated at load. Seeded 1,024-bit keys remain only as the test and local fallback. | `src/lib/credits/blind.ts`, `tests/credits/credits.test.ts` |
-| CLI checks | `drouter-cli.mjs verify` no longer hardcodes C6 and C7 as passing. C6 reads the live Arc registry; C3, C5 and C7 use the same labels as the web client. | `scripts/drouter-cli.mjs` |
-| Verifier quorum | The console labels the 5-of-7 quorum as simulated, because all verifier keys are derived from one demo server seed. | `src/components/session.ts` |
-| Secret scanning | AWS-format test fixtures are now built at runtime so they no longer match provider patterns. No real credential was ever committed. | `tests/privacy/privacy.test.ts`, `tests/risk/risk.test.ts` |
+| Vault passphrases & passkeys | Added WebAuthn PRF passkey accounts (`src/lib/auth/passkey.ts`) alongside the 2,048-word BIP39 English list (about 66 bits, 210,000 PBKDF2-HMAC-SHA-512 rounds + HKDF-SHA-384 + AES-256-GCM). Vault IDs use a `vault-` prefix. | `src/lib/auth/passkey.ts`, `src/lib/auth/vault.ts`, `tests/passkey/passkey.test.ts` |
+| Blind credits & one-time deposit addresses | Production issuer key is 2,048-bit RSA from `CREDITS_ISSUER_RSA_PQ`. Invoices (`POST /api/credits/invoice`) derive a fresh one-time deposit address per invoice from `CREDITS_DEPOSIT_XPUB` (`m/44'/60'/0'/0`) and strip sender addresses on `POST /api/credits/claim`. | `src/lib/credits/blind.ts`, `src/lib/credits/ledger.ts`, `tests/credits/credits.test.ts` |
+| Mechanical filter & Arc fingerprint | Extracted all deterministic redaction rules into `MECHANICAL_RULESET` (`version: "1.0.1"`, `src/lib/privacy/mechanical-ruleset.ts`) and anchored its SHA-256 fingerprint (`0x0928121dfa0558ab8e59af0298aa76c5b9a3674012d2ff162b66df79bba20f28`) on Circle Arc Testnet (`tx 0x09055dc1b5d6a79de9d96824ee76213b2c238a8bfd744ab143405d30db1fe730`), verified in the browser before send (`FilterFingerprintBadge`). Added second-pass `attestedPiiFilter` (`https://pii-filter.tinfoil.sh`). | `src/lib/privacy/mechanical-ruleset.ts`, `src/lib/privacy/fingerprint.ts`, `src/lib/privacy/attested-filter.ts` |
+| Split-knowledge planner & whole-corpus broker | Removed full-text `POST /api/gemini`. Browser runs redaction and sends only a content-free `TaskDescriptor` (capped at 56.35 bits) to `POST /api/gemini/plan` behind `assertGoogleBoundMessage` and `assertContentFree`, and fetches the whole 16-document corpus via `GET /api/knowledge/corpus` for local BM25 ranking. | `src/lib/gemini/egress-schemas.ts`, `src/lib/agent-client/index.ts`, `src/lib/broker/index.ts` |
+| CLI checks & independent verification | `drouter-cli.mjs verify --submit` signs C1-C7 verification claims with a local Ed25519 key (`~/.config/deroute/verifier-key`) and submits them to `POST /api/transparency/verifications`, returning RFC 6962 inclusion and consistency proofs. | `scripts/drouter-cli.mjs`, `src/lib/transparency/store.ts` |
+| Secret scanning | AWS-format test fixtures are built at runtime so they no longer match provider patterns. No real credential was ever committed. | `tests/privacy/privacy.test.ts`, `tests/risk/risk.test.ts` |
 | MongoDB | The application user has `readWrite` on the `drouter` database only. The `0.0.0.0/0` access list remains because Vercel functions have no fixed egress IPs. | Atlas `connectionStatus` |
