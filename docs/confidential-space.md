@@ -52,22 +52,22 @@ The shared verifier (`src/lib/attestation/confidential-space.ts`) runs the follo
 2. **`pinned_root_ca`**: Parses `x5c[2]` and verifies that its raw DER bytes and SHA-256 fingerprint equal the pinned Google Confidential Space Root CA:
    - SHA-256: `148B293821BB0C6A317F413C8BA475814091CB22D49B9E3C94198DB8E8F86C39`
    - SHA-1: `B95120742C24E3AA34042E1C3BA3AAD28B212321` (matches Google's published digest at `https://docs.cloud.google.com/confidential-computing/confidential-space/docs/connect-external-resources#request`).
-3. **`x5c_chain_and_validity`**: Verifies that the leaf certificate is signed by the intermediate CA, the intermediate CA is signed by the root CA, the root CA is self-signed, CA basic constraints hold, and all three certificates are within their `notBefore` .. `notAfter` validity window at verification time.
+3. **`x5c_chain_and_validity`**: Verifies that the leaf certificate is signed by the intermediate CA, the intermediate CA is signed by the root CA, the root CA is self-signed, `BasicConstraints` `CA=true` is present on root and intermediate (absence means not a CA) and `CA=false`/absent on the leaf, `pathLenConstraint` is honoured, `KeyUsage` includes `keyCertSign` on issuers and `digitalSignature` (without `keyCertSign`) on the leaf when present, all three certificates use `sha256WithRSAEncryption` (`RSASSA-PKCS1-v1_5` with `SHA-256` and RSA key >= 2048 bits), and all three certificates are within their `notBefore` .. `notAfter` validity window at verification time.
 4. **`jwt_rs256_signature`**: Verifies the `RSASSA-PKCS1-v1_5` SHA-256 signature over the ASCII `header.payload` bytes using the leaf certificate's public key via WebCrypto.
 5. **`issuer_and_audience`**: Confirms `iss === "https://confidentialcomputing.googleapis.com"` and `aud === "https://drouter-demo.vercel.app/deroute-core"`.
-6. **`token_lifetime`**: Validates numeric `nbf`, `iat`, and `exp` claims against the current Unix timestamp with a 60-second clock-skew tolerance.
+6. **`token_lifetime`**: Validates numeric `nbf`, `iat`, and `exp` claims (`nbf <= exp` and `iat <= exp`) against the current Unix timestamp with a 60-second clock-skew tolerance.
 7. **`confidential_space_posture`**: Requires `swname === "CONFIDENTIAL_SPACE"`, `dbgstat === "disabled-since-boot"` (rejecting `confidential-space-debug`), `secboot === true`, and `submods.confidential_space.support_attributes` containing `"STABLE"`.
 8. **`hardware_tee_model`**: Requires `hwmodel` to be in `["GCP_AMD_SEV", "GCP_AMD_SEV_ES", "GCP_INTEL_TDX"]` and reports the active hardware isolation technology.
 9. **`container_image_digest`**: Requires `submods.container.image_digest` to match one of the expected `sha256:<64-hex>` digests configured in `CORE_IMAGE_DIGESTS`.
 10. **`container_env_override` & `eat_nonce_binding`**:
-    - Requires `Object.keys(submods.container.env_override ?? {})` to be a subset of `["CORE_KEY_SOURCE", "CORE_PUBLIC_ORIGIN"]` (conforming to Dockerfile label `tee.launch_policy.allow_env_override`).
-    - Recomputes `keysDigest = sha256(canonicalJson({ egress, tree }))` and `tlsSpkiDigest = sha256(tlsCert.publicKey.rawData)` and requires `eat_nonce` to contain both 64-character lowercase hex digests.
+    - Requires `Object.keys(submods.container.env_override ?? {})` to be a subset of `["CORE_KEY_SOURCE", "CORE_PUBLIC_ORIGIN"]` with string values (conforming to Dockerfile label `tee.launch_policy.allow_env_override`).
+    - Recomputes `keysDigest = sha256(canonicalJson({ egress, tree }))` and `tlsSpkiDigest = sha256(tlsCert.publicKey.rawData)` and requires `eat_nonce` to contain both distinct 64-character lowercase hex digests (`keysDigest !== tlsSpkiDigest`).
 
 ### Verify-Then-Pin TLS in `/api/core/[...path]` (G5)
 
 1. When a request arrives at `/api/core/<path>`, the proxy first checks if it holds a cached attestation for `CORE_HOST` that is at least 5 minutes (`300 s`) away from `exp`.
-2. On a cold cache, the proxy connects to `https://<CORE_HOST>:8443/attestation`, captures the peer TLS certificate's raw DER bytes from the TLS socket, and runs `verifyConfidentialSpaceAttestation()` with those exact certificate bytes.
-3. Once verified, the proxy caches `tlsSpkiSha256` until `exp - 300` seconds and pins all subsequent `node:https` requests using a `checkServerIdentity` and `secureConnect` callback that computes `sha256(peerCert.publicKey.spkiDer)` and aborts the connection if it differs from the attested `tlsSpkiSha256`.
+2. On a cold cache, the proxy fetches `https://<CORE_HOST>:8443/attestation` (which returns `{ token, keys, keysDigest, tlsSpkiSha256, tlsCertPem, refreshedAtSec }`), verifies that `tlsCertPem` matches the TLS handshake certificate, and runs `verifyConfidentialSpaceAttestation()` to prove that `sha256(SPKI of tlsCertPem)` is one of the Google-signed nonces.
+3. Once verified, the proxy creates a dedicated `https.Agent` for that pin configured with `ca: [tlsCertPem]`, `rejectUnauthorized: true`, and a `checkServerIdentity` callback that returns an `Error` unless `sha256(peerCert.publicKey.spkiDer)` equals the attested `tlsSpkiSha256`. Whenever the pin changes after re-attestation, the previous `https.Agent` is destroyed so old keep-alive sockets are dropped immediately.
 
 ### Official Google Cloud References
 

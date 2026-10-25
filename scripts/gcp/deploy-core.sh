@@ -14,6 +14,7 @@
 # - `roles/secretmanager.secretAccessor` is granted per secret only (never project-wide).
 
 set -euo pipefail
+set +x
 
 PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}"
 REGION="${REGION:-us-central1}"
@@ -124,6 +125,7 @@ upsert_secret() {
   local secret_name="$1"
   local keychain_service="$2"
   local v=""
+  local existing=""
 
   if ! v="$(read_secret_value "${secret_name}" "${keychain_service}")" || [[ -z "${v}" ]]; then
     echo "Error: Secret ${secret_name} not found in environment, macOS Keychain (${keychain_service}), or ${ENV_FILE}." >&2
@@ -135,12 +137,18 @@ upsert_secret() {
       --replication-policy="automatic" \
       --project="${PROJECT_ID}" \
       --quiet >/dev/null
+  else
+    existing="$(gcloud secrets versions access latest --secret="${secret_name}" --project="${PROJECT_ID}" 2>/dev/null || true)"
   fi
 
-  printf %s "$v" | gcloud secrets versions add "${secret_name}" \
-    --data-file=- \
-    --project="${PROJECT_ID}" \
-    --quiet >/dev/null
+  # Only add a new version if no version exists or the secret value changed
+  if [[ -z "${existing}" || "${existing}" != "${v}" ]]; then
+    printf %s "$v" | gcloud secrets versions add "${secret_name}" \
+      --data-file=- \
+      --project="${PROJECT_ID}" \
+      --quiet >/dev/null
+  fi
+  unset existing
   unset v
 
   # Grant secretAccessor on this individual secret only
@@ -186,12 +194,22 @@ fi
 METADATA="^~^tee-image-reference=${IMAGE_REF}~tee-restart-policy=Always~tee-env-CORE_KEY_SOURCE=boot~tee-env-CORE_PUBLIC_ORIGIN=${CORE_PUBLIC_ORIGIN}"
 
 if gcloud compute instances describe "${INSTANCE_NAME}" --zone="${ZONE}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+  INSTANCE_STATUS="$(gcloud compute instances describe "${INSTANCE_NAME}" \
+    --zone="${ZONE}" \
+    --project="${PROJECT_ID}" \
+    --format='value(status)')"
   gcloud compute instances add-metadata "${INSTANCE_NAME}" \
     --zone="${ZONE}" \
     --project="${PROJECT_ID}" \
     --metadata="${METADATA}" \
     --quiet >/dev/null
-  gcloud compute instances reset "${INSTANCE_NAME}" \
+  if [[ "${INSTANCE_STATUS}" == "RUNNING" ]]; then
+    gcloud compute instances stop "${INSTANCE_NAME}" \
+      --zone="${ZONE}" \
+      --project="${PROJECT_ID}" \
+      --quiet >/dev/null
+  fi
+  gcloud compute instances start "${INSTANCE_NAME}" \
     --zone="${ZONE}" \
     --project="${PROJECT_ID}" \
     --quiet >/dev/null

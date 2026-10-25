@@ -3,6 +3,7 @@
 # Pass PURGE_ALL=1 to also delete the Secret Manager secrets and workload service account.
 
 set -euo pipefail
+set +x
 
 PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}"
 REGION="${REGION:-us-central1}"

@@ -2,7 +2,7 @@
  * Google Cloud Confidential Space PKI Attestation Verifier (G4).
  *
  * Browser- and Node-safe module using only `@peculiar/x509@2.2.0` and WebCrypto (`globalThis.crypto.subtle`).
- * Performs zero randomness or network calls at import time.
+ * Performs zero randomness, network calls, or global `Reflect` mutations at import time.
  *
  * Official documentation references:
  * - PKI token verification: https://docs.cloud.google.com/confidential-computing/confidential-space/docs/connect-external-resources#pki_attestation_tokens
@@ -10,18 +10,34 @@
  * - Launch policies: https://docs.cloud.google.com/confidential-computing/confidential-space/docs/reference/launch-policies
  */
 
+import type * as x509Types from "@peculiar/x509";
 import {
+  ensureReflectMetadata,
   GOOGLE_CONFIDENTIAL_SPACE_ROOT_CA_PEM,
   GOOGLE_CONFIDENTIAL_SPACE_ROOT_CA_SHA1,
   GOOGLE_CONFIDENTIAL_SPACE_ROOT_CA_SHA256,
 } from "./google-cs-root";
-import * as x509 from "@peculiar/x509";
 
 export {
+  ensureReflectMetadata,
   GOOGLE_CONFIDENTIAL_SPACE_ROOT_CA_PEM,
   GOOGLE_CONFIDENTIAL_SPACE_ROOT_CA_SHA1,
   GOOGLE_CONFIDENTIAL_SPACE_ROOT_CA_SHA256,
 };
+
+let x509ModulePromise: Promise<typeof import("@peculiar/x509")> | null = null;
+
+/**
+ * Lazily loads `@peculiar/x509` after ensuring non-enumerable `Reflect` metadata helpers
+ * exist, eliminating import-order sensitivity and import-time global mutation.
+ */
+async function getX509(): Promise<typeof import("@peculiar/x509")> {
+  if (!x509ModulePromise) {
+    ensureReflectMetadata();
+    x509ModulePromise = import("@peculiar/x509");
+  }
+  return x509ModulePromise;
+}
 
 export const EXPECTED_CONFIDENTIAL_SPACE_ISSUER =
   "https://confidentialcomputing.googleapis.com" as const;
@@ -103,6 +119,10 @@ function getWebCrypto(): Crypto {
   throw new Error("WebCrypto API (globalThis.crypto.subtle) is required");
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function bytesToHexLower(bytes: ArrayBuffer | Uint8Array): string {
   const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   let out = "";
@@ -117,6 +137,14 @@ function bytesToHexUpper(bytes: ArrayBuffer | Uint8Array): string {
 }
 
 function base64UrlToBytes(input: string): Uint8Array {
+  if (
+    typeof input !== "string" ||
+    input.length === 0 ||
+    input.length % 4 === 1 ||
+    !/^[A-Za-z0-9_-]+$/.test(input)
+  ) {
+    throw new Error("Invalid unpadded Base64URL string");
+  }
   const normalized = input.replace(/-/g, "+").replace(/_/g, "/");
   const padLen = (4 - (normalized.length % 4)) % 4;
   const padded = normalized + "=".repeat(padLen);
@@ -148,6 +176,38 @@ function equalBytes(a: ArrayBuffer | Uint8Array, b: ArrayBuffer | Uint8Array): b
     diff |= va[i] ^ vb[i];
   }
   return diff === 0;
+}
+
+/**
+ * Verifies that an X.509 certificate in the Google Confidential Space chain uses
+ * `sha256WithRSAEncryption` (`RSASSA-PKCS1-v1_5` with `SHA-256`) and an RSA key >= 2048 bits.
+ */
+function isSha256WithRsaEncryptionCert(cert: x509Types.X509Certificate): boolean {
+  const sigAlg = cert.signatureAlgorithm as {
+    name?: string;
+    hash?: string | { name?: string };
+  };
+  const hashName =
+    typeof sigAlg?.hash === "string"
+      ? sigAlg.hash
+      : typeof sigAlg?.hash?.name === "string"
+        ? sigAlg.hash.name
+        : "";
+  if (sigAlg?.name !== "RSASSA-PKCS1-v1_5" || hashName.toUpperCase() !== "SHA-256") {
+    return false;
+  }
+  const pubAlg = cert.publicKey.algorithm as {
+    name?: string;
+    modulusLength?: number;
+  };
+  if (
+    pubAlg?.name !== "RSASSA-PKCS1-v1_5" ||
+    typeof pubAlg.modulusLength !== "number" ||
+    pubAlg.modulusLength < 2048
+  ) {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -223,7 +283,8 @@ export async function computeAttestedKeysDigest(
 export async function computeTlsCertSpkiSha256(
   certPemOrDer: string | ArrayBuffer | Uint8Array,
 ): Promise<string> {
-  const rawInput: x509.AsnEncodedType =
+  const x509 = await getX509();
+  const rawInput: x509Types.AsnEncodedType =
     certPemOrDer instanceof Uint8Array
       ? (certPemOrDer.buffer.slice(
           certPemOrDer.byteOffset,
@@ -247,6 +308,7 @@ export async function getEmbeddedRootCaFingerprints(): Promise<{
   notAfter: string;
 }> {
   const cryptoApi = getWebCrypto();
+  const x509 = await getX509();
   const cert = new x509.X509Certificate(GOOGLE_CONFIDENTIAL_SPACE_ROOT_CA_PEM);
   const sha256Buf = await cryptoApi.subtle.digest("SHA-256", cert.rawData);
   const sha1Buf = await cryptoApi.subtle.digest("SHA-1", cert.rawData);
@@ -267,6 +329,7 @@ export async function verifyConfidentialSpaceAttestation(
   options: ConfidentialSpaceVerificationOptions,
 ): Promise<ConfidentialSpaceVerificationResult> {
   const cryptoApi = getWebCrypto();
+  const x509 = await getX509();
   const checks: ConfidentialSpaceCheck[] = [];
   const expectedAudience = options.expectedAudience ?? DEFAULT_CONFIDENTIAL_SPACE_AUDIENCE;
   const allowedEnvOverrides = new Set(
@@ -279,7 +342,7 @@ export async function verifyConfidentialSpaceAttestation(
     options.nowSec !== undefined ? Math.floor(options.nowSec) : Math.floor(Date.now() / 1000);
   const checkDate = new Date(nowSec * 1000);
 
-  // Step 1: Parse JWT parts, header alg === RS256, and x5c length === 3
+  // Step 1: Parse JWT parts, header alg === RS256, crit absent, and x5c length === 3
   let headerObj: Record<string, unknown> | null = null;
   let payloadObj: Record<string, unknown> | null = null;
   let signingInputBytes: Uint8Array | null = null;
@@ -293,12 +356,19 @@ export async function verifyConfidentialSpaceAttestation(
     try {
       const headerJson = bytesToUtf8(base64UrlToBytes(parts[0]));
       const payloadJson = bytesToUtf8(base64UrlToBytes(parts[1]));
-      headerObj = JSON.parse(headerJson) as Record<string, unknown>;
-      payloadObj = JSON.parse(payloadJson) as Record<string, unknown>;
-      signingInputBytes = utf8ToBytes(`${parts[0]}.${parts[1]}`);
-      signatureBytes = base64UrlToBytes(parts[2]);
-      if (Array.isArray(headerObj?.x5c) && headerObj.x5c.every((c) => typeof c === "string")) {
-        x5cList = headerObj.x5c as string[];
+      const parsedHeader = JSON.parse(headerJson);
+      const parsedPayload = JSON.parse(payloadJson);
+      if (isPlainObject(parsedHeader) && isPlainObject(parsedPayload)) {
+        headerObj = parsedHeader;
+        payloadObj = parsedPayload;
+        signingInputBytes = utf8ToBytes(`${parts[0]}.${parts[1]}`);
+        signatureBytes = base64UrlToBytes(parts[2]);
+        if (
+          Array.isArray(headerObj.x5c) &&
+          headerObj.x5c.every((c) => typeof c === "string" && c.length > 0)
+        ) {
+          x5cList = headerObj.x5c as string[];
+        }
       }
     } catch {
       headerObj = null;
@@ -307,10 +377,12 @@ export async function verifyConfidentialSpaceAttestation(
   }
 
   const alg = headerObj?.alg;
+  const hasCrit = headerObj !== null && "crit" in headerObj && headerObj.crit !== undefined;
   const headerCheckPassed =
     headerObj !== null &&
     payloadObj !== null &&
     alg === "RS256" &&
+    !hasCrit &&
     x5cList.length === 3;
 
   checks.push({
@@ -320,15 +392,15 @@ export async function verifyConfidentialSpaceAttestation(
       ? "The attestation token uses a standard RSA signature and includes a three-certificate Google chain."
       : "The attestation token header is malformed or does not use a valid RSA certificate chain.",
     technical: headerCheckPassed
-      ? `JWT header alg=RS256 and x5c contains 3 certificates (leaf, intermediate, root).`
-      : `Expected JWT with alg="RS256" and x5c.length=3; got alg=${JSON.stringify(alg)}, x5c.length=${x5cList.length}.`,
+      ? `JWT header alg=RS256, crit absent, and x5c contains 3 certificates (leaf, intermediate, root).`
+      : `Expected JWT with alg="RS256", no crit header, and x5c.length=3; got alg=${JSON.stringify(alg)}, hasCrit=${hasCrit}, x5c.length=${x5cList.length}.`,
   });
 
   // Step 2: Parse certificates and verify root DER equals pinned Google Confidential Space Root CA
-  let leafCert: x509.X509Certificate | null = null;
-  let intermediateCert: x509.X509Certificate | null = null;
-  let rootCert: x509.X509Certificate | null = null;
-  let pinnedRootCert: x509.X509Certificate | null = null;
+  let leafCert: x509Types.X509Certificate | null = null;
+  let intermediateCert: x509Types.X509Certificate | null = null;
+  let rootCert: x509Types.X509Certificate | null = null;
+  let pinnedRootCert: x509Types.X509Certificate | null = null;
 
   if (x5cList.length === 3) {
     try {
@@ -368,7 +440,7 @@ export async function verifyConfidentialSpaceAttestation(
       : `x5c[2] DER mismatch against pinned Root CA (got SHA-256 ${rootSha256Hex || "unparseable"}).`,
   });
 
-  // Step 3: Verify certificate chain signatures and validity windows at check time
+  // Step 3: Verify certificate chain signatures, BasicConstraints, pathLen, KeyUsage, sigAlg, and validity windows
   let chainSignaturesPassed = false;
   let chainValidityPassed = false;
   let chainDetail = "";
@@ -385,10 +457,41 @@ export async function verifyConfidentialSpaceAttestation(
     chainValidityPassed = leafTimeOk && interTimeOk && rootTimeOk;
 
     try {
+      const leafCaExt = leafCert.getExtension(x509.BasicConstraintsExtension);
       const interCaExt = intermediateCert.getExtension(x509.BasicConstraintsExtension);
       const rootCaExt = rootCert.getExtension(x509.BasicConstraintsExtension);
+
+      // RFC 5280 §4.2.1.9 / §6.1.4(k): issuers MUST have BasicConstraints CA=true;
+      // absence means not a CA. Leaf MUST have CA=false or BasicConstraints absent.
+      // pathLenConstraint on root must allow at least 1 intermediate CA (>= 1 if present);
+      // pathLenConstraint on intermediate must be >= 0 if present.
       const caConstraintsOk =
-        (interCaExt ? interCaExt.ca : true) && (rootCaExt ? rootCaExt.ca : true);
+        Boolean(interCaExt && interCaExt.ca === true) &&
+        Boolean(rootCaExt && rootCaExt.ca === true) &&
+        (!leafCaExt || leafCaExt.ca === false) &&
+        (rootCaExt?.pathLength === undefined ||
+          (Number.isInteger(rootCaExt.pathLength) && rootCaExt.pathLength >= 1)) &&
+        (interCaExt?.pathLength === undefined ||
+          (Number.isInteger(interCaExt.pathLength) && interCaExt.pathLength >= 0));
+
+      // When KeyUsage extension is present:
+      // - Root and intermediate issuers must include keyCertSign
+      // - Leaf must include digitalSignature and must NOT include keyCertSign
+      const rootKeyUsage = rootCert.getExtension(x509.KeyUsagesExtension);
+      const interKeyUsage = intermediateCert.getExtension(x509.KeyUsagesExtension);
+      const leafKeyUsage = leafCert.getExtension(x509.KeyUsagesExtension);
+      const keyUsageOk =
+        (!rootKeyUsage || (rootKeyUsage.usages & x509.KeyUsageFlags.keyCertSign) !== 0) &&
+        (!interKeyUsage || (interKeyUsage.usages & x509.KeyUsageFlags.keyCertSign) !== 0) &&
+        (!leafKeyUsage ||
+          ((leafKeyUsage.usages & x509.KeyUsageFlags.digitalSignature) !== 0 &&
+            (leafKeyUsage.usages & x509.KeyUsageFlags.keyCertSign) === 0));
+
+      // Only accept sha256WithRSAEncryption (RSASSA-PKCS1-v1_5 with SHA-256, RSA >= 2048)
+      const certAlgorithmsOk =
+        isSha256WithRsaEncryptionCert(leafCert) &&
+        isSha256WithRsaEncryptionCert(intermediateCert) &&
+        isSha256WithRsaEncryptionCert(rootCert);
 
       const issuerMatchOk =
         leafCert.issuer === intermediateCert.subject &&
@@ -410,11 +513,13 @@ export async function verifyConfidentialSpaceAttestation(
 
       chainSignaturesPassed =
         caConstraintsOk &&
+        keyUsageOk &&
+        certAlgorithmsOk &&
         issuerMatchOk &&
         leafSignedByInter &&
         interSignedByRoot &&
         rootSelfSigned;
-      chainDetail = `leafSignedByInter=${leafSignedByInter}, interSignedByRoot=${interSignedByRoot}, rootSelfSigned=${rootSelfSigned}, leafTimeOk=${leafTimeOk}, interTimeOk=${interTimeOk}, rootTimeOk=${rootTimeOk}`;
+      chainDetail = `caConstraintsOk=${caConstraintsOk}, keyUsageOk=${keyUsageOk}, certAlgorithmsOk=${certAlgorithmsOk}, issuerMatchOk=${issuerMatchOk}, leafSignedByInter=${leafSignedByInter}, interSignedByRoot=${interSignedByRoot}, rootSelfSigned=${rootSelfSigned}, leafTimeOk=${leafTimeOk}, interTimeOk=${interTimeOk}, rootTimeOk=${rootTimeOk}`;
     } catch (err) {
       chainSignaturesPassed = false;
       chainDetail = `chain verification error: ${err instanceof Error ? err.message : String(err)}`;
@@ -498,7 +603,7 @@ export async function verifyConfidentialSpaceAttestation(
     technical: `iss=${JSON.stringify(iss)} (expected "${EXPECTED_CONFIDENTIAL_SPACE_ISSUER}"), aud=${JSON.stringify(aud)} (expected "${expectedAudience}").`,
   });
 
-  // Step 5b: Token lifetime (nbf, iat, exp with 60 s clock skew)
+  // Step 5b: Token lifetime (nbf, iat, exp with 60 s clock skew and nbf <= exp && iat <= exp)
   const nbf = typeof payloadObj?.nbf === "number" ? payloadObj.nbf : null;
   const iat = typeof payloadObj?.iat === "number" ? payloadObj.iat : null;
   const exp = typeof payloadObj?.exp === "number" ? payloadObj.exp : null;
@@ -509,6 +614,8 @@ export async function verifyConfidentialSpaceAttestation(
     Number.isFinite(nbf) &&
     Number.isFinite(iat) &&
     Number.isFinite(exp) &&
+    nbf <= exp &&
+    iat <= exp &&
     nowSec + CLOCK_SKEW_SECONDS >= nbf &&
     nowSec + CLOCK_SKEW_SECONDS >= iat &&
     nowSec - CLOCK_SKEW_SECONDS < exp;
@@ -526,14 +633,10 @@ export async function verifyConfidentialSpaceAttestation(
   const swname = payloadObj?.swname;
   const dbgstat = payloadObj?.dbgstat;
   const secboot = payloadObj?.secboot;
-  const submods =
-    payloadObj?.submods && typeof payloadObj.submods === "object"
-      ? (payloadObj.submods as Record<string, unknown>)
-      : null;
-  const csSubmod =
-    submods?.confidential_space && typeof submods.confidential_space === "object"
-      ? (submods.confidential_space as Record<string, unknown>)
-      : null;
+  const submods = isPlainObject(payloadObj?.submods) ? payloadObj.submods : null;
+  const csSubmod = isPlainObject(submods?.confidential_space)
+    ? submods.confidential_space
+    : null;
   const supportAttributes = Array.isArray(csSubmod?.support_attributes)
     ? (csSubmod.support_attributes as unknown[]).filter((x): x is string => typeof x === "string")
     : [];
@@ -569,10 +672,7 @@ export async function verifyConfidentialSpaceAttestation(
   });
 
   // Step 5e: Container image digest (`submods.container.image_digest`)
-  const containerSubmod =
-    submods?.container && typeof submods.container === "object"
-      ? (submods.container as Record<string, unknown>)
-      : null;
+  const containerSubmod = isPlainObject(submods?.container) ? submods.container : null;
   const imageDigest =
     typeof containerSubmod?.image_digest === "string" ? containerSubmod.image_digest : null;
   const imageDigestPassed =
@@ -592,18 +692,19 @@ export async function verifyConfidentialSpaceAttestation(
 
   // Step 5f: Environment variable overrides (`submods.container.env_override`)
   const envOverrideObj =
-    containerSubmod?.env_override !== undefined &&
-    containerSubmod?.env_override !== null &&
-    typeof containerSubmod.env_override === "object" &&
-    !Array.isArray(containerSubmod.env_override)
-      ? (containerSubmod.env_override as Record<string, unknown>)
-      : containerSubmod?.env_override === undefined
-        ? {}
-        : null;
+    containerSubmod?.env_override !== undefined
+      ? isPlainObject(containerSubmod.env_override)
+        ? containerSubmod.env_override
+        : null
+      : {};
 
   const overrideKeys = envOverrideObj ? Object.keys(envOverrideObj) : [];
   const disallowedKeys = overrideKeys.filter((k) => !allowedEnvOverrides.has(k));
-  const envOverridePassed = envOverrideObj !== null && disallowedKeys.length === 0;
+  const allValuesStrings =
+    envOverrideObj !== null &&
+    overrideKeys.every((k) => typeof envOverrideObj[k] === "string");
+  const envOverridePassed =
+    envOverrideObj !== null && disallowedKeys.length === 0 && allValuesStrings;
 
   checks.push({
     id: "container_env_override",
@@ -612,12 +713,12 @@ export async function verifyConfidentialSpaceAttestation(
       ? "No unauthorized environment overrides were injected by the cloud operator."
       : "The cloud operator passed unauthorized environment variable overrides to the container.",
     technical:
-      envOverrideObj === null
-        ? "submods.container.env_override is not a plain object."
+      envOverrideObj === null || !allValuesStrings
+        ? "submods.container.env_override is not a plain string-valued object."
         : `env_override keys=${JSON.stringify(overrideKeys)} (allowed: ${JSON.stringify([...allowedEnvOverrides])}).`,
   });
 
-  // Step 5g: `eat_nonce` binding to recomputed `keysDigest` and `tlsSpkiDigest`
+  // Step 5g: `eat_nonce` binding to two distinct recomputed digests (`keysDigest` and `tlsSpkiDigest`)
   let recomputedKeysDigest: string | null = null;
   let recomputedTlsSpkiDigest: string | null = null;
   let nonceError = "";
@@ -653,6 +754,15 @@ export async function verifyConfidentialSpaceAttestation(
     nonceError = err instanceof Error ? err.message : String(err);
   }
 
+  if (
+    !nonceError &&
+    recomputedKeysDigest !== null &&
+    recomputedTlsSpkiDigest !== null &&
+    recomputedKeysDigest === recomputedTlsSpkiDigest
+  ) {
+    nonceError = "keysDigest and tlsSpkiDigest must be two distinct nonces.";
+  }
+
   const rawEatNonce = payloadObj?.eat_nonce;
   const eatNonceList: string[] =
     typeof rawEatNonce === "string"
@@ -661,12 +771,16 @@ export async function verifyConfidentialSpaceAttestation(
         ? (rawEatNonce as string[])
         : [];
 
+  const uniqueEatNonces = new Set(eatNonceList);
   const noncePassed =
     !nonceError &&
     recomputedKeysDigest !== null &&
     recomputedTlsSpkiDigest !== null &&
-    eatNonceList.includes(recomputedKeysDigest) &&
-    eatNonceList.includes(recomputedTlsSpkiDigest);
+    recomputedKeysDigest !== recomputedTlsSpkiDigest &&
+    eatNonceList.length === 2 &&
+    uniqueEatNonces.size === 2 &&
+    uniqueEatNonces.has(recomputedKeysDigest) &&
+    uniqueEatNonces.has(recomputedTlsSpkiDigest);
 
   checks.push({
     id: "eat_nonce_binding",
@@ -676,7 +790,7 @@ export async function verifyConfidentialSpaceAttestation(
       : "The attestation nonces do not match the workload's signing keys or TLS certificate.",
     technical: nonceError
       ? `Nonce recomputation failed: ${nonceError}`
-      : `eat_nonce=${JSON.stringify(eatNonceList)}, expected keysDigest=${recomputedKeysDigest} and tlsSpkiDigest=${recomputedTlsSpkiDigest}.`,
+      : `eat_nonce=${JSON.stringify(eatNonceList)}, expected two distinct digests keysDigest=${recomputedKeysDigest} and tlsSpkiDigest=${recomputedTlsSpkiDigest}.`,
   });
 
   const allPassed = checks.every((c) => c.passed);

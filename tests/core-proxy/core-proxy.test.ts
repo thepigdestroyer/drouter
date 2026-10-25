@@ -1,19 +1,25 @@
 import crypto from "node:crypto";
 import https from "node:https";
+import type { TLSSocket } from "node:tls";
+import type * as x509Types from "@peculiar/x509";
 import {
   computeAttestedKeysDigest,
   computeTlsCertSpkiSha256,
   DEFAULT_CONFIDENTIAL_SPACE_AUDIENCE,
+  ensureReflectMetadata,
   EXPECTED_CONFIDENTIAL_SPACE_ISSUER,
 } from "@/lib/attestation/confidential-space";
 import {
   clearCoreAttestationCache,
   getCachedCoreAttestation,
+  normalizeAllowedCorePath,
+  parseCoreHost,
   proxyCoreRequest,
 } from "@/lib/core-proxy";
 import { GET, POST } from "@/app/api/core/[...path]/route";
-import * as x509 from "@peculiar/x509";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
+
+let x509: typeof import("@peculiar/x509");
 
 const TEST_NOW_SEC = 1_792_886_400;
 const TEST_IMAGE_DIGEST =
@@ -36,11 +42,22 @@ function jsonToBase64Url(obj: unknown): string {
   return bytesToBase64Url(Buffer.from(JSON.stringify(obj), "utf8"));
 }
 
-async function generateSelfSignedEcdsaTlsPair(commonName: string): Promise<{
+interface GeneratedTlsMaterial {
+  cert: x509Types.X509Certificate;
   certPem: string;
   keyPem: string;
   spkiSha256: string;
-}> {
+  webPriv: CryptoKey;
+}
+
+async function generateEcdsaTlsPair(
+  commonName: string,
+  options: {
+    isCa?: boolean;
+    issuerCert?: x509Types.X509Certificate;
+    issuerKey?: CryptoKey;
+  } = {},
+): Promise<GeneratedTlsMaterial> {
   const { privateKey, publicKey } = crypto.generateKeyPairSync("ec", {
     namedCurve: "prime256v1",
   });
@@ -62,29 +79,54 @@ async function generateSelfSignedEcdsaTlsPair(commonName: string): Promise<{
     ["verify"],
   );
 
-  const cert = await x509.X509CertificateGenerator.createSelfSigned({
-    serialNumber: "01",
-    name: `CN=${commonName}`,
-    notBefore: new Date((TEST_NOW_SEC - 86_400) * 1000),
-    notAfter: new Date((TEST_NOW_SEC + 86_400 * 365) * 1000),
-    signingAlgorithm: { name: "ECDSA", hash: "SHA-256" },
-    keys: { privateKey: webPriv, publicKey: webPub },
-  });
+  const extensions: x509Types.Extension[] = options.isCa
+    ? [
+        new x509.BasicConstraintsExtension(true, 1, true),
+        new x509.KeyUsagesExtension(
+          x509.KeyUsageFlags.keyCertSign | x509.KeyUsageFlags.digitalSignature,
+          true,
+        ),
+      ]
+    : [new x509.BasicConstraintsExtension(false, undefined, true)];
 
-  const certPem = cert.toString("pem");
+  const cert = options.issuerCert && options.issuerKey
+    ? await x509.X509CertificateGenerator.create({
+        serialNumber: "02",
+        subject: `CN=${commonName}`,
+        issuer: options.issuerCert.subject,
+        notBefore: new Date((TEST_NOW_SEC - 86_400) * 1000),
+        notAfter: new Date((TEST_NOW_SEC + 86_400 * 365) * 1000),
+        signingAlgorithm: { name: "ECDSA", hash: "SHA-256" },
+        publicKey: webPub,
+        signingKey: options.issuerKey,
+        extensions,
+      })
+    : await x509.X509CertificateGenerator.createSelfSigned({
+        serialNumber: "01",
+        name: `CN=${commonName}`,
+        notBefore: new Date((TEST_NOW_SEC - 86_400) * 1000),
+        notAfter: new Date((TEST_NOW_SEC + 86_400 * 365) * 1000),
+        signingAlgorithm: { name: "ECDSA", hash: "SHA-256" },
+        keys: { privateKey: webPriv, publicKey: webPub },
+        extensions,
+      });
+
+  const certPem = cert.toString("pem").trim();
   const keyPem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
   const spkiSha256 = await computeTlsCertSpkiSha256(certPem);
-  return { certPem, keyPem, spkiSha256 };
+  return { cert, certPem, keyPem, spkiSha256, webPriv };
 }
 
 interface ProxyTestFixture {
   rootCertPem: string;
   x5cChain: string[];
   leafPrivateKey: CryptoKey;
-  tls1: { certPem: string; keyPem: string; spkiSha256: string };
-  tls2: { certPem: string; keyPem: string; spkiSha256: string };
+  tls1: GeneratedTlsMaterial;
+  tls2DifferentCa: GeneratedTlsMaterial;
+  tlsChildDifferentSpki: GeneratedTlsMaterial;
   keysDigest: string;
   validTokenForTls1: string;
+  validTokenForTls2: string;
 }
 
 let fixture: ProxyTestFixture;
@@ -102,14 +144,67 @@ async function generateRsaPair(): Promise<CryptoKeyPair> {
   );
 }
 
+async function signAttestationToken(
+  x5cChain: string[],
+  leafPrivateKey: CryptoKey,
+  keysDigest: string,
+  tlsSpkiSha256: string,
+  exp = TEST_NOW_SEC + 3600,
+): Promise<string> {
+  const header = { alg: "RS256", typ: "JWT", x5c: x5cChain };
+  const payload = {
+    iss: EXPECTED_CONFIDENTIAL_SPACE_ISSUER,
+    aud: DEFAULT_CONFIDENTIAL_SPACE_AUDIENCE,
+    iat: TEST_NOW_SEC - 30,
+    nbf: TEST_NOW_SEC - 30,
+    exp,
+    swname: "CONFIDENTIAL_SPACE",
+    dbgstat: "disabled-since-boot",
+    secboot: true,
+    hwmodel: "GCP_AMD_SEV",
+    eat_nonce: [keysDigest, tlsSpkiSha256],
+    submods: {
+      confidential_space: {
+        support_attributes: ["LATEST", "STABLE", "USABLE"],
+      },
+      container: {
+        image_digest: TEST_IMAGE_DIGEST,
+        env_override: {
+          CORE_KEY_SOURCE: "boot",
+        },
+      },
+    },
+  };
+
+  const h = jsonToBase64Url(header);
+  const p = jsonToBase64Url(payload);
+  const sig = await globalThis.crypto.subtle.sign(
+    { name: "RSASSA-PKCS1-v1_5" },
+    leafPrivateKey,
+    new TextEncoder().encode(`${h}.${p}`),
+  );
+  return `${h}.${p}.${bytesToBase64Url(sig)}`;
+}
+
 beforeAll(async () => {
-  const [rootKeys, interKeys, leafKeys, tls1, tls2] = await Promise.all([
+  ensureReflectMetadata();
+  x509 = await import("@peculiar/x509");
+
+  const [rootKeys, interKeys, leafKeys, tls1, tls2DifferentCa] = await Promise.all([
     generateRsaPair(),
     generateRsaPair(),
     generateRsaPair(),
-    generateSelfSignedEcdsaTlsPair("deroute-core-1.internal"),
-    generateSelfSignedEcdsaTlsPair("deroute-core-mitm.internal"),
+    // Make tls1 CA-capable so we can also sign a child leaf certificate with a different SPKI
+    // to test that checkServerIdentity refuses it even when OpenSSL CA chain verification passes!
+    generateEcdsaTlsPair("deroute-core-1.internal", { isCa: true }),
+    generateEcdsaTlsPair("deroute-core-mitm-ca.internal", { isCa: true }),
   ]);
+
+  const tlsChildDifferentSpki = await generateEcdsaTlsPair("deroute-core-mitm-leaf.internal", {
+    isCa: false,
+    issuerCert: tls1.cert,
+    issuerKey: tls1.webPriv,
+  });
 
   const notBefore = new Date((TEST_NOW_SEC - 86_400) * 1000);
   const notAfter = new Date((TEST_NOW_SEC + 86_400 * 365) * 1000);
@@ -156,49 +251,29 @@ beforeAll(async () => {
   ];
 
   const keysDigest = await computeAttestedKeysDigest(TEST_KEYS);
-
-  const header = { alg: "RS256", typ: "JWT", x5c: x5cChain };
-  const payload = {
-    iss: EXPECTED_CONFIDENTIAL_SPACE_ISSUER,
-    aud: DEFAULT_CONFIDENTIAL_SPACE_AUDIENCE,
-    iat: TEST_NOW_SEC - 30,
-    nbf: TEST_NOW_SEC - 30,
-    exp: TEST_NOW_SEC + 3600,
-    swname: "CONFIDENTIAL_SPACE",
-    dbgstat: "disabled-since-boot",
-    secboot: true,
-    hwmodel: "GCP_AMD_SEV",
-    eat_nonce: [keysDigest, tls1.spkiSha256],
-    submods: {
-      confidential_space: {
-        support_attributes: ["LATEST", "STABLE", "USABLE"],
-      },
-      container: {
-        image_digest: TEST_IMAGE_DIGEST,
-        env_override: {
-          CORE_KEY_SOURCE: "boot",
-        },
-      },
-    },
-  };
-
-  const h = jsonToBase64Url(header);
-  const p = jsonToBase64Url(payload);
-  const sig = await globalThis.crypto.subtle.sign(
-    { name: "RSASSA-PKCS1-v1_5" },
+  const validTokenForTls1 = await signAttestationToken(
+    x5cChain,
     leafKeys.privateKey,
-    new TextEncoder().encode(`${h}.${p}`),
+    keysDigest,
+    tls1.spkiSha256,
   );
-  const validTokenForTls1 = `${h}.${p}.${bytesToBase64Url(sig)}`;
+  const validTokenForTls2 = await signAttestationToken(
+    x5cChain,
+    leafKeys.privateKey,
+    keysDigest,
+    tls2DifferentCa.spkiSha256,
+  );
 
   fixture = {
     rootCertPem: rootCert.toString("pem"),
     x5cChain,
     leafPrivateKey: leafKeys.privateKey,
     tls1,
-    tls2,
+    tls2DifferentCa,
+    tlsChildDifferentSpki,
     keysDigest,
     validTokenForTls1,
+    validTokenForTls2,
   };
 });
 
@@ -220,8 +295,30 @@ describe("Confidential Space Core Proxy (G5)", () => {
     expect(json).toEqual({ core: "not-deployed" });
   });
 
+  it("validates CORE_HOST (including IPv6 brackets) and rejects malformed path segments or percent-encoded paths", async () => {
+    expect(parseCoreHost("127.0.0.1:8443")).toEqual({ host: "127.0.0.1", port: 8443 });
+    expect(parseCoreHost("[::1]:8443")).toEqual({ host: "::1", port: 8443 });
+    expect(parseCoreHost("[::1]")).toEqual({ host: "::1", port: 8443 });
+    expect(parseCoreHost("::1")).toBeNull();
+    expect(parseCoreHost("user@127.0.0.1:8443")).toBeNull();
+    expect(parseCoreHost("127.0.0.1:0")).toBeNull();
+    expect(parseCoreHost("127.0.0.1:99999")).toBeNull();
+
+    // Empty segment inside array must be rejected, not collapsed
+    expect(normalizeAllowedCorePath(["knowledge", "", "corpus"]).ok).toBe(false);
+    expect(normalizeAllowedCorePath(["knowledge", "corpus"]).ok).toBe(true);
+
+    // Percent-encoded URL path is rejected
+    const encodedReq = new Request("https://drouter-demo.vercel.app/api/core/health%2f..", {
+      method: "GET",
+    });
+    const encodedRes = await GET(encodedReq, {
+      params: Promise.resolve({ path: ["health"] }),
+    });
+    expect(encodedRes.status).toBe(404);
+  });
+
   it("enforces the strict path and method allowlist before making any upstream calls", async () => {
-    // Disallowed path: transparency/sign-tree-head or arbitrary path
     for (const badPath of [
       ["transparency", "sign-tree-head"],
       ["admin", "secrets"],
@@ -238,7 +335,6 @@ describe("Confidential Space Core Proxy (G5)", () => {
       expect(body.error).toBe("path_not_allowed");
     }
 
-    // Wrong HTTP method on allowlisted path
     const postHealth = new Request("https://drouter-demo.vercel.app/api/core/health", {
       method: "POST",
       body: JSON.stringify({}),
@@ -256,7 +352,6 @@ describe("Confidential Space Core Proxy (G5)", () => {
     });
     expect(resGetPlan.status).toBe(405);
 
-    // Query parameters forbidden
     const queryReq = new Request(
       "https://drouter-demo.vercel.app/api/core/knowledge/corpus?topic=tdx",
       { method: "GET" },
@@ -267,8 +362,9 @@ describe("Confidential Space Core Proxy (G5)", () => {
     expect(resQuery.status).toBe(400);
   });
 
-  it("verifies /attestation, pins TLS to tlsSpkiSha256, caches attestation, and strips IP/cookie/user-agent headers", async () => {
+  it("verifies /attestation, pins TLS with ca:[tlsCertPem] + rejectUnauthorized:true + checkServerIdentity, reuses keep-alive sockets, strips headers, and never spreads unverified attestation fields", async () => {
     let attestationFetchCount = 0;
+    let pinnedTlsHandshakeCount = 0;
     const receivedUpstreamHeaders: Record<string, unknown>[] = [];
 
     const httpsServer = https.createServer(
@@ -289,7 +385,9 @@ describe("Confidential Space Core Proxy (G5)", () => {
               keys: TEST_KEYS,
               keysDigest: fixture.keysDigest,
               tlsSpkiSha256: fixture.tls1.spkiSha256,
+              tlsCertPem: fixture.tls1.certPem,
               refreshedAtSec: TEST_NOW_SEC - 10,
+              untrustedExtraField: "must-never-be-spread-by-proxy",
             }),
           );
           return;
@@ -323,6 +421,10 @@ describe("Confidential Space Core Proxy (G5)", () => {
       },
     );
 
+    httpsServer.on("secureConnection", () => {
+      pinnedTlsHandshakeCount += 1;
+    });
+
     await new Promise<void>((resolve) => httpsServer.listen(0, "127.0.0.1", resolve));
     const address = httpsServer.address() as { port: number };
     const coreHost = `127.0.0.1:${address.port}`;
@@ -336,7 +438,24 @@ describe("Confidential Space Core Proxy (G5)", () => {
         nowSec: () => simulatedNowSec,
       };
 
-      // 1. First request to /health triggers /attestation fetch + verification + TLS pin
+      // 1. First request to /attestation returns only verified fields (never spreads untrustedExtraField)
+      const attReq = new Request("https://drouter-demo.vercel.app/api/core/attestation", {
+        method: "GET",
+      });
+      const attRes = await proxyCoreRequest(attReq, ["attestation"], proxyConfig);
+      expect(attRes.status).toBe(200);
+      const attJson = JSON.parse(attRes.body);
+      expect(attJson.token).toBe(fixture.validTokenForTls1);
+      expect(attJson.keys).toEqual(TEST_KEYS);
+      expect(attJson.keysDigest).toBe(fixture.keysDigest);
+      expect(attJson.tlsSpkiSha256).toBe(fixture.tls1.spkiSha256);
+      expect(attJson.tlsCertPem).toBe(fixture.tls1.certPem);
+      expect(attJson.verification.ok).toBe(true);
+      expect(attJson.untrustedExtraField).toBeUndefined();
+      expect(attestationFetchCount).toBe(1);
+      expect(pinnedTlsHandshakeCount).toBe(1); // 1 handshake for /attestation
+
+      // 2. Request to /health uses the dedicated pinned https.Agent
       const req1 = new Request("https://drouter-demo.vercel.app/api/core/health", {
         method: "GET",
         headers: {
@@ -350,10 +469,9 @@ describe("Confidential Space Core Proxy (G5)", () => {
       expect(res1.status).toBe(200);
       expect(JSON.parse(res1.body)).toEqual({ ok: true, service: "deroute-core" });
       expect(attestationFetchCount).toBe(1);
-      expect(getCachedCoreAttestation()?.tlsSpkiSha256).toBe(fixture.tls1.spkiSha256);
+      expect(pinnedTlsHandshakeCount).toBe(2); // 1 new handshake for the pinned keepAlive agent
 
-      // Verify zero forwarding of client IP, cookies, or user-agent on both /attestation and /health
-      expect(receivedUpstreamHeaders.length).toBe(2);
+      // Verify zero forwarding of client IP, cookies, or user-agent
       for (const h of receivedUpstreamHeaders) {
         expect(h["x-forwarded-for"]).toBeUndefined();
         expect(h["x-real-ip"]).toBeUndefined();
@@ -361,7 +479,7 @@ describe("Confidential Space Core Proxy (G5)", () => {
         expect(h["user-agent"]).toBeUndefined();
       }
 
-      // 2. Second request to POST /agent/plan reuses cached attestation without re-fetching /attestation
+      // 3. Second pinned request to POST /agent/plan reuses the keep-alive TLS socket in the pinned Agent!
       const req2 = new Request("https://drouter-demo.vercel.app/api/core/agent/plan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -371,23 +489,19 @@ describe("Confidential Space Core Proxy (G5)", () => {
       expect(res2.status).toBe(200);
       const body2 = JSON.parse(res2.body);
       expect(body2).toEqual({ ok: true, receivedTaskKind: "summarize" });
-      expect(body2.stack).toBeUndefined(); // stack stripped
+      expect(body2.stack).toBeUndefined();
       expect(attestationFetchCount).toBe(1);
-
-      // 3. Advance clock to within 5 minutes of token exp -> cache expires and re-fetches /attestation
-      simulatedNowSec = TEST_NOW_SEC + 3600 - 299;
-      const req3 = new Request("https://drouter-demo.vercel.app/api/core/health", {
-        method: "GET",
-      });
-      const res3 = await proxyCoreRequest(req3, ["health"], proxyConfig);
-      expect(res3.status).toBe(200);
-      expect(attestationFetchCount).toBe(2);
+      expect(pinnedTlsHandshakeCount).toBe(2); // Reused keep-alive TLS socket!
     } finally {
       await new Promise<void>((resolve) => httpsServer.close(() => resolve()));
     }
   });
 
-  it("aborts TLS connection with 502 tls_spki_pin_mismatch if the server swaps its TLS key after attestation", async () => {
+  it("refuses both (a) a MITM server with a different self-signed CA and (b) a MITM server with a cert signed by the pinned CA whose SPKI differs, before any request bytes are written", async () => {
+    let mitmHttpRequestsReceived = 0;
+    let mitmTlsApplicationBytesReceived = 0;
+    let attestationPhase = true;
+
     const httpsServer = https.createServer(
       {
         key: fixture.tls1.keyPem,
@@ -403,15 +517,30 @@ describe("Confidential Space Core Proxy (G5)", () => {
               keys: TEST_KEYS,
               keysDigest: fixture.keysDigest,
               tlsSpkiSha256: fixture.tls1.spkiSha256,
+              tlsCertPem: fixture.tls1.certPem,
               refreshedAtSec: TEST_NOW_SEC,
             }),
           );
           return;
         }
+        if (!attestationPhase) {
+          mitmHttpRequestsReceived += 1;
+        }
         res.writeHead(200);
         res.end(JSON.stringify({ ok: true }));
       },
     );
+
+    const activeServerSockets = new Set<TLSSocket>();
+    httpsServer.on("secureConnection", (tlsSocket: TLSSocket) => {
+      activeServerSockets.add(tlsSocket);
+      tlsSocket.on("close", () => activeServerSockets.delete(tlsSocket));
+      if (!attestationPhase) {
+        tlsSocket.on("data", (chunk: Buffer) => {
+          mitmTlsApplicationBytesReceived += chunk.byteLength;
+        });
+      }
+    });
 
     await new Promise<void>((resolve) => httpsServer.listen(0, "127.0.0.1", resolve));
     const address = httpsServer.address() as { port: number };
@@ -425,31 +554,174 @@ describe("Confidential Space Core Proxy (G5)", () => {
         nowSec: () => TEST_NOW_SEC,
       };
 
-      // First call establishes verified attestation and pins tls1.spkiSha256
+      // Prime the attestation cache with genuine tls1
       const okRes = await proxyCoreRequest(
-        new Request("https://drouter-demo.vercel.app/api/core/health"),
-        ["health"],
+        new Request("https://drouter-demo.vercel.app/api/core/attestation"),
+        ["attestation"],
         proxyConfig,
       );
       expect(okRes.status).toBe(200);
 
-      // Now swap the server's TLS certificate to tls2 while cache holds pin for tls1
+      // Case A: MITM server with a certificate from a different self-signed CA
+      attestationPhase = false;
       httpsServer.setSecureContext({
-        key: fixture.tls2.keyPem,
-        cert: fixture.tls2.certPem,
+        key: fixture.tls2DifferentCa.keyPem,
+        cert: fixture.tls2DifferentCa.certPem,
       });
 
-      const mitmRes = await proxyCoreRequest(
+      const mitmResA = await proxyCoreRequest(
+        new Request("https://drouter-demo.vercel.app/api/core/agent/plan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ taskKind: "summarize", secretProbe: "never-sent" }),
+        }),
+        ["agent", "plan"],
+        proxyConfig,
+      );
+      expect(mitmResA.status).toBe(502);
+      const mitmBodyA = JSON.parse(mitmResA.body);
+      expect(mitmBodyA.ok).toBe(false);
+      expect(mitmBodyA.error).toBe("tls_spki_pin_mismatch");
+      expect(mitmHttpRequestsReceived).toBe(0);
+      expect(mitmTlsApplicationBytesReceived).toBe(0);
+
+      // Re-prime attestation cache with genuine tls1 for Case B
+      attestationPhase = true;
+      httpsServer.setSecureContext({
+        key: fixture.tls1.keyPem,
+        cert: fixture.tls1.certPem,
+      });
+      const rePrimeRes = await proxyCoreRequest(
+        new Request("https://drouter-demo.vercel.app/api/core/attestation"),
+        ["attestation"],
+        proxyConfig,
+      );
+      expect(rePrimeRes.status).toBe(200);
+
+      // Case B: MITM server presents a leaf certificate signed by tls1 (so OpenSSL CA check passes
+      // with ca: [tls1.certPem] and rejectUnauthorized: true!), but whose SPKI differs from tls1!
+      // Node's checkServerIdentity must refuse the connection before any request bytes are written.
+      attestationPhase = false;
+      httpsServer.setSecureContext({
+        key: fixture.tlsChildDifferentSpki.keyPem,
+        cert: `${fixture.tlsChildDifferentSpki.certPem}\n${fixture.tls1.certPem}`,
+      });
+
+      const mitmResB = await proxyCoreRequest(
+        new Request("https://drouter-demo.vercel.app/api/core/agent/plan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ taskKind: "summarize", secretProbe: "never-sent" }),
+        }),
+        ["agent", "plan"],
+        proxyConfig,
+      );
+      expect(mitmResB.status).toBe(502);
+      const mitmBodyB = JSON.parse(mitmResB.body);
+      expect(mitmBodyB.ok).toBe(false);
+      expect(mitmBodyB.error).toBe("tls_spki_pin_mismatch");
+      expect(mitmHttpRequestsReceived).toBe(0);
+      expect(mitmTlsApplicationBytesReceived).toBe(0);
+    } finally {
+      for (const s of activeServerSockets) s.destroy();
+      await new Promise<void>((resolve) => httpsServer.close(() => resolve()));
+    }
+  });
+
+  it("drops old keep-alive sockets and replaces the https.Agent when the pin changes after re-attestation", async () => {
+    let currentTls = fixture.tls1;
+    let currentToken = fixture.validTokenForTls1;
+    const serverSideSockets: TLSSocket[] = [];
+
+    const httpsServer = https.createServer(
+      {
+        key: currentTls.keyPem,
+        cert: currentTls.certPem,
+      },
+      (req, res) => {
+        res.setHeader("Content-Type", "application/json; charset=utf-8");
+        if (req.url === "/attestation") {
+          res.writeHead(200);
+          res.end(
+            JSON.stringify({
+              token: currentToken,
+              keys: TEST_KEYS,
+              keysDigest: fixture.keysDigest,
+              tlsSpkiSha256: currentTls.spkiSha256,
+              tlsCertPem: currentTls.certPem,
+              refreshedAtSec: TEST_NOW_SEC,
+            }),
+          );
+          return;
+        }
+        res.writeHead(200);
+        res.end(JSON.stringify({ ok: true, pin: currentTls.spkiSha256 }));
+      },
+    );
+
+    httpsServer.on("secureConnection", (tlsSocket: TLSSocket) => {
+      serverSideSockets.push(tlsSocket);
+    });
+
+    await new Promise<void>((resolve) => httpsServer.listen(0, "127.0.0.1", resolve));
+    const address = httpsServer.address() as { port: number };
+    const coreHost = `127.0.0.1:${address.port}`;
+
+    try {
+      let simulatedNowSec = TEST_NOW_SEC;
+      const proxyConfig = {
+        coreHost,
+        coreImageDigests: [TEST_IMAGE_DIGEST],
+        pinnedRootCaPem: fixture.rootCertPem,
+        nowSec: () => simulatedNowSec,
+      };
+
+      // 1. Connect with pin 1 (tls1)
+      const res1 = await proxyCoreRequest(
         new Request("https://drouter-demo.vercel.app/api/core/health"),
         ["health"],
         proxyConfig,
       );
-      expect(mitmRes.status).toBe(502);
-      const mitmBody = JSON.parse(mitmRes.body);
-      expect(mitmBody.ok).toBe(false);
-      expect(mitmBody.error).toBe("tls_spki_pin_mismatch");
-      expect(mitmBody.stack).toBeUndefined();
+      expect(res1.status).toBe(200);
+      const agent1 = getCachedCoreAttestation()!.agent;
+      expect(getCachedCoreAttestation()!.tlsSpkiSha256).toBe(fixture.tls1.spkiSha256);
+
+      // Capture the keep-alive client socket inside agent1
+      const freeSocketsList1 = Object.values(agent1.freeSockets).flat();
+      expect(freeSocketsList1.length).toBe(1);
+      const oldClientSocket = freeSocketsList1[0]!;
+      expect(oldClientSocket.destroyed).toBe(false);
+
+      // 2. Rotate server to tls2DifferentCa with a valid attestation token for tls2,
+      //    and advance clock to trigger re-attestation (within 5 minutes of token exp)
+      currentTls = fixture.tls2DifferentCa;
+      currentToken = fixture.validTokenForTls2;
+      httpsServer.setSecureContext({
+        key: currentTls.keyPem,
+        cert: currentTls.certPem,
+      });
+      simulatedNowSec = TEST_NOW_SEC + 3600 - 200;
+
+      const res2 = await proxyCoreRequest(
+        new Request("https://drouter-demo.vercel.app/api/core/health"),
+        ["health"],
+        proxyConfig,
+      );
+      expect(res2.status).toBe(200);
+      expect(JSON.parse(res2.body)).toEqual({
+        ok: true,
+        pin: fixture.tls2DifferentCa.spkiSha256,
+      });
+
+      const agent2 = getCachedCoreAttestation()!.agent;
+      expect(agent2).not.toBe(agent1);
+      expect(getCachedCoreAttestation()!.tlsSpkiSha256).toBe(
+        fixture.tls2DifferentCa.spkiSha256,
+      );
+      // Old keep-alive socket from agent1 must be destroyed immediately upon pin change!
+      expect(oldClientSocket.destroyed).toBe(true);
     } finally {
+      for (const s of serverSideSockets) s.destroy();
       await new Promise<void>((resolve) => httpsServer.close(() => resolve()));
     }
   });

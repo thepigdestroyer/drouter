@@ -2,6 +2,7 @@
 # Stop a running deRoute Confidential Space VM instance to pause compute billing (G7).
 
 set -euo pipefail
+set +x
 
 PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}"
 REGION="${REGION:-us-central1}"

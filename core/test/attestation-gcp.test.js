@@ -24,7 +24,7 @@ function makeFakeJwt(payloadObj) {
   return `${header}.${payload}.${sig}`;
 }
 
-test("attestation-gcp requests PKI token over unix socket, binds keysDigest and tlsSpkiDigest, and refreshes after 45 minutes", async () => {
+test("attestation-gcp requests PKI token over unix socket, binds keysDigest and tlsSpkiDigest, checks exp/eat_nonce, reconfigures on key change, and refreshes after 45 minutes or exp", async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cs-launcher-"));
   const socketPath = path.join(tmpDir, "teeserver.sock");
 
@@ -48,6 +48,9 @@ test("attestation-gcp requests PKI token over unix socket, binds keysDigest and 
   );
   assert.equal(DEFAULT_REFRESH_INTERVAL_MS, 45 * 60 * 1000);
 
+  let clockSec = 1_792_886_400;
+  let nextJwtExpOffsetSec = 3600;
+  let overrideEatNonce = null;
   const receivedRequests = [];
   let tokenCounter = 0;
 
@@ -80,7 +83,10 @@ test("attestation-gcp requests PKI token over unix socket, binds keysDigest and 
       const jwt = makeFakeJwt({
         seq: tokenCounter,
         aud: parsedBody.audience,
-        eat_nonce: parsedBody.nonces,
+        iat: clockSec,
+        nbf: clockSec,
+        exp: clockSec + nextJwtExpOffsetSec,
+        eat_nonce: overrideEatNonce ?? parsedBody.nonces,
       });
       res.writeHead(200, { "Content-Type": "text/plain" });
       res.end(jwt);
@@ -90,14 +96,12 @@ test("attestation-gcp requests PKI token over unix socket, binds keysDigest and 
   await new Promise((resolve) => fakeLauncher.listen(socketPath, resolve));
 
   try {
-    let clockSec = 1_792_886_400;
-
     configureAttestation({
       socketPath,
       keys: { egress: egressPubHex, tree: treePubHex },
       tlsCert: spkiPem,
       nowSec: () => clockSec,
-      refreshIntervalMs: 0, // disable background timer in unit test; test clock-based 45m refresh deterministically
+      refreshIntervalMs: 0,
     });
 
     // 1. Initial call to getAttestation() fetches from unix socket
@@ -116,9 +120,23 @@ test("attestation-gcp requests PKI token over unix socket, binds keysDigest and 
     assert.equal(att1.keysDigest, expectedKeysDigest);
     assert.equal(att1.tlsSpkiSha256, expectedTlsSpkiSha256);
     assert.equal(att1.refreshedAtSec, 1_792_886_400);
+    assert.equal(att1.expiresAtSec, 1_792_886_400 + 3600);
     assert.equal(att1.token.split(".").length, 3);
 
-    // 2. Test 45-minute refresh lifecycle with createAttestationManager
+    // 2. Calling getAttestation({ keys: newKeys }) without reconfigure:true automatically reconfigures
+    //    and fetches a fresh token bound to the new keysDigest
+    const rotatedKeys = { egress: "33".repeat(32), tree: "44".repeat(32) };
+    const expectedRotatedDigest = sha256Hex(canonicalJson(rotatedKeys));
+    const attRotated = await getAttestation({ keys: rotatedKeys });
+    assert.equal(receivedRequests.length, 2);
+    assert.equal(attRotated.keysDigest, expectedRotatedDigest);
+    assert.deepEqual(attRotated.keys, rotatedKeys);
+    assert.deepEqual(receivedRequests[1].body.nonces, [
+      expectedRotatedDigest,
+      expectedTlsSpkiSha256,
+    ]);
+
+    // 3. Test 45-minute refresh lifecycle AND shorter token exp lifecycle
     const manager = createAttestationManager({
       socketPath,
       keys: { egress: egressPubHex, tree: treePubHex },
@@ -129,21 +147,58 @@ test("attestation-gcp requests PKI token over unix socket, binds keysDigest and 
 
     try {
       const m1 = await manager.getAttestation();
-      assert.equal(receivedRequests.length, 2);
+      assert.equal(receivedRequests.length, 3);
       assert.equal(m1.refreshedAtSec, 1_792_886_400);
 
       // Advance 44 minutes (2640s): still cached, does not re-fetch
       clockSec += 44 * 60;
       const m2 = await manager.getAttestation();
-      assert.equal(receivedRequests.length, 2);
+      assert.equal(receivedRequests.length, 3);
       assert.equal(m2.token, m1.token);
 
       // Advance 1 more minute (total 45 minutes = 2700s): triggers refresh
+      // Have the launcher issue a short-lived token (exp = clockSec + 600s = 10 mins)
+      nextJwtExpOffsetSec = 600;
       clockSec += 60;
       const m3 = await manager.getAttestation();
-      assert.equal(receivedRequests.length, 3);
+      assert.equal(receivedRequests.length, 4);
       assert.notEqual(m3.token, m1.token);
       assert.equal(m3.refreshedAtSec, 1_792_886_400 + 2700);
+      assert.equal(m3.expiresAtSec, clockSec + 600);
+
+      // Advance 601 seconds (< 45 minutes, but past the short token's exp!):
+      // manager must never serve the expired token and must refresh immediately
+      nextJwtExpOffsetSec = 3600;
+      clockSec += 601;
+      const m4 = await manager.getAttestation();
+      assert.equal(receivedRequests.length, 5);
+      assert.notEqual(m4.token, m3.token);
+
+      // 4. Rejects if launcher returns an already-expired token
+      nextJwtExpOffsetSec = -10;
+      await assert.rejects(
+        () => manager.getAttestation({ forceRefresh: true }),
+        /already-expired JWT/,
+      );
+
+      // 5. Rejects if launcher returns a token with mismatched eat_nonce
+      nextJwtExpOffsetSec = 3600;
+      overrideEatNonce = ["ff".repeat(32), expectedTlsSpkiSha256];
+      await assert.rejects(
+        () => manager.getAttestation({ forceRefresh: true }),
+        /eat_nonce .* does not match expected nonces/,
+      );
+
+      // 6. Rejects colliding nonces (keysDigest === tlsSpkiSha256)
+      assert.throws(
+        () =>
+          createAttestationManager({
+            socketPath,
+            keys: { egress: egressPubHex, tree: treePubHex },
+            tlsSpkiSha256: expectedKeysDigest,
+          }),
+        /distinct nonces/,
+      );
     } finally {
       manager.stop();
     }

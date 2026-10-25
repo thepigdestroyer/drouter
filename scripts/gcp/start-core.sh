@@ -2,6 +2,7 @@
 # Start a stopped deRoute Confidential Space VM instance and print its public IP (G7).
 
 set -euo pipefail
+set +x
 
 PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}"
 REGION="${REGION:-us-central1}"

@@ -6,6 +6,8 @@
  * SubjectPublicKeyInfo (SPKI) DER, verifies the Google Cloud Confidential Space PKI token against
  * the pinned Google Confidential Space Root CA, checks all G4 claims, and prints the check table.
  *
+ * Refuses to run without `CORE_IMAGE_DIGESTS`.
+ *
  * Usage:
  *   CORE_HOST=<ip>:8443 CORE_IMAGE_DIGESTS=sha256:<digest> node scripts/gcp/verify-core.mjs
  */
@@ -55,6 +57,69 @@ const DEFAULT_AUDIENCE = "https://drouter-demo.vercel.app/deroute-core";
 const ALLOWED_HWMODELS = new Set(["GCP_AMD_SEV", "GCP_AMD_SEV_ES", "GCP_INTEL_TDX"]);
 const ALLOWED_ENV_OVERRIDES = new Set(["CORE_KEY_SOURCE", "CORE_PUBLIC_ORIGIN"]);
 
+function ensureReflectMetadata() {
+  if (
+    typeof Reflect.getMetadata === "function" &&
+    typeof Reflect.getOwnMetadata === "function" &&
+    typeof Reflect.defineMetadata === "function" &&
+    typeof Reflect.metadata === "function"
+  ) {
+    return;
+  }
+  const store = new WeakMap();
+  const getMap = (target, key, create) => {
+    if ((typeof target !== "object" || target === null) && typeof target !== "function") {
+      return undefined;
+    }
+    let tm = store.get(target);
+    if (!tm) {
+      if (!create) return undefined;
+      tm = new Map();
+      store.set(target, tm);
+    }
+    let pm = tm.get(key);
+    if (!pm && create) {
+      pm = new Map();
+      tm.set(key, pm);
+    }
+    return pm;
+  };
+  const defs = {
+    defineMetadata: (k, v, t, p) => {
+      const m = getMap(t, p, true);
+      if (m) m.set(k, v);
+    },
+    getOwnMetadata: (k, t, p) => {
+      const m = getMap(t, p, false);
+      return m ? m.get(k) : undefined;
+    },
+    getMetadata: (k, t, p) => {
+      let cur = t;
+      while (cur && (typeof cur === "object" || typeof cur === "function")) {
+        const own = Reflect.getOwnMetadata(k, cur, p);
+        if (own !== undefined) return own;
+        cur = Object.getPrototypeOf(cur);
+      }
+      return undefined;
+    },
+    metadata: (k, v) => (t, p) => Reflect.defineMetadata(k, v, t, p),
+  };
+  for (const [name, fn] of Object.entries(defs)) {
+    if (typeof Reflect[name] !== "function") {
+      Object.defineProperty(Reflect, name, {
+        value: fn,
+        configurable: true,
+        writable: true,
+        enumerable: false,
+      });
+    }
+  }
+}
+
+function isPlainObject(v) {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
 function canonicalJson(value) {
   if (value === null || value === undefined) return "null";
   if (typeof value === "boolean" || typeof value === "string" || typeof value === "number") {
@@ -75,12 +140,38 @@ function sha256HexLower(bufOrStr) {
 
 function parseHostPort(rawHost) {
   const clean = String(rawHost || "").trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "");
-  if (!clean) return null;
-  const idx = clean.lastIndexOf(":");
-  if (idx > 0) {
-    return { host: clean.slice(0, idx), port: Number(clean.slice(idx + 1)) || 8443 };
+  if (!clean || /[/?#@\s]/.test(clean)) return null;
+  const colonCount = (clean.match(/:/g) || []).length;
+  if (colonCount > 1 && !clean.startsWith("[")) return null;
+  try {
+    const parsed = new URL(`https://${clean}`);
+    const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
+    if (!hostname || !/^[A-Za-z0-9.:-]+$/.test(hostname)) return null;
+    const port = parsed.port ? Number(parsed.port) : 8443;
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+    return { host: hostname, port };
+  } catch {
+    return null;
   }
-  return { host: clean, port: 8443 };
+}
+
+function isSha256WithRsaEncryptionCert(cert) {
+  const sigAlg = cert.signatureAlgorithm;
+  const hashName =
+    typeof sigAlg?.hash === "string"
+      ? sigAlg.hash
+      : typeof sigAlg?.hash?.name === "string"
+        ? sigAlg.hash.name
+        : "";
+  if (sigAlg?.name !== "RSASSA-PKCS1-v1_5" || hashName.toUpperCase() !== "SHA-256") {
+    return false;
+  }
+  const pubAlg = cert.publicKey.algorithm;
+  return (
+    pubAlg?.name === "RSASSA-PKCS1-v1_5" &&
+    typeof pubAlg.modulusLength === "number" &&
+    pubAlg.modulusLength >= 2048
+  );
 }
 
 function fetchAttestationWithPeerCert({ host, port }) {
@@ -101,7 +192,8 @@ function fetchAttestationWithPeerCert({ host, port }) {
           reject(new Error("Peer did not present a TLS certificate"));
           return;
         }
-        const x509Peer = new crypto.X509Certificate(peer.raw);
+        const peerCertRaw = Buffer.from(peer.raw);
+        const x509Peer = new crypto.X509Certificate(peerCertRaw);
         const spkiDer = x509Peer.publicKey.export({ type: "spki", format: "der" });
         const peerSpkiSha256 = sha256HexLower(spkiDer);
 
@@ -110,7 +202,7 @@ function fetchAttestationWithPeerCert({ host, port }) {
         res.on("end", () => {
           try {
             const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-            resolve({ statusCode: res.statusCode, payload, peerSpkiSha256 });
+            resolve({ statusCode: res.statusCode, payload, peerCertRaw, peerSpkiSha256 });
           } catch (err) {
             reject(err);
           }
@@ -127,7 +219,9 @@ async function main() {
   const rawHost = process.env.CORE_HOST || process.argv[2];
   const target = parseHostPort(rawHost);
   if (!target) {
-    console.error("Usage: CORE_HOST=<ip>:8443 CORE_IMAGE_DIGESTS=sha256:<digest> node scripts/gcp/verify-core.mjs");
+    console.error(
+      "Usage: CORE_HOST=<ip>:8443 CORE_IMAGE_DIGESTS=sha256:<digest> node scripts/gcp/verify-core.mjs",
+    );
     process.exit(1);
   }
 
@@ -135,19 +229,30 @@ async function main() {
     String(process.env.CORE_IMAGE_DIGESTS || "")
       .split(",")
       .map((s) => s.trim())
-      .filter(Boolean),
+      .filter((s) => /^sha256:[0-9a-f]{64}$/.test(s)),
   );
+  if (expectedDigests.size === 0) {
+    console.error(
+      "Error: CORE_IMAGE_DIGESTS is required and must contain at least one sha256:<64-hex> digest.",
+    );
+    process.exit(1);
+  }
+
   const expectedAudience = process.env.CORE_ATTESTATION_AUDIENCE || DEFAULT_AUDIENCE;
 
-  const { statusCode, payload, peerSpkiSha256 } = await fetchAttestationWithPeerCert(target);
-  if (statusCode !== 200) {
+  ensureReflectMetadata();
+  const x509 = await import("@peculiar/x509");
+
+  const { statusCode, payload, peerCertRaw, peerSpkiSha256 } =
+    await fetchAttestationWithPeerCert(target);
+  if (statusCode !== 200 || !isPlainObject(payload)) {
     console.error(`Error: /attestation returned HTTP ${statusCode}`);
     process.exit(1);
   }
 
-  const token = String(payload.token || "");
+  const token = String(payload.token || "").trim();
   const parts = token.split(".");
-  if (parts.length !== 3) {
+  if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) {
     console.error("Error: /attestation did not return a 3-part JWT");
     process.exit(1);
   }
@@ -161,11 +266,17 @@ async function main() {
   const checks = [];
 
   // 1. Header & x5c count
-  const headerOk = header.alg === "RS256" && x5c.length === 3;
+  const headerOk =
+    isPlainObject(header) &&
+    isPlainObject(claims) &&
+    header.alg === "RS256" &&
+    header.crit === undefined &&
+    x5c.length === 3 &&
+    x5c.every((c) => typeof c === "string" && c.length > 0);
   checks.push({
     id: "jwt_header_and_x5c",
     passed: headerOk,
-    technical: `alg=${header.alg}, x5c.length=${x5c.length}`,
+    technical: `alg=${header?.alg}, crit=${header?.crit}, x5c.length=${x5c.length}`,
   });
 
   // 2. Root CA match
@@ -177,28 +288,82 @@ async function main() {
   const rootSha256 = rootCert
     ? crypto.createHash("sha256").update(rootCert.raw).digest("hex").toUpperCase()
     : "";
-  const rootOk = Boolean(rootCert && rootCert.raw.equals(pinnedRoot.raw) && rootSha256 === PINNED_ROOT_SHA256);
+  const rootOk = Boolean(
+    rootCert && rootCert.raw.equals(pinnedRoot.raw) && rootSha256 === PINNED_ROOT_SHA256,
+  );
   checks.push({
     id: "pinned_root_ca",
     passed: rootOk,
     technical: `root sha256=${rootSha256}`,
   });
 
-  // 3. Chain signatures & validity
+  // 3. Chain signatures, BasicConstraints, pathLen, KeyUsage, sigAlg, and validity
   const nowMs = Date.now();
-  const withinValidity = (c) =>
-    c && nowMs >= Date.parse(c.validFrom) && nowMs <= Date.parse(c.validTo);
-  const chainOk = Boolean(
-    leafCert &&
-      interCert &&
-      rootCert &&
-      withinValidity(leafCert) &&
-      withinValidity(interCert) &&
-      withinValidity(rootCert) &&
-      leafCert.verify(interCert.publicKey) &&
-      interCert.verify(rootCert.publicKey) &&
-      rootCert.verify(rootCert.publicKey),
-  );
+  let chainOk = false;
+  if (leafCert && interCert && rootCert) {
+    try {
+      const pLeaf = new x509.X509Certificate(x5c[0]);
+      const pInter = new x509.X509Certificate(x5c[1]);
+      const pRoot = new x509.X509Certificate(x5c[2]);
+
+      const leafTimeOk =
+        nowMs >= pLeaf.notBefore.getTime() && nowMs <= pLeaf.notAfter.getTime();
+      const interTimeOk =
+        nowMs >= pInter.notBefore.getTime() && nowMs <= pInter.notAfter.getTime();
+      const rootTimeOk =
+        nowMs >= pRoot.notBefore.getTime() && nowMs <= pRoot.notAfter.getTime();
+
+      const leafCaExt = pLeaf.getExtension(x509.BasicConstraintsExtension);
+      const interCaExt = pInter.getExtension(x509.BasicConstraintsExtension);
+      const rootCaExt = pRoot.getExtension(x509.BasicConstraintsExtension);
+
+      const caConstraintsOk =
+        Boolean(interCaExt && interCaExt.ca === true) &&
+        Boolean(rootCaExt && rootCaExt.ca === true) &&
+        (!leafCaExt || leafCaExt.ca === false) &&
+        (rootCaExt?.pathLength === undefined ||
+          (Number.isInteger(rootCaExt.pathLength) && rootCaExt.pathLength >= 1)) &&
+        (interCaExt?.pathLength === undefined ||
+          (Number.isInteger(interCaExt.pathLength) && interCaExt.pathLength >= 0));
+
+      const rootKu = pRoot.getExtension(x509.KeyUsagesExtension);
+      const interKu = pInter.getExtension(x509.KeyUsagesExtension);
+      const leafKu = pLeaf.getExtension(x509.KeyUsagesExtension);
+      const keyUsageOk =
+        (!rootKu || (rootKu.usages & x509.KeyUsageFlags.keyCertSign) !== 0) &&
+        (!interKu || (interKu.usages & x509.KeyUsageFlags.keyCertSign) !== 0) &&
+        (!leafKu ||
+          ((leafKu.usages & x509.KeyUsageFlags.digitalSignature) !== 0 &&
+            (leafKu.usages & x509.KeyUsageFlags.keyCertSign) === 0));
+
+      const certAlgorithmsOk =
+        isSha256WithRsaEncryptionCert(pLeaf) &&
+        isSha256WithRsaEncryptionCert(pInter) &&
+        isSha256WithRsaEncryptionCert(pRoot);
+
+      const issuerMatchOk =
+        pLeaf.issuer === pInter.subject &&
+        pInter.issuer === pRoot.subject &&
+        pRoot.issuer === pRoot.subject;
+
+      const sigsOk =
+        leafCert.verify(interCert.publicKey) &&
+        interCert.verify(rootCert.publicKey) &&
+        rootCert.verify(rootCert.publicKey);
+
+      chainOk =
+        leafTimeOk &&
+        interTimeOk &&
+        rootTimeOk &&
+        caConstraintsOk &&
+        keyUsageOk &&
+        certAlgorithmsOk &&
+        issuerMatchOk &&
+        sigsOk;
+    } catch {
+      chainOk = false;
+    }
+  }
   checks.push({
     id: "x5c_chain_and_validity",
     passed: chainOk,
@@ -207,7 +372,8 @@ async function main() {
 
   // 4. RS256 JWS signature
   const sigOk = Boolean(
-    leafCert &&
+    headerOk &&
+      leafCert &&
       crypto.verify("RSA-SHA256", signingInput, leafCert.publicKey, sigBytes),
   );
   checks.push({
@@ -229,6 +395,11 @@ async function main() {
     typeof claims.nbf === "number" &&
     typeof claims.iat === "number" &&
     typeof claims.exp === "number" &&
+    Number.isFinite(claims.nbf) &&
+    Number.isFinite(claims.iat) &&
+    Number.isFinite(claims.exp) &&
+    claims.nbf <= claims.exp &&
+    claims.iat <= claims.exp &&
     nowSec + 60 >= claims.nbf &&
     nowSec + 60 >= claims.iat &&
     nowSec - 60 < claims.exp;
@@ -238,12 +409,17 @@ async function main() {
     technical: `nbf=${claims.nbf}, iat=${claims.iat}, exp=${claims.exp}`,
   });
 
-  const supportAttrs = claims.submods?.confidential_space?.support_attributes || [];
+  const submods = isPlainObject(claims.submods) ? claims.submods : null;
+  const csSubmod = isPlainObject(submods?.confidential_space)
+    ? submods.confidential_space
+    : null;
+  const supportAttrs = Array.isArray(csSubmod?.support_attributes)
+    ? csSubmod.support_attributes
+    : [];
   const postureOk =
     claims.swname === "CONFIDENTIAL_SPACE" &&
     claims.dbgstat === "disabled-since-boot" &&
     claims.secboot === true &&
-    Array.isArray(supportAttrs) &&
     supportAttrs.includes("STABLE");
   checks.push({
     id: "confidential_space_posture",
@@ -258,37 +434,73 @@ async function main() {
     technical: `hwmodel=${claims.hwmodel}`,
   });
 
-  const imageDigest = claims.submods?.container?.image_digest || "";
+  const containerSubmod = isPlainObject(submods?.container) ? submods.container : null;
+  const imageDigest =
+    typeof containerSubmod?.image_digest === "string" ? containerSubmod.image_digest : "";
   const digestOk =
-    expectedDigests.size > 0 ? expectedDigests.has(imageDigest) : /^sha256:[0-9a-f]{64}$/.test(imageDigest);
+    /^sha256:[0-9a-f]{64}$/.test(imageDigest) &&
+    expectedDigests.size > 0 &&
+    expectedDigests.has(imageDigest);
   checks.push({
     id: "container_image_digest",
     passed: digestOk,
     technical: `image_digest=${imageDigest}`,
   });
 
-  const envOverride = claims.submods?.container?.env_override || {};
-  const overrideKeys = Object.keys(envOverride);
-  const envOk = overrideKeys.every((k) => ALLOWED_ENV_OVERRIDES.has(k));
+  const envOverride =
+    containerSubmod?.env_override === undefined
+      ? {}
+      : isPlainObject(containerSubmod.env_override)
+        ? containerSubmod.env_override
+        : null;
+  const overrideKeys = envOverride ? Object.keys(envOverride) : [];
+  const envOk =
+    envOverride !== null &&
+    overrideKeys.every(
+      (k) => ALLOWED_ENV_OVERRIDES.has(k) && typeof envOverride[k] === "string",
+    );
   checks.push({
     id: "container_env_override",
     passed: envOk,
     technical: `env_override=${JSON.stringify(overrideKeys)}`,
   });
 
-  const recomputedKeysDigest = sha256HexLower(
-    canonicalJson({
-      egress: String(payload.keys?.egress || "").toLowerCase(),
-      tree: String(payload.keys?.tree || "").toLowerCase(),
-    }),
-  );
+  const egressHex = String(payload.keys?.egress || "").trim().toLowerCase();
+  const treeHex = String(payload.keys?.tree || "").trim().toLowerCase();
+  const validKeysFormat = /^[0-9a-f]{64}$/.test(egressHex) && /^[0-9a-f]{64}$/.test(treeHex);
+  const recomputedKeysDigest = validKeysFormat
+    ? sha256HexLower(canonicalJson({ egress: egressHex, tree: treeHex }))
+    : "";
+
+  const reportedTlsSpki = String(payload.tlsSpkiSha256 || "").trim().toLowerCase();
+  const reportedKeysDigest = String(payload.keysDigest || "").trim().toLowerCase();
+  let certPemMatchesPeer = true;
+  if (typeof payload.tlsCertPem === "string" && payload.tlsCertPem.trim().length > 0) {
+    try {
+      const parsedCert = new crypto.X509Certificate(payload.tlsCertPem.trim());
+      certPemMatchesPeer = parsedCert.raw.equals(peerCertRaw);
+    } catch {
+      certPemMatchesPeer = false;
+    }
+  }
+
   const nonces = Array.isArray(claims.eat_nonce)
-    ? claims.eat_nonce
+    ? claims.eat_nonce.filter((n) => typeof n === "string")
     : typeof claims.eat_nonce === "string"
       ? [claims.eat_nonce]
       : [];
+  const uniqueNonces = new Set(nonces);
   const nonceOk =
-    nonces.includes(recomputedKeysDigest) && nonces.includes(peerSpkiSha256);
+    validKeysFormat &&
+    certPemMatchesPeer &&
+    recomputedKeysDigest.length === 64 &&
+    recomputedKeysDigest !== peerSpkiSha256 &&
+    (!reportedKeysDigest || reportedKeysDigest === recomputedKeysDigest) &&
+    reportedTlsSpki === peerSpkiSha256 &&
+    nonces.length === 2 &&
+    uniqueNonces.size === 2 &&
+    uniqueNonces.has(recomputedKeysDigest) &&
+    uniqueNonces.has(peerSpkiSha256);
   checks.push({
     id: "eat_nonce_binding",
     passed: nonceOk,

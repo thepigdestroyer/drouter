@@ -9,8 +9,12 @@
 /**
  * Minimal Reflect metadata polyfill required by `@peculiar/x509@2.2.0` (`tsyringe`)
  * before `@peculiar/x509` is evaluated in browser or Node environments.
+ *
+ * Installed lazily by `getX509()` using non-enumerable `Object.defineProperty`
+ * descriptors so importing attestation modules has zero global side effects and
+ * `Object.keys(Reflect)` never changes.
  */
-function ensureReflectMetadata(): void {
+export function ensureReflectMetadata(): void {
   const r = Reflect as unknown as {
     getMetadata?: (metadataKey: unknown, target: object, propertyKey?: string | symbol) => unknown;
     getOwnMetadata?: (
@@ -30,22 +34,30 @@ function ensureReflectMetadata(): void {
     ) => (target: object, propertyKey?: string | symbol) => void;
   };
 
-  if (typeof r.getMetadata === "function" && typeof r.defineMetadata === "function") {
+  if (
+    typeof r.getMetadata === "function" &&
+    typeof r.getOwnMetadata === "function" &&
+    typeof r.defineMetadata === "function" &&
+    typeof r.metadata === "function"
+  ) {
     return;
   }
 
   const store = new WeakMap<object, Map<string | symbol | undefined, Map<unknown, unknown>>>();
 
   const getMap = (
-    target: object,
+    target: unknown,
     propertyKey: string | symbol | undefined,
     create: boolean,
   ): Map<unknown, unknown> | undefined => {
-    let targetMap = store.get(target);
+    if ((typeof target !== "object" || target === null) && typeof target !== "function") {
+      return undefined;
+    }
+    let targetMap = store.get(target as object);
     if (!targetMap) {
       if (!create) return undefined;
       targetMap = new Map();
-      store.set(target, targetMap);
+      store.set(target as object, targetMap);
     }
     let propMap = targetMap.get(propertyKey);
     if (!propMap && create) {
@@ -55,31 +67,83 @@ function ensureReflectMetadata(): void {
     return propMap;
   };
 
-  r.defineMetadata = (metadataKey, metadataValue, target, propertyKey) => {
-    getMap(target, propertyKey, true)!.set(metadataKey, metadataValue);
+  const defineMetadataFn = (
+    metadataKey: unknown,
+    metadataValue: unknown,
+    target: object,
+    propertyKey?: string | symbol,
+  ): void => {
+    const map = getMap(target, propertyKey, true);
+    if (map) {
+      map.set(metadataKey, metadataValue);
+    }
   };
 
-  r.getOwnMetadata = (metadataKey, target, propertyKey) => {
+  const getOwnMetadataFn = (
+    metadataKey: unknown,
+    target: object,
+    propertyKey?: string | symbol,
+  ): unknown => {
     const map = getMap(target, propertyKey, false);
     return map ? map.get(metadataKey) : undefined;
   };
 
-  r.getMetadata = (metadataKey, target, propertyKey) => {
-    let cur: object | null = target;
+  const getMetadataFn = (
+    metadataKey: unknown,
+    target: object,
+    propertyKey?: string | symbol,
+  ): unknown => {
+    let cur: unknown = target;
     while (cur && (typeof cur === "object" || typeof cur === "function")) {
-      const own = r.getOwnMetadata!(metadataKey, cur, propertyKey);
+      const own = (r.getOwnMetadata ?? getOwnMetadataFn)(metadataKey, cur as object, propertyKey);
       if (own !== undefined) return own;
       cur = Object.getPrototypeOf(cur);
     }
     return undefined;
   };
 
-  r.metadata = (metadataKey, metadataValue) => (target, propertyKey) => {
-    r.defineMetadata!(metadataKey, metadataValue, target, propertyKey);
-  };
-}
+  const metadataFn =
+    (metadataKey: unknown, metadataValue: unknown) =>
+    (target: object, propertyKey?: string | symbol): void => {
+      (r.defineMetadata ?? defineMetadataFn)(metadataKey, metadataValue, target, propertyKey);
+    };
 
-ensureReflectMetadata();
+  if (typeof r.defineMetadata !== "function") {
+    Object.defineProperty(Reflect, "defineMetadata", {
+      value: defineMetadataFn,
+      configurable: true,
+      writable: true,
+      enumerable: false,
+    });
+  }
+
+  if (typeof r.getOwnMetadata !== "function") {
+    Object.defineProperty(Reflect, "getOwnMetadata", {
+      value: getOwnMetadataFn,
+      configurable: true,
+      writable: true,
+      enumerable: false,
+    });
+  }
+
+  if (typeof r.getMetadata !== "function") {
+    Object.defineProperty(Reflect, "getMetadata", {
+      value: getMetadataFn,
+      configurable: true,
+      writable: true,
+      enumerable: false,
+    });
+  }
+
+  if (typeof r.metadata !== "function") {
+    Object.defineProperty(Reflect, "metadata", {
+      value: metadataFn,
+      configurable: true,
+      writable: true,
+      enumerable: false,
+    });
+  }
+}
 
 export const GOOGLE_CONFIDENTIAL_SPACE_ROOT_CA_PEM = `-----BEGIN CERTIFICATE-----
 MIIGCDCCA/CgAwIBAgITYBvRy5g9aYYMh7tJS7pFwafL6jANBgkqhkiG9w0BAQsF

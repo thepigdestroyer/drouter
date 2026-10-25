@@ -6,8 +6,9 @@
  * 1. `keysDigest` = lowercase hex SHA-256 of `canonicalJson({ egress: <raw ed25519 pub hex>, tree: <raw ed25519 pub hex> })`
  * 2. `tlsSpkiDigest` = lowercase hex SHA-256 of the TLS certificate's SubjectPublicKeyInfo DER.
  *
- * Refreshes every 45 minutes (2,700,000 ms) and exports `getAttestation()` returning
- * `{ token, keys: { egress, tree }, keysDigest, tlsSpkiSha256, refreshedAtSec }`.
+ * Verifies the returned JWT's `exp` and `eat_nonce` claims against the current keys and TLS SPKI,
+ * refreshes every 45 minutes (2,700,000 ms) or whenever the token is expired, and exports
+ * `getAttestation()` returning `{ token, keys: { egress, tree }, keysDigest, tlsSpkiSha256, tlsCertPem, expiresAtSec, refreshedAtSec }`.
  *
  * Official documentation:
  * https://docs.cloud.google.com/confidential-computing/confidential-space/docs/connect-external-resources#retrieve_attestation_tokens
@@ -66,30 +67,44 @@ export function computeKeysDigest(keysOrRing) {
 }
 
 /**
- * Computes `tlsSpkiDigest` = lowercase 64-char hex SHA-256 of the TLS certificate's
- * SubjectPublicKeyInfo (SPKI) DER.
- *
- * Accepts:
- * - A precomputed 64-char hex SHA-256 string (`tlsSpkiSha256` / `tlsSpkiDigest`),
- * - An X.509 certificate PEM string or DER Buffer/Uint8Array,
- * - A Node `crypto.KeyObject` or SPKI PEM/DER.
+ * Extracts `{ tlsSpkiSha256, tlsCertPem }` from a TLS certificate (PEM/DER), public key, or SPKI digest.
  */
-export function computeTlsSpkiDigest(tlsInput) {
+export function extractTlsMaterial(tlsInput, explicitCertPem) {
+  let tlsCertPem = null;
+  if (typeof explicitCertPem === "string" && explicitCertPem.includes("BEGIN CERTIFICATE")) {
+    const cert = new crypto.X509Certificate(explicitCertPem.trim());
+    tlsCertPem = cert.toString().trim();
+  }
+
   if (typeof tlsInput === "string") {
     const trimmed = tlsInput.trim();
     const cleanHex = trimmed.replace(/^0x/i, "").toLowerCase();
     if (/^[0-9a-f]{64}$/.test(cleanHex)) {
-      return cleanHex;
+      if (tlsCertPem) {
+        const cert = new crypto.X509Certificate(tlsCertPem);
+        const spkiDer = cert.publicKey.export({ type: "spki", format: "der" });
+        const fromCert = sha256Hex(new Uint8Array(spkiDer));
+        if (fromCert !== cleanHex) {
+          throw new Error("Provided tlsCertPem SPKI digest does not match tlsSpkiSha256");
+        }
+      }
+      return { tlsSpkiSha256: cleanHex, tlsCertPem };
     }
     if (trimmed.includes("BEGIN CERTIFICATE")) {
       const cert = new crypto.X509Certificate(trimmed);
       const spkiDer = cert.publicKey.export({ type: "spki", format: "der" });
-      return sha256Hex(new Uint8Array(spkiDer));
+      return {
+        tlsSpkiSha256: sha256Hex(new Uint8Array(spkiDer)),
+        tlsCertPem: cert.toString().trim(),
+      };
     }
     if (trimmed.includes("BEGIN PUBLIC KEY")) {
       const pubKey = crypto.createPublicKey({ key: trimmed, format: "pem" });
       const spkiDer = pubKey.export({ type: "spki", format: "der" });
-      return sha256Hex(new Uint8Array(spkiDer));
+      return {
+        tlsSpkiSha256: sha256Hex(new Uint8Array(spkiDer)),
+        tlsCertPem,
+      };
     }
   }
 
@@ -97,23 +112,105 @@ export function computeTlsSpkiDigest(tlsInput) {
     try {
       const cert = new crypto.X509Certificate(tlsInput);
       const spkiDer = cert.publicKey.export({ type: "spki", format: "der" });
-      return sha256Hex(new Uint8Array(spkiDer));
+      return {
+        tlsSpkiSha256: sha256Hex(new Uint8Array(spkiDer)),
+        tlsCertPem: cert.toString().trim(),
+      };
     } catch {
-      // If raw SPKI DER bytes were passed directly:
-      const pubKey = crypto.createPublicKey({ key: Buffer.from(tlsInput), format: "der", type: "spki" });
+      const pubKey = crypto.createPublicKey({
+        key: Buffer.from(tlsInput),
+        format: "der",
+        type: "spki",
+      });
       const spkiDer = pubKey.export({ type: "spki", format: "der" });
-      return sha256Hex(new Uint8Array(spkiDer));
+      return {
+        tlsSpkiSha256: sha256Hex(new Uint8Array(spkiDer)),
+        tlsCertPem,
+      };
     }
   }
 
   if (tlsInput && typeof tlsInput === "object" && typeof tlsInput.export === "function") {
     const spkiDer = tlsInput.export({ type: "spki", format: "der" });
-    return sha256Hex(new Uint8Array(spkiDer));
+    return {
+      tlsSpkiSha256: sha256Hex(new Uint8Array(spkiDer)),
+      tlsCertPem,
+    };
   }
 
   throw new Error(
     "computeTlsSpkiDigest requires a TLS certificate (PEM/DER), public key, or 64-char hex SPKI SHA-256 digest",
   );
+}
+
+/**
+ * Computes `tlsSpkiDigest` = lowercase 64-char hex SHA-256 of the TLS certificate's
+ * SubjectPublicKeyInfo (SPKI) DER.
+ */
+export function computeTlsSpkiDigest(tlsInput) {
+  return extractTlsMaterial(tlsInput).tlsSpkiSha256;
+}
+
+/**
+ * Decodes and validates the payload of a 3-part JWT returned by the launcher,
+ * checking `exp` and `eat_nonce` against the expected two distinct nonces.
+ */
+export function validateLauncherJwtClaims(token, expectedNonces, nowSec) {
+  if (typeof token !== "string") {
+    throw new Error("Confidential Space launcher did not return a JWT string");
+  }
+  const parts = token.trim().split(".");
+  if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) {
+    throw new Error("Confidential Space launcher did not return a 3-part JWT");
+  }
+
+  let claims;
+  try {
+    const json = Buffer.from(parts[1], "base64url").toString("utf8");
+    claims = JSON.parse(json);
+  } catch {
+    throw new Error("Confidential Space launcher returned a JWT with an unparseable payload");
+  }
+
+  if (!claims || typeof claims !== "object" || Array.isArray(claims)) {
+    throw new Error("Confidential Space launcher JWT payload must be a JSON object");
+  }
+
+  if (typeof claims.exp !== "number" || !Number.isFinite(claims.exp)) {
+    throw new Error("Confidential Space launcher JWT is missing a numeric exp claim");
+  }
+
+  if (claims.exp <= nowSec) {
+    throw new Error(
+      `Confidential Space launcher returned an already-expired JWT (exp=${claims.exp}, now=${nowSec})`,
+    );
+  }
+
+  const rawEatNonce = claims.eat_nonce;
+  const nonceList = Array.isArray(rawEatNonce)
+    ? rawEatNonce.filter((n) => typeof n === "string")
+    : typeof rawEatNonce === "string"
+      ? [rawEatNonce]
+      : [];
+
+  const uniqueNonces = new Set(nonceList);
+  if (
+    expectedNonces.length !== 2 ||
+    expectedNonces[0] === expectedNonces[1] ||
+    nonceList.length !== 2 ||
+    uniqueNonces.size !== 2 ||
+    !uniqueNonces.has(expectedNonces[0]) ||
+    !uniqueNonces.has(expectedNonces[1])
+  ) {
+    throw new Error(
+      `Confidential Space launcher JWT eat_nonce (${JSON.stringify(rawEatNonce)}) does not match expected nonces (${JSON.stringify(expectedNonces)})`,
+    );
+  }
+
+  return {
+    claims,
+    expiresAtSec: claims.exp,
+  };
 }
 
 /**
@@ -137,6 +234,11 @@ export function requestLauncherPkiToken({
         new Error("Each Confidential Space nonce must be a string between 10 and 74 bytes"),
       );
     }
+  }
+  if (nonces[0] === nonces[1]) {
+    return Promise.reject(
+      new Error("Confidential Space nonces (keysDigest and tlsSpkiDigest) must be distinct"),
+    );
   }
 
   const requestBody = JSON.stringify({
@@ -231,7 +333,7 @@ let activeManager = null;
 
 /**
  * Creates a stateful Confidential Space attestation manager that fetches a PKI token
- * at boot and refreshes it every 45 minutes (`refreshIntervalMs`).
+ * at boot and refreshes it every 45 minutes (`refreshIntervalMs`) or before `exp`.
  */
 export function createAttestationManager(options = {}) {
   const socketPath =
@@ -245,9 +347,14 @@ export function createAttestationManager(options = {}) {
       : () => Math.floor(Date.now() / 1000);
 
   const { keys, keysDigest } = computeKeysDigest(options.keys ?? options.keyRing);
-  const tlsSpkiSha256 = computeTlsSpkiDigest(
-    options.tlsCert ?? options.tlsSpkiSha256 ?? options.tlsSpkiDigest,
+  const { tlsSpkiSha256, tlsCertPem } = extractTlsMaterial(
+    options.tlsCert ?? options.tlsCertPem ?? options.tlsSpkiSha256 ?? options.tlsSpkiDigest,
+    options.tlsCertPem,
   );
+
+  if (keysDigest === tlsSpkiSha256) {
+    throw new Error("keysDigest and tlsSpkiSha256 must be distinct nonces");
+  }
 
   let currentSnapshot = null;
   let inflightRefresh = null;
@@ -259,14 +366,20 @@ export function createAttestationManager(options = {}) {
     }
     inflightRefresh = (async () => {
       try {
+        const expectedNonces = [keysDigest, tlsSpkiSha256];
         const token = await requestLauncherPkiToken({
           socketPath,
           audience,
-          nonces: [keysDigest, tlsSpkiSha256],
+          nonces: expectedNonces,
           timeoutMs: options.timeoutMs ?? LAUNCHER_REQUEST_TIMEOUT_MS,
         });
         const refreshedAtSec = nowSecFn();
-        currentSnapshot = {
+        const { expiresAtSec } = validateLauncherJwtClaims(
+          token,
+          expectedNonces,
+          refreshedAtSec,
+        );
+        const snapshot = {
           token,
           keys: {
             egress: keys.egress,
@@ -274,9 +387,12 @@ export function createAttestationManager(options = {}) {
           },
           keysDigest,
           tlsSpkiSha256,
+          tlsCertPem,
+          expiresAtSec,
           refreshedAtSec,
         };
-        return currentSnapshot;
+        currentSnapshot = snapshot;
+        return snapshot;
       } finally {
         inflightRefresh = null;
       }
@@ -305,16 +421,26 @@ export function createAttestationManager(options = {}) {
     }
   }
 
+  function isSnapshotValidAt(snapshot, now) {
+    if (!snapshot) return false;
+    if (snapshot.keysDigest !== keysDigest || snapshot.tlsSpkiSha256 !== tlsSpkiSha256) {
+      return false;
+    }
+    if (typeof snapshot.expiresAtSec !== "number" || now >= snapshot.expiresAtSec) {
+      return false;
+    }
+    const maxAgeSec = Math.floor(refreshIntervalMs / 1000);
+    if (maxAgeSec > 0 && now - snapshot.refreshedAtSec >= maxAgeSec) {
+      return false;
+    }
+    return true;
+  }
+
   async function getAttestation(getOptions = {}) {
     const forceRefresh = Boolean(getOptions.forceRefresh);
-    const maxAgeSec = Math.floor(refreshIntervalMs / 1000);
     const now = nowSecFn();
 
-    if (
-      !currentSnapshot ||
-      forceRefresh ||
-      now - currentSnapshot.refreshedAtSec >= maxAgeSec
-    ) {
+    if (forceRefresh || !isSnapshotValidAt(currentSnapshot, now)) {
       await refresh();
     }
     startAutoRefresh();
@@ -322,9 +448,11 @@ export function createAttestationManager(options = {}) {
   }
 
   return {
+    initOptions: { ...options },
     keys,
     keysDigest,
     tlsSpkiSha256,
+    tlsCertPem,
     refresh,
     getAttestation,
     startAutoRefresh,
@@ -333,8 +461,7 @@ export function createAttestationManager(options = {}) {
 }
 
 /**
- * Configures the singleton Confidential Space attestation manager and performs an optional
- * immediate boot fetch.
+ * Configures the singleton Confidential Space attestation manager.
  */
 export function configureAttestation(options) {
   if (activeManager) {
@@ -355,16 +482,45 @@ export function resetAttestationForTests() {
 }
 
 /**
- * Returns `{ token, keys: { egress, tree }, keysDigest, tlsSpkiSha256, refreshedAtSec }`.
- * Fetches a fresh PKI token from `/run/container_launcher/teeserver.sock` on first call
- * or when the cached token is older than 45 minutes.
+ * Returns `{ token, keys: { egress, tree }, keysDigest, tlsSpkiSha256, tlsCertPem, expiresAtSec, refreshedAtSec }`.
+ * Fetches a fresh PKI token from `/run/container_launcher/teeserver.sock` on first call,
+ * when the cached token is older than 45 minutes or expired, or when keys / TLS cert change.
  */
 export async function getAttestation(options = {}) {
-  if (options.keys || options.keyRing || options.tlsCert || options.tlsSpkiSha256) {
+  const hasKeyOption = Boolean(options.keys || options.keyRing);
+  const hasTlsOption = Boolean(
+    options.tlsCert || options.tlsCertPem || options.tlsSpkiSha256 || options.tlsSpkiDigest,
+  );
+
+  if (hasKeyOption || hasTlsOption) {
     if (!activeManager || options.reconfigure) {
-      configureAttestation(options);
+      configureAttestation({ ...(activeManager?.initOptions ?? {}), ...options });
+    } else {
+      let needsReconfigure = false;
+      if (hasKeyOption) {
+        const { keysDigest: nextKeysDigest } = computeKeysDigest(options.keys ?? options.keyRing);
+        if (nextKeysDigest !== activeManager.keysDigest) {
+          needsReconfigure = true;
+        }
+      }
+      if (hasTlsOption) {
+        const nextTls = extractTlsMaterial(
+          options.tlsCert ?? options.tlsCertPem ?? options.tlsSpkiSha256 ?? options.tlsSpkiDigest,
+          options.tlsCertPem,
+        );
+        if (
+          nextTls.tlsSpkiSha256 !== activeManager.tlsSpkiSha256 ||
+          (nextTls.tlsCertPem && nextTls.tlsCertPem !== activeManager.tlsCertPem)
+        ) {
+          needsReconfigure = true;
+        }
+      }
+      if (needsReconfigure) {
+        configureAttestation({ ...activeManager.initOptions, ...options });
+      }
     }
   }
+
   if (!activeManager) {
     throw new Error(
       "Confidential Space attestation manager is not initialized; call configureAttestation({ keys, tlsCert }) or pass options to getAttestation()",
