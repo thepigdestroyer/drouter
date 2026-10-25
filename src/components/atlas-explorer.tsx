@@ -8,7 +8,7 @@ import {
   PLAIN_ATLAS_PRESET_QUERIES,
   resolveEffectiveAtlasQuery,
   sanitizeJargonToPlainWords,
-} from "@/components/argon/argon-helpers";
+} from "@/lib/plain-copy";
 import { getActiveCustomScrubTerms } from "@/lib/auth/vault";
 import {
   type CorpusDocument,

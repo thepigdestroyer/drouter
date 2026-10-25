@@ -1,0 +1,1353 @@
+import { ed25519 } from "@noble/curves/ed25519.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
+import type * as x509Types from "@peculiar/x509";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+  POST as planPost,
+  setCorePlanHandlerForTests,
+  setPlanGenAIClientForTests,
+} from "@/app/api/gemini/plan/route";
+import * as geminiRouteModule from "@/app/api/gemini/route";
+import {
+  buildPlainTimelineSteps,
+  DEVICE_PREPARATION_PLAIN_SENTENCE,
+  findForbiddenPlainTerms,
+  formatEgressReceiptDisplay,
+  formatPlainDataHandling,
+  resolvePlannerModeBadgeText,
+  resolvePlannerSubtitleText,
+} from "@/components/argon/argon-helpers";
+import {
+  assertClosedPlanSchema,
+  buildBrowserRedactedTaskAndDescriptor,
+  buildGeminiCreateRequestFromDescriptor,
+  clearCorpusCache,
+  computeCorpusContentSha256,
+  geminiEgressSigningPayload,
+  NEXT_SERVER_RECEIPT_LABEL,
+  requestAgentPlanFromBrowser,
+  runBrowserAgentWorkflow,
+  runBrowserRedactionPipeline,
+  SEALED_GOOGLE_COMPUTER_RECEIPT_LABEL,
+  sortCorpusDocuments,
+  verifyCoreAttestationForEgressKey,
+  verifyEgressReceiptClient,
+} from "@/lib/agent-client";
+import { ATLAS_SEED_DOCS } from "@/lib/atlas/knowledge-base";
+import {
+  computeAttestedKeysDigest,
+  computeTlsCertSpkiSha256,
+  DEFAULT_CONFIDENTIAL_SPACE_AUDIENCE,
+  ensureReflectMetadata,
+  EXPECTED_CONFIDENTIAL_SPACE_ISSUER,
+} from "@/lib/attestation/confidential-space";
+import {
+  ALLOWED_PLANNER_TOOLS,
+  assertContentFree,
+  assertGoogleBoundMessage,
+  buildTaskDescriptor,
+  ContentFreeEgressError,
+  GEMINI_4_ARGON_MODEL_ID,
+  HONEST_DATA_HANDLING_STATEMENT,
+  type ClosedAgentPlan,
+  type GeminiEgressReceipt,
+  type GenAIInteractionsClientLike,
+} from "@/lib/gemini";
+import {
+  attestedPiiFilter,
+  clearAttestedPiiFilterCacheForTests,
+  setAttestedPiiFilterClientForTests,
+} from "@/lib/privacy/attested-filter";
+import { canonicalJson, coarsenEpochSecToHour } from "@/lib/transparency/log";
+import { resetAnchorRateLimitState } from "@/lib/transparency/store";
+
+const TEST_NOW_SEC = 1_792_886_400;
+const TEST_CORE_IMAGE_DIGEST =
+  "sha256:4a5d8e2c79a416b1f81c36f0b9e1e2c5f9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4";
+const SEALED_SECRET_KEY = new Uint8Array(32).fill(0x42);
+const SEALED_PUBLIC_KEY_HEX = bytesToHex(
+  ed25519.getPublicKey(SEALED_SECRET_KEY),
+).toLowerCase();
+const SEALED_TREE_PUBLIC_KEY_HEX = "22".repeat(32);
+
+let coreAttestationFixture: {
+  pinnedRootCaPem: string;
+  attestationResponseJson: Record<string, unknown>;
+};
+
+function bytesToBase64Url(bytes: ArrayBuffer | Uint8Array): string {
+  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  return Buffer.from(view)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function jsonToBase64Url(obj: unknown): string {
+  return bytesToBase64Url(Buffer.from(JSON.stringify(obj), "utf8"));
+}
+
+function certToDerBase64(cert: x509Types.X509Certificate): string {
+  return Buffer.from(cert.rawData).toString("base64");
+}
+
+beforeAll(async () => {
+  ensureReflectMetadata();
+  const x509 = await import("@peculiar/x509");
+  const genRsa = () =>
+    globalThis.crypto.subtle.generateKey(
+      {
+        name: "RSASSA-PKCS1-v1_5",
+        modulusLength: 2048,
+        publicExponent: new Uint8Array([1, 0, 1]),
+        hash: "SHA-256",
+      },
+      true,
+      ["sign", "verify"],
+    );
+
+  const [rootKeys, interKeys, leafKeys] = await Promise.all([
+    genRsa(),
+    genRsa(),
+    genRsa(),
+  ]);
+  const notBefore = new Date((TEST_NOW_SEC - 86_400) * 1000);
+  const notAfter = new Date((TEST_NOW_SEC + 86_400 * 365) * 1000);
+  const alg = { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" };
+
+  const rootCert = await x509.X509CertificateGenerator.createSelfSigned({
+    serialNumber: "01",
+    name: "C=US, O=Google LLC, CN=Test Confidential Space Root CA",
+    notBefore,
+    notAfter,
+    signingAlgorithm: alg,
+    keys: rootKeys,
+    extensions: [
+      new x509.BasicConstraintsExtension(true, 2, true),
+      new x509.KeyUsagesExtension(
+        x509.KeyUsageFlags.keyCertSign | x509.KeyUsageFlags.cRLSign,
+        true,
+      ),
+    ],
+  });
+
+  const interCert = await x509.X509CertificateGenerator.create({
+    serialNumber: "02",
+    subject: "C=US, O=Google LLC, CN=Test Confidential Space Intermediate CA",
+    issuer: rootCert.subject,
+    notBefore,
+    notAfter,
+    signingAlgorithm: alg,
+    publicKey: interKeys.publicKey,
+    signingKey: rootKeys.privateKey,
+    extensions: [
+      new x509.BasicConstraintsExtension(true, 0, true),
+      new x509.KeyUsagesExtension(
+        x509.KeyUsageFlags.keyCertSign | x509.KeyUsageFlags.cRLSign,
+        true,
+      ),
+    ],
+  });
+
+  const leafCert = await x509.X509CertificateGenerator.create({
+    serialNumber: "03",
+    subject: "C=US, O=Google LLC, CN=confidentialcomputing.googleapis.com",
+    issuer: interCert.subject,
+    notBefore,
+    notAfter,
+    signingAlgorithm: alg,
+    publicKey: leafKeys.publicKey,
+    signingKey: interKeys.privateKey,
+    extensions: [
+      new x509.BasicConstraintsExtension(false, undefined, true),
+      new x509.KeyUsagesExtension(x509.KeyUsageFlags.digitalSignature, true),
+    ],
+  });
+
+  const tlsKeys = await globalThis.crypto.subtle.generateKey(
+    { name: "ECDSA", namedCurve: "P-256" },
+    true,
+    ["sign", "verify"],
+  );
+  const tlsCert = await x509.X509CertificateGenerator.createSelfSigned({
+    serialNumber: "10",
+    name: "CN=deroute-core.internal",
+    notBefore,
+    notAfter,
+    signingAlgorithm: { name: "ECDSA", hash: "SHA-256" },
+    keys: tlsKeys,
+  });
+
+  const tlsCertPem = tlsCert.toString("pem");
+  const tlsSpkiSha256 = await computeTlsCertSpkiSha256(tlsCertPem);
+  const keys = {
+    egress: SEALED_PUBLIC_KEY_HEX,
+    tree: SEALED_TREE_PUBLIC_KEY_HEX,
+  };
+  const keysDigest = await computeAttestedKeysDigest(keys);
+
+  const header = {
+    alg: "RS256",
+    typ: "JWT",
+    x5c: [
+      certToDerBase64(leafCert),
+      certToDerBase64(interCert),
+      certToDerBase64(rootCert),
+    ],
+  };
+  const payload = {
+    iss: EXPECTED_CONFIDENTIAL_SPACE_ISSUER,
+    aud: DEFAULT_CONFIDENTIAL_SPACE_AUDIENCE,
+    iat: TEST_NOW_SEC - 30,
+    nbf: TEST_NOW_SEC - 30,
+    exp: TEST_NOW_SEC + 3600,
+    swname: "CONFIDENTIAL_SPACE",
+    swversion: ["261000"],
+    dbgstat: "disabled-since-boot",
+    secboot: true,
+    hwmodel: "GCP_AMD_SEV",
+    oemid: 11129,
+    eat_nonce: [keysDigest, tlsSpkiSha256],
+    submods: {
+      confidential_space: {
+        support_attributes: ["LATEST", "STABLE", "USABLE"],
+        monitoring_enabled: { memory: false },
+      },
+      container: {
+        image_digest: TEST_CORE_IMAGE_DIGEST,
+        image_reference: `ghcr.io/thepigdestroyer/deroute-core@${TEST_CORE_IMAGE_DIGEST}`,
+        restart_policy: "Always",
+        env_override: {
+          CORE_KEY_SOURCE: "boot",
+          CORE_PUBLIC_ORIGIN: "https://drouter-demo.vercel.app",
+        },
+      },
+    },
+  };
+
+  const h = jsonToBase64Url(header);
+  const p = jsonToBase64Url(payload);
+  const sig = await globalThis.crypto.subtle.sign(
+    { name: "RSASSA-PKCS1-v1_5" },
+    leafKeys.privateKey,
+    new TextEncoder().encode(`${h}.${p}`),
+  );
+  const token = `${h}.${p}.${bytesToBase64Url(sig)}`;
+
+  process.env.NEXT_PUBLIC_CORE_IMAGE_DIGESTS = TEST_CORE_IMAGE_DIGEST;
+  coreAttestationFixture = {
+    pinnedRootCaPem: rootCert.toString("pem"),
+    attestationResponseJson: {
+      token,
+      keys,
+      keysDigest,
+      tlsSpkiSha256,
+      tlsCertPem,
+      expiresAtSec: TEST_NOW_SEC + 3600,
+      refreshedAtSec: TEST_NOW_SEC,
+    },
+  };
+});
+
+afterEach(() => {
+  setCorePlanHandlerForTests(null);
+  setPlanGenAIClientForTests(null, null);
+  setAttestedPiiFilterClientForTests(null);
+  clearAttestedPiiFilterCacheForTests();
+  clearCorpusCache();
+  resetAnchorRateLimitState();
+  vi.restoreAllMocks();
+});
+
+function buildMockEnclaveMatrix() {
+  const dmVerityRootHash =
+    "8b4029108ac795b767e972858e926186c0e7b6a61f6c7fa9ce70ce1a6ee87f1a";
+  const register0 = `${dmVerityRootHash}980bb51973cdf396404412ebb7c1a7b7`;
+  return {
+    status: "verified",
+    routerHost: "router-0.tinfoil.sh",
+    routerReleaseTag: "v0.1.0",
+    routerReleaseDigest:
+      "5233a27f1468f474d27c103e06c1a7a607e6a722ff4f9299ddf4e32fa87f201e",
+    routerConfigRepo: "tinfoilsh/confidential-model-router",
+    routerReleaseUrl:
+      "https://github.com/tinfoilsh/confidential-model-router/releases/tag/v0.1.0",
+    routerSigstoreUrl:
+      "https://search.sigstore.dev/?hash=5233a27f1468f474d27c103e06c1a7a607e6a722ff4f9299ddf4e32fa87f201e",
+    amdKdsUrl: "",
+    proxyWellKnownUrl: "https://inference.tinfoil.sh/.well-known/tinfoil-proxy",
+    fetchedAt: "2026-10-25T00:00:00.000Z",
+    models: {
+      "gemma4-31b": {
+        modelId: "gemma4-31b",
+        status: "router-attested",
+        repo: "tinfoilsh/confidential-gemma4-31b",
+        tag: "v0.0.12",
+        hardwarePredicate: "https://tinfoil.sh/predicate/tdx-guest/v2",
+        tierClassification: "Tier B (Intel TDX + 8x Confidential GPU)",
+        configuredHosts: 1,
+        verifiedHosts: 1,
+        healthyHosts: 1,
+        unverifiedHosts: 0,
+        enclaveHosts: [
+          {
+            host: "gemma4-31b-inf10.tinfoil.containers.tinfoil.dev",
+            hpkeKey:
+              "5df270bc5c4329725ce4a4a37dac06977355db702ee2de3e834803f825ea492d",
+            predicate: "https://tinfoil.sh/predicate/tdx-guest/v2",
+            tlsKeyFp:
+              "6758bad98341283b96ddfe1a7db25b270dc26ae789de9dbb17d66566c9b2aa2d",
+            codeTag: "v0.0.12",
+          },
+        ],
+        measurementRegisters: [register0],
+        vmShape: { cpus: 32, memoryMb: 262144, gpus: 8, disks: 1 },
+        dmVerityRootHash,
+        kernelHash:
+          "7e57f9877b4533e7dcb8dd7419dfaf422f3c7cef6fd337a4eaf27ae90a751ff",
+        initrdHash:
+          "2c23dba70e90589414b334be5b648fab4ead1d5b17ef355f04fd7ede2a9e2e7",
+        containerImageDigest: `sha256:${dmVerityRootHash}`,
+        weightRepoCommit: "tinfoilsh/confidential-gemma4-31b@v0.0.12",
+        weightMpkHash: dmVerityRootHash,
+        ccGpuFlagsVerified: true,
+        releaseUrl:
+          "https://github.com/tinfoilsh/confidential-gemma4-31b/releases/tag/v0.0.12",
+        sigstoreSearchUrl: `https://search.sigstore.dev/?hash=${dmVerityRootHash}`,
+      },
+      "kimi-k3": {
+        modelId: "kimi-k3",
+        status: "router-attested",
+        repo: "tinfoilsh/confidential-kimi-k3",
+        tag: "v0.0.15",
+        hardwarePredicate: "https://tinfoil.sh/predicate/tdx-guest/v2",
+        tierClassification: "Tier B (Intel TDX + 8x Confidential GPU)",
+        configuredHosts: 1,
+        verifiedHosts: 1,
+        healthyHosts: 1,
+        unverifiedHosts: 0,
+        enclaveHosts: [
+          {
+            host: "kimi-k3-inf14.tinfoil.containers.tinfoil.dev",
+            hpkeKey:
+              "5df270bc5c4329725ce4a4a37dac06977355db702ee2de3e834803f825ea492d",
+            predicate: "https://tinfoil.sh/predicate/tdx-guest/v2",
+            tlsKeyFp:
+              "6758bad98341283b96ddfe1a7db25b270dc26ae789de9dbb17d66566c9b2aa2d",
+            codeTag: "v0.0.15",
+          },
+        ],
+        measurementRegisters: [register0],
+        vmShape: { cpus: 32, memoryMb: 262144, gpus: 8, disks: 1 },
+        dmVerityRootHash,
+        kernelHash:
+          "7e57f9877b4533e7dcb8dd7419dfaf422f3c7cef6fd337a4eaf27ae90a751ff",
+        initrdHash:
+          "2c23dba70e90589414b334be5b648fab4ead1d5b17ef355f04fd7ede2a9e2e7",
+        containerImageDigest: `sha256:${dmVerityRootHash}`,
+        weightRepoCommit: "tinfoilsh/confidential-kimi-k3@v0.0.15",
+        weightMpkHash: dmVerityRootHash,
+        ccGpuFlagsVerified: true,
+        releaseUrl:
+          "https://github.com/tinfoilsh/confidential-kimi-k3/releases/tag/v0.0.15",
+        sigstoreSearchUrl: `https://search.sigstore.dev/?hash=${dmVerityRootHash}`,
+      },
+    },
+  };
+}
+
+function buildMockCorpusResponse() {
+  const docs = sortCorpusDocuments(
+    ATLAS_SEED_DOCS.map((seed) => ({
+      title: seed.title,
+      summary: seed.summary,
+      tags: [...seed.tags],
+      sourceUrl: seed.sourceUrl,
+      retrievedAt: seed.retrievedAt,
+      embedding: [...seed.embedding],
+    })),
+  );
+  const contentSha256 = computeCorpusContentSha256(docs);
+  return {
+    database: "drouter",
+    collection: "enclave_intelligence",
+    documentCount: docs.length,
+    contentSha256,
+    documents: docs,
+  };
+}
+
+function buildMockSealedComputerPlanAndReceipt(descriptor: unknown): {
+  plan: ClosedAgentPlan;
+  egressReceipt: GeminiEgressReceipt;
+} {
+  const { validatedDescriptor, canonicalRequest, requestSha256 } =
+    buildGeminiCreateRequestFromDescriptor(descriptor);
+  const secretKey = new Uint8Array(32).fill(0x42);
+  const publicKeyHex = bytesToHex(ed25519.getPublicKey(secretKey)).toLowerCase();
+  const epochHourSec = coarsenEpochSecToHour(1_792_886_400);
+  const signingBytes = geminiEgressSigningPayload({
+    sha256: requestSha256,
+    epochHourSec,
+  });
+  const signatureHex = bytesToHex(
+    ed25519.sign(signingBytes, secretKey),
+  ).toLowerCase();
+
+  const steps: ClosedAgentPlan["steps"] = [
+    {
+      step: 1,
+      id: "call-1",
+      tool: "scrub_and_symmetry_mask",
+      arguments: { inputHandle: "$INPUT", bucketQuantumBytes: 4096 },
+    },
+    {
+      step: 2,
+      id: "call-2",
+      tool: "verify_two_hop_enclave_and_quorum",
+      arguments: { providerId: "tinfoil", enclaveModel: "gemma4-31b" },
+    },
+    {
+      step: 3,
+      id: "call-3",
+      tool: "search_atlas_hybrid_kb",
+      arguments: {
+        topic: "tinfoil_enclave",
+        inputHandle: "$RESULT_1",
+        category: "provider",
+      },
+    },
+    {
+      step: 4,
+      id: "call-4",
+      tool: "invoke_attested_enclave",
+      arguments: {
+        inputHandle: "$RESULT_1",
+        enclaveModel: "gemma4-31b",
+        taskKind: validatedDescriptor.taskKind,
+      },
+    },
+    {
+      step: 5,
+      id: "call-5",
+      tool: "anchor_arc_settlement_with_human_gate",
+      arguments: {
+        actionKind: "anchor_receipt",
+        resultHandle: "$RESULT_3",
+        humanApproved: false,
+      },
+    },
+  ];
+
+  const plan: ClosedAgentPlan = {
+    taskKind: validatedDescriptor.taskKind,
+    inputHandle: "$INPUT",
+    inputTokenEstimate: validatedDescriptor.inputTokenEstimate,
+    steps,
+    toolCalls: steps.map((s) => ({
+      id: s.id,
+      name: s.tool,
+      arguments: s.arguments,
+    })),
+    summary:
+      "Gemini 4 Argon control-plane plan verified (5 tool calls over content-free handles).",
+  };
+
+  const egressReceipt: GeminiEgressReceipt = {
+    canonicalRequest,
+    sha256: requestSha256,
+    epochHourSec,
+    kind: "gemini-egress",
+    signer: "sealed-google-computer",
+    signerLabel: SEALED_GOOGLE_COMPUTER_RECEIPT_LABEL,
+    signature: signatureHex,
+    publicKey: publicKeyHex,
+    keyId: "egress-signing",
+  };
+
+  return { plan, egressReceipt };
+}
+
+describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
+  it("removes the old full-text POST /api/gemini path so /api/gemini only serves content-free GET metadata", async () => {
+    expect("POST" in geminiRouteModule).toBe(false);
+    expect(typeof geminiRouteModule.GET).toBe("function");
+
+    const getRes = await geminiRouteModule.GET();
+    expect(getRes.status).toBe(200);
+    const getJson = (await getRes.json()) as Record<string, unknown>;
+    expect(getJson.ok).toBe(true);
+    expect(getJson.dataSentToGoogle).toBe("content-free task descriptor only");
+    expect(() =>
+      assertGoogleBoundMessage("taskDescriptor", getJson.taskDescriptor),
+    ).not.toThrow();
+  });
+
+  it("runs a mocked end-to-end agent workflow in the browser proving NO request body leaving the browser except the enclave call contains any word of the task", async () => {
+    const privateTask =
+      "Examine our oncology survival study protocol for Priya Natarajan at Halden & Moss LLP dated 2026-05-10 " +
+      "(grant budget £125,000.00, contact priya.natarajan@example.org, mobile +44 7911 123456, test key sk-test-4f9a2c7e1b8d6a3f5e0c). " +
+      "Explain the main findings in plain words.";
+
+    // Extract every word (>= 2 chars) from the private task
+    const taskWords = Array.from(
+      new Set(privateTask.toLowerCase().match(/[a-z0-9]{2,}/g) ?? []),
+    );
+    expect(taskWords.length).toBeGreaterThan(20);
+
+    const recordedFetches: Array<{
+      url: string;
+      method: string;
+      body: string | undefined;
+    }> = [];
+
+    const mockFetch: typeof fetch = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? "GET").toUpperCase();
+        const body =
+          typeof init?.body === "string"
+            ? init.body
+            : init?.body !== undefined
+              ? String(init.body)
+              : undefined;
+
+        recordedFetches.push({ url, method, body });
+
+        if (url === "/api/gemini/plan") {
+          const parsedDesc = JSON.parse(body ?? "{}");
+          const { plan, egressReceipt } =
+            buildMockSealedComputerPlanAndReceipt(parsedDesc);
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              planner: GEMINI_4_ARGON_MODEL_ID,
+              plannerSource: "sealed-google-computer",
+              model: GEMINI_4_ARGON_MODEL_ID,
+              interactionId: "inter-argon-turn-1",
+              status: "completed",
+              dataSentToGoogle: "content-free task descriptor only",
+              egressFirewallVerified: true,
+              plan,
+              egressReceipt,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        if (url === "/api/core/attestation") {
+          return new Response(
+            JSON.stringify(coreAttestationFixture.attestationResponseJson),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (url === "/api/relay/enclave-matrix") {
+          return new Response(JSON.stringify(buildMockEnclaveMatrix()), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+
+        if (url === "/api/registry") {
+          return new Response(
+            JSON.stringify({
+              source: "arc",
+              nodes: [
+                {
+                  id: "tinfoil-router",
+                  kind: "tinfoil",
+                  status: "active",
+                  stake: "100",
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        if (url === "/api/knowledge/corpus") {
+          const corpusPayload = buildMockCorpusResponse();
+          return new Response(JSON.stringify(corpusPayload), {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json",
+              ETag: corpusPayload.contentSha256,
+            },
+          });
+        }
+
+        if (url === "/api/relay/v1/chat/completions") {
+          // Enclave call: extract placeholders from the redacted prompt and echo them in the response
+          const parsedEnclaveReq = JSON.parse(body ?? "{}") as {
+            messages?: Array<{ role: string; content: string }>;
+          };
+          const userMsg = parsedEnclaveReq.messages?.[0]?.content ?? "";
+          const placeholdersInPrompt = Array.from(
+            new Set(
+              userMsg.match(
+                /\[(?:SECRET|EMAIL|PHONE|IP|ACCT|ENTITY|URL|ADDRESS|DATE|NAME|DIGITS|ENTROPY)_\d+\]/g,
+              ) ?? [],
+            ),
+          );
+          return new Response(
+            JSON.stringify({
+              completion: `Completed private analysis for ${placeholdersInPrompt.join(", ")}.`,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        throw new Error(`Unexpected fetch URL in browser agent run: ${url}`);
+      },
+    );
+
+    const openSessionSpy = vi.fn(async (_model: "gemma4-31b" | "kimi-k3") => ({
+      async *send(
+        mdl: string,
+        messages: { role: "user" | "assistant"; content: string }[],
+      ) {
+        const res = await mockFetch("/api/relay/v1/chat/completions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: mdl, messages }),
+        });
+        const data = (await res.json()) as { completion: string };
+        yield data.completion;
+      },
+    }));
+
+    const outcome = await runBrowserAgentWorkflow({
+      taskPrompt: privateTask,
+      alwaysHide: ["Halden & Moss LLP"],
+      thinkingLevel: "high",
+      background: true,
+      humanApprovedExternalAction: false,
+      preferredEnclaveModel: "gemma4-31b",
+      fetchFn: mockFetch,
+      openSessionFn: openSessionSpy,
+      coreAttestationOptions: {
+        pinnedRootCaPem: coreAttestationFixture.pinnedRootCaPem,
+        nowSec: TEST_NOW_SEC,
+      },
+    });
+
+    expect(openSessionSpy).toHaveBeenCalledTimes(1);
+    expect(outcome.plannerUnavailable).toBe(false);
+    expect(outcome.run.overallPassed).toBe(true);
+    expect(outcome.run.mode).toBe("live");
+    expect(outcome.run.egressReceipt?.signer).toBe("sealed-google-computer");
+
+    // Verify names and personal details were restored on the device
+    const restoredOutput = outcome.run.stages.stage4.restoredClientOutput;
+    expect(restoredOutput).toContain("Priya Natarajan");
+    expect(restoredOutput).toContain("Halden & Moss LLP");
+    expect(restoredOutput).toContain("priya.natarajan@example.org");
+    expect(restoredOutput).toContain("sk-test-4f9a2c7e1b8d6a3f5e0c");
+    expect(
+      outcome.run.stages.stage4.verificationSignal.homomorphicRestoreVerified,
+    ).toBe(true);
+
+    // Assert on EVERY mocked fetch call leaving the browser:
+    expect(recordedFetches.length).toBeGreaterThanOrEqual(5);
+    const nonEnclaveCalls = recordedFetches.filter(
+      (f) => f.url !== "/api/relay/v1/chat/completions",
+    );
+    const enclaveCalls = recordedFetches.filter(
+      (f) => f.url === "/api/relay/v1/chat/completions",
+    );
+    expect(nonEnclaveCalls.length).toBeGreaterThanOrEqual(4);
+    expect(enclaveCalls).toHaveLength(1);
+
+    for (const call of nonEnclaveCalls) {
+      const lowerBody = (call.body ?? "").toLowerCase();
+      const lowerUrl = call.url.toLowerCase();
+      // Every word of the task must be completely absent from every non-enclave request body!
+      for (const word of taskWords) {
+        const wordRe = new RegExp(`\\b${word}\\b`, "i");
+        expect(
+          wordRe.test(lowerBody),
+          `Expected task word '${word}' to be absent from body of ${call.url}: ${lowerBody}`,
+        ).toBe(false);
+        expect(
+          wordRe.test(lowerUrl),
+          `Expected task word '${word}' to be absent from url ${call.url}`,
+        ).toBe(false);
+      }
+
+      if (call.url === "/api/gemini/plan") {
+        expect(call.body).toBeDefined();
+        const parsedPlanReq = JSON.parse(call.body!);
+        expect(() =>
+          assertGoogleBoundMessage("taskDescriptor", parsedPlanReq),
+        ).not.toThrow();
+        expect(() => assertContentFree(parsedPlanReq)).not.toThrow();
+      } else {
+        // Verification and whole-corpus requests have no body and no query string
+        expect(call.body).toBeUndefined();
+        expect(call.url).not.toContain("?");
+      }
+    }
+
+    // And the enclave call itself contains ONLY the redacted task (zero raw PII/secrets)
+    const enclaveBody = enclaveCalls[0].body ?? "";
+    expect(enclaveBody).toContain("oncology survival study protocol");
+    expect(enclaveBody).not.toContain("Priya Natarajan");
+    expect(enclaveBody).not.toContain("Halden & Moss LLP");
+    expect(enclaveBody).not.toContain("priya.natarajan@example.org");
+    expect(enclaveBody).not.toContain("sk-test-4f9a2c7e1b8d6a3f5e0c");
+    expect(enclaveBody).not.toContain("7911 123456");
+  });
+
+  it("rejects any payload with text, extra keys, missing keys, duplicate keys, or unknown values on POST /api/gemini/plan", async () => {
+    const validDescriptor = buildTaskDescriptor({
+      taskKind: "review",
+      inputTokenEstimate: 128,
+      redactionCounts: { SECRET: 1, EMAIL: 1, TOTAL: 2 },
+      verification: {
+        mechanicalRedactionPassed: true,
+        attestedPiiFilterVerified: false,
+        bucketAligned4096: true,
+      },
+      allowedTools: ALLOWED_PLANNER_TOOLS,
+    });
+
+    const invalidBodies: Array<{ label: string; rawBody: string }> = [
+      {
+        label: "taskPrompt text field",
+        rawBody: JSON.stringify({
+          ...validDescriptor,
+          taskPrompt: "Review our survival study",
+        }),
+      },
+      {
+        label: "text field",
+        rawBody: JSON.stringify({
+          ...validDescriptor,
+          text: "Summarize the findings",
+        }),
+      },
+      {
+        label: "extra unknown key",
+        rawBody: JSON.stringify({
+          ...validDescriptor,
+          extraKey: "ok",
+        }),
+      },
+      {
+        label: "free text in inputHandle",
+        rawBody: JSON.stringify({
+          ...validDescriptor,
+          inputHandle: "Priya Natarajan",
+        }),
+      },
+      {
+        label: "unknown taskKind enum value",
+        rawBody: JSON.stringify({
+          ...validDescriptor,
+          taskKind: "exfiltrate",
+        }),
+      },
+      {
+        label: "non-power-of-two inputTokenEstimate",
+        rawBody: JSON.stringify({
+          ...validDescriptor,
+          inputTokenEstimate: 100,
+        }),
+      },
+      {
+        label: "out-of-range redactionCounts value (> 2)",
+        rawBody: JSON.stringify({
+          ...validDescriptor,
+          redactionCounts: { EMAIL: 5, TOTAL: 5 },
+        }),
+      },
+      {
+        label: "unknown allowedTools entry",
+        rawBody: JSON.stringify({
+          ...validDescriptor,
+          allowedTools: ["unknown_tool"],
+        }),
+      },
+      {
+        label: "missing required verification key",
+        rawBody: JSON.stringify({
+          taskKind: "review",
+          inputHandle: "$INPUT",
+          inputTokenEstimate: 128,
+          redactionCounts: { TOTAL: 0 },
+          allowedTools: ALLOWED_PLANNER_TOOLS,
+        }),
+      },
+      {
+        label: "duplicate JSON key smuggling text",
+        rawBody:
+          '{"taskKind":"Patient Jane Doe","taskKind":"review","inputHandle":"$INPUT","inputTokenEstimate":128,"redactionCounts":{"TOTAL":0},"verification":{"mechanicalRedactionPassed":true},"allowedTools":["scrub_and_symmetry_mask"]}',
+      },
+    ];
+
+    for (const item of invalidBodies) {
+      const req = new Request("http://localhost:3000/api/gemini/plan", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": "198.51.100.21",
+        },
+        body: item.rawBody,
+      });
+      const res = await planPost(req);
+      expect(res.status, `Expected 400 for ${item.label}`).toBe(400);
+      const data = (await res.json()) as Record<string, unknown>;
+      expect(data.ok).toBe(false);
+    }
+
+    // Also reject query parameters on POST /api/gemini/plan
+    const queryReq = new Request(
+      "http://localhost:3000/api/gemini/plan?task=secret",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": "198.51.100.22",
+        },
+        body: canonicalJson(validDescriptor),
+      },
+    );
+    const queryRes = await planPost(queryReq);
+    expect(queryRes.status).toBe(400);
+
+    // Also verify assertClosedPlanSchema rejects empty 0-step plans, extra keys, or invalid tool arguments in plan output
+    const { plan: validPlan } =
+      buildMockSealedComputerPlanAndReceipt(validDescriptor);
+    expect(() => assertClosedPlanSchema(validPlan)).not.toThrow();
+    expect(() =>
+      assertClosedPlanSchema({ ...validPlan, steps: [], toolCalls: [] }),
+    ).toThrow(ContentFreeEgressError);
+    expect(() =>
+      assertClosedPlanSchema({ ...validPlan, extraField: "bad" }),
+    ).toThrow(ContentFreeEgressError);
+    expect(() =>
+      assertClosedPlanSchema({
+        ...validPlan,
+        steps: [
+          {
+            step: 1,
+            id: "call-1",
+            tool: "invoke_attested_enclave",
+            arguments: {
+              inputHandle: "leaked prompt text",
+              enclaveModel: "gemma4-31b",
+            },
+          },
+        ],
+        toolCalls: [
+          {
+            id: "call-1",
+            name: "invoke_attested_enclave",
+            arguments: {
+              inputHandle: "leaked prompt text",
+              enclaveModel: "gemma4-31b",
+            },
+          },
+        ],
+      }),
+    ).toThrow(ContentFreeEgressError);
+  });
+
+  it("handles planner-unavailable state honestly (never a fake plan) in POST /api/gemini/plan, runBrowserAgentWorkflow, and UI helpers", async () => {
+    setCorePlanHandlerForTests(async () => ({
+      status: 503,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ core: "not-deployed" }),
+    }));
+    setPlanGenAIClientForTests(null, "");
+
+    const { taskDescriptor } = buildBrowserRedactedTaskAndDescriptor({
+      taskPrompt:
+        "Review agreement for Priya Natarajan at Halden & Moss LLP (contact priya.natarajan@example.org).",
+      alwaysHide: ["Halden & Moss LLP"],
+    });
+
+    const req = new Request("http://localhost:3000/api/gemini/plan", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-forwarded-for": "198.51.100.25",
+      },
+      body: canonicalJson(taskDescriptor),
+    });
+
+    const res = await planPost(req);
+    expect(res.status).toBe(503);
+    const json = (await res.json()) as Record<string, unknown>;
+    expect(json.ok).toBe(false);
+    expect(json.planner).toBe("unavailable");
+    expect(json.plan).toBeNull();
+    expect(json.egressReceipt).toBeNull();
+
+    // Now test runBrowserAgentWorkflow when POST /api/gemini/plan returns 503 planner: "unavailable"
+    const mockUnavailableFetch: typeof fetch = vi.fn(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "/api/gemini/plan") {
+          return new Response(JSON.stringify(json), {
+            status: 503,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (url === "/api/core/attestation") {
+          return new Response(
+            JSON.stringify(coreAttestationFixture.attestationResponseJson),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (url === "/api/relay/enclave-matrix") {
+          return new Response(JSON.stringify(buildMockEnclaveMatrix()), {
+            status: 200,
+          });
+        }
+        if (url === "/api/registry") {
+          return new Response(JSON.stringify({ nodes: [] }), { status: 200 });
+        }
+        if (url === "/api/knowledge/corpus") {
+          const corpusPayload = buildMockCorpusResponse();
+          return new Response(JSON.stringify(corpusPayload), {
+            status: 200,
+            headers: { ETag: corpusPayload.contentSha256 },
+          });
+        }
+        return new Response("{}", { status: 200 });
+      },
+    );
+
+    const openSessionSpy = vi.fn();
+    const outcome = await runBrowserAgentWorkflow({
+      taskPrompt:
+        "Review agreement for Priya Natarajan at Halden & Moss LLP (contact priya.natarajan@example.org).",
+      alwaysHide: ["Halden & Moss LLP"],
+      fetchFn: mockUnavailableFetch,
+      openSessionFn: openSessionSpy,
+    });
+
+    expect(outcome.plannerUnavailable).toBe(true);
+    expect(outcome.run.mode).toBe("planner-unavailable");
+    expect(outcome.run.plannerStatus).toBe("unavailable");
+    expect(outcome.run.plan).toBeNull();
+    expect(outcome.run.egressReceipt).toBeNull();
+    expect(outcome.run.overallPassed).toBe(false);
+    // Enclave session is not called with a fake plan
+    expect(openSessionSpy).not.toHaveBeenCalled();
+
+    const badge = resolvePlannerModeBadgeText({
+      planner: outcome.run.planner,
+      plannerStatus: outcome.run.plannerStatus,
+      mode: outcome.run.mode,
+    });
+    expect(badge).toBe("Planner unavailable (no Gemini key is set)");
+    expect(findForbiddenPlainTerms(badge)).toEqual([]);
+
+    const subtitle = resolvePlannerSubtitleText({
+      isLiveGeminiBadge: false,
+      plannerUnavailable: true,
+    });
+    expect(subtitle).toContain("Gemini planner is unavailable");
+    expect(subtitle).toContain("No fake plan is ever generated");
+    expect(findForbiddenPlainTerms(subtitle)).toEqual([]);
+
+    const steps = buildPlainTimelineSteps({
+      run: outcome.run,
+      plannerBadgeText: badge,
+    });
+    expect(steps[0].passed).toBe(true); // Stage 1 on-device detail hiding still passed
+    expect(steps[2].passed).toBe(false); // Stage 4 Thinking reports unavailable
+    expect(steps[2].statusText).toBe("Unavailable");
+    expect(steps[2].plainResult).toContain("no fake plan was generated");
+    expect(steps[3].passed).toBe(false);
+    expect(steps[3].statusText).toBe("Not needed");
+    for (const s of steps) {
+      expect(findForbiddenPlainTerms(s.plainResult)).toEqual([]);
+    }
+
+    // Also verify that when GEMINI_API_KEY IS set and the Gemini API call fails, POST /api/gemini/plan returns gemini_call_failed and attemptedLiveCall: true
+    setPlanGenAIClientForTests(
+      {
+        interactions: {
+          create: vi.fn(async () => {
+            throw new Error("Upstream Gemini 500 error");
+          }),
+        },
+      },
+      "test-configured-gemini-key",
+    );
+    const failedCallReq = new Request("http://localhost:3000/api/gemini/plan", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-forwarded-for": "198.51.100.26",
+      },
+      body: canonicalJson(taskDescriptor),
+    });
+    const failedCallRes = await planPost(failedCallReq);
+    expect(failedCallRes.status).toBe(503);
+    const failedCallJson = (await failedCallRes.json()) as Record<string, unknown>;
+    expect(failedCallJson.error).toBe("gemini_call_failed");
+    expect(failedCallJson.attemptedLiveCall).toBe(true);
+
+    const failedBadge = resolvePlannerModeBadgeText({
+      planner: { provider: "gemini", model: "unavailable" },
+      plannerStatus: "unavailable",
+      mode: "planner-unavailable",
+      attemptedLiveCall: true,
+    });
+    expect(failedBadge).toBe("Planner unavailable (the Gemini call failed)");
+  });
+
+  it("verifies and formats egress receipts honestly for both signers: sealed Google computer vs recorded by our server", async () => {
+    const descriptor = buildTaskDescriptor({
+      taskKind: "review",
+      inputTokenEstimate: 64,
+      redactionCounts: { SECRET: 1, EMAIL: 1, TOTAL: 2 },
+      verification: {
+        mechanicalRedactionPassed: true,
+        attestedPiiFilterVerified: false,
+        bucketAligned4096: true,
+      },
+      allowedTools: ALLOWED_PLANNER_TOOLS,
+    });
+
+    // 1. Signer A: Sealed Google computer (`/api/core/agent/plan` available)
+    const mockCore = buildMockSealedComputerPlanAndReceipt(descriptor);
+    setCorePlanHandlerForTests(
+      async () => ({
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ok: true,
+          planner: GEMINI_4_ARGON_MODEL_ID,
+          model: GEMINI_4_ARGON_MODEL_ID,
+          interactionId: "inter-argon-turn-1",
+          status: "completed",
+          dataSentToGoogle: "content-free task descriptor only",
+          egressFirewallVerified: true,
+          plan: mockCore.plan,
+          egressReceipt: mockCore.egressReceipt,
+        }),
+      }),
+      SEALED_PUBLIC_KEY_HEX,
+    );
+
+    const coreReq = new Request("http://localhost:3000/api/gemini/plan", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-forwarded-for": "198.51.100.31",
+      },
+      body: canonicalJson(descriptor),
+    });
+    const coreRes = await planPost(coreReq);
+    expect(coreRes.status).toBe(200);
+    const coreJson = (await coreRes.json()) as {
+      ok: boolean;
+      plannerSource: string;
+      plan: ClosedAgentPlan;
+      egressReceipt: GeminiEgressReceipt;
+    };
+    expect(coreJson.ok).toBe(true);
+    expect(coreJson.plannerSource).toBe("sealed-google-computer");
+    expect(coreJson.egressReceipt.signer).toBe("sealed-google-computer");
+    expect(coreJson.egressReceipt.keyId).toBe("egress-signing");
+
+    // Must reject sealed-computer receipt if expectedPublicKeyHex is omitted (never trust receipt.publicKey itself)
+    expect(verifyEgressReceiptClient(coreJson.egressReceipt).ok).toBe(false);
+
+    // Must reject receipt if bound to a different TaskDescriptor
+    const otherDescriptor = buildTaskDescriptor({
+      taskKind: "summarize",
+      inputTokenEstimate: 64,
+      redactionCounts: { SECRET: 1, EMAIL: 1, TOTAL: 2 },
+      verification: {
+        mechanicalRedactionPassed: true,
+        attestedPiiFilterVerified: false,
+        bucketAligned4096: true,
+      },
+      allowedTools: ALLOWED_PLANNER_TOOLS,
+    });
+    expect(
+      verifyEgressReceiptClient(
+        coreJson.egressReceipt,
+        SEALED_PUBLIC_KEY_HEX,
+        otherDescriptor,
+      ).ok,
+    ).toBe(false);
+
+    // Passes when verified with the attested egress key from /api/core/attestation and matching descriptor
+    const verifiedCore = verifyEgressReceiptClient(
+      coreJson.egressReceipt,
+      SEALED_PUBLIC_KEY_HEX,
+      descriptor,
+    );
+    expect(verifiedCore.ok).toBe(true);
+
+    const displayCore = formatEgressReceiptDisplay(coreJson.egressReceipt);
+    expect(displayCore.hasReceipt).toBe(true);
+    expect(displayCore.signer).toBe("sealed-google-computer");
+    expect(displayCore.signerHeading).toBe(SEALED_GOOGLE_COMPUTER_RECEIPT_LABEL);
+    expect(displayCore.canonicalBytes).toBe(
+      mockCore.egressReceipt.canonicalRequest,
+    );
+    expect(displayCore.sha256Hex).toBe(mockCore.egressReceipt.sha256);
+    expect(displayCore.signatureHex).toBe(mockCore.egressReceipt.signature);
+    expect(displayCore.publicKeyHex).toBe(mockCore.egressReceipt.publicKey);
+
+    // 2. Signer B: Recorded by our Next server (when `/api/core/agent/plan` is 503 not-deployed and GEMINI_API_KEY is set)
+    setCorePlanHandlerForTests(async () => ({
+      status: 503,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ core: "not-deployed" }),
+    }));
+
+    const mockNextGenAIClient: GenAIInteractionsClientLike = {
+      interactions: {
+        create: vi.fn(async (params: Record<string, unknown>) => {
+          expect(() =>
+            assertGoogleBoundMessage("createRequest", params),
+          ).not.toThrow();
+          expect(() => assertContentFree(params)).not.toThrow();
+          return {
+            id: "inter-argon-turn-1",
+            status: "completed",
+            steps: [
+              {
+                type: "function_call",
+                id: "call-1",
+                name: "scrub_and_symmetry_mask",
+                arguments: { inputHandle: "$INPUT", bucketQuantumBytes: 4096 },
+              },
+              {
+                type: "function_call",
+                id: "call-2",
+                name: "verify_two_hop_enclave_and_quorum",
+                arguments: { providerId: "tinfoil", enclaveModel: "gemma4-31b" },
+              },
+              {
+                type: "function_call",
+                id: "call-3",
+                name: "invoke_attested_enclave",
+                arguments: {
+                  inputHandle: "$RESULT_1",
+                  enclaveModel: "gemma4-31b",
+                  taskKind: "review",
+                },
+              },
+            ],
+            output_text:
+              "Planned 3 confidential steps over content-free handles.",
+          };
+        }),
+      },
+    };
+    setPlanGenAIClientForTests(mockNextGenAIClient, "test-server-key");
+
+    const nextReq = new Request("http://localhost:3000/api/gemini/plan", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-forwarded-for": "198.51.100.32",
+      },
+      body: canonicalJson(descriptor),
+    });
+    const nextRes = await planPost(nextReq);
+    expect(nextRes.status).toBe(200);
+    const nextJson = (await nextRes.json()) as {
+      ok: boolean;
+      plannerSource: string;
+      plan: ClosedAgentPlan;
+      egressReceipt: GeminiEgressReceipt;
+    };
+    expect(nextJson.ok).toBe(true);
+    expect(nextJson.plannerSource).toBe("next-server");
+    expect(nextJson.egressReceipt.signer).toBe("next-server");
+    expect(nextJson.egressReceipt.keyId).toBe("operator-tree-head");
+    expect(nextJson.egressReceipt.signerLabel).toBe(NEXT_SERVER_RECEIPT_LABEL);
+    expect(nextJson.egressReceipt.transparencyLog).toBeDefined();
+
+    const verifiedNext = verifyEgressReceiptClient(nextJson.egressReceipt);
+    expect(verifiedNext.ok).toBe(true);
+
+    const displayNext = formatEgressReceiptDisplay(nextJson.egressReceipt);
+    expect(displayNext.hasReceipt).toBe(true);
+    expect(displayNext.signer).toBe("next-server");
+    expect(displayNext.signerHeading).toBe(NEXT_SERVER_RECEIPT_LABEL);
+    expect(displayNext.signerHeading.toLowerCase()).toContain(
+      "recorded by our server",
+    );
+    expect(displayNext.canonicalBytes).toBe(
+      mockCore.egressReceipt.canonicalRequest,
+    );
+    expect(displayNext.sha256Hex).toBe(mockCore.egressReceipt.sha256);
+    expect(displayNext.transparencySummary).toContain("leaf #");
+    expect(displayNext.transparencySummary).toContain("rootHash=0x");
+  });
+
+  it("runs the attested second-pass filter (attestedPiiFilter) on mechanically redacted text in the browser, applies extra redactions, and falls back honestly when unavailable", async () => {
+    const samplePrompt =
+      "Review the clinical protocol with handle alex_rivera_private for Dana Reyes at dana.reyes@example.org on 2026-08-14.";
+
+    // 1. When attestedPiiFilter is verified and catches an extra span ("alex_rivera_private")
+    const verifiedPrep = await runBrowserRedactionPipeline({
+      taskPrompt: samplePrompt,
+      attestedFilterRunner: async (mechText) => ({
+        text: mechText.replace("alex_rivera_private", "<PRIVATE_PERSON>"),
+        redactionCount: 1,
+        model: "pii-filter",
+        verified: true,
+        detectedSpans: [
+          {
+            label: "private_person",
+            start: mechText.indexOf("alex_rivera_private"),
+            end:
+              mechText.indexOf("alex_rivera_private") +
+              "alex_rivera_private".length,
+            text: "alex_rivera_private",
+            placeholder: "<PRIVATE_PERSON>",
+          },
+        ],
+      }),
+    });
+
+    expect(verifiedPrep.stage1.attestedFilter.verified).toBe(true);
+    expect(verifiedPrep.stage1.attestedFilter.fallbackToMechanicalOnly).toBe(
+      false,
+    );
+    expect(verifiedPrep.stage1.attestedFilter.redactionCount).toBe(1);
+    expect(
+      verifiedPrep.taskDescriptor.verification.attestedPiiFilterVerified,
+    ).toBe(true);
+    expect(verifiedPrep.papillonGeneralizedPrompt).not.toContain(
+      "alex_rivera_private",
+    );
+    expect(verifiedPrep.papillonGeneralizedPrompt).toContain("[ATTESTED_PII_1]");
+    expect(
+      verifiedPrep.restoreAll(verifiedPrep.papillonGeneralizedPrompt),
+    ).toBe(samplePrompt);
+
+    // 2. When attestedPiiFilter fails, continues with the mechanical result and says so honestly
+    const fallbackPrep = await runBrowserRedactionPipeline({
+      taskPrompt: samplePrompt,
+      attestedFilterRunner: async () => {
+        throw new Error("Enclave unreachable");
+      },
+    });
+    expect(fallbackPrep.stage1.attestedFilter.verified).toBe(false);
+    expect(fallbackPrep.stage1.attestedFilter.fallbackToMechanicalOnly).toBe(
+      true,
+    );
+    expect(
+      fallbackPrep.taskDescriptor.verification.attestedPiiFilterVerified,
+    ).toBe(false);
+    expect(fallbackPrep.stage1.attestedFilter.note).toContain("unavailable");
+
+    // 3. Also test attestedPiiFilter directly with an injected SecureClient mock
+    setAttestedPiiFilterClientForTests({
+      ready: async () => {},
+      getVerificationDocument: () => ({
+        securityVerified: true,
+        enclaveHost: "pii-filter.tinfoil.sh",
+      }),
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            redacted_text: "Review the protocol with <PRIVATE_PERSON>",
+            summary: { span_count: 1 },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    });
+    const directRes = await attestedPiiFilter(
+      "Review the protocol with Cousin Leo",
+      { useRelay: true },
+    );
+    expect(directRes.verified).toBe(true);
+    expect(directRes.redactionCount).toBe(1);
+
+    // 4. Plain data handling includes the explicit device preparation sentence
+    const plainView = formatPlainDataHandling(HONEST_DATA_HANDLING_STATEMENT);
+    expect(plainView.devicePreparationSentence).toBe(
+      DEVICE_PREPARATION_PLAIN_SENTENCE,
+    );
+    expect(findForbiddenPlainTerms(plainView.devicePreparationSentence)).toEqual(
+      [],
+    );
+
+    // 5. Verify core attestation helper extracts the attested egress key
+    const verifiedEgressKey = await verifyCoreAttestationForEgressKey({
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify(coreAttestationFixture.attestationResponseJson),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      expectedImageDigests: [TEST_CORE_IMAGE_DIGEST],
+      pinnedRootCaPem: coreAttestationFixture.pinnedRootCaPem,
+      nowSec: TEST_NOW_SEC,
+    });
+    expect(verifiedEgressKey).toBe(SEALED_PUBLIC_KEY_HEX);
+
+    // 6. requestAgentPlanFromBrowser rejects a receipt signed by an unattested key
+    const rogueSecretKey = new Uint8Array(32).fill(0x99);
+    const roguePubKeyHex = bytesToHex(
+      ed25519.getPublicKey(rogueSecretKey),
+    ).toLowerCase();
+    const { canonicalRequest, requestSha256 } =
+      buildGeminiCreateRequestFromDescriptor(verifiedPrep.taskDescriptor);
+    const epochHourSec = coarsenEpochSecToHour(TEST_NOW_SEC);
+    const rogueSigHex = bytesToHex(
+      ed25519.sign(
+        geminiEgressSigningPayload({ sha256: requestSha256, epochHourSec }),
+        rogueSecretKey,
+      ),
+    ).toLowerCase();
+
+    const { plan } = buildMockSealedComputerPlanAndReceipt(
+      verifiedPrep.taskDescriptor,
+    );
+    await expect(
+      requestAgentPlanFromBrowser(verifiedPrep.taskDescriptor, {
+        fetchFn: async (input) => {
+          const url = String(input);
+          if (url === "/api/gemini/plan") {
+            return new Response(
+              JSON.stringify({
+                ok: true,
+                plannerSource: "sealed-google-computer",
+                plan,
+                egressReceipt: {
+                  canonicalRequest,
+                  sha256: requestSha256,
+                  epochHourSec,
+                  kind: "gemini-egress",
+                  signer: "sealed-google-computer",
+                  signature: rogueSigHex,
+                  publicKey: roguePubKeyHex,
+                  keyId: "egress-signing",
+                },
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            );
+          }
+          if (url === "/api/core/attestation") {
+            return new Response(
+              JSON.stringify(coreAttestationFixture.attestationResponseJson),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            );
+          }
+          return new Response("{}", { status: 404 });
+        },
+        coreAttestationOptions: {
+          expectedImageDigests: [TEST_CORE_IMAGE_DIGEST],
+          pinnedRootCaPem: coreAttestationFixture.pinnedRootCaPem,
+          nowSec: TEST_NOW_SEC,
+        },
+      }),
+    ).rejects.toThrow(/Invalid or mismatched Ed25519 public key/);
+  });
+});

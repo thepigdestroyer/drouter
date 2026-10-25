@@ -216,7 +216,7 @@ const POST_ROUTES = [
     }),
   },
   {
-    path: "/api/gemini",
+    path: "/api/gemini/plan",
     validBody: JSON.stringify({
       thinkingLevel: "high",
       background: true,

@@ -20,6 +20,7 @@ import {
   DEFAULT_PLAIN_TASK_PROMPT,
   EXAMPLE_AGENT_TASKS,
   formatCleanRunJsonForDisplay,
+  formatEgressReceiptDisplay,
   formatPlainDataHandling,
   resolvePlannerModeBadgeText,
   resolvePlannerSubtitleText,
@@ -29,6 +30,9 @@ import {
   type ArgonPlannerInfo,
 } from "@/components/argon/argon-helpers";
 import {
+  runBrowserAgentWorkflow,
+} from "@/lib/agent-client";
+import {
   ARGON_TOOLKIT_MANIFEST,
   FORBIDDEN_ARGON_PARAMETERS,
   GEMINI_4_ARGON_MODEL_ID,
@@ -37,9 +41,9 @@ import {
   type ArgonValidationResult,
   type TaskDescriptor,
 } from "@/lib/gemini/interactions";
-import type {
-  ArgonAutonomousRunResult,
-  DataHandlingStatement,
+import {
+  HONEST_DATA_HANDLING_STATEMENT,
+  type ArgonAutonomousRunResult,
 } from "@/lib/gemini/orchestrator";
 
 export { resolvePlannerModeBadgeText, type ArgonPlannerInfo };
@@ -52,23 +56,6 @@ interface ModelCallRecord {
   inputTokens?: number;
   outputTokens?: number;
   error?: string;
-}
-
-interface GeminiRouteResponse {
-  ok?: boolean;
-  error?: string;
-  message?: string;
-  mode?: string;
-  planner?: ArgonPlannerInfo;
-  dataSentToGoogle?: string;
-  dataHandling?: DataHandlingStatement;
-  taskDescriptor?: TaskDescriptor;
-  modelCalls?: ModelCallRecord[];
-  autonomousRun?: ArgonAutonomousRunResult & {
-    planner?: ArgonPlannerInfo;
-  };
-  arcAnchor?: ArcAnchorResult;
-  validation?: ArgonValidationResult;
 }
 
 const PUBLIC_RECEIPT_BOOK_URL =
@@ -119,7 +106,6 @@ function ArgonAuthenticatedView() {
   const [humanApproved, setHumanApproved] = useState<boolean>(false);
   const [userDeclinedApproval, setUserDeclinedApproval] =
     useState<boolean>(false);
-  const [geminiApiKey, setGeminiApiKey] = useState<string>("");
   const [sdkTab, setSdkTab] = useState<"typescript" | "python" | "payload">(
     "typescript",
   );
@@ -144,25 +130,40 @@ function ArgonAuthenticatedView() {
     setApiError(null);
     setLastActionKind("get");
     try {
-      const res = await fetch("/api/gemini");
-      const data = (await res
-        .json()
-        .catch(() => null)) as GeminiRouteResponse | null;
-      if (!res.ok || !data || data.ok === false || !data.autonomousRun) {
-        const errMsg =
-          data?.message ||
-          data?.error ||
-          `Could not load the initial agent state (HTTP ${res.status}).`;
-        setApiError(errMsg);
-        return;
-      }
-
-      const run = data.autonomousRun;
-      setRunResult(run);
-      setPlannerInfo(data.planner ?? run.planner ?? null);
-      setApiModelCalls(Array.isArray(data.modelCalls) ? data.modelCalls : []);
-      setArcAnchor(data.arcAnchor ?? null);
-      setHumanApproved(Boolean(run.stages.stage5.approvedByHuman));
+      const alwaysHide =
+        typeof window !== "undefined" ? getActiveCustomScrubTerms() : [];
+      const outcome = await runBrowserAgentWorkflow({
+        taskPrompt: DEFAULT_PLAIN_TASK_PROMPT,
+        alwaysHide,
+        thinkingLevel: "medium",
+        background: true,
+        humanApprovedExternalAction: false,
+        preferredEnclaveModel: "gemma4-31b",
+      });
+      setRunResult(outcome.run);
+      setPlannerInfo(outcome.run.planner);
+      setApiModelCalls(outcome.run.modelCalls);
+      setArcAnchor(
+        outcome.arcAnchor
+          ? outcome.arcAnchor.broadcast &&
+            outcome.arcAnchor.txHash &&
+            outcome.arcAnchor.explorerUrl &&
+            outcome.arcAnchor.receiptHash
+            ? {
+                broadcast: true,
+                txHash: outcome.arcAnchor.txHash,
+                explorerUrl: outcome.arcAnchor.explorerUrl,
+                receiptHash: outcome.arcAnchor.receiptHash,
+              }
+            : {
+                broadcast: false,
+                reason:
+                  outcome.arcAnchor.reason ??
+                  "Not broadcast on initial load.",
+              }
+          : null,
+      );
+      setHumanApproved(Boolean(outcome.run.stages.stage5.approvedByHuman));
       setUserDeclinedApproval(false);
     } catch (err) {
       setApiError(
@@ -188,7 +189,6 @@ function ArgonAuthenticatedView() {
     const effectiveApproval =
       overrideApproval !== undefined ? overrideApproval : humanApproved;
 
-    // Clear previous runResult when starting a new Run so a failed POST never leaves stale results visible
     if (overrideApproval !== true) {
       setRunResult(null);
       setArcAnchor(null);
@@ -197,46 +197,38 @@ function ArgonAuthenticatedView() {
     try {
       const alwaysHide =
         typeof window !== "undefined" ? getActiveCustomScrubTerms() : [];
-      const response = await fetch("/api/gemini", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          taskPrompt,
-          alwaysHide,
-          thinkingLevel,
-          background: backgroundDecode,
-          humanApprovedExternalAction: effectiveApproval,
-          preferredEnclaveModel: enclaveModel,
-          geminiApiKey: geminiApiKey.trim() || undefined,
-        }),
+      const outcome = await runBrowserAgentWorkflow({
+        taskPrompt,
+        alwaysHide,
+        thinkingLevel,
+        background: backgroundDecode,
+        humanApprovedExternalAction: effectiveApproval,
+        preferredEnclaveModel: enclaveModel,
       });
 
-      const data = (await response
-        .json()
-        .catch(() => null)) as GeminiRouteResponse | null;
-
-      if (
-        !response.ok ||
-        !data ||
-        data.ok === false ||
-        !data.autonomousRun
-      ) {
-        const validationErrors = data?.validation?.errors?.join(" ");
-        const errMsg =
-          validationErrors ||
-          data?.message ||
-          data?.error ||
-          `Agent run failed with HTTP ${response.status}.`;
-        setRunResult(null);
-        setApiError(errMsg);
-        return;
-      }
-
-      const run = data.autonomousRun;
-      setRunResult(run);
-      setPlannerInfo(data.planner ?? run.planner ?? null);
-      setApiModelCalls(Array.isArray(data.modelCalls) ? data.modelCalls : []);
-      setArcAnchor(data.arcAnchor ?? null);
+      setRunResult(outcome.run);
+      setPlannerInfo(outcome.run.planner);
+      setApiModelCalls(outcome.run.modelCalls);
+      setArcAnchor(
+        outcome.arcAnchor
+          ? outcome.arcAnchor.broadcast &&
+            outcome.arcAnchor.txHash &&
+            outcome.arcAnchor.explorerUrl &&
+            outcome.arcAnchor.receiptHash
+            ? {
+                broadcast: true,
+                txHash: outcome.arcAnchor.txHash,
+                explorerUrl: outcome.arcAnchor.explorerUrl,
+                receiptHash: outcome.arcAnchor.receiptHash,
+              }
+            : {
+                broadcast: false,
+                reason:
+                  outcome.arcAnchor.reason ??
+                  "Not broadcast on live network.",
+              }
+          : null,
+      );
       setHumanApproved(effectiveApproval);
       setUserDeclinedApproval(false);
     } catch (err) {
@@ -292,12 +284,24 @@ function ArgonAuthenticatedView() {
   const attemptedLiveGemini = Boolean(
     runResult?.stages.stage4.liveGeminiCall.attemptedLiveCall,
   );
+  const isPlannerUnavailable =
+    runResult?.mode === "planner-unavailable" ||
+    runResult?.plannerStatus === "unavailable" ||
+    runResult?.stages.stage4.plannerStatus === "unavailable";
   const hasLiveModelCalls = apiModelCalls.some((c) => c.ok);
-  const isInitialPreview = lastActionKind === "get" && !hasLiveModelCalls;
+  const isInitialPreview =
+    lastActionKind === "get" && !hasLiveModelCalls && !isPlannerUnavailable;
 
   const plannerBadgeText = resolvePlannerModeBadgeText({
     planner: plannerInfo,
-    mode: runResult?.mode ?? (liveGeminiReached ? "live" : "tinfoil-planner"),
+    plannerStatus: runResult?.plannerStatus,
+    mode:
+      runResult?.mode ??
+      (isPlannerUnavailable
+        ? "planner-unavailable"
+        : liveGeminiReached
+          ? "live"
+          : "tinfoil-planner"),
     liveGeminiReached,
     attemptedLiveCall: attemptedLiveGemini,
     enclaveModel:
@@ -307,6 +311,7 @@ function ArgonAuthenticatedView() {
 
   const plannerSubtitle = resolvePlannerSubtitleText({
     isLiveGeminiBadge,
+    plannerUnavailable: isPlannerUnavailable,
     attemptedLiveCall: attemptedLiveGemini,
     liveGeminiReached,
     isInitialPreview,
@@ -318,6 +323,15 @@ function ArgonAuthenticatedView() {
   const isGatePending =
     runResult?.stages.stage5.externalActionStatus === "paused_awaiting_human" ||
     !runResult?.stages.stage5.approvedByHuman;
+  const canApprovePublicReceipt = Boolean(
+    runResult &&
+      !isPlannerUnavailable &&
+      runResult.stages.stage1.passed &&
+      runResult.stages.stage2.passed &&
+      runResult.stages.stage3.passed &&
+      runResult.stages.stage4.passed,
+  );
+  const wasSentToGoogle = Boolean(!isPlannerUnavailable && liveGeminiReached);
 
   const timelineSteps = runResult
     ? buildPlainTimelineSteps({
@@ -329,9 +343,14 @@ function ArgonAuthenticatedView() {
       })
     : [];
 
-  const plainDataHandling = formatPlainDataHandling(runResult?.dataHandling);
-  const activeTaskDescriptor =
+  const plainDataHandling = formatPlainDataHandling(
+    runResult?.dataHandling ?? HONEST_DATA_HANDLING_STATEMENT,
+  );
+  const activeTaskDescriptor: TaskDescriptor | undefined =
     runResult?.taskDescriptor ?? runResult?.stages.stage4.taskDescriptor;
+  const activeEgressReceipt =
+    runResult?.egressReceipt ?? runResult?.stages.stage4.egressReceipt ?? null;
+  const formattedReceipt = formatEgressReceiptDisplay(activeEgressReceipt);
 
   return (
     <>
@@ -373,13 +392,27 @@ function ArgonAuthenticatedView() {
               {/* Plain Split-Knowledge & Data-Handling Summary */}
               <div className="border-t border-rule pt-3.5 space-y-3">
                 <p
+                  data-testid="argon-device-preparation-sentence"
+                  className="text-sm text-ink-2"
+                >
+                  {plainDataHandling.devicePreparationSentence}
+                </p>
+                <p
                   data-testid="argon-what-google-received"
                   className="text-sm font-medium text-ink"
                 >
-                  {WHAT_GOOGLE_RECEIVED_PROMPT}{" "}
-                  <span className="font-normal text-ink-2">
-                    {plainDataHandling.sentToGooglePlain}.
-                  </span>
+                  {wasSentToGoogle ? (
+                    <>
+                      {WHAT_GOOGLE_RECEIVED_PROMPT}{" "}
+                      <span className="font-normal text-ink-2">
+                        {plainDataHandling.sentToGooglePlain}.
+                      </span>
+                    </>
+                  ) : (
+                    <span className="font-normal text-ink-2">
+                      Nothing was sent to Google in this run.
+                    </span>
+                  )}
                 </p>
 
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 text-xs text-ink-2">
@@ -423,11 +456,68 @@ function ArgonAuthenticatedView() {
                       </div>
                       <div className="space-y-1">
                         <div className="text-ink font-medium">
-                          Content-free TaskDescriptor sent to planner:
+                          Content-free TaskDescriptor sent to POST /api/gemini/plan:
                         </div>
                         <pre className="ep-inset p-3 overflow-x-auto text-[11px] text-ink">
                           {JSON.stringify(activeTaskDescriptor, null, 2)}
                         </pre>
+                      </div>
+                      <div className="space-y-1">
+                        <div className="text-ink font-medium">
+                          Egress receipt ({formattedReceipt.signerHeading}):
+                        </div>
+                        {formattedReceipt.hasReceipt ? (
+                          <div className="ep-inset p-3 space-y-1.5 text-[11px] text-ink-2 break-all">
+                            <div>
+                              <span className="text-ink font-medium">
+                                Signer:
+                              </span>{" "}
+                              {formattedReceipt.signerHeading}
+                            </div>
+                            <div>
+                              <span className="text-ink font-medium">
+                                Canonical request SHA-256:
+                              </span>{" "}
+                              0x{formattedReceipt.sha256Hex}
+                            </div>
+                            <div>
+                              <span className="text-ink font-medium">
+                                Key ID:
+                              </span>{" "}
+                              {formattedReceipt.keyId} |{" "}
+                              <span className="text-ink font-medium">
+                                Public key:
+                              </span>{" "}
+                              0x{formattedReceipt.publicKeyHex}
+                            </div>
+                            <div>
+                              <span className="text-ink font-medium">
+                                Ed25519 signature:
+                              </span>{" "}
+                              0x{formattedReceipt.signatureHex}
+                            </div>
+                            {formattedReceipt.transparencySummary && (
+                              <div>
+                                <span className="text-ink font-medium">
+                                  Transparency log:
+                                </span>{" "}
+                                {formattedReceipt.transparencySummary}
+                              </div>
+                            )}
+                            <div className="pt-1">
+                              <div className="text-ink font-medium">
+                                Exact canonical bytes Google received:
+                              </div>
+                              <pre className="mt-1 p-2 bg-paper overflow-x-auto text-[10px] text-ink whitespace-pre-wrap break-all">
+                                {formattedReceipt.canonicalBytes}
+                              </pre>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="ep-inset p-3 text-[11px] text-ink-2">
+                            {formattedReceipt.signerHeading}
+                          </div>
+                        )}
                       </div>
                       {runResult?.dataHandling && (
                         <div className="space-y-1">
@@ -663,27 +753,6 @@ function ArgonAuthenticatedView() {
                           </div>
                           <div>
                             <span className="text-ink font-medium">
-                              Attested filter (D4):
-                            </span>{" "}
-                            model={runResult.stages.stage1.attestedFilter.model}
-                            , verified=
-                            {String(
-                              runResult.stages.stage1.attestedFilter.verified,
-                            )}
-                            , redactionCount=
-                            {
-                              runResult.stages.stage1.attestedFilter
-                                .redactionCount
-                            }
-                            , fallbackToMechanicalOnly=
-                            {String(
-                              runResult.stages.stage1.attestedFilter
-                                .fallbackToMechanicalOnly,
-                            )}{" "}
-                            ({runResult.stages.stage1.attestedFilter.note})
-                          </div>
-                          <div>
-                            <span className="text-ink font-medium">
                               Outbound masked prompt:
                             </span>{" "}
                             {
@@ -815,9 +884,11 @@ function ArgonAuthenticatedView() {
 
                     {step.id === "thinking" && (
                       <div className="space-y-2">
-                        <p className="text-xs font-medium text-ink">
-                          {WHAT_GOOGLE_RECEIVED_PROMPT}
-                        </p>
+                        {wasSentToGoogle && (
+                          <p className="text-xs font-medium text-ink">
+                            {WHAT_GOOGLE_RECEIVED_PROMPT}
+                          </p>
+                        )}
                         <TechDetails label="Show technical details">
                           <div className="space-y-2 font-mono text-xs text-ink-2">
                             <div>
@@ -840,7 +911,47 @@ function ArgonAuthenticatedView() {
                             </div>
                             <div className="space-y-1">
                               <div className="text-ink font-medium">
-                                Server-resolved opaque handles:
+                                Egress receipt ({formattedReceipt.signerHeading}):
+                              </div>
+                              {formattedReceipt.hasReceipt ? (
+                                <div className="ep-inset p-3 space-y-1 text-[11px] text-ink-2 break-all">
+                                  <div>
+                                    Signer: {formattedReceipt.signerHeading}
+                                  </div>
+                                  <div>
+                                    SHA-256: 0x{formattedReceipt.sha256Hex}
+                                  </div>
+                                  <div>
+                                    Key ({formattedReceipt.keyId}): 0x
+                                    {formattedReceipt.publicKeyHex}
+                                  </div>
+                                  <div>
+                                    Signature: 0x{formattedReceipt.signatureHex}
+                                  </div>
+                                  {formattedReceipt.transparencySummary && (
+                                    <div>
+                                      Transparency log:{" "}
+                                      {formattedReceipt.transparencySummary}
+                                    </div>
+                                  )}
+                                  <div className="pt-1">
+                                    <div className="text-ink font-medium">
+                                      Exact canonical bytes Google received:
+                                    </div>
+                                    <pre className="mt-1 p-2 bg-paper overflow-x-auto text-[10px] text-ink whitespace-pre-wrap break-all">
+                                      {formattedReceipt.canonicalBytes}
+                                    </pre>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="ep-inset p-3 text-[11px] text-ink-2">
+                                  {formattedReceipt.signerHeading}
+                                </div>
+                              )}
+                            </div>
+                            <div className="space-y-1">
+                              <div className="text-ink font-medium">
+                                Browser-resolved opaque handles:
                               </div>
                               <pre className="ep-inset p-3 overflow-x-auto text-[11px] text-ink-2">
                                 {JSON.stringify(
@@ -999,9 +1110,9 @@ function ArgonAuthenticatedView() {
           ) : null}
         </InkReveal>
 
-        {/* 3. Clear Approval Card */}
+        {/* 3. Clear Approval Card (only offered when the run completed successfully) */}
         <InkReveal className="[&[data-ink-reveal=pending]]:!opacity-100 [&[data-ink-reveal=pending]]:![clip-path:none]">
-          {runResult && (
+          {canApprovePublicReceipt && runResult && (
             <section
               aria-label="Public receipt approval"
               aria-live="polite"
@@ -1203,26 +1314,6 @@ function ArgonAuthenticatedView() {
                       </div>
                     </div>
                   </div>
-
-                  {/* Optional Gemini API key */}
-                  <div className="ep-inset p-3.5 space-y-2">
-                    <label
-                      htmlFor="gemini-api-key-input"
-                      className="block font-mono text-xs text-ink"
-                    >
-                      Use your own Gemini API key (optional, sent for one call
-                      and never stored)
-                    </label>
-                    <input
-                      id="gemini-api-key-input"
-                      type="password"
-                      autoComplete="off"
-                      placeholder="AIzaSy..."
-                      value={geminiApiKey}
-                      onChange={(e) => setGeminiApiKey(e.target.value)}
-                      className="ep-input font-mono text-xs"
-                    />
-                  </div>
                 </div>
 
                 {/* Model calls telemetry */}
@@ -1270,9 +1361,9 @@ function ArgonAuthenticatedView() {
                     </div>
                   ) : (
                     <p className="ep-inset p-3 font-mono text-xs text-ink-2">
-                      No external LLM calls were recorded in this cached
-                      preview. Click Run or Allow to execute a live call via
-                      POST /api/gemini.
+                      No external LLM calls were recorded yet. Click Run to
+                      request a content-free plan via POST /api/gemini/plan and
+                      execute in the browser via openTinfoilSession.
                     </p>
                   )}
                 </div>

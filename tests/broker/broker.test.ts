@@ -18,7 +18,7 @@ import {
   AtlasExplorer,
   executeAtlasExplorerSearch,
 } from "@/components/atlas-explorer";
-import { findForbiddenPlainTerms } from "@/components/argon/argon-helpers";
+import { findForbiddenPlainTerms } from "@/lib/plain-copy";
 import { ATLAS_SEED_DOCS } from "@/lib/atlas";
 import {
   clearCorpusCacheForTests,

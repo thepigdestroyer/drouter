@@ -29,14 +29,26 @@ import {
   ARGON_COMPANION_MODELS,
   ARGON_CONFIDENTIAL_TOOLS,
   ARGON_MAX_UNIFIED_CONTEXT_TOKENS,
+  CLOSED_CALL_ID_REGEX,
   ContentFreeEgressError,
   DATA_SENT_TO_GOOGLE,
+  DIGEST_HANDLE_REGEX,
+  DOC_HANDLE_REGEX,
   GEMINI_4_ARGON_MODEL_ID,
+  HANDLE_KEY_TO_REGEX,
+  INPUT_LITERAL_HANDLE_REGEX,
+  INPUT_OR_RESULT_HANDLE_REGEX,
+  isPowerOfTwoInRange,
   LOOKUP_TOPICS,
+  MAX_HANDLE_INDEX,
   MAX_PLANNER_STEPS,
   MAX_PLAINTEXT_LEAK_COUNT,
   MAX_REDACTION_COUNT_PER_KIND,
   MAX_TOKEN_BUCKET,
+  MEASUREMENT_HANDLE_REGEX,
+  RECEIPT_HANDLE_REGEX,
+  RESULT_HANDLE_REGEX,
+  ROUTER_HANDLE_REGEX,
   SPLIT_KNOWLEDGE_SYSTEM_INSTRUCTION,
   VALID_TASK_KINDS,
   VALID_THINKING_LEVELS,
@@ -44,112 +56,60 @@ import {
   type InteractionsCreatePayload,
   type PlannerToolName,
   type TaskDescriptor,
-} from "./interactions";
+} from "./shared";
 
-export const MAX_HANDLE_INDEX = 16;
-
-export const INPUT_LITERAL_HANDLE_REGEX = /^\$INPUT$/;
-export const INPUT_OR_RESULT_HANDLE_REGEX =
-  /^(?:\$INPUT|\$RESULT_(?:[1-9]|1[0-6]))$/;
-export const RESULT_HANDLE_REGEX = /^\$RESULT_(?:[1-9]|1[0-6])$/;
-export const DOC_HANDLE_REGEX = /^\$DOC_(?:[1-9]|1[0-6])$/;
-export const RECEIPT_HANDLE_REGEX = /^\$RECEIPT_(?:[1-9]|1[0-6])$/;
-export const DIGEST_HANDLE_REGEX = /^\$DIGEST_(?:[1-9]|1[0-6])$/;
-export const ROUTER_HANDLE_REGEX = /^\$ROUTER_(?:[1-9]|1[0-6])$/;
-export const MEASUREMENT_HANDLE_REGEX = /^\$MEASUREMENT_(?:[1-9]|1[0-6])$/;
-
-export const HANDLE_KEY_TO_REGEX: Readonly<Record<string, RegExp>> = {
-  inputHandle: INPUT_OR_RESULT_HANDLE_REGEX,
-  outputHandle: RESULT_HANDLE_REGEX,
-  resultHandle: INPUT_OR_RESULT_HANDLE_REGEX,
-  docHandle: DOC_HANDLE_REGEX,
-  topDocHandle: DOC_HANDLE_REGEX,
-  receiptHandle: RECEIPT_HANDLE_REGEX,
-  digestHandle: DIGEST_HANDLE_REGEX,
-  contentHandle: DIGEST_HANDLE_REGEX,
-  outputDigestHandle: DIGEST_HANDLE_REGEX,
-  routerHandle: ROUTER_HANDLE_REGEX,
-  enclaveMeasurementHandle: MEASUREMENT_HANDLE_REGEX,
+export {
+  CLOSED_CALL_ID_REGEX,
+  DIGEST_HANDLE_REGEX,
+  DOC_HANDLE_REGEX,
+  HANDLE_KEY_TO_REGEX,
+  INPUT_LITERAL_HANDLE_REGEX,
+  INPUT_OR_RESULT_HANDLE_REGEX,
+  isPowerOfTwoInRange,
+  MAX_HANDLE_INDEX,
+  MEASUREMENT_HANDLE_REGEX,
+  RECEIPT_HANDLE_REGEX,
+  RESULT_HANDLE_REGEX,
+  ROUTER_HANDLE_REGEX,
 };
 
-export const CLOSED_CALL_ID_REGEX =
-  /^(?:call|tc|inter)-(?:[1-9]|1[0-6]|turn-(?:[1-9]|1[0-6])|argon-turn-(?:[1-9]|1[0-6])|(?:(?:[1-9]|1[0-6])-)?(?:scrub_and_symmetry_mask|verify_two_hop_enclave_and_quorum|search_atlas_hybrid_kb|invoke_attested_enclave|anchor_arc_settlement_with_human_gate)|(?:[1-9]|1[0-6])-(?:[1-9]|1[0-6]))$/;
+const EXPECTED_SUBAGENT_ROUTING: Readonly<Record<string, string>> = {
+  sandbox_verifier: ARGON_COMPANION_MODELS.sandboxAgent,
+  fast_swarm: ARGON_COMPANION_MODELS.parallelSubagentFast,
+  quorum_checker: ARGON_COMPANION_MODELS.parallelSubagentLite,
+  deep_research: ARGON_COMPANION_MODELS.deepResearch,
+  on_device_filter: ARGON_COMPANION_MODELS.confidentialOnDevice,
+  attested_enclave_model: ARGON_COMPANION_MODELS.confidentialOpenCloud,
+  tinfoil_enclave_target: ARGON_COMPANION_MODELS.tinfoilEnclaveGemma,
+  voice_briefing: ARGON_COMPANION_MODELS.voiceTts,
+  live_voice_gate: ARGON_COMPANION_MODELS.realtimeVoice,
+};
 
-// Evaluated on first use: this module and ./interactions import each other.
-let EXPECTED_SUBAGENT_ROUTING_CACHE:
-  Readonly<Record<string, string>> | undefined;
-function getExpectedSubagentRouting(): Readonly<Record<string, string>> {
-  return (EXPECTED_SUBAGENT_ROUTING_CACHE ??= {
-    sandbox_verifier: ARGON_COMPANION_MODELS.sandboxAgent,
-    fast_swarm: ARGON_COMPANION_MODELS.parallelSubagentFast,
-    quorum_checker: ARGON_COMPANION_MODELS.parallelSubagentLite,
-    deep_research: ARGON_COMPANION_MODELS.deepResearch,
-    on_device_filter: ARGON_COMPANION_MODELS.confidentialOnDevice,
-    attested_enclave_model: ARGON_COMPANION_MODELS.confidentialOpenCloud,
-    tinfoil_enclave_target: ARGON_COMPANION_MODELS.tinfoilEnclaveGemma,
-    voice_briefing: ARGON_COMPANION_MODELS.voiceTts,
-    live_voice_gate: ARGON_COMPANION_MODELS.realtimeVoice,
-  });
-}
+const EXPECTED_METADATA: Readonly<Record<string, string>> = {
+  sdk_target: "@google/genai>=2.31.0",
+  api_surface: "client.interactions.create",
+  persona: "redacted_clinical_scientist_persona",
+  enclave_protocol:
+    "RFC 9180 HPKE EHBP + AMD SEV-SNP Router + Intel TDX / NVIDIA CC GPU Enclaves",
+  data_sent_to_google: DATA_SENT_TO_GOOGLE,
+};
 
-// Evaluated on first use: this module and ./interactions import each other.
-let EXPECTED_METADATA_CACHE: Readonly<Record<string, string>> | undefined;
-function getExpectedMetadata(): Readonly<Record<string, string>> {
-  return (EXPECTED_METADATA_CACHE ??= {
-    sdk_target: "@google/genai>=2.31.0",
-    api_surface: "client.interactions.create",
-    persona: "redacted_clinical_scientist_persona",
-    enclave_protocol:
-      "RFC 9180 HPKE EHBP + AMD SEV-SNP Router + Intel TDX / NVIDIA CC GPU Enclaves",
-    data_sent_to_google: DATA_SENT_TO_GOOGLE,
-  });
-}
+const ALLOWED_SEARCH_TOPICS_SET: ReadonlySet<string> = new Set<string>([
+  ...ALLOWED_ATLAS_TOPICS,
+  ...LOOKUP_TOPICS,
+]);
 
-// Evaluated on first use: this module and ./interactions import each other.
-let ALLOWED_SEARCH_TOPICS_SET_CACHE: ReadonlySet<string> | undefined;
-function getAllowedSearchTopicsSet(): ReadonlySet<string> {
-  return (ALLOWED_SEARCH_TOPICS_SET_CACHE ??= new Set<string>([
-    ...ALLOWED_ATLAS_TOPICS,
-    ...LOOKUP_TOPICS,
-  ]));
-}
+const ALLOWED_ATLAS_CATEGORIES_SET: ReadonlySet<string> = new Set<string>(
+  ALLOWED_ATLAS_CATEGORIES,
+);
 
-// Evaluated on first use: this module and ./interactions import each other.
-let ALLOWED_ATLAS_CATEGORIES_SET_CACHE: ReadonlySet<string> | undefined;
-function getAllowedAtlasCategoriesSet(): ReadonlySet<string> {
-  return (ALLOWED_ATLAS_CATEGORIES_SET_CACHE ??= new Set<string>(
-    ALLOWED_ATLAS_CATEGORIES,
-  ));
-}
+const VALID_TASK_KINDS_SET: ReadonlySet<string> = new Set<string>(
+  VALID_TASK_KINDS,
+);
 
-// Evaluated on first use: this module and ./interactions import each other.
-let VALID_TASK_KINDS_SET_CACHE: ReadonlySet<string> | undefined;
-function getValidTaskKindsSet(): ReadonlySet<string> {
-  return (VALID_TASK_KINDS_SET_CACHE ??= new Set<string>(VALID_TASK_KINDS));
-}
-
-// Evaluated on first use: this module and ./interactions import each other.
-let VALID_THINKING_LEVELS_SET_CACHE: ReadonlySet<string> | undefined;
-function getValidThinkingLevelsSet(): ReadonlySet<string> {
-  return (VALID_THINKING_LEVELS_SET_CACHE ??= new Set<string>(
-    VALID_THINKING_LEVELS,
-  ));
-}
-
-export function isPowerOfTwoInRange(
-  value: unknown,
-  min: number,
-  max: number,
-): value is number {
-  return (
-    typeof value === "number" &&
-    Number.isInteger(value) &&
-    !Object.is(value, -0) &&
-    value >= min &&
-    value <= max &&
-    (value & (value - 1)) === 0
-  );
-}
+const VALID_THINKING_LEVELS_SET: ReadonlySet<string> = new Set<string>(
+  VALID_THINKING_LEVELS,
+);
 
 export function isScrubCountPowerOfTwoBucket(value: unknown): value is number {
   return value === 0 || isPowerOfTwoInRange(value, 1, 64);
@@ -320,7 +280,7 @@ function assertGenerationConfig(
   const thinkingLevel = obj.thinking_level;
   if (
     typeof thinkingLevel !== "string" ||
-    !getValidThinkingLevelsSet().has(thinkingLevel)
+    !VALID_THINKING_LEVELS_SET.has(thinkingLevel)
   ) {
     throw new ContentFreeEgressError(
       String(thinkingLevel),
@@ -364,7 +324,7 @@ export function assertTaskDescriptorSchema(
 
   if (
     typeof obj.taskKind !== "string" ||
-    !getValidTaskKindsSet().has(obj.taskKind)
+    !VALID_TASK_KINDS_SET.has(obj.taskKind)
   ) {
     throw new ContentFreeEgressError(String(obj.taskKind), `${path}.taskKind`);
   }
@@ -501,7 +461,7 @@ export function assertInteractionsCreatePayloadSchema(
   }
   if (
     typeof obj.thinking_level !== "string" ||
-    !getValidThinkingLevelsSet().has(obj.thinking_level)
+    !VALID_THINKING_LEVELS_SET.has(obj.thinking_level)
   ) {
     throw new ContentFreeEgressError(
       String(obj.thinking_level),
@@ -581,12 +541,12 @@ export function assertInteractionsCreatePayloadSchema(
   assertValidToolsArray(obj.tools, undefined, `${path}.tools`);
   assertDeepEqualConstant(
     obj.subagent_routing,
-    getExpectedSubagentRouting(),
+    EXPECTED_SUBAGENT_ROUTING,
     `${path}.subagent_routing`,
   );
   assertDeepEqualConstant(
     obj.metadata,
-    getExpectedMetadata(),
+    EXPECTED_METADATA,
     `${path}.metadata`,
   );
 
@@ -733,7 +693,7 @@ export function assertToolCallArgumentsSchema(
       assertExactKeys(obj, ["topic"], ["inputHandle", "category"], path);
       if (
         typeof obj.topic !== "string" ||
-        !getAllowedSearchTopicsSet().has(obj.topic)
+        !ALLOWED_SEARCH_TOPICS_SET.has(obj.topic)
       ) {
         throw new ContentFreeEgressError(String(obj.topic), `${path}.topic`);
       }
@@ -753,7 +713,7 @@ export function assertToolCallArgumentsSchema(
       if (Object.prototype.hasOwnProperty.call(obj, "category")) {
         if (
           typeof obj.category !== "string" ||
-          !getAllowedAtlasCategoriesSet().has(obj.category)
+          !ALLOWED_ATLAS_CATEGORIES_SET.has(obj.category)
         ) {
           throw new ContentFreeEgressError(
             String(obj.category),
@@ -789,7 +749,7 @@ export function assertToolCallArgumentsSchema(
       if (Object.prototype.hasOwnProperty.call(obj, "taskKind")) {
         if (
           typeof obj.taskKind !== "string" ||
-          !getValidTaskKindsSet().has(obj.taskKind)
+          !VALID_TASK_KINDS_SET.has(obj.taskKind)
         ) {
           throw new ContentFreeEgressError(
             String(obj.taskKind),
