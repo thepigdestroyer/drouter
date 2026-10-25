@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// deRoute Private Local Proxy (source commit: e847e6ff9b60)
+// deRoute Private Local Proxy (source commit: 82617252e320)
 import { createRequire as __derouteCreateRequire } from "node:module";
 const require = __derouteCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -49020,6 +49020,22 @@ function createDerouteProxyServer(opts) {
         );
       } catch (err) {
         const msg = err instanceof Error ? sanitizeErrorText(err.message) : "Upstream enclave request failed";
+        if (res.headersSent) {
+          if (!res.writableEnded) {
+            res.write(
+              `data: ${JSON.stringify({
+                error: {
+                  message: `Upstream enclave request failed: ${msg}`,
+                  type: "upstream_error"
+                }
+              })}
+
+`
+            );
+            res.end();
+          }
+          return;
+        }
         sendJsonResponse(
           res,
           502,
