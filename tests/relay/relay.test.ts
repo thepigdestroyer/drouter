@@ -386,7 +386,7 @@ describe("Oblivious Relay Routing for pii-filter.tinfoil.sh and Standard Enclave
       setAttestedPiiSecureClientFactoryForTests(() => {
         const clientObj = {
           _transport: {
-            fetch: async () => {
+            fetch: async (..._args: unknown[]) => {
               sent += 1;
               return new Response("{}", { status: 200 });
             },
