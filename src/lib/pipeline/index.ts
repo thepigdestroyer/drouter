@@ -37,6 +37,7 @@ export interface PreparePromptOptions {
 }
 
 const REDACTION_RISK_WEIGHTS: Readonly<Record<string, number>> = {
+  MARKED: 25,
   SECRET: 40,
   ACCT: 30,
   EMAIL: 25,

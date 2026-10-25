@@ -11,6 +11,7 @@ import { TINFOIL_MODELS } from "@/lib/tinfoil/client";
 import type { DeepAttestationBundle } from "@/lib/tinfoil/deep-inspect";
 import {
   getActiveCustomScrubTerms,
+  getCurrentVaultSession,
   subscribeVaultSession,
 } from "@/lib/auth/vault";
 import {
@@ -18,7 +19,10 @@ import {
   storedCreditBalance,
 } from "@/lib/credits/client";
 import { downloadAndResume, freezeAndUpload } from "@/lib/freeze/client";
-import { createMechanicalSession } from "@/lib/privacy/mechanical";
+import {
+  createMechanicalSession,
+  type MechanicalSession,
+} from "@/lib/privacy/mechanical";
 import {
   hashHex,
   openSession,
@@ -32,6 +36,7 @@ import {
 import {
   prepareHistoricalTurnText,
   prepareOutboundTurn,
+  rebuildMechanicalSessionFromMessages,
   restoreUnspentCreditHeader,
   type MessagePrivacyReport,
 } from "@/components/console/send-pipeline";
@@ -112,6 +117,57 @@ export function formatHiddenDetailsSummary(count: number): string {
   return `${count} personal detail${count === 1 ? "" : "s"} hidden`;
 }
 
+export const CONSOLE_HIDE_MARKER_HINT =
+  "Wrap anything in ££ like ££this££ to hide it.";
+
+export interface ConsoleExamplePrompt {
+  id: "non-technical" | "technical" | "everyday";
+  label: string;
+  prompt: string;
+  sensitiveItems: readonly string[];
+}
+
+export const CONSOLE_EXAMPLE_PROMPTS: readonly ConsoleExamplePrompt[] = [
+  {
+    id: "non-technical",
+    label: "Draft an email with hidden names",
+    prompt:
+      "Write a polite reply to Dana Reyes at dana.reyes@example.com about rescheduling our call to 2026-10-30 and keeping my number 415-555-0199 and ££our merger offer££ private.",
+    sensitiveItems: [
+      "Dana Reyes",
+      "dana.reyes@example.com",
+      "2026-10-30",
+      "415-555-0199",
+      "our merger offer",
+      "££",
+    ],
+  },
+  {
+    id: "technical",
+    label: "Debug a deploy with hidden technical details",
+    prompt: [
+      "Why does our deploy fail? Server 10.42.7.19, key ",
+      "sk",
+      "_live_",
+      "51HxYz9876543210fictional, host billing.int.acme.internal, logs in /Users/dana/acme/deploy.log. ££Project Falcon££ launches Friday.",
+    ].join(""),
+    sensitiveItems: [
+      "10.42.7.19",
+      ["sk", "_live_", "51HxYz9876543210fictional"].join(""),
+      "billing.int.acme.internal",
+      "/Users/dana/acme/deploy.log",
+      "Project Falcon",
+      "££",
+    ],
+  },
+  {
+    id: "everyday",
+    label: "Ask an everyday question",
+    prompt: "Give me three simple dinner ideas I can cook in 20 minutes.",
+    sensitiveItems: [],
+  },
+];
+
 function FlowingInkTypingIndicator() {
   return (
     <div
@@ -171,7 +227,10 @@ export function Console() {
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("overview");
   const [terminalModalOpen, setTerminalModalOpen] = useState(false);
   const filterFingerprintStatus = useFilterFingerprintStatus();
-  const mechanicalSessionRef = useRef(createMechanicalSession());
+  const mechanicalSessionRef = useRef<MechanicalSession | null>(null);
+  if (!mechanicalSessionRef.current) {
+    mechanicalSessionRef.current = createMechanicalSession();
+  }
   const scrollRef = useRef<HTMLDivElement>(null);
   const didAutoConnectRef = useRef(false);
 
@@ -179,6 +238,9 @@ export function Console() {
     setCreditBalance(storedCreditBalance());
     setCustomTermsCount(getActiveCustomScrubTerms().length);
     const unsub = subscribeVaultSession(() => {
+      if (!getCurrentVaultSession()) {
+        mechanicalSessionRef.current?.clear();
+      }
       setCustomTermsCount(getActiveCustomScrubTerms().length);
       setCreditBalance(storedCreditBalance());
     });
@@ -274,7 +336,7 @@ export function Console() {
       setLastPrivacyReport(null);
       setExportedProof(null);
       setError(null);
-      mechanicalSessionRef.current.clear();
+      mechanicalSessionRef.current?.clear();
       const seen = new Map<string, CheckResult>();
       try {
         const active = await openSession(
@@ -357,11 +419,32 @@ export function Console() {
     setError(null);
 
     let turnPrepared;
+    let preparedHistoryMessages: ChatMessage[];
     try {
+      preparedHistoryMessages = messages.map((m) => {
+        if (m.wireContent) {
+          return m;
+        }
+        if (m.role === "user") {
+          const preparedHistorical = prepareHistoricalTurnText(m.content, {
+            normalizeStyle,
+            session: mechanicalSessionRef.current ?? undefined,
+          });
+          return {
+            ...m,
+            wireContent: preparedHistorical,
+          };
+        }
+        return {
+          ...m,
+          wireContent: m.content,
+        };
+      });
+
       turnPrepared = await prepareOutboundTurn(text, {
         scrubEnabled,
         normalizeStyle,
-        session: mechanicalSessionRef.current,
+        session: mechanicalSessionRef.current ?? undefined,
       });
     } catch (e) {
       setError((e as Error).message || "Could not prepare your message right now.");
@@ -386,32 +469,12 @@ export function Console() {
       privacyReport: turnPrepared.report,
     };
 
-    const displayHistory: ChatMessage[] = [...messages, userMsg];
-    const wireHistory: ChatMessage[] = displayHistory.map((m) => {
-      if (m.wireContent) {
-        return {
-          role: m.role,
-          content: m.wireContent,
-          wireContent: m.wireContent,
-        };
-      }
-      if (m.role === "user") {
-        const preparedHistorical = prepareHistoricalTurnText(m.content, {
-          normalizeStyle,
-          session: mechanicalSessionRef.current,
-        });
-        return {
-          role: m.role,
-          content: preparedHistorical,
-          wireContent: preparedHistorical,
-        };
-      }
-      return {
-        role: m.role,
-        content: m.content,
-        wireContent: m.content,
-      };
-    });
+    const displayHistory: ChatMessage[] = [...preparedHistoryMessages, userMsg];
+    const wireHistory: ChatMessage[] = displayHistory.map((m) => ({
+      role: m.role,
+      content: m.wireContent ?? m.content,
+      wireContent: m.wireContent ?? m.content,
+    }));
 
     setMessages([...displayHistory, { role: "assistant", content: "" }]);
     setPhase("streaming");
@@ -473,7 +536,7 @@ export function Console() {
         });
       }
     }
-    mechanicalSessionRef.current.clear();
+    mechanicalSessionRef.current?.clear();
     setSession(null);
     setPhase("closed");
   }, [session, zeroTelemetry]);
@@ -609,9 +672,15 @@ export function Console() {
           throw err;
         }
       }
+      if (mechanicalSessionRef.current) {
+        rebuildMechanicalSessionFromMessages(restored.messages, {
+          normalizeStyle,
+          session: mechanicalSessionRef.current,
+        });
+      }
       setMessages(restored.messages);
     },
-    [model, registry, session],
+    [model, normalizeStyle, registry, session],
   );
 
   const activeEvidence = session?.evidence ?? lastEvidence;
@@ -739,39 +808,16 @@ export function Console() {
               </p>
               {session && canSend && (
                 <div className="mt-5 flex flex-wrap justify-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setInput(
-                        "Write a polite reply to Dana Reyes at dana.reyes@example.com about rescheduling our Friday call.",
-                      )
-                    }
-                    className="ep-btn-ghost px-3 py-1.5 text-xs"
-                  >
-                    Draft an email with hidden names
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setInput(
-                        "Summarize this note for my doctor and keep my phone number 415-555-0199 private.",
-                      )
-                    }
-                    className="ep-btn-ghost px-3 py-1.5 text-xs"
-                  >
-                    Summarize a private note
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setInput(
-                        "Give me three simple dinner ideas I can cook in 20 minutes.",
-                      )
-                    }
-                    className="ep-btn-ghost px-3 py-1.5 text-xs"
-                  >
-                    Ask an everyday question
-                  </button>
+                  {CONSOLE_EXAMPLE_PROMPTS.map((example) => (
+                    <button
+                      key={example.id}
+                      type="button"
+                      onClick={() => setInput(example.prompt)}
+                      className="ep-btn-ghost px-3 py-1.5 text-xs"
+                    >
+                      {example.label}
+                    </button>
+                  ))}
                 </div>
               )}
             </div>
@@ -874,6 +920,12 @@ export function Console() {
             Send
           </button>
         </form>
+        <div
+          className="border-t border-rule bg-paper-2 px-4 py-1.5 text-xs text-ink-3"
+          data-testid="console-hide-marker-hint"
+        >
+          {CONSOLE_HIDE_MARKER_HINT}
+        </div>
       </div>
 
       {receipt && (
@@ -897,6 +949,7 @@ export function Console() {
           lastPrivacyReport={lastPrivacyReport}
           customTermsCount={customTermsCount}
           draftText={input}
+          session={mechanicalSessionRef.current ?? undefined}
           creditBalance={creditBalance}
           onMintCredits={handleMintCredits}
           onCreditBalanceChange={setCreditBalance}

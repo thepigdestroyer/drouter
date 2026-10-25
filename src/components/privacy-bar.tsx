@@ -12,6 +12,7 @@ import {
   previewDraftPrivacy,
   type MessagePrivacyReport,
 } from "@/components/console/send-pipeline";
+import type { MechanicalSession } from "@/lib/privacy/mechanical";
 import { TechDetails } from "@/components/ink/tech-details";
 
 export interface PrivacyBarProps {
@@ -23,6 +24,7 @@ export interface PrivacyBarProps {
   lastPrivacyReport?: MessagePrivacyReport | null;
   customTermsCount?: number;
   draftText: string;
+  session?: MechanicalSession;
   creditBalance: number | null;
   onMintCredits: () => Promise<void>;
   onCreditBalanceChange?: (nextBalance: number) => void;
@@ -41,6 +43,11 @@ const TOKEN_PACKS: Array<{ denomination: 1 | 5 | 20; amountUsdc: string }> = [
 function shortHex(hex: string, lead = 10, tail = 6): string {
   if (hex.length <= lead + tail + 2) return hex;
   return `${hex.slice(0, lead)}...${hex.slice(-tail)}`;
+}
+
+export function formatRedactionKindLabel(kind: string): string {
+  if (kind === "MARKED") return "marked by you";
+  return kind;
 }
 
 export function friendlyCreditFlowError(rawError?: string | null): string {
@@ -66,6 +73,7 @@ export function PrivacyBar({
   lastPrivacyReport,
   customTermsCount,
   draftText,
+  session,
   creditBalance,
   onMintCredits,
   onCreditBalanceChange,
@@ -184,8 +192,9 @@ export function PrivacyBar({
     return previewDraftPrivacy(draftText, {
       scrubEnabled,
       normalizeStyle,
+      session,
     });
-  }, [draftText, scrubEnabled, normalizeStyle]);
+  }, [draftText, scrubEnabled, normalizeStyle, session]);
 
   const activeCustomTermsCount =
     customTermsCount ?? draftPrepared?.customTerms.length ?? 0;
@@ -500,6 +509,30 @@ export function PrivacyBar({
             </span>
           </div>
 
+          {activeRedactions.length > 0 && (
+            <div className="space-y-1">
+              <div
+                className="flex flex-wrap items-center gap-1.5"
+                data-testid="privacy-bar-redactions"
+              >
+                <span className="ep-label">Hidden in browser:</span>
+                {activeRedactions.map((r, i) => (
+                  <span key={`${r.placeholder}-${i}`} className="ep-pass">
+                    {r.placeholder} ({formatRedactionKindLabel(r.kind)})
+                  </span>
+                ))}
+              </div>
+              {activeOutboundPreview && (
+                <p
+                  className="ep-mono text-ink"
+                  data-testid="privacy-bar-outbound-preview"
+                >
+                  {activeOutboundPreview}
+                </p>
+              )}
+            </div>
+          )}
+
           <TechDetails label="Show technical details">
             <div className="mt-2 space-y-2 border-t border-rule pt-2">
               <div className="flex flex-wrap items-center gap-2 font-mono text-[11px] text-ink">
@@ -532,7 +565,7 @@ export function PrivacyBar({
                     <span className="ep-label">Replaced in browser:</span>
                     {activeRedactions.map((r, i) => (
                       <span key={`${r.placeholder}-${i}`} className="ep-pass">
-                        {r.placeholder} ({r.kind})
+                        {r.placeholder} ({formatRedactionKindLabel(r.kind)})
                       </span>
                     ))}
                   </div>

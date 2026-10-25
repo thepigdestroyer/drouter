@@ -10,7 +10,10 @@ import {
   evaluateLocalFilterFingerprint,
   type PublishedFilterFingerprint,
 } from "@/lib/privacy/fingerprint";
-import type { MechanicalSession } from "@/lib/privacy/mechanical";
+import {
+  createMechanicalSession,
+  type MechanicalSession,
+} from "@/lib/privacy/mechanical";
 import type { MechanicalRuleset } from "@/lib/privacy/mechanical-ruleset";
 import type { SessionScrubber } from "@/lib/privacy/scrubber";
 
@@ -57,8 +60,8 @@ export function assertFilterFingerprintAllowsSend(opts?: {
   published?: PublishedFilterFingerprint;
 }): void {
   const status = evaluateLocalFilterFingerprint({
-    ruleset: opts?.ruleset,
-    published: opts?.published,
+    ...(opts?.ruleset !== undefined ? { ruleset: opts.ruleset } : {}),
+    ...(opts?.published !== undefined ? { published: opts.published } : {}),
   });
   if (status.blockingSend) {
     throw new FilterFingerprintMismatchError(
@@ -94,7 +97,7 @@ export function previewDraftPrivacy(
     customTerms,
     normalizeStyle: Boolean(opts?.normalizeStyle),
     mechanical: true,
-    session: opts?.session,
+    session: opts?.session ? opts.session.clone() : undefined,
     scrubber: opts?.scrubber,
     ruleset: opts?.rulesetOverride,
   });
@@ -118,6 +121,27 @@ export function prepareHistoricalTurnText(
     scrubber: opts?.scrubber,
     ruleset: opts?.rulesetOverride,
   }).outboundText;
+}
+
+/**
+ * Rebuilds a `MechanicalSession` in chronological order from restored conversation
+ * messages so later turns keep consistent placeholders and can restore historical placeholders.
+ */
+export function rebuildMechanicalSessionFromMessages(
+  messages: ReadonlyArray<{ role: "user" | "assistant"; content: string }>,
+  opts?: PrepareTurnOptions,
+): MechanicalSession {
+  const session = opts?.session ?? createMechanicalSession();
+  session.clear();
+  for (const m of messages) {
+    if (m.role === "user") {
+      prepareHistoricalTurnText(m.content, {
+        ...opts,
+        session,
+      });
+    }
+  }
+  return session;
 }
 
 /**

@@ -6,6 +6,7 @@ import {
 import type { SessionScrubber } from "./scrubber";
 
 export type MechanicalRedactionKind =
+  | "MARKED"
   | "SECRET"
   | "EMAIL"
   | "PHONE"
@@ -39,6 +40,7 @@ export interface MechanicalSession {
   addCustomTerm(term: string): void;
   entries(): MechanicalSessionEntry[];
   clear(): void;
+  clone(): MechanicalSession;
 }
 
 export interface MechanicalRedactOptions {
@@ -60,6 +62,7 @@ interface CandidateSpan {
   kind: MechanicalRedactionKind;
   raw: string;
   canonicalKey: string;
+  emptyRemoval?: boolean;
 }
 
 interface MechanicalSessionState {
@@ -72,6 +75,7 @@ interface MechanicalSessionState {
 
 function createEmptyCounters(): Record<MechanicalRedactionKind, number> {
   return {
+    MARKED: 0,
     SECRET: 0,
     EMAIL: 0,
     PHONE: 0,
@@ -629,6 +633,28 @@ export function createMechanicalSession(
         addCustomTermToState(state, term, ruleset);
       }
     },
+    clone(): MechanicalSession {
+      const cloned = createMechanicalSession(initialCustomTerms, ruleset);
+      const clonedState = sessionStateMap.get(cloned);
+      if (clonedState) {
+        clonedState.customTerms.clear();
+        for (const [k, v] of state.customTerms.entries()) {
+          clonedState.customTerms.set(k, v);
+        }
+        for (const [k, v] of state.byKey.entries()) {
+          const entryCopy = { ...v };
+          clonedState.byKey.set(k, entryCopy);
+          clonedState.byPlaceholder.set(entryCopy.placeholder.toUpperCase(), entryCopy);
+        }
+        for (const lit of state.reservedLiterals) {
+          clonedState.reservedLiterals.add(lit);
+        }
+        for (const k of Object.keys(state.counters) as MechanicalRedactionKind[]) {
+          clonedState.counters[k] = state.counters[k];
+        }
+      }
+      return cloned;
+    },
   };
 
   sessionStateMap.set(session, state);
@@ -713,7 +739,79 @@ export function mechanicalRedact(
 
   const candidates: CandidateSpan[] = [];
 
-  // 0. Protect any literal placeholders already present in `text`
+  // 0a. Explicit user markers (e.g. ££...££) from ruleset.markerRule: runs FIRST and fails closed
+  const { openMarker, closeMarker, kind: markerKind } = ruleset.markerRule;
+  if (openMarker && closeMarker) {
+    let searchFrom = 0;
+    while (searchFrom < text.length) {
+      const openIdx = text.indexOf(openMarker, searchFrom);
+      if (openIdx === -1) break;
+      const contentStart = openIdx + openMarker.length;
+      const closeIdx = text.indexOf(closeMarker, contentStart);
+      if (closeIdx === -1) {
+        // Fail closed: unclosed opening marker hides everything to the end of the message
+        const spanStart = openIdx;
+        const spanEnd = text.length;
+        const innerRaw = text.slice(contentStart, spanEnd);
+        occupied.push({ start: spanStart, end: spanEnd });
+        if (!innerRaw) {
+          candidates.push({
+            start: spanStart,
+            end: spanEnd,
+            kind: markerKind,
+            raw: "",
+            canonicalKey: "",
+            emptyRemoval: true,
+          });
+        } else {
+          const { normalized: normInner } = normalizeWithIndexMap(
+            innerRaw,
+            ruleset,
+          );
+          const normKey = (normInner || innerRaw).toLowerCase();
+          candidates.push({
+            start: spanStart,
+            end: spanEnd,
+            kind: markerKind,
+            raw: innerRaw,
+            canonicalKey: `${markerKind}:${normKey}`,
+          });
+        }
+        break;
+      } else {
+        const spanStart = openIdx;
+        const spanEnd = closeIdx + closeMarker.length;
+        const innerRaw = text.slice(contentStart, closeIdx);
+        occupied.push({ start: spanStart, end: spanEnd });
+        if (!innerRaw) {
+          candidates.push({
+            start: spanStart,
+            end: spanEnd,
+            kind: markerKind,
+            raw: "",
+            canonicalKey: "",
+            emptyRemoval: true,
+          });
+        } else {
+          const { normalized: normInner } = normalizeWithIndexMap(
+            innerRaw,
+            ruleset,
+          );
+          const normKey = (normInner || innerRaw).toLowerCase();
+          candidates.push({
+            start: spanStart,
+            end: spanEnd,
+            kind: markerKind,
+            raw: innerRaw,
+            canonicalKey: `${markerKind}:${normKey}`,
+          });
+        }
+        searchFrom = spanEnd;
+      }
+    }
+  }
+
+  // 0b. Protect any literal placeholders already present in `text`
   const existingPlaceholderRe = compileRuleSpec(
     ruleset.placeholderPatterns.existingPlaceholder,
   );
@@ -722,8 +820,20 @@ export function mechanicalRedact(
     const lit = litMatch[0];
     const start = litMatch.index;
     const end = start + lit.length;
+    if (overlaps(start, end)) continue;
     occupied.push({ start, end });
-    reservedLiterals.add(lit.toUpperCase());
+    const upperLit = lit.toUpperCase();
+    if (byPlaceholder.has(upperLit)) {
+      candidates.push({
+        start,
+        end,
+        kind: "ENTITY",
+        raw: lit,
+        canonicalKey: `LITERAL_COLLISION:${upperLit}`,
+      });
+    } else {
+      reservedLiterals.add(upperLit);
+    }
   }
 
   const addSpanFromNormalizedRange = (
@@ -745,13 +855,18 @@ export function mechanicalRedact(
       return;
     }
     const raw = text.slice(origStart, origEnd);
+    const normSlice = normalized.slice(normStart, normEnd);
+    const defaultKey =
+      kind === "SECRET" || kind === "ENTROPY"
+        ? normSlice
+        : normSlice.toLowerCase();
     occupied.push({ start: origStart, end: origEnd });
     candidates.push({
       start: origStart,
       end: origEnd,
       kind,
       raw,
-      canonicalKey: `${kind}:${keySuffix ?? raw}`,
+      canonicalKey: `${kind}:${keySuffix ?? defaultKey}`,
     });
   };
 
@@ -1094,12 +1209,14 @@ export function mechanicalRedact(
 
   for (const span of candidates) {
     out += text.slice(cursor, span.start);
-    const mapping = getOrCreatePlaceholder(span);
-    out += mapping.placeholder;
-    redactions.push({
-      kind: mapping.kind,
-      placeholder: mapping.placeholder,
-    });
+    if (!span.emptyRemoval) {
+      const mapping = getOrCreatePlaceholder(span);
+      out += mapping.placeholder;
+      redactions.push({
+        kind: mapping.kind,
+        placeholder: mapping.placeholder,
+      });
+    }
     cursor = span.end;
   }
   out += text.slice(cursor);

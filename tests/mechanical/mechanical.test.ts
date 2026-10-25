@@ -383,6 +383,185 @@ describe("D3: Deterministic Fail-Closed Mechanical Redaction Filter (mechanicalR
     );
     expect(afterClear.text).toBe("Follow up with [NAME_1] on [ENTITY_1].");
   });
+
+  it("handles explicit ££...££ markers first: closed, unclosed (fail-closed), empty ££££, multi-line, next to money (£125,000), inside code, and repeated across turns", () => {
+    const session = createMechanicalSession();
+
+    // 1. Closed marker, empty ££££ marker, and adjacent £125,000 money amount
+    const turn1Input =
+      "Budget £125,000 for ££Project Falcon££££££ with ££internal codename alpha££.";
+    const turn1 = session.redact(turn1Input);
+    expect(turn1.text).toBe("Budget [DIGITS_1] for [MARKED_1] with [MARKED_2].");
+    expect(turn1.redactions).toEqual([
+      { kind: "DIGITS", placeholder: "[DIGITS_1]" },
+      { kind: "MARKED", placeholder: "[MARKED_1]" },
+      { kind: "MARKED", placeholder: "[MARKED_2]" },
+    ]);
+    // Restore puts back only the inner text without ££ markers
+    expect(turn1.restore(turn1.text)).toBe(
+      "Budget £125,000 for Project Falcon with internal codename alpha.",
+    );
+
+    // 2. Marked span runs FIRST before every other rule (so emails/keys inside ££...££ become one [MARKED_N] placeholder, never split)
+    const innerEmailAndKey = joinParts(
+      "owner dana.reyes@example.com with ",
+      "sk",
+      "_live_",
+      "51HxYz9876543210",
+    );
+    const priorityRes = session.redact(`Config: ££${innerEmailAndKey}££.`);
+    expect(priorityRes.text).toBe("Config: [MARKED_3].");
+    expect(priorityRes.redactions).toEqual([
+      { kind: "MARKED", placeholder: "[MARKED_3]" },
+    ]);
+    expect(priorityRes.restore(priorityRes.text)).toBe(
+      `Config: ${innerEmailAndKey}.`,
+    );
+
+    // 3. Multi-line marked span and inside a code snippet
+    const codeSnippet = [
+      "```ts",
+      'const endpoint = "££https://staging-01.secret-cluster.internal:8443/v2££";',
+      "const note = `££line one of secret",
+      "line two of secret££`;",
+      "```",
+    ].join("\n");
+    const codeRes = session.redact(codeSnippet);
+    expect(codeRes.text).not.toContain("staging-01");
+    expect(codeRes.text).not.toContain("line one of secret");
+    expect(codeRes.text).not.toContain("line two of secret");
+    expect(codeRes.text).toContain('const endpoint = "[MARKED_4]";');
+    expect(codeRes.text).toContain("const note = `[MARKED_5]`;");
+    expect(codeRes.restore(codeRes.text)).toBe(
+      [
+        "```ts",
+        'const endpoint = "https://staging-01.secret-cluster.internal:8443/v2";',
+        "const note = `line one of secret",
+        "line two of secret`;",
+        "```",
+      ].join("\n"),
+    );
+
+    // 4. Repeated across turns (including case/Unicode variations) reuses [MARKED_1]
+    const turn2 = session.redact(
+      "Confirm ££project falcon££ and ££Pro\u200Bject Falcon££ launch.",
+    );
+    expect(turn2.text).toBe("Confirm [MARKED_1] and [MARKED_1] launch.");
+    expect(turn2.restore("Status for [MARKED_1]: ready.")).toBe(
+      "Status for Project Falcon: ready.",
+    );
+
+    // 5. Fail closed: an opening ££ with no closing ££ hides everything from the marker to the end of the message
+    const unclosedInput =
+      "Public intro before marker ££everything after this opening marker is hidden\nincluding line two and 10.42.7.19";
+    const unclosedRes = session.redact(unclosedInput);
+    expect(unclosedRes.text).toBe("Public intro before marker [MARKED_6]");
+    expect(unclosedRes.text).not.toContain("everything after");
+    expect(unclosedRes.text).not.toContain("10.42.7.19");
+    expect(unclosedRes.restore(unclosedRes.text)).toBe(
+      "Public intro before marker everything after this opening marker is hidden\nincluding line two and 10.42.7.19",
+    );
+  });
+
+  it("maintains case-folded and Unicode-normalized canonical key stability across turns and escapes colliding literal placeholders", () => {
+    const session = createMechanicalSession();
+
+    const t1 = session.redact(
+      "Contact Dana.Reyes@Example.com and Elena Rostova at https://Portal.Acme.Internal/login.",
+    );
+    expect(t1.text).toBe("Contact [EMAIL_1] and [NAME_1] at [URL_1].");
+
+    // Turn 2 uses different case, zero-width characters, and Cyrillic homoglyphs for the same items
+    const t2 = session.redact(
+      "Follow up with dana.reyes@example.com, El\u200Bena R\u043Estov\u0430, and https://portal.acme.internal/login.",
+    );
+    expect(t2.text).toBe("Follow up with [EMAIL_1], [NAME_1], and [URL_1].");
+
+    // Literal placeholder collision in Turn 3: typing literal [NAME_1] when [NAME_1] is already allocated
+    const t3 = session.redact(
+      "Why did the log print literal [NAME_1] for Elena Rostova?",
+    );
+    // The first [NAME_1] is a literal collision so it gets escaped to [ENTITY_1]; the real Elena Rostova still gets [NAME_1]
+    expect(t3.text).toBe("Why did the log print literal [ENTITY_1] for [NAME_1]?");
+    expect(t3.restore(t3.text)).toBe(
+      "Why did the log print literal [NAME_1] for Elena Rostova?",
+    );
+  });
+
+  it("hides technical details (API keys, valid IPv4s, IPv6s, MAC addresses, internal hostnames, and user file paths) while preserving version numbers and clean code snippets", () => {
+    const apiKey = joinParts("sk", "_live_", "51HxYz9876543210fictional");
+    const ghToken = joinParts("ghp", "_", "1234567890abcdefghijklmnopqrstuvwxyzAB");
+    const ipv4 = "10.42.7.19";
+    const ipv4Port = "192.168.1.250:8080";
+    const ipv6Full = "2001:0db8:85a3:0000:0000:8a2e:0370:7334";
+    const ipv6Compressed = "fe80::1ff:fe23:4567:890a";
+    const ipv6Trailing = "2001:db8::";
+    const macColon = "00:1A:2B:3C:4D:5E";
+    const macHyphen = "02-42-AC-11-00-02";
+    const macCisco = "001a.2b3c.4d5e";
+    const hostInternal = "billing.int.acme.internal";
+    const hostLocal = "redis-cache.local";
+    const hostCorp = "gitlab.eng.acme.corp";
+    const hostLan = "nas-01.lan";
+    const hostIntranet = "hr-portal.acme.intranet";
+    const hostCloud = "ip-10-42-7-19.ec2.internal";
+    const pathMac = "/Users/dana/acme/deploy.log";
+    const pathLinux = "/home/dana_reyes/.ssh/id_rsa";
+    const pathWin = "C:\\Users\\dana\\AppData\\Local\\temp.txt";
+
+    const techInput = [
+      `Keys: ${apiKey}, ${ghToken}.`,
+      `IPs: ${ipv4}, ${ipv4Port}, ${ipv6Full}, ${ipv6Compressed}, ${ipv6Trailing}.`,
+      `MACs: ${macColon}, ${macHyphen}, ${macCisco}.`,
+      `Hosts: ${hostInternal}, ${hostLocal}, ${hostCorp}, ${hostLan}, ${hostIntranet}, ${hostCloud}.`,
+      `Paths: ${pathMac}, ${pathLinux}, ${pathWin}.`,
+    ].join(" ");
+
+    const res = mechanicalRedact(techInput);
+
+    for (const item of [
+      apiKey,
+      ghToken,
+      ipv4,
+      ipv4Port,
+      ipv6Full,
+      ipv6Compressed,
+      ipv6Trailing,
+      macColon,
+      macHyphen,
+      macCisco,
+      hostInternal,
+      hostLocal,
+      hostCorp,
+      hostLan,
+      hostIntranet,
+      hostCloud,
+      pathMac,
+      pathLinux,
+      pathWin,
+      "/Users/dana",
+      "/home/dana_reyes",
+      "C:\\Users\\dana",
+      "deploy.log",
+      "temp.txt",
+    ]) {
+      expect(res.text).not.toContain(item);
+    }
+    expect(res.restore(res.text)).toBe(techInput);
+
+    // Version strings like 1.2.3 or v2.4.10 and ordinary code snippets must remain untouched (0 false positives)
+    const cleanCodeAndVersions = [
+      "Upgrade package from v1.2.3 to 2.4.10 before running the build.",
+      "function add(a: number, b: number): number { return a + b; }",
+      "const items = array.filter((x) => x.active).map((x) => x.label);",
+      "import { useState, useEffect } from 'react';",
+    ];
+    for (const snippet of cleanCodeAndVersions) {
+      const cleanRes = mechanicalRedact(snippet);
+      expect(cleanRes.redactions).toEqual([]);
+      expect(cleanRes.text).toBe(snippet);
+    }
+  });
 });
 
 describe("D4: Attested Enclave PII Filter (attestedPiiFilter)", () => {

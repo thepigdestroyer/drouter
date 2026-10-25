@@ -169,4 +169,28 @@ describe("Interface I1: Browser-Safe Prompt Pipeline (preparePrompt)", () => {
       "Updated Project Nightfall: Marcus Vance and Elena Rostova will both sign for $45,000 on 2026-10-25 (cc: Marcus Vance, Elena Rostova).",
     );
   });
+
+  it("redacts ££...££ marked spans as [MARKED_N] with elevated riskBefore, reduces riskAfter, and restores without markers", () => {
+    const session = createMechanicalSession();
+    const prepared = preparePrompt(
+      "Review ££Project Falcon££ and ££internal launch playbook££ before Friday.",
+      {
+        mechanical: true,
+        session,
+      },
+    );
+
+    expect(prepared.outboundText).toBe(
+      "Review [MARKED_1] and [MARKED_2] before Friday.",
+    );
+    expect(prepared.report.redactions).toEqual([
+      { kind: "MARKED", placeholder: "[MARKED_1]" },
+      { kind: "MARKED", placeholder: "[MARKED_2]" },
+    ]);
+    expect(prepared.report.riskBefore).toBeGreaterThanOrEqual(50);
+    expect(prepared.report.riskAfter).toBe(0);
+    expect(
+      prepared.restore("Approved [MARKED_1] and [MARKED_2] for Friday."),
+    ).toBe("Approved Project Falcon and internal launch playbook for Friday.");
+  });
 });

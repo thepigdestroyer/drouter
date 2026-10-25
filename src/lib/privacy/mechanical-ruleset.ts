@@ -12,8 +12,15 @@ export interface RegexRuleSpec {
   flags: string;
 }
 
+export interface ExplicitMarkerRuleSpec {
+  openMarker: string;
+  closeMarker: string;
+  kind: "MARKED";
+}
+
 export interface MechanicalRuleset {
   version: string;
+  markerRule: ExplicitMarkerRuleSpec;
   placeholderPatterns: {
     existingPlaceholder: RegexRuleSpec;
     restorePlaceholder: RegexRuleSpec;
@@ -148,16 +155,21 @@ const NAME_WORD_SRC =
   "(?:(?:Mc|Mac|O'|D')[A-Z][a-z]{1,25}|[A-Z][a-z]{1,25}(?:[-'][A-Z]?[a-z]{1,25})*)";
 
 export const MECHANICAL_RULESET: MechanicalRuleset = {
-  version: "1.0.1",
+  version: "1.0.2",
+  markerRule: {
+    openMarker: "££",
+    closeMarker: "££",
+    kind: "MARKED",
+  },
   placeholderPatterns: {
     existingPlaceholder: {
       source:
-        "\\[(?:SECRET|EMAIL|PHONE|IP|ACCT|ENTITY|URL|ADDRESS|DATE|NAME|DIGITS|ENTROPY|[A-Z0-9_]+)_\\d+\\]|<PRIVATE_[A-Z0-9_]+>",
+        "\\[(?:MARKED|SECRET|EMAIL|PHONE|IP|ACCT|ENTITY|URL|ADDRESS|DATE|NAME|DIGITS|ENTROPY|[A-Z0-9_]+)_\\d+\\]|<PRIVATE_[A-Z0-9_]+>",
       flags: "g",
     },
     restorePlaceholder: {
       source:
-        "\\[(?:SECRET|EMAIL|PHONE|IP|ACCT|ENTITY|URL|ADDRESS|DATE|NAME|DIGITS|ENTROPY)_\\d+\\]",
+        "\\[(?:MARKED|SECRET|EMAIL|PHONE|IP|ACCT|ENTITY|URL|ADDRESS|DATE|NAME|DIGITS|ENTROPY)_\\d+\\]",
       flags: "gi",
     },
     bracketedToken: {
@@ -482,12 +494,22 @@ export const MECHANICAL_RULESET: MechanicalRuleset = {
       },
       {
         source:
+          "(?:(?<![A-Za-z0-9_.-])\\/(?:Users|home)\\/[A-Za-z0-9._-]+(?:\\/[^\\s\"'<>)\\],;:]*)?|\\b[A-Za-z]:\\\\Users\\\\[A-Za-z0-9._-]+(?:\\\\[^\\s\"'<>)\\],;:]*)?)",
+        flags: "g",
+      },
+      {
+        source:
           "\\bwww\\.[a-zA-Z0-9-]+(?:\\.[a-zA-Z0-9-]+)+(?::\\d{2,5})?(?:\\/[^\\s\"'<>)\\]]*)?",
         flags: "gi",
       },
       {
         source:
-          "\\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\\.)+(?:com|org|net|edu|gov|mil|int|io|sh|ai|dev|app|co|uk|us|eu|de|fr|jp|cn|ch|nl|se|no|fi|dk|ca|au|nz|in|br|it|es|pl|ru|kr|sg|hk|tw|il|ae|za|mx|ar|cl|info|biz|me|xyz|tech|cloud|online|site|store|local|internal|corp|lan|onion|eth|crypto|test|example|invalid)\\b(?:\\.[a-zA-Z]{2,3})?(?::\\d{2,5})?(?:\\/[^\\s\"'<>)\\]]*)?",
+          "\\b(?:ip-\\d{1,3}-\\d{1,3}-\\d{1,3}-\\d{1,3}|ec2-\\d{1,3}-\\d{1,3}-\\d{1,3}-\\d{1,3}|gke-[a-zA-Z0-9-]+|aks-[a-zA-Z0-9-]+|eks-[a-zA-Z0-9-]+)(?:\\.[a-zA-Z0-9-]+)+(?::\\d{2,5})?(?:\\/[^\\s\"'<>)\\]]*)?",
+        flags: "gi",
+      },
+      {
+        source:
+          "\\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\\.)+(?:com|org|net|edu|gov|mil|int|io|sh|ai|dev|app|co|uk|us|eu|de|fr|jp|cn|ch|nl|se|no|fi|dk|ca|au|nz|in|br|it|es|pl|ru|kr|sg|hk|tw|il|ae|za|mx|ar|cl|info|biz|me|xyz|tech|cloud|online|site|store|local|internal|corp|lan|intranet|localdomain|priv|arpa|onion|eth|crypto|test|example|invalid)\\b(?:\\.[a-zA-Z]{2,3})?(?::\\d{2,5})?(?:\\/[^\\s\"'<>)\\]]*)?",
         flags: "gi",
       },
     ],
@@ -564,12 +586,17 @@ export const MECHANICAL_RULESET: MechanicalRuleset = {
     ip: [
       {
         source:
-          "\\b(?:(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(?::\\d{1,5})?\\b",
+          "(?<![0-9.])(?:(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(?::\\d{1,5})?(?![0-9.])\\b",
         flags: "g",
       },
       {
         source:
-          "\\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\\b|\\b(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,5}\\b",
+          "(?<![0-9a-fA-F:])(?:(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|(?:[0-9a-fA-F]{1,4}:){1,7}:|(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,5}|::(?:ffff(?::0{1,4})?:)?(?:(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)|::(?:[0-9a-fA-F]{1,4}:){0,6}[0-9a-fA-F]{1,4})(?:%[0-9a-zA-Z]{1,16})?(?![0-9a-fA-F:])",
+        flags: "gi",
+      },
+      {
+        source:
+          "\\b(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\\b|\\b(?:[0-9a-fA-F]{2}-){5}[0-9a-fA-F]{2}\\b|\\b[0-9a-fA-F]{4}\\.[0-9a-fA-F]{4}\\.[0-9a-fA-F]{4}\\b",
         flags: "g",
       },
     ],
@@ -606,12 +633,12 @@ export const MECHANICAL_RULESET: MechanicalRuleset = {
       },
       {
         source:
-          "\\b(?:0?[1-9]|[12]\\d|3[01])[-/.](?:0?[1-9]|1[0-2])[-/.](?:(?:19|20)\\d{2}|\\d{2})\\b",
+          "\\b(?:0?[1-9]|[12]\\d|3[01])[-/](?:0?[1-9]|1[0-2])[-/](?:(?:19|20)\\d{2}|\\d{2})\\b|\\b(?:0?[1-9]|[12]\\d|3[01])\\.(?:0?[1-9]|1[0-2])\\.(?:19|20)\\d{2}\\b",
         flags: "g",
       },
       {
         source:
-          "\\b(?:0?[1-9]|1[0-2])[-/.](?:0?[1-9]|[12]\\d|3[01])[-/.](?:(?:19|20)\\d{2}|\\d{2})\\b",
+          "\\b(?:0?[1-9]|1[0-2])[-/](?:0?[1-9]|[12]\\d|3[01])[-/](?:(?:19|20)\\d{2}|\\d{2})\\b|\\b(?:0?[1-9]|1[0-2])\\.(?:0?[1-9]|[12]\\d|3[01])\\.(?:19|20)\\d{2}\\b",
         flags: "g",
       },
       {
@@ -784,7 +811,7 @@ export const MECHANICAL_RULESET: MechanicalRuleset = {
       "please", "call", "contact", "email", "send", "ask", "tell", "meet", "see",
       "hello", "hi", "dear", "hey", "thanks", "thank", "audit", "verify", "check",
       "review", "summarize", "analyze", "draft", "report", "update", "forward",
-      "confirming", "confirm", "inspect", "list", "allow", "ensure", "note",
+      "confirming", "confirm", "inspect", "list", "allow", "ensure", "note", "add",
     ],
     technicalTitleCaseAllowlist: [
       "trusted execution",

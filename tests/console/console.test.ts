@@ -1,24 +1,36 @@
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   lockVault,
+  subscribeVaultSession,
   unlockVaultWithPassphrase,
   updateVaultPayload,
+  getCurrentVaultSession,
 } from "@/lib/auth/vault";
 import {
   clearStoredCredits,
   storeCreditTokens,
   storedCreditBalance,
 } from "@/lib/credits/client";
+import {
+  rulesetFingerprint,
+  setFilterFingerprintVerifyOptionsForTests,
+} from "@/lib/privacy/fingerprint";
 import { createMechanicalSession } from "@/lib/privacy/mechanical";
+import { MECHANICAL_RULESET } from "@/lib/privacy/mechanical-ruleset";
 import { createSessionScrubber } from "@/lib/privacy/scrubber";
 import {
   prepareHistoricalTurnText,
   prepareOutboundTurn,
   previewDraftPrivacy,
+  rebuildMechanicalSessionFromMessages,
   restoreUnspentCreditHeader,
 } from "@/components/console/send-pipeline";
 import { exportSessionProof } from "@/components/console/proof-exporter";
 import {
+  CONSOLE_EXAMPLE_PROMPTS,
+  CONSOLE_HIDE_MARKER_HINT,
   describeModel,
   formatHiddenDetailsSummary,
   FRIENDLY_MODELS,
@@ -27,7 +39,11 @@ import {
   friendlyFailureReason,
   friendlyRuntimeError,
 } from "@/components/visual-trust-dashboard";
-import { friendlyCreditFlowError } from "@/components/privacy-bar";
+import {
+  formatRedactionKindLabel,
+  friendlyCreditFlowError,
+  PrivacyBar,
+} from "@/components/privacy-bar";
 import {
   openSession,
   pickNode,
@@ -68,9 +84,17 @@ describe("console send pipeline (I1 + I2 + I3)", () => {
   beforeEach(() => {
     clearStoredCredits();
     lockVault();
+    setFilterFingerprintVerifyOptionsForTests({
+      published: {
+        version: MECHANICAL_RULESET.version,
+        fingerprint: rulesetFingerprint(MECHANICAL_RULESET),
+        anchorTx: `0x${"ab".repeat(32)}`,
+      },
+    });
   });
 
   afterEach(() => {
+    setFilterFingerprintVerifyOptionsForTests(null);
     clearStoredCredits();
     lockVault();
     vi.restoreAllMocks();
@@ -256,6 +280,154 @@ describe("console send pipeline (I1 + I2 + I3)", () => {
     expect(turn2.restore(modelReply)).toBe(
       "Confirmed for Project Helios: Marcus Vance notified Elena Rostova on 2026-10-25 that $50,000.00 and $125,000.00 were cleared by Marcus Vance and Elena Rostova.",
     );
+  });
+
+  it("ensures live draft preview equals the sent text across turns 1 to 3 without mutating the live session on intermediate keystrokes", async () => {
+    const session = createMechanicalSession();
+
+    // Turn 1: simulate intermediate keystrokes in previewDraftPrivacy before sending
+    previewDraftPrivacy("Meet Partial Name and ££temp secret££", { session });
+    expect(session.entries()).toHaveLength(0);
+
+    const turn1Draft =
+      "Meet Elena Rostova about ££Project Falcon££ on 2026-10-25.";
+    const preview1 = previewDraftPrivacy(turn1Draft, { session });
+    const sent1 = await prepareOutboundTurn(turn1Draft, { session });
+    expect(preview1.prepared.outboundText).toBe(sent1.outboundText);
+    expect(sent1.outboundText).toBe(
+      "Meet [NAME_1] about [MARKED_1] on [DATE_1].",
+    );
+
+    // Turn 2: simulate intermediate keystrokes, then preview and send
+    previewDraftPrivacy("Ask Someone Else at 10.99.88.77", { session });
+    const turn2Draft =
+      "Ask Marcus Vance and Elena Rostova if ££Project Falcon££ or ££Backup Plan££ is ready.";
+    const preview2 = previewDraftPrivacy(turn2Draft, { session });
+    const sent2 = await prepareOutboundTurn(turn2Draft, { session });
+    expect(preview2.prepared.outboundText).toBe(sent2.outboundText);
+    expect(sent2.outboundText).toBe(
+      "Ask [NAME_2] and [NAME_1] if [MARKED_1] or [MARKED_2] is ready.",
+    );
+
+    // Turn 3: third turn with new and repeated items + PrivacyBar markup check
+    const turn3Draft =
+      "Email Clara Oswald and Marcus Vance at clara@example.com regarding ££Backup Plan££ and ££Phase Three££.";
+    const preview3 = previewDraftPrivacy(turn3Draft, { session });
+
+    const barHtml = renderToStaticMarkup(
+      React.createElement(PrivacyBar, {
+        scrubEnabled: true,
+        onToggleScrub: () => {},
+        draftText: turn3Draft,
+        session,
+        creditBalance: 5,
+        onMintCredits: async () => {},
+      }),
+    );
+    expect(barHtml).toContain(preview3.prepared.outboundText);
+    expect(barHtml).toContain("[MARKED_2] (marked by you)");
+    expect(barHtml).toContain("[MARKED_3] (marked by you)");
+
+    const sent3 = await prepareOutboundTurn(turn3Draft, { session });
+    expect(preview3.prepared.outboundText).toBe(sent3.outboundText);
+    expect(sent3.outboundText).toBe(
+      "Email [NAME_3] and [NAME_2] at [EMAIL_1] regarding [MARKED_2] and [MARKED_3].",
+    );
+  });
+
+  it("clears the mechanical session on sign-out / vault lock and rebuilds session consistently on resume", async () => {
+    unlockVaultWithPassphrase("abandon ability able about above absent", false);
+    const session = createMechanicalSession();
+
+    const unsub = subscribeVaultSession(() => {
+      if (!getCurrentVaultSession()) {
+        session.clear();
+      }
+    });
+
+    try {
+      const turn1 = await prepareOutboundTurn(
+        "Contact Elena Rostova about ££Project Falcon££.",
+        { session },
+      );
+      expect(turn1.outboundText).toBe("Contact [NAME_1] about [MARKED_1].");
+      expect(session.entries().length).toBe(2);
+
+      // Sign-out / lockVault triggers subscribeVaultSession and clears the session
+      lockVault();
+      expect(session.entries()).toEqual([]);
+
+      // After sign-out, a new person starts at [NAME_1]
+      const afterSignOut = await prepareOutboundTurn(
+        "Contact Marcus Vance.",
+        { session },
+      );
+      expect(afterSignOut.outboundText).toBe("Contact [NAME_1].");
+
+      // Resume consistency: rebuilding session from restored conversation messages
+      const restoredMessages = [
+        {
+          role: "user" as const,
+          content: "Meet Elena Rostova on 2026-10-25 for ££Project Falcon££.",
+        },
+        {
+          role: "assistant" as const,
+          content: "Scheduled Elena Rostova on 2026-10-25 for Project Falcon.",
+        },
+      ];
+      rebuildMechanicalSessionFromMessages(restoredMessages, { session });
+
+      // Next turn after resume reuses [NAME_1] and [MARKED_1] from Turn 1, assigns [NAME_2] to Marcus Vance, and restores Turn 1 placeholders
+      const resumedTurn2 = await prepareOutboundTurn(
+        "Add Marcus Vance and Elena Rostova to ££Project Falcon££.",
+        { session },
+      );
+      expect(resumedTurn2.outboundText).toBe(
+        "Add [NAME_2] and [NAME_1] to [MARKED_1].",
+      );
+      expect(
+        resumedTurn2.restore(
+          "Confirmed [NAME_1] and [NAME_2] on [DATE_1] for [MARKED_1].",
+        ),
+      ).toBe(
+        "Confirmed Elena Rostova and Marcus Vance on 2026-10-25 for Project Falcon.",
+      );
+    } finally {
+      unsub();
+    }
+  });
+
+  it("hides every sensitive item in CONSOLE_EXAMPLE_PROMPTS (non-technical and technical examples) and labels MARKED spans as 'marked by you'", () => {
+    expect(CONSOLE_HIDE_MARKER_HINT).toBe(
+      "Wrap anything in ££ like ££this££ to hide it.",
+    );
+    expect(formatRedactionKindLabel("MARKED")).toBe("marked by you");
+    expect(formatRedactionKindLabel("SECRET")).toBe("SECRET");
+
+    const nonTech = CONSOLE_EXAMPLE_PROMPTS.find(
+      (e) => e.id === "non-technical",
+    );
+    const tech = CONSOLE_EXAMPLE_PROMPTS.find((e) => e.id === "technical");
+    expect(nonTech).toBeDefined();
+    expect(tech).toBeDefined();
+
+    for (const example of [nonTech!, tech!]) {
+      const preview = previewDraftPrivacy(example.prompt);
+      for (const sensitive of example.sensitiveItems) {
+        expect(
+          preview.prepared.outboundText,
+          `Example ${example.id} must hide ${sensitive}`,
+        ).not.toContain(sensitive);
+      }
+      expect(
+        preview.prepared.report.redactions.some((r) => r.kind === "MARKED"),
+      ).toBe(true);
+      // Restore puts back the text without ££ markers
+      const expectedRestored = example.prompt.replace(/££/g, "");
+      expect(preview.prepared.restore(preview.prepared.outboundText)).toBe(
+        expectedRestored,
+      );
+    }
   });
 });
 
