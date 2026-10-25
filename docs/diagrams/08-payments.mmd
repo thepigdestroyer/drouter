@@ -1,34 +1,35 @@
-%%{init: {"theme":"base","themeVariables":{"primaryColor":"#f3f1ec","primaryTextColor":"#151515","primaryBorderColor":"#151515","lineColor":"#595752","secondaryColor":"#ffffff","tertiaryColor":"#f3f1ec","fontFamily":"Georgia, serif"}}}%%
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Georgia, serif","fontSize":"16px","actorBkg":"#151515","actorTextColor":"#f3f1ec","actorBorder":"#151515","actorLineColor":"#8a8780","signalColor":"#151515","signalTextColor":"#151515","noteBkgColor":"#ffffff","noteBorderColor":"#d9531e","noteTextColor":"#151515","sequenceNumberColor":"#ffffff","labelBoxBkgColor":"#151515","labelTextColor":"#f3f1ec"},"themeCSS":".messageLine0,.messageLine1{stroke-width:2.4px;} .messageText{font-weight:600;} marker path{fill:#151515;stroke:#151515;}","sequence":{"mirrorActors":false,"wrap":true,"width":210,"actorMargin":120,"messageMargin":34,"boxMargin":14,"noteMargin":12}}}%%
 sequenceDiagram
   autonumber
-  participant Browser as Browser Wallet (client.ts)
-  participant Server as deRoute Credits Ledger (ledger.ts)
-  participant Arc as Circle Arc Testnet (Chain 5042002)
-  participant Mongo as MongoDB (Invoices / Payments / Nullifiers)
+  participant B as Your browser
+  participant S as deRoute credits service
+  participant A as Circle Arc (USDC)
+  participant D as Database
 
-  Browser->>Browser: generateClaimSecret() -> 32B claimSecret<br/>claimHash = sha256(claimSecret) (keep claimSecret local)
-  Browser->>Server: POST /api/credits/invoice { claimHash, denomination: 1 | 5 | 20 }
-  Server->>Server: allocateNextDerivationIndex()<br/>deriveDepositAddress(index) from CREDITS_DEPOSIT_XPUB
-  Server->>Mongo: Insert credit_invoices { invoiceId, derivationIndex,<br/>amount, claimHash, coarse expiresAt, paid: false }
-  Server-->>Browser: { invoiceId, depositAddress, amountUsdc (0.0001 | 0.0005 | 0.002) }
+  rect rgb(243, 241, 236)
+    Note over B,D: STEP 1 · Ask for a one-time payment address
+    Note right of B: Make a secret claim code and keep it on the device
+    B->>S: Only the claim code's hash, plus the amount (1, 5 or 20 credits)
+    Note right of S: Derive a fresh deposit address, never reused
+    S->>D: Store the invoice (hash only, no wallet, no IP)
+    S-->>B: One-time deposit address
+  end
 
-  Browser->>Arc: ERC-20 USDC Transfer(to: depositAddress, value: amountUsdc)
-  Browser->>Server: GET /api/credits -> RSA public key { n, e, denominations }
-  Browser->>Browser: blindToken(tokenHex, denom, pub)<br/>m = FDH(tokenHex, denom, n), m' = m * r^e mod n
+  rect rgb(255, 255, 255)
+    Note over B,D: STEP 2 · Pay and collect blind-signed credits
+    B->>A: Send USDC to the one-time address (from any wallet)
+    Note right of B: Blind the credit tokens so the server cannot see them
+    B->>S: Claim code plus blinded tokens
+    S->>A: Was the address paid enough?
+    A-->>S: Payment confirmed (sender is discarded)
+    Note right of S: Sign the blinded tokens
+    S-->>B: Blind signatures
+    Note right of B: Unblind, check, store encrypted on the device
+  end
 
-  Browser->>Server: POST /api/credits/claim { invoiceId, claimSecret, blinded: [m'], denomination }
-  Server->>Server: Verify constantTimeHexEqual(sha256(claimSecret), invoice.claimHash)
-  Server->>Arc: getLogs(ERC-20 Transfer, args: { to: depositAddress })<br/>Strip sender (args.from / topics[1]) at ingestion
-  Arc-->>Server: Confirmed Transfer log (paidUnits >= requiredUnits)
-  Server->>Server: signBlinded(): s' = (m')^d_denom mod n
-  Server->>Mongo: Mark credit_invoices.paid = true<br/>Insert credit_payments { txHash, amount } (no sender, no IP)
-  Server-->>Browser: { signatures: [s'], denomination, confirmations }
-
-  Browser->>Browser: unblindSignature(): s = s' * r^-1 mod n<br/>verifyTokenSignature(tokenHex, s, pub)<br/>Store AES-256-GCM encrypted in localStorage (drouter.credits.v1)
-
-  Note over Browser,Mongo: Unlinkable Spend Phase: Server never saw tokenHex or s during issuance
-
-  Browser->>Server: Inference / POST /api/credits/spend<br/>Header x-drouter-credit: { token: tokenHex, signature: s, denomination }
-  Server->>Server: verifyTokenSignature(): s^e_denom mod n == FDH(tokenHex, denom, n)<br/>nullifier = sha256("drouter/v1/credit-nullifier:" + tokenHex)
-  Server->>Mongo: Atomic upsert credit_nullifiers { nullifier, denomination, coarse spentAt }
-  Server-->>Browser: 200 OK { ok: true, nullifier } (or 409 Double-Spend Rejected)
+  rect rgb(243, 241, 236)
+    Note over B,D: STEP 3 · Spend a credit without a name
+    B->>S: One credit with each message
+    Note right of S: Valid signature? Record its one-time nullifier
+    S->>D: Nullifier only (a second spend is refused)
+  end

@@ -93,40 +93,46 @@ flowchart LR
 ### The life of one chat message
 
 ```mermaid
-%%{init: {"theme":"base","themeVariables":{"primaryColor":"#f3f1ec","primaryTextColor":"#151515","primaryBorderColor":"#151515","lineColor":"#595752","secondaryColor":"#ffffff","tertiaryColor":"#f3f1ec","fontFamily":"Georgia, serif"}}}%%
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Georgia, serif","fontSize":"16px","actorBkg":"#151515","actorTextColor":"#f3f1ec","actorBorder":"#151515","actorLineColor":"#8a8780","signalColor":"#151515","signalTextColor":"#151515","noteBkgColor":"#ffffff","noteBorderColor":"#d9531e","noteTextColor":"#151515","sequenceNumberColor":"#ffffff","labelBoxBkgColor":"#151515","labelTextColor":"#f3f1ec"},"themeCSS":".messageLine0,.messageLine1{stroke-width:2.4px;} .messageText{font-weight:600;} marker path{fill:#151515;stroke:#151515;}","sequence":{"mirrorActors":false,"wrap":true,"width":210,"actorMargin":120,"messageMargin":34,"boxMargin":14,"noteMargin":12}}}%%
 sequenceDiagram
   autonumber
-  actor User as User
-  participant Browser as Browser (send-pipeline.ts & tinfoil/client.ts)
-  participant Arc as Circle Arc Testnet (chainId 5042002)
-  participant Relay as Vercel Oblivious Relay (/api/relay/v1/*)
-  participant Enclave as Tinfoil Enclave (Router + Model CVM)
+  participant U as You
+  participant B as Your browser
+  participant A as Circle Arc
+  participant R as deRoute relay
+  participant E as Sealed computer (Tinfoil)
 
-  User->>Browser: Types raw prompt with personal details
-  Browser->>Browser: Recompute SHA-256 of MECHANICAL_RULESET (verifyFilterFingerprint)
-  Browser->>Arc: Read-only eth_getTransactionReceipt(anchorTx) for published-fingerprint.json
-  Arc-->>Browser: Confirm on-chain filter fingerprint receipt (or block send on mismatch)
-  Note over Browser: assertFilterFingerprintAllowsSend() passes,<br/>preparePrompt() scrubs PII/secrets/vault terms,<br/>normalizes style, and pops 1 blind credit (takeCreditHeader)
+  rect rgb(243, 241, 236)
+    Note over U,A: STEP 1 · On your device
+    U->>B: Type a message
+    B->>A: Is my filter the published one?
+    A-->>B: Yes: fingerprint receipt matches
+    Note right of B: Hide names, numbers and secrets
+  end
 
-  Browser->>Relay: GET /api/relay/attestation & GET /api/relay/enclave-matrix
-  Relay->>Enclave: Fetch AMD SEV-SNP report, VCEK, Sigstore bundle & proxy table
-  Enclave-->>Relay: Attestation bundle + model enclave matrix
-  Relay-->>Browser: Return attestation bundle & deep inspection matrix
+  rect rgb(255, 255, 255)
+    Note over B,E: STEP 2 · Check the sealed computer before sending
+    B->>R: Ask for the hardware proof
+    R->>E: Forward the request
+    E-->>B: Signed hardware report (through the relay)
+    Note right of B: Run checks C1 to C7 (any failure blocks sending)
+  end
 
-  Note over Browser: Verify Seven Checks (checksFromDocument):<br/>C1: Hardware signature chain<br/>C2: Approved software<br/>C3: HPKE key bound to enclave report<br/>C4: Running code = released code<br/>C5: Router-attested confidential GPU pool<br/>C6: Registry admission<br/>C7: Manifest-pinned model & dm-verity root
+  rect rgb(243, 241, 236)
+    Note over B,E: STEP 3 · Send it sealed
+    Note right of B: Pad to a fixed size, then encrypt (HPKE)
+    B->>R: Ciphertext plus one blind-signed credit
+    Note right of R: Spend one credit (nullifier), add the API key
+    R->>E: Forward the ciphertext only
+  end
 
-  Browser->>Browser: Pad JSON to 4096 B power-of-two bucket (padJsonPayloadToBucket)<br/>& seal with RFC 9180 HPKE to enclave hpkePublicKey
-
-  Browser->>Relay: POST /api/relay/v1/chat/completions<br/>(HPKE ciphertext + ehbp-encapsulated-key + x-drouter-credit)
-  Note over Relay: verifyAndSpendCreditHeader():<br/>Verify Chaumian RSA blind signature (e in 65537, 65539, 65543),<br/>atomically record nullifier in credit_nullifiers,<br/>refill rate bucket, and inject Authorization: Bearer TINFOIL_API_KEY
-
-  Relay->>Enclave: Forward HPKE ciphertext + ehbp-encapsulated-key + Bearer API key
-  Enclave->>Enclave: Decrypt inside enclave RAM, run model on redacted text, HPKE-encrypt stream
-  Enclave-->>Relay: Encrypted SSE stream + ehbp-response-nonce
-  Relay-->>Browser: Pace frames (pacedStream, 50 ms cadence) + X-DRouter-Credit-Nullifier
-
-  Browser->>Browser: Decrypt HPKE stream & restore placeholders via prepared.restore()
-  Browser-->>User: Render restored response with local privacy & attestation receipt
+  rect rgb(255, 255, 255)
+    Note over B,E: STEP 4 · The answer comes back sealed
+    Note left of E: Decrypt inside, run the model, encrypt the reply
+    E-->>R: Encrypted reply
+    R-->>B: Encrypted reply, at a steady pace
+    B->>U: Decrypted, hidden details put back
+  end
 ```
 
 ---

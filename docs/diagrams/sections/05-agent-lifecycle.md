@@ -3,43 +3,51 @@
 The autonomous agent workflow in `src/lib/agent-client/index.ts` separates control-plane planning from confidential data execution so Google Gemini never sees user text or redacted text. The browser runs on-device mechanical redaction followed by an attested second pass through the `pii-filter` enclave, sends only a content-free `TaskDescriptor` to `POST /api/gemini/plan`, executes the returned plan steps in the browser (fetching the whole public corpus and sending the redacted task over HPKE to the model enclave), restores names on the device, and verifies the signed egress receipt with its Merkle inclusion proof.
 
 ```mermaid
-%%{init: {"theme":"base","themeVariables":{"primaryColor":"#f3f1ec","primaryTextColor":"#151515","primaryBorderColor":"#151515","lineColor":"#595752","secondaryColor":"#ffffff","tertiaryColor":"#f3f1ec","fontFamily":"Georgia, serif"}}}%%
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Georgia, serif","fontSize":"16px","actorBkg":"#151515","actorTextColor":"#f3f1ec","actorBorder":"#151515","actorLineColor":"#8a8780","signalColor":"#151515","signalTextColor":"#151515","noteBkgColor":"#ffffff","noteBorderColor":"#d9531e","noteTextColor":"#151515","sequenceNumberColor":"#ffffff","labelBoxBkgColor":"#151515","labelTextColor":"#f3f1ec"},"themeCSS":".messageLine0,.messageLine1{stroke-width:2.4px;} .messageText{font-weight:600;} marker path{fill:#151515;stroke:#151515;}","sequence":{"mirrorActors":false,"wrap":true,"width":210,"actorMargin":120,"messageMargin":34,"boxMargin":14,"noteMargin":12}}}%%
 sequenceDiagram
   autonumber
-  actor User as User
-  participant Browser as Browser (src/lib/agent-client/index.ts)
-  participant Relay as Vercel Relay & Routes (/api/relay/*, /api/knowledge/corpus)
-  participant PiiEnclave as Tinfoil pii-filter Enclave (D4)
-  participant PlanRoute as Planner Route (POST /api/gemini/plan)
-  participant Gemini as Google Gemini Control Plane (gemini-4-argon)
-  participant ModelEnclave as Tinfoil Model Enclave (gemma4-31b / kimi-k3)
+  participant U as You
+  participant B as Your browser
+  participant S as deRoute server and relay
+  participant P as Personal-detail filter (Tinfoil)
+  participant G as Gemini 4 Argon
+  participant M as Sealed computer (Tinfoil)
 
-  User->>Browser: Submits private task + Always-Hide terms
-  Browser->>Browser: Stage 1 Pass 1: On-device mechanicalRedact (D3)
-  Browser->>Relay: HPKE-encrypted mechanically scrubbed text (useRelay: true)
-  Relay->>PiiEnclave: Forward HPKE ciphertext + Bearer TINFOIL_API_KEY
-  PiiEnclave-->>Relay: Attested second-pass spans ([ATTESTED_PII_n])
-  Relay-->>Browser: Return attestedPiiFilter result (verified: true)
-  Browser->>Browser: Apply createSymmetryTransform() + 4096 B bucket padding<br/>Build content-free TaskDescriptor (~56 bits) & run local egress gate
+  rect rgb(243, 241, 236)
+    Note over U,P: STEP 1 · Prepare the task on your device
+    U->>B: Type a task (plus your always-hide words)
+    Note right of B: First filter: hide names, numbers and secrets
+    B->>S: Filtered text, encrypted to the filter's sealed computer
+    S->>P: Forward the ciphertext only
+    P-->>B: Extra details to hide (through the relay)
+    Note right of B: Build a task description with none of your words
+  end
 
-  Browser->>PlanRoute: POST /api/gemini/plan (canonicalJson(taskDescriptor) only)
-  Note over PlanRoute: Closed-Schema Egress Gate:<br/>buildGeminiCreateRequestFromDescriptor(),<br/>assertGoogleBoundMessage("createRequest"),<br/>and assertContentFree() (~67 bits max capacity)
-  PlanRoute->>Gemini: client.interactions.create(createRequest) over opaque handles ($INPUT)
-  Gemini-->>PlanRoute: Function-call steps (scrub, verify_two_hop, search_kb, invoke_enclave, anchor_arc)
-  Note over PlanRoute: Validate each tool call (assertValidToolCall, assertClosedPlanSchema),<br/>append event to Merkle transparency log (appendVerificationEventToLog),<br/>and sign GeminiEgressReceipt with auditPath inclusion proof
-  PlanRoute-->>Browser: ClosedAgentPlan + GeminiEgressReceipt (with transparencyLog inclusion proof)
+  rect rgb(255, 255, 255)
+    Note over B,G: STEP 2 · Gemini plans without your words
+    B->>S: Task description only
+    Note right of S: Closed-schema gate: exact shape, about 67 bits at most
+    S->>G: Content-free planning request
+    G-->>S: Plan of tool steps
+    Note right of S: Check the plan's shape, log a receipt
+    S-->>B: Plan plus receipt and log proof
+    Note right of B: Check the receipt and its proof
+  end
 
-  Browser->>Browser: Verify egressReceipt signature, sha256, canonicalRequest & inclusion proof
-  Browser->>Relay: Execute plan verification & knowledge steps:<br/>GET /api/relay/enclave-matrix, GET /api/registry, GET /api/knowledge/corpus
-  Relay-->>Browser: Live 2-hop attestation matrix, Arc registry nodes & whole 16-doc public corpus
-  Browser->>Browser: Verify 7 checks (automatic failover gemma4-31b <-> kimi-k3 if needed)<br/>& rank whole public corpus locally in browser memory (BM25)
+  rect rgb(243, 241, 236)
+    Note over B,M: STEP 3 · Do the work inside a sealed computer
+    B->>S: Fetch hardware proofs, registry and the public library
+    Note right of B: Run checks C1 to C7, search the library locally
+    B->>S: Filtered task, encrypted to the sealed computer
+    S->>M: Forward the ciphertext only
+    M-->>B: Encrypted answer (through the relay)
+  end
 
-  Browser->>Relay: openTinfoilSession(): Send redacted task encrypted with RFC 9180 HPKE
-  Relay->>ModelEnclave: Forward HPKE ciphertext to attested model enclave
-  ModelEnclave-->>Relay: Stream HPKE-encrypted completion over placeholders
-  Relay-->>Browser: Stream encrypted response frames
-  Browser->>Browser: Decrypt response, restore names & shifted values on device (restoreAll),<br/>verify T^-1(f(T(x))) = f(x), and sign Ed25519 forensic digest
-  Browser-->>User: Restored answer + verified EgressReceipt & Merkle inclusion proof
+  rect rgb(255, 255, 255)
+    Note over U,S: STEP 4 · Back on your device
+    Note right of B: Decrypt, put hidden details back, check the restore
+    B->>U: Answer, plus what Google received and the receipt
+  end
 ```
 
 - **Two-Pass Redaction and Symmetry Masking (`runBrowserRedactionPipeline`)**: Stage 1 runs `mechanicalRedact` (D3) on the device first, sends the mechanically scrubbed text over HPKE through `/api/relay` to Tinfoil's attested `pii-filter` enclave (`attestedPiiFilter`, D4) for a second pass (`[ATTESTED_PII_n]`), applies reversible date/numeric/entity symmetry masking (`createSymmetryTransform`), and aligns the payload to a `4096`-byte power-of-two bucket.
