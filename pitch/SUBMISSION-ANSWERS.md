@@ -31,13 +31,15 @@ Who it is for: [Name a real person who agreed to be named, for example "Priya, a
 What changes for them: they type normally; names, dates, numbers and secrets are hidden on their device before anything leaves; anything they wrap in ££ like ££this££ is hidden too; the AI runs inside hardware that proves which code it runs; and they can see exactly what Google received.
 
 ## How it works (the seven building blocks)
-1. **On-device filter.** Deterministic rules hide names, emails, phone numbers, dates, money, account numbers, keys, internal hostnames and file paths. The rule set's fingerprint is published on Circle Arc (filter v1.0.2, tx 0x8cddab9a2a5f56cc51bc6abf0c5ac5bc914858b7839ce3dc4327e34745150670) and the browser refuses to send if its filter does not match. A second pass runs inside Tinfoil's sealed personal-detail filter.
+1. **On-device filter.** Deterministic rules hide names, emails, phone numbers, dates, money, account numbers, keys, internal hostnames and file paths. The rule set's fingerprint is published on Circle Arc (filter v1.0.3, tx 0xf97f080fc9b6e7f1cb5fa311af3f41498aab81a9f228cde10fdfb8d9cf25265a) and the browser refuses to send if its filter does not match. A second pass runs inside Tinfoil's sealed personal-detail filter.
 2. **Sealed computers.** Prompts are processed only inside hardware-isolated Tinfoil enclaves (AMD SEV-SNP router, Intel TDX, NVIDIA confidential GPUs). Before sending, the browser runs seven checks (C1 to C7): hardware signature chain, approved software, encryption key bound to the enclave, running code equals released code, confidential GPU pool, registry admission, pinned model.
 3. **Open registry on Circle Arc.** Nodes are admitted on-chain with a USDC stake; anyone can check who may serve.
 4. **End-to-end encryption through a blind relay.** HPKE (RFC 9180) to the enclave's attested key, fixed-size padding; our relay only forwards ciphertext.
 5. **Unlinkable payments.** One-time deposit addresses and blind-signed credits with one-time spend codes; passkey accounts with no email.
 6. **Content-free Gemini planner and private knowledge.** Gemini 4 Argon plans agent tasks from a description with none of the user's words; private runs download the whole public library so MongoDB never learns what anyone looked up.
 7. **Public accountability.** An hourly monitor checks the six real sealed computers; results go into an RFC 6962 transparency log anchored on Arc; anyone can verify with `node scripts/drouter-cli.mjs verify --submit`.
+
+**Also usable from coding tools.** OpenCode and other OpenAI-compatible tools and scripts can use deRoute with an anonymous `drk_` access key bundled from blind-signed credits in the browser. Private mode is a single downloadable file, `deroute-proxy.mjs` (sha256 published), that runs on the user's own computer: it applies the same published filter, runs the seven checks and encrypts to the sealed computer before anything leaves. Hosted mode is simpler and clearly labelled as visible to our server.
 
 ## Gemini: which models and agents we used, and how (required by the Gemini bounty)
 - **gemini-4-argon** is the lead planner on the Agent page, called with the `@google/genai` SDK through the Interactions API (`client.interactions.create`), `thinking_level: "medium"`, `store: false` (Google keeps no copy), with five function-calling tools. It receives only a content-free task description (task kind, power-of-two size bucket, rounded counts of hidden details, which checks to run, allowed tools) and returns a plan of tool calls that refer to opaque handles such as `$INPUT`.
@@ -68,7 +70,7 @@ First commit 24 October 2026 14:41 BST; every commit since is in the public repo
 Proving privacy instead of promising it: a generic "does this look like content" filter kept being bypassed in review, so we replaced it with exact message schemas and measured the worst-case capacity. Making the browser verify hardware proofs, Arc records and log inclusion proofs itself. Keeping placeholders stable across a whole conversation so hidden details always come back correctly.
 
 ## What's next
-Deploy the planner inside Google Cloud Confidential Space; more independent operators in the Arc registry; a local proxy so any coding tool can use deRoute privately.
+Deploy the planner inside Google Cloud Confidential Space; more independent operators in the Arc registry; a signed, reproducible release of the local proxy for coding tools, with automatic updates when a new filter version is published on Arc.
 
 ## Team
 [Names and roles]

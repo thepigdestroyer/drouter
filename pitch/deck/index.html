@@ -286,7 +286,7 @@ code,.code{font-family:var(--mono)}
   <rect x="0" y="96" width="710" height="196" rx="12" fill="#f3f1ec" stroke="#151515" stroke-width="2"/>
   <line x1="0" y1="138" x2="710" y2="138" stroke="#151515" stroke-width="1.5"/>
   <circle cx="24" cy="117" r="4.5" fill="#151515"/><circle cx="40" cy="117" r="4.5" fill="#151515"/><circle cx="56" cy="117" r="4.5" fill="#151515"/>
-  <text x="80" y="123.5" class="m18">filter v1.0.1 · matches the Arc fingerprint</text>
+  <text x="80" y="123.5" class="m18">filter v1.0.3 · matches the Arc fingerprint</text>
   <text x="24" y="184" class="s22 mut">Email dana.reyes@example.org the key sk-test-4f9a…</text>
   <line x1="24" y1="178" x2="530" y2="178" stroke="#595752" stroke-width="1.6"/>
   <text x="24" y="250" class="s22">Email</text>
@@ -528,9 +528,9 @@ code,.code{font-family:var(--mono)}
 
 <div class="card rv" style="--d:5;left:930px;top:694px;width:410px;height:296px">
   <div class="label">Filter fingerprint on Arc</div>
-  <div class="big" style="font-size:48px;margin-top:12px">v1.0.1</div>
-  <div class="kv"><div class="k">Rule-set sha256</div><div class="v">0x0928121d…bba20f28</div></div>
-  <div class="kv"><div class="k">Arc transaction</div><div class="v">0x09055dc1…db1fe730</div></div>
+  <div class="big" style="font-size:48px;margin-top:12px">v1.0.3</div>
+  <div class="kv"><div class="k">Rule-set sha256</div><div class="v">0x95f683a8…5d447857</div></div>
+  <div class="kv"><div class="k">Arc transaction</div><div class="v">0xf97f080f…cf25265a</div></div>
   <p style="margin-top:12px">Mismatch on page load blocks sending.</p>
 </div>
 
@@ -583,7 +583,7 @@ code,.code{font-family:var(--mono)}
     <li><b>Official <code>@google/genai</code> Interactions API</b>, <code>store: false</code>, 5 tools over opaque handles, at most 5 steps.</li>
     <li><b>Egress receipts.</b> Each request’s sha256 joins the RFC 6962 log, with a signed tree head and inclusion proof.</li>
   </ul>
-  <div class="status"><b>FAILS CLOSED</b>Today Google rejects the live call (HTTP 402), so the planner answers 503 “planner unavailable”, never a simulated plan.</div>
+  <div class="status"><b>LIVE</b>/api/gemini/plan returns a gemini-4-argon plan plus its egress receipt. If Google fails, it answers 503, never a simulated plan.</div>
 </div>
 
 <div class="track rv" style="--d:4;left:978px">

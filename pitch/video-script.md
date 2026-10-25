@@ -12,9 +12,9 @@ These are live production problems I found today. Each one shows up on camera if
 
 | # | Problem (seen live on 25 Oct) | What it looks like on camera | Fix or workaround |
 | :- | :- | :- | :- |
-| 1 | `GEMINI_API_KEY` is now set in production, but every planner call fails with **HTTP 402** from Google. At the start of my session the endpoint still answered `no_key`. | Agent page badge: "Planner unavailable (the Gemini call failed)". Steps 3 to 5 show Unavailable, Not needed and Failed. | Fix billing or credits on the Google AI project behind the key, redeploy if the key changes, then run the check in section 7.4. **Part 2, shot S3 cannot be recorded until this passes.** |
+| 1 | FIXED 25 Oct (commit e2483a1 and a working key): live `/api/gemini/plan` returns HTTP 200 with a `gemini-4-argon` plan and its egress receipt. |
 | 2 | FIXED 25 Oct (commits 8c0e618, cb19eea): the security policy now allows `https://rpc.testnet.arc.io`, so the filter badge can confirm its Arc receipt. |
-| 3 | The second filter pass inside Tinfoil's sealed `pii-filter` fails in the browser. Its attestation verifies, then `POST /api/relay/v1/chat/completions` (model `pii-filter`) returns **404**. The page falls back to the on-device filter and says so. The server-side second pass behind public Atlas search does work (`filterRan: "mechanical+attested"`). | Agent step 1: "second check inside a sealed computer: no". | Fix the browser call path, or leave the block 1 caption at its "today" wording (section 3) and do not linger on step 1. |
+| 3 | FIXED 25 Oct (commit 0542b27): the second filter pass runs inside Tinfoil's sealed `pii-filter`; the relay sends that enclave to `/redact` only. |
 | 4 | FIXED 25 Oct (commit b5035cb): `/explain` ("How it works") loads normally again; the game uses its public demo key in the browser. |
 
 ---
@@ -67,8 +67,7 @@ Short sentences, one breath each. Numbers are the signposts: hit "One", "Two", a
 **P1 0:03-0:12 · Block 1: The filter (22 words)**
 > One: the filter. Your browser hides emails, phone numbers and keys first. Its fingerprint lives on Circle Arc. No match, no send.
 
-Lower-third (today): `1 · On-device personal-detail filter v1.0.1 · fingerprint anchored on Circle Arc Testnet (tx 0x09055dc1...db1fe730)`
-Lower-third (only after fix #3 in section 0): add `· second pass in Tinfoil's sealed pii-filter`
+Lower-third: `1 · On-device personal-detail filter v1.0.3 · fingerprint anchored on Circle Arc Testnet (tx 0xf97f080f...cf25265a) · second pass in Tinfoil's sealed pii-filter`
 
 **P1 0:12-0:19 · Block 2: Sealed computers (17 words)**
 > Two: sealed computers. Prompts open only inside sealed AMD, Intel and NVIDIA hardware, after seven browser checks.
@@ -138,7 +137,7 @@ Navigation rule: the account session lives in memory. Typing a URL or reloading 
 - **Page**: https://drouter-demo.vercel.app/argon (top nav "Agent"). Record as a separate clip because the expert settings reset when you leave the page.
 - **Before you hit record**: let the automatic first run finish. Open "For experts", set Thinking level **LOW** and Enclave model **kimi-k3**, close "For experts", and scroll to the top.
 - **Action**:
-  1. Point at the badge above the Run button: "Personal-detail filter v1.0.1: matches the published version" with "Verified" (needs fix #2).
+  1. Point at the badge above the Run button: "Personal-detail filter v1.0.3: matches the published version" with "Verified".
   2. Click "Run" (it changes to "Running..."). Cut the wait.
   3. Show the badge "Planned by Gemini 4 Argon" and the timeline: "2. Checking the seal: 7 of 7 safety checks passed" and "3. Thinking: Planned by Gemini 4 Argon. Gemini planned the steps without seeing your words. The sealed computer finished the work..."
   4. Scroll to the top card, which has three columns: "What Google can see", "What Google never sees", "What the sealed computer sees". Click its "Show technical details".
@@ -250,7 +249,7 @@ Or run one command and check for yourself.
 - Do not buy tokens on camera. "Get more anonymous tokens" shows a one-time deposit address. Paying needs Arc Testnet USDC and is not part of the demo.
 
 ### 7.4 Gemini key configured and working
-- [ ] In Vercel production, `GEMINI_API_KEY` must be set (it is now) and its Google project must not return 402. Changing env vars needs a redeploy.
+- [x] In Vercel production, `GEMINI_API_KEY` is set and working (verified 25 Oct). Changing env vars needs a redeploy.
 - [ ] Check with:
 
 ```bash
@@ -259,7 +258,7 @@ curl -s -X POST https://drouter-demo.vercel.app/api/gemini/plan \
   -d '{"allowedTools":["scrub_and_symmetry_mask","verify_two_hop_enclave_and_quorum","search_atlas_hybrid_kb","invoke_attested_enclave","anchor_arc_settlement_with_human_gate"],"inputHandle":"$INPUT","inputTokenEstimate":128,"redactionCounts":{"DATE":1,"DIGITS":2,"EMAIL":1,"SECRET":1,"TOTAL":2},"taskKind":"summarize","verification":{"attestedPiiFilterVerified":false,"bucketAligned4096":true,"mechanicalRedactionPassed":true}}'
 ```
 
-  Pass: `"ok":true` with a `"plan"` and an `"egressReceipt"`. Today it returns HTTP 503 with `"error":"gemini_call_failed"` and `402 API error occurred`. The planner has a hard 20-second limit, which is why S3 uses Thinking level LOW.
+  Pass: `"ok":true` with a `"plan"` and an `"egressReceipt"`. Verified 25 Oct: HTTP 200, planner `gemini-4-argon`, with an egress receipt. The planner has a hard 20-second limit, which is why S3 uses Thinking level LOW.
 
 ### 7.5 Example inputs that visibly trigger on-device hiding (fictional persona from the code only)
 - **Chat (`/app`)**, verified live:
@@ -285,7 +284,7 @@ for p in api/health api/registry api/relay/enclave-matrix api/accountability api
 - [ ] Sign in (7.2), then open Chat and wait for "Sealed and private" and "7/7 checks passed".
 - [ ] Open Agent and let the automatic first run finish. Each Agent page load runs the default task, including a planner call.
 - [ ] Open Proof and check that "Latest hourly run" is from the last hour or two.
-- [ ] In a second tab, open https://explorer.testnet.arc.io/tx/0x09055dc1b5d6a79de9d96824ee76213b2c238a8bfd744ab143405d30db1fe730 (the filter anchor) as backup B-roll.
+- [ ] In a second tab, open https://explorer.testnet.arc.io/tx/0xf97f080fc9b6e7f1cb5fa311af3f41498aab81a9f228cde10fdfb8d9cf25265a (the filter anchor) as backup B-roll.
 - [ ] Terminal: in a clone of the repo, run `npm install`, then do one dry run of `node scripts/drouter-cli.mjs verify` without `--submit`. I ran it on 25 Oct and C1 to C7 all passed. Use `--submit` only for the real take, because each submission adds a real signed entry to the public log. Afterwards, the Proof page counter rises by one (it showed 1 signed check on 25 Oct).
 
 ### 7.8 Final dry run
@@ -298,7 +297,7 @@ for p in api/health api/registry api/relay/enclave-matrix api/accountability api
 
 | Spoken claim | Evidence |
 | :- | :- |
-| Filter v1.0.1; fingerprint on Circle Arc; no match, no send | `src/lib/privacy/mechanical-ruleset.ts` (`version: "1.0.1"`), `src/lib/privacy/published-fingerprint.json`. Recomputed fingerprint `0x0928121d...a20f28` matches. Arc RPC: tx `0x09055dc1...db1fe730` status success, `ReceiptAnchored` with hash `0x20364c27...4789fb`. A mismatch blocks Chat (`canSend`, `assertFilterFingerprintAllowsSend`) and Agent Run (`filterBlocked`). |
+| Filter v1.0.3; fingerprint on Circle Arc; no match, no send | `src/lib/privacy/mechanical-ruleset.ts` (`version: "1.0.3"`), `src/lib/privacy/published-fingerprint.json`. Recomputed fingerprint `0x95f683a8...5d447857` matches. Arc RPC: tx `0xf97f080f...cf25265a` status success, `ReceiptAnchored` with hash `0x42d5dca8...22f538`. A mismatch blocks Chat (`canSend`, `assertFilterFingerprintAllowsSend`) and Agent Run (`filterBlocked`). |
 | Hides emails, phone numbers and keys first | Live test: `[EMAIL_1]`, `[SECRET_1]`; `[PHONE_1]` for `415-555-0199` (code test). Runs in the browser before encryption (`prepareOutboundTurn`, `runBrowserRedactionPipeline`). |
 | Sealed AMD, Intel and NVIDIA hardware; seven browser checks | `src/lib/tinfoil/client.ts` `checksFromDocument` (C1-C5, C7) and `src/components/session.ts` (C6). Live on `/app`: 7/7 PASS. C1 "VCEK -> SEV-Genoa -> ARK-Genoa", C5 "8× NVIDIA confidential GPUs ... TDX + CC mode". CLI `verify`: 7 PASS. |
 | Machines join on-chain by staking USDC; anyone can audit | `contracts/DRouterRegistry.sol` `registerNode` is payable with `minStake`. Live `/api/registry`: `source: arc`, 6 active nodes, 0.01 USDC stake each, contract `0xbc8085c2b6fe6e0db05f169925c0b841828f4481`. |
