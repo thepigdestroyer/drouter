@@ -30,6 +30,10 @@ import {
   DEFAULT_CONFIDENTIAL_SPACE_AUDIENCE,
   verifyConfidentialSpaceAttestation,
 } from "@/lib/attestation/confidential-space";
+import expectedCoreDigestsJson from "@/lib/attestation/expected-core-digests.json";
+
+export const COMMITTED_CORE_IMAGE_DIGESTS: readonly string[] =
+  expectedCoreDigestsJson.digests;
 
 export const ALLOWED_CORE_PATHS = new Set([
   "attestation",
@@ -258,11 +262,17 @@ export function parseCoreImageDigests(
   if (override && override.length > 0) {
     return override.map((d) => d.trim()).filter(Boolean);
   }
-  if (!envVal) return [];
+  const committed = COMMITTED_CORE_IMAGE_DIGESTS.map((d) => d.trim()).filter(
+    Boolean,
+  );
+  if (!envVal || !envVal.trim()) {
+    return committed;
+  }
+  const committedSet = new Set(committed.map((d) => d.toLowerCase()));
   return envVal
     .split(",")
     .map((d) => d.trim())
-    .filter(Boolean);
+    .filter((d) => Boolean(d) && committedSet.has(d.toLowerCase()));
 }
 
 /**

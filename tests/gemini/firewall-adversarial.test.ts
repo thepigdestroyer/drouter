@@ -1,4 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  POST as planPost,
+  setCorePlanHandlerForTests,
+  setPlanGenAIClientForTests,
+} from "@/app/api/gemini/plan/route";
 import { canonicalJson } from "@/lib/transparency/log";
 import {
   ALLOWED_PLANNER_TOOLS,
@@ -8,8 +13,6 @@ import {
   assertValidToolCall,
   buildInteractionsCreatePayload,
   buildTaskDescriptor,
-  callGeminiInteractionsEndpoint,
-  callTinfoilPlannerToolLoop,
   ContentFreeEgressError,
   createDigestHandleMapState,
   GEMINI_4_ARGON_MODEL_ID,
@@ -20,8 +23,13 @@ import {
   ToolPolicyViolationError,
   validateToolCallArguments,
   type GenAIInteractionsClientLike,
-  type TinfoilPlannerClientLike,
 } from "@/lib/gemini";
+
+afterEach(() => {
+  setCorePlanHandlerForTests(null);
+  setPlanGenAIClientForTests(null, null);
+  vi.restoreAllMocks();
+});
 
 describe("Shared Content-Free Egress Firewall: Round 1 & Round 2 Adversarial Suite + Legitimate Orchestrator Shapes", () => {
   it("blocks all Round 1 CRITICAL-2 bypass classes (JSON-in-string, UTF-16/high-bit hex, snake_case call IDs, numeric encoding, nested arrays, prototypes, non-enumerable keys)", () => {
@@ -627,9 +635,8 @@ describe("Shared Content-Free Egress Firewall: Round 1 & Round 2 Adversarial Sui
       rawToolResults.anchor_arc_settlement_with_human_gate.receiptSha256,
     );
 
-    // 5. End-to-end callGeminiInteractionsEndpoint verifies zero hex strings > 16 chars reach Google
+    // 5. End-to-end POST /api/gemini/plan verifies zero hex strings > 16 chars reach Google
     const outboundRequestsToGoogle: Array<Record<string, unknown>> = [];
-    let turn = 0;
     const mockClient: GenAIInteractionsClientLike = {
       interactions: {
         create: vi.fn(async (req: Record<string, unknown>) => {
@@ -637,56 +644,58 @@ describe("Shared Content-Free Egress Firewall: Round 1 & Round 2 Adversarial Sui
           const serialized = JSON.stringify(req);
           expect(serialized).not.toMatch(/0x[0-9a-f]{15,}/i);
           expect(() =>
+            assertGoogleBoundMessage("createRequest", req, "$.createRequest"),
+          ).not.toThrow();
+          expect(() =>
             assertContentFree(req, "$.createRequest"),
           ).not.toThrow();
 
-          turn += 1;
-          if (turn === 1) {
-            return {
-              id: "inter-argon-turn-1",
-              status: "requires_action",
-              steps: [
-                {
-                  type: "function_call",
-                  id: "call-1",
-                  name: "search_atlas_hybrid_kb",
-                  arguments: { topic: "provider:tinfoil" },
-                },
-                {
-                  type: "function_call",
-                  id: "call-2",
-                  name: "anchor_arc_settlement_with_human_gate",
-                  arguments: {
-                    actionKind: "anchor_receipt",
-                    resultHandle: "$RESULT_2",
-                    humanApproved: false,
-                  },
-                },
-              ],
-            };
-          }
           return {
-            id: "inter-argon-turn-2",
+            id: "inter-argon-turn-1",
             status: "completed",
+            steps: [
+              {
+                type: "function_call",
+                id: "call-1",
+                name: "search_atlas_hybrid_kb",
+                arguments: { topic: "provider:tinfoil" },
+              },
+              {
+                type: "function_call",
+                id: "call-2",
+                name: "anchor_arc_settlement_with_human_gate",
+                arguments: {
+                  actionKind: "anchor_receipt",
+                  resultHandle: "$RESULT_2",
+                  humanApproved: false,
+                },
+              },
+            ],
             output_text: "Completed over opaque handles.",
           };
         }),
       },
     };
 
-    const callResult = await callGeminiInteractionsEndpoint({
-      payload,
-      genaiClient: mockClient,
-      toolExecutor: async (name) => rawToolResults[name],
-    });
+    setCorePlanHandlerForTests(async () => ({
+      status: 503,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ core: "not-deployed" }),
+    }));
+    setPlanGenAIClientForTests(mockClient, "test-gemini-key");
 
-    expect(callResult.liveEndpointReached).toBe(true);
-    expect(outboundRequestsToGoogle).toHaveLength(2);
-    expect(callResult.resolvedDigestHandles).toEqual({
-      $DOC_1: rawToolResults.search_atlas_hybrid_kb.topDocSha256,
-      $RECEIPT_1:
-        rawToolResults.anchor_arc_settlement_with_human_gate.receiptSha256,
-    });
+    const planRes = await planPost(
+      new Request("http://localhost:3000/api/gemini/plan", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": "198.51.100.51",
+        },
+        body: canonicalJson(descriptor),
+      }),
+    );
+    expect(planRes.status).toBe(200);
+    expect(outboundRequestsToGoogle).toHaveLength(1);
   });
 
   it("blocks all Round 3 adversarial bypasses (handle fallthrough, A1Z26 token-array spelling, multi-key numeric packing, non-power-of-two buckets, sub-object key mixing, replaceDigestsWithOpaqueHandles laundering, cross-prefix handles, short-hex ASCII, undefined values, and callTinfoilPlannerToolLoop echoing)", async () => {
@@ -925,7 +934,7 @@ describe("Shared Content-Free Egress Firewall: Round 1 & Round 2 Adversarial Sui
       ContentFreeEgressError,
     );
 
-    // 4. Round 3 MINOR-1: Short-hex (<= 16 chars) ASCII smuggling, undefined values, empty objects, and callTinfoilPlannerToolLoop validation
+    // 4. Round 3 MINOR-1: Short-hex (<= 16 chars) ASCII smuggling, undefined values, empty objects, and planPost tool validation
     expect(() =>
       assertContentFree({ contentSha256: "0x4849569a9b9c9d" }, "$.googleBound"),
     ).toThrow(ContentFreeEgressError);
@@ -940,95 +949,50 @@ describe("Shared Content-Free Egress Firewall: Round 1 & Round 2 Adversarial Sui
     ).toThrow(ContentFreeEgressError);
     expect(() => assertContentFree({})).toThrow(ContentFreeEgressError);
 
-    // callTinfoilPlannerToolLoop rejects missing fnName and non-object JSON arguments
-    const badMissingFnClient: TinfoilPlannerClientLike = {
-      chat: {
-        completions: {
+    // POST /api/gemini/plan rejects missing tool name in function_call step with 422 tool_policy_violation
+    setCorePlanHandlerForTests(async () => ({
+      status: 503,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ core: "not-deployed" }),
+    }));
+    setPlanGenAIClientForTests(
+      {
+        interactions: {
           create: vi.fn(async () => ({
-            id: "chatcmpl-bad-1",
-            choices: [
+            id: "inter-argon-turn-1",
+            status: "completed",
+            steps: [
               {
-                message: {
-                  role: "assistant",
-                  content: null,
-                  tool_calls: [
-                    {
-                      id: "tc-1",
-                      type: "function",
-                      function: { name: "", arguments: "{}" },
-                    },
-                  ],
-                },
+                type: "function_call",
+                id: "call-1",
+                name: "",
+                arguments: {},
               },
             ],
           })),
         },
       },
-    };
-    await expect(
-      callTinfoilPlannerToolLoop({
-        model: "gemma4-31b",
-        scrubbedPrompt: "Review [EMAIL_1]",
-        tinfoilClient: badMissingFnClient,
-        toolExecutor: async () => ({
-          status: "ok",
-          passed: true,
-          outputHandle: "$RESULT_1",
-          redactionCount: 1,
-          mechanicalRedactionCount: 1,
-          attestedRedactionCount: 0,
-          bucketBytes: 4096,
-          plaintextLeakCount: 0,
-          contentHandle: "$DIGEST_1",
-        }),
-      }),
-    ).rejects.toThrow(ToolPolicyViolationError);
-
-    const badNonObjectArgsClient: TinfoilPlannerClientLike = {
-      chat: {
-        completions: {
-          create: vi.fn(async () => ({
-            id: "chatcmpl-bad-2",
-            choices: [
-              {
-                message: {
-                  role: "assistant",
-                  content: null,
-                  tool_calls: [
-                    {
-                      id: "tc-1",
-                      type: "function",
-                      function: {
-                        name: "scrub_and_symmetry_mask",
-                        arguments: '"leaked_string_instead_of_object"',
-                      },
-                    },
-                  ],
-                },
-              },
-            ],
-          })),
+      "test-gemini-key",
+    );
+    const badFnRes = await planPost(
+      new Request("http://localhost:3000/api/gemini/plan", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": "198.51.100.52",
         },
-      },
-    };
-    await expect(
-      callTinfoilPlannerToolLoop({
-        model: "gemma4-31b",
-        scrubbedPrompt: "Review [EMAIL_1]",
-        tinfoilClient: badNonObjectArgsClient,
-        toolExecutor: async () => ({
-          status: "ok",
-          passed: true,
-          outputHandle: "$RESULT_1",
-          redactionCount: 1,
-          mechanicalRedactionCount: 1,
-          attestedRedactionCount: 0,
-          bucketBytes: 4096,
-          plaintextLeakCount: 0,
-          contentHandle: "$DIGEST_1",
-        }),
+        body: canonicalJson(
+          buildTaskDescriptor({
+            taskKind: "review",
+            inputTokenEstimate: 64,
+            redactionCounts: { TOTAL: 0 },
+            verification: { mechanicalRedactionPassed: true },
+            allowedTools: ALLOWED_PLANNER_TOOLS,
+          }),
+        ),
       }),
-    ).rejects.toThrow(ToolPolicyViolationError);
+    );
+    expect(badFnRes.status).toBe(422);
   });
 
   it("enforces closed schema gate (assertGoogleBoundMessage): every real orchestrator message passes, and for each schema one extra key, one missing key, and one out-of-range value are rejected", () => {

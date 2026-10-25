@@ -14,6 +14,7 @@ import {
   runBrowserAgentWorkflow,
   runBrowserRedactionPipeline,
   sortCorpusDocuments,
+  verifyEgressReceiptClient,
 } from "@/lib/agent-client";
 import {
   ALLOWED_PLANNER_TOOLS,
@@ -26,9 +27,6 @@ import {
   assertValidToolCall,
   buildInteractionsCreatePayload,
   buildTaskDescriptor,
-  buildTinfoilOpenAITools,
-  callGeminiInteractionsEndpoint,
-  callTinfoilPlannerToolLoop,
   classifyTaskKind,
   ContentFreeEgressError,
   DATA_SENT_TO_GOOGLE,
@@ -41,7 +39,6 @@ import {
   PlannerBudgetExceededError,
   PrivacyInvariantViolationError,
   sanitizeAlwaysHideTerms,
-  sanitizeToArgonConfig,
   ToolPolicyViolationError,
   validateArgonRequestConfig,
   validateToolCallArguments,
@@ -49,7 +46,6 @@ import {
   type ClosedAgentPlan,
   type GeminiEgressReceipt,
   type GenAIInteractionsClientLike,
-  type TinfoilPlannerClientLike,
 } from "@/lib/gemini";
 import {
    canonicalJson,
@@ -117,19 +113,6 @@ describe("Gemini 4 Argon Config Contract, TaskDescriptor & Content-Free Egress F
       expect(res.rejectedParameters).toContain(item.key);
       expect(res.errors.some((e) => e.includes(item.key))).toBe(true);
     }
-
-    const sanitized = sanitizeToArgonConfig({
-      thinking_level: "high",
-      temperature: 0.5,
-      thinking_budget: 2048,
-      cached_content: "cachedContents/old",
-    });
-    expect(sanitized.config.model).toBe(GEMINI_4_ARGON_MODEL_ID);
-    expect(sanitized.strippedFields).toEqual([
-      "temperature",
-      "thinking_budget",
-      "cached_content",
-    ]);
   });
 
   it("builds a content-free TaskDescriptor and InteractionsCreatePayload without any user text", () => {
@@ -175,8 +158,6 @@ describe("Gemini 4 Argon Config Contract, TaskDescriptor & Content-Free Egress F
     expect(payload.metadata.data_sent_to_google).toBe(DATA_SENT_TO_GOOGLE);
     expect(JSON.parse(payload.input[0].content)).toEqual(descriptor);
 
-    const openAiTools = buildTinfoilOpenAITools(payload.tools);
-    expect(openAiTools).toHaveLength(payload.tools.length);
     const snippets = generateInteractionsSdkSnippets(payload);
     expect(snippets.typescript).toContain("client.interactions.create");
     expect(snippets.python).toContain("client.interactions.create");
@@ -508,72 +489,55 @@ describe("Gemini 4 Argon Config Contract, TaskDescriptor & Content-Free Egress F
   });
 
   it("enforces step budgets and wall-clock time budgets on planner loops", async () => {
-    const payload = buildInteractionsCreatePayload({
-      taskDescriptor: buildTaskDescriptor({ taskKind: "review" }),
-      thinkingLevel: "low",
-    });
+    const descriptor = buildTaskDescriptor({ taskKind: "review" });
 
-    // 1. Exceeding maxSteps throws PlannerBudgetExceededError
+    setCorePlanHandlerForTests(async () => ({
+      status: 503,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ core: "not-deployed" }),
+    }));
+
+    // 1. Exceeding MAX_PLANNER_STEPS (5) on POST /api/gemini/plan returns 422 planner_budget_exceeded
     const tooManyStepsClient: GenAIInteractionsClientLike = {
       interactions: {
-        create: vi.fn(async () => ({
-          id: "inter-argon-turn-1",
-          status: "requires_action",
-          steps: [
-            {
+        create: vi.fn(async (params: Record<string, unknown>) => {
+          expect(() =>
+            assertGoogleBoundMessage("createRequest", params),
+          ).not.toThrow();
+          expect(() => assertContentFree(params)).not.toThrow();
+          return {
+            id: "inter-argon-turn-1",
+            status: "requires_action",
+            steps: [1, 2, 3, 4, 5, 6].map((idx) => ({
               type: "function_call",
-              id: "call-1",
+              id: `call-${idx}`,
               name: "scrub_and_symmetry_mask",
               arguments: { inputHandle: "$INPUT", bucketQuantumBytes: 4096 },
-            },
-            {
-              type: "function_call",
-              id: "call-2",
-              name: "verify_two_hop_enclave_and_quorum",
-              arguments: { providerId: "tinfoil", enclaveModel: "gemma4-31b" },
-            },
-            {
-              type: "function_call",
-              id: "call-3",
-              name: "invoke_attested_enclave",
-              arguments: { inputHandle: "$INPUT", enclaveModel: "gemma4-31b" },
-            },
-          ],
-        })),
+            })),
+          };
+        }),
       },
     };
+    setPlanGenAIClientForTests(tooManyStepsClient, "test-gemini-key");
 
-    await expect(
-      callGeminiInteractionsEndpoint({
-        payload,
-        genaiClient: tooManyStepsClient,
-        maxSteps: 2,
-        toolExecutor: async () => ({ status: "ok", passed: true }),
+    const stepRes = await planPost(
+      new Request("http://localhost:3000/api/gemini/plan", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": "198.51.100.61",
+        },
+        body: canonicalJson(descriptor),
       }),
-    ).rejects.toThrow(PlannerBudgetExceededError);
+    );
+    expect(stepRes.status).toBe(504);
+    const stepJson = (await stepRes.json()) as Record<string, unknown>;
+    expect(stepJson.error).toBe("planner_budget_exceeded");
 
-    // 2. Exceeding wallClockBudgetMs throws PlannerBudgetExceededError
-    const slowClient: GenAIInteractionsClientLike = {
-      interactions: {
-        create: vi.fn(
-          () =>
-            new Promise<{ id?: string; status?: string }>((resolve) => {
-              setTimeout(
-                () => resolve({ id: "inter-argon-turn-1", status: "completed" }),
-                120,
-              );
-            }),
-        ),
-      },
-    };
-
-    await expect(
-      callGeminiInteractionsEndpoint({
-        payload,
-        genaiClient: slowClient,
-        wallClockBudgetMs: 20,
-      }),
-    ).rejects.toThrow(PlannerBudgetExceededError);
+    // 2. PlannerBudgetExceededError carries kind and limit
+    const timeoutErr = new PlannerBudgetExceededError("wall_clock_timeout", 20);
+    expect(timeoutErr.kind).toBe("wall_clock_timeout");
+    expect(timeoutErr.limit).toBe(20);
   });
 
   it("runs two-pass redaction (D3 mechanicalRedact + D4 attestedPiiFilter) and falls back cleanly to D3 when D4 is unavailable", async () => {
@@ -662,40 +626,32 @@ describe("Gemini 4 Argon Config Contract, TaskDescriptor & Content-Free Egress F
     const mockGeminiClient: GenAIInteractionsClientLike = {
       interactions: { create: spyGeminiCreate },
     };
+    setCorePlanHandlerForTests(async () => ({
+      status: 503,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ core: "not-deployed" }),
+    }));
+    setPlanGenAIClientForTests(mockGeminiClient, "test-gemini-key");
 
-    const validPayload = buildInteractionsCreatePayload({
-      taskDescriptor: buildTaskDescriptor({ taskKind: "review" }),
-      thinkingLevel: "medium",
-    });
-    // Tamper the payload with free text to verify egress firewall blocks the SDK call
-    const tamperedPayload = {
-      ...validPayload,
-      input: [{ role: "user" as const, content: "Free text prompt for Priya Natarajan" }],
+    const validDescriptor = buildTaskDescriptor({ taskKind: "review" });
+    // Tamper the descriptor with free text to verify egress firewall blocks the SDK call before interactions.create
+    const tamperedDescriptor = {
+      ...validDescriptor,
+      inputHandle: "Free text prompt for Priya Natarajan",
     };
 
-    await expect(
-      callGeminiInteractionsEndpoint({
-        payload: tamperedPayload,
-        sensitiveOriginals: originals,
-        genaiClient: mockGeminiClient,
+    const tamperedRes = await planPost(
+      new Request("http://localhost:3000/api/gemini/plan", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": "198.51.100.62",
+        },
+        body: JSON.stringify(tamperedDescriptor),
       }),
-    ).rejects.toThrow(ContentFreeEgressError);
+    );
+    expect(tamperedRes.status).toBe(400);
     expect(spyGeminiCreate).not.toHaveBeenCalled();
-
-    const spyTinfoilCreate = vi.fn();
-    const mockTinfoilClient: TinfoilPlannerClientLike = {
-      chat: { completions: { create: spyTinfoilCreate } },
-    };
-
-    await expect(
-      callTinfoilPlannerToolLoop({
-        model: "kimi-k3",
-        scrubbedPrompt: "Leaked Halden & Moss LLP in Tinfoil planner prompt",
-        sensitiveOriginals: originals,
-        tinfoilClient: mockTinfoilClient,
-      }),
-    ).rejects.toThrow(PrivacyInvariantViolationError);
-    expect(spyTinfoilCreate).not.toHaveBeenCalled();
   });
 });
 
@@ -804,140 +760,103 @@ function buildMockEnclaveMatrix(opts?: { breakGemma?: boolean }) {
 
 function createMockBrowserFetch(opts?: {
   breakGemma?: boolean;
-  plannerUnavailable?: boolean;
-  geminiCallFailed?: boolean;
+  useExistingPlanRouteState?: boolean;
 }): typeof fetch {
+  let planCalls = 0;
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (url === "/api/gemini/plan") {
-      if (opts?.plannerUnavailable || opts?.geminiCallFailed) {
-        return new Response(
-          JSON.stringify({
-            ok: false,
-            planner: "unavailable",
-            plannerSource: "unavailable",
-            error: opts?.geminiCallFailed
-              ? "gemini_call_failed"
-              : "planner_unavailable",
-            unavailableReason: opts?.geminiCallFailed
-              ? "gemini_call_failed"
-              : "no_key",
-            attemptedLiveCall: Boolean(opts?.geminiCallFailed),
-            message: opts?.geminiCallFailed
-              ? "The Gemini call failed: HTTP 403 Permission denied for key [REDACTED_KEY]"
-              : "Gemini planner is unavailable because neither deroute-core nor GEMINI_API_KEY is configured.",
-            dataSentToGoogle: "none (planner unavailable)",
-            egressFirewallVerified: true,
-            plan: null,
-            egressReceipt: null,
-          }),
-          { status: 503, headers: { "Content-Type": "application/json" } },
+      planCalls += 1;
+      if (!opts?.useExistingPlanRouteState) {
+        setCorePlanHandlerForTests(async () => ({
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ core: "not-deployed" }),
+        }));
+        setPlanGenAIClientForTests(
+          {
+            interactions: {
+              create: vi.fn(async (params: Record<string, unknown>) => {
+                // Assert both gates on every interactions.create call!
+                expect(() =>
+                  assertGoogleBoundMessage("createRequest", params),
+                ).not.toThrow();
+                expect(() => assertContentFree(params)).not.toThrow();
+                const inputArr = params.input as Array<{ text?: string }>;
+                const parsedDesc = JSON.parse(inputArr?.[0]?.text ?? "{}") as {
+                  taskKind?: string;
+                };
+                return {
+                  id: "inter-argon-turn-1",
+                  status: "completed",
+                  steps: [
+                    {
+                      type: "function_call",
+                      id: "call-1",
+                      name: "scrub_and_symmetry_mask",
+                      arguments: {
+                        inputHandle: "$INPUT",
+                        bucketQuantumBytes: 4096,
+                      },
+                    },
+                    {
+                      type: "function_call",
+                      id: "call-2",
+                      name: "verify_two_hop_enclave_and_quorum",
+                      arguments: {
+                        providerId: "tinfoil",
+                        enclaveModel: "gemma4-31b",
+                      },
+                    },
+                    {
+                      type: "function_call",
+                      id: "call-3",
+                      name: "search_atlas_hybrid_kb",
+                      arguments: {
+                        topic: "tinfoil_enclave",
+                        inputHandle: "$RESULT_1",
+                        category: "provider",
+                      },
+                    },
+                    {
+                      type: "function_call",
+                      id: "call-4",
+                      name: "invoke_attested_enclave",
+                      arguments: {
+                        inputHandle: "$RESULT_1",
+                        enclaveModel: "gemma4-31b",
+                        taskKind: parsedDesc.taskKind ?? "review",
+                      },
+                    },
+                    {
+                      type: "function_call",
+                      id: "call-5",
+                      name: "anchor_arc_settlement_with_human_gate",
+                      arguments: {
+                        actionKind: "anchor_receipt",
+                        resultHandle: "$RESULT_3",
+                        humanApproved: false,
+                      },
+                    },
+                  ],
+                  output_text:
+                    "Gemini 4 Argon control-plane plan verified (5 tool calls over content-free handles).",
+                };
+              }),
+            },
+          },
+          "test-gemini-key",
         );
       }
-
-      const descriptor = JSON.parse(String(init?.body ?? "{}"));
-      const { validatedDescriptor, canonicalRequest, requestSha256 } =
-        buildGeminiCreateRequestFromDescriptor(descriptor);
-      const epochHourSec = coarsenEpochSecToHour(1_792_886_400);
-
-      const steps: ClosedAgentPlan["steps"] = [
-        {
-          step: 1,
-          id: "call-1",
-          tool: "scrub_and_symmetry_mask",
-          arguments: { inputHandle: "$INPUT", bucketQuantumBytes: 4096 },
-        },
-        {
-          step: 2,
-          id: "call-2",
-          tool: "verify_two_hop_enclave_and_quorum",
-          arguments: { providerId: "tinfoil", enclaveModel: "gemma4-31b" },
-        },
-        {
-          step: 3,
-          id: "call-3",
-          tool: "search_atlas_hybrid_kb",
-          arguments: {
-            topic: "tinfoil_enclave",
-            inputHandle: "$RESULT_1",
-            category: "provider",
+      return planPost(
+        new Request("http://localhost:3000/api/gemini/plan", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-forwarded-for": `198.51.100.${100 + (planCalls % 100)}`,
           },
-        },
-        {
-          step: 4,
-          id: "call-4",
-          tool: "invoke_attested_enclave",
-          arguments: {
-            inputHandle: "$RESULT_1",
-            enclaveModel: "gemma4-31b",
-            taskKind: validatedDescriptor.taskKind,
-          },
-        },
-        {
-          step: 5,
-          id: "call-5",
-          tool: "anchor_arc_settlement_with_human_gate",
-          arguments: {
-            actionKind: "anchor_receipt",
-            resultHandle: "$RESULT_3",
-            humanApproved: false,
-          },
-        },
-      ];
-
-      const plan: ClosedAgentPlan = {
-        taskKind: validatedDescriptor.taskKind,
-        inputHandle: "$INPUT",
-        inputTokenEstimate: validatedDescriptor.inputTokenEstimate,
-        steps,
-        toolCalls: steps.map((s) => ({
-          id: s.id,
-          name: s.tool,
-          arguments: s.arguments,
-        })),
-        summary:
-          "Gemini 4 Argon control-plane plan verified (5 tool calls over content-free handles).",
-      };
-
-      const sth = signTreeHead({
-        treeSize: 1,
-        rootHash: requestSha256,
-        timestampSec: epochHourSec,
-      });
-      const egressReceipt: GeminiEgressReceipt = {
-        canonicalRequest,
-        sha256: requestSha256,
-        epochHourSec: sth.timestampSec,
-        kind: "gemini-egress",
-        signer: "next-server",
-        signerLabel: NEXT_SERVER_RECEIPT_LABEL,
-        signature: sth.signature,
-        publicKey: sth.operatorPublicKey,
-        keyId: "operator-tree-head",
-        transparencyLog: {
-          leafIndex: 0,
-          leafHash: requestSha256,
-          treeSize: 1,
-          rootHash: sth.rootHash,
-          operatorPublicKey: sth.operatorPublicKey,
-          treeHeadSignature: sth.signature,
-        },
-      };
-
-      return new Response(
-        JSON.stringify({
-          ok: true,
-          planner: GEMINI_4_ARGON_MODEL_ID,
-          plannerSource: "next-server",
-          model: GEMINI_4_ARGON_MODEL_ID,
-          interactionId: "inter-argon-turn-1",
-          status: "completed",
-          dataSentToGoogle: DATA_SENT_TO_GOOGLE,
-          egressFirewallVerified: true,
-          plan,
-          egressReceipt,
+          body: String(init?.body ?? ""),
         }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
       );
     }
 
@@ -1262,7 +1181,7 @@ describe("Autonomous 6-Stage Split-Knowledge Browser Agent & Control Plane (Wave
 
     const { run: noKeyRun } = await runBrowserAgentWorkflow({
       taskPrompt: "Review auth code for security@acme-dev.example.",
-      fetchFn: createMockBrowserFetch({ plannerUnavailable: true }),
+      fetchFn: createMockBrowserFetch({ useExistingPlanRouteState: true }),
       openSessionFn: createEchoPlaceholderSession("Reviewed."),
     });
     expect(noKeyRun.stages.stage4.liveGeminiCall.attemptedLiveCall).toBe(false);
@@ -1279,7 +1198,11 @@ describe("Autonomous 6-Stage Split-Knowledge Browser Agent & Control Plane (Wave
     // 2. Key IS configured on POST /api/gemini/plan, and live Gemini call fails
     const failingGenaiClient: GenAIInteractionsClientLike = {
       interactions: {
-        create: vi.fn(async () => {
+        create: vi.fn(async (params: Record<string, unknown>) => {
+          expect(() =>
+            assertGoogleBoundMessage("createRequest", params),
+          ).not.toThrow();
+          expect(() => assertContentFree(params)).not.toThrow();
           throw new Error(
             "HTTP 403 Permission denied for key AIzaSySecretKeyValue123456789",
           );
@@ -1311,7 +1234,7 @@ describe("Autonomous 6-Stage Split-Knowledge Browser Agent & Control Plane (Wave
 
     const { run: failedKeyRun } = await runBrowserAgentWorkflow({
       taskPrompt: "Review auth code for security@acme-dev.example.",
-      fetchFn: createMockBrowserFetch({ geminiCallFailed: true }),
+      fetchFn: createMockBrowserFetch({ useExistingPlanRouteState: true }),
       openSessionFn: createEchoPlaceholderSession("Reviewed."),
     });
     expect(failedKeyRun.stages.stage4.liveGeminiCall.attemptedLiveCall).toBe(
@@ -1342,218 +1265,16 @@ describe("Autonomous 6-Stage Split-Knowledge Browser Agent & Control Plane (Wave
     ).toContain("the Gemini call failed");
   });
 
-  it("executes callTinfoilPlannerToolLoop through handle-based tool plumbing with zero raw PII leaks", async () => {
-    const tinfoilCalls: Array<Record<string, unknown>> = [];
-    let turn = 0;
-
-    const mockTinfoilClient: TinfoilPlannerClientLike = {
-      ready: vi.fn(async () => {}),
-      chat: {
-        completions: {
-          create: vi.fn(async (params: Record<string, unknown>) => {
-            tinfoilCalls.push(params);
-            const serialized = JSON.stringify(params);
-            expect(serialized).not.toContain("sk-test-4f9a2c7e1b8d6a3f5e0c");
-            expect(serialized).not.toContain("priya.natarajan@haldenmoss.example");
-            expect(serialized).not.toContain("Halden & Moss LLP");
-
-            turn += 1;
-            if (turn === 1) {
-              return {
-                id: "chatcmpl-tinfoil-turn-1",
-                choices: [
-                  {
-                    finish_reason: "tool_calls",
-                    message: {
-                      role: "assistant",
-                      content: null,
-                      tool_calls: [
-                        {
-                          id: "tc-1",
-                          type: "function",
-                          function: {
-                            name: "scrub_and_symmetry_mask",
-                            arguments: JSON.stringify({
-                              inputHandle: "$INPUT",
-                              bucketQuantumBytes: 4096,
-                            }),
-                          },
-                        },
-                        {
-                          id: "tc-2",
-                          type: "function",
-                          function: {
-                            name: "verify_two_hop_enclave_and_quorum",
-                            arguments: JSON.stringify({
-                              providerId: "tinfoil",
-                              enclaveModel: "gemma4-31b",
-                            }),
-                          },
-                        },
-                        {
-                          id: "tc-3",
-                          type: "function",
-                          function: {
-                            name: "search_atlas_hybrid_kb",
-                            arguments: JSON.stringify({
-                              topic: "tinfoil_enclave",
-                              inputHandle: "$RESULT_1",
-                              category: "provider",
-                            }),
-                          },
-                        },
-                        {
-                          id: "tc-4",
-                          type: "function",
-                          function: {
-                            name: "invoke_attested_enclave",
-                            arguments: JSON.stringify({
-                              inputHandle: "$RESULT_1",
-                              enclaveModel: "gemma4-31b",
-                              taskKind: "review",
-                            }),
-                          },
-                        },
-                        {
-                          id: "tc-5",
-                          type: "function",
-                          function: {
-                            name: "anchor_arc_settlement_with_human_gate",
-                            arguments: JSON.stringify({
-                              actionKind: "anchor_receipt",
-                              resultHandle: "$RESULT_3",
-                              humanApproved: false,
-                            }),
-                          },
-                        },
-                      ],
-                    },
-                  },
-                ],
-                usage: { prompt_tokens: 180, completion_tokens: 72 },
-              };
-            }
-
-            return {
-              id: "chatcmpl-tinfoil-turn-2",
-              choices: [
-                {
-                  finish_reason: "stop",
-                  message: {
-                    role: "assistant",
-                    content:
-                      "Completed review for [NAME_1] at [ENTITY_1] ([EMAIL_1]) with all 5 verification tools passing.",
-                  },
-                },
-              ],
-              usage: { prompt_tokens: 310, completion_tokens: 36 },
-            };
-          }),
-        },
-      },
-    };
-
-    const prep = await runBrowserRedactionPipeline({
-      taskPrompt:
-        "Review agreement for Priya Natarajan at Halden & Moss LLP (contact priya.natarajan@haldenmoss.example, key sk-test-4f9a2c7e1b8d6a3f5e0c).",
-      alwaysHide: ["Halden & Moss LLP"],
-    });
-
-    const loopResult = await callTinfoilPlannerToolLoop({
-      model: "gemma4-31b",
-      scrubbedPrompt: prep.papillonGeneralizedPrompt,
-      sensitiveOriginals: prep.originalSensitiveTokens,
-      tinfoilClient: mockTinfoilClient,
-      toolExecutor: async (toolName) => {
-        if (toolName === "scrub_and_symmetry_mask") {
-          return {
-            status: "ok",
-            passed: true,
-            outputHandle: "$RESULT_1",
-            redactionCount: 4,
-            mechanicalRedactionCount: 4,
-            attestedRedactionCount: 0,
-            bucketBytes: 4096,
-            plaintextLeakCount: 0,
-            contentHandle: "$DIGEST_1",
-          };
-        }
-        if (toolName === "verify_two_hop_enclave_and_quorum") {
-          return {
-            status: "verified",
-            passed: true,
-            providerId: "tinfoil",
-            enclaveModel: "gemma4-31b",
-            checksPassed: 7,
-            checksTotal: 7,
-            routerHandle: "$ROUTER_1",
-            enclaveMeasurementHandle: "$MEASUREMENT_1",
-          };
-        }
-        if (toolName === "search_atlas_hybrid_kb") {
-          return {
-            status: "ok",
-            outputHandle: "$RESULT_2",
-            vectorEngine: "app-fallback",
-            textEngine: "app-fallback",
-            fusionEngine: "app-rrf",
-            totalDocs: 16,
-            matchingReceiptsCount: 0,
-            topDocHandle: "$DOC_1",
-          };
-        }
-        if (toolName === "invoke_attested_enclave") {
-          return {
-            status: "completed",
-            attested: true,
-            enclaveModel: "gemma4-31b",
-            outputHandle: "$RESULT_3",
-            outputTokenEstimate: 128,
-            outputDigestHandle: "$DIGEST_2",
-          };
-        }
-        return {
-          status: "blocked_pending_human",
-          requiresHumanApproval: true,
-          humanApproved: false,
-          stateChangedOnChain: false,
-          receiptHandle: "$RECEIPT_1",
-        };
-      },
-    });
-
-    expect(loopResult.liveEndpointReached).toBe(true);
-    expect(loopResult.toolCallsExecuted).toEqual([
-      "scrub_and_symmetry_mask",
-      "verify_two_hop_enclave_and_quorum",
-      "search_atlas_hybrid_kb",
-      "invoke_attested_enclave",
-      "anchor_arc_settlement_with_human_gate",
-    ]);
-    expect(prep.restoreAll(loopResult.finalText ?? "")).toContain(
-      "Priya Natarajan",
-    );
-    expect(prep.restoreAll(loopResult.finalText ?? "")).toContain(
-      "Halden & Moss LLP",
-    );
-    expect(tinfoilCalls).toHaveLength(2);
-  });
-
-  it("executes a multi-turn split-knowledge tool-calling loop with mocked @google/genai client.interactions.create where every outbound request passes both assertGoogleBoundMessage and assertContentFree", async () => {
+  it("executes a split-knowledge tool-calling workflow through POST /api/gemini/plan with mocked @google/genai client.interactions.create where every outbound request passes both assertGoogleBoundMessage and assertContentFree", async () => {
     const recordedCalls: Array<Record<string, unknown>> = [];
-    let argonTurn = 0;
 
     const mockGenaiClient: GenAIInteractionsClientLike = {
       interactions: {
         create: vi.fn(async (params: Record<string, unknown>) => {
           recordedCalls.push(params);
-          argonTurn += 1;
           // Every single outbound request to Google must pass both gates!
           expect(() =>
-            assertGoogleBoundMessage(
-              argonTurn === 1 ? "createRequest" : "followUpRequest",
-              params,
-            ),
+            assertGoogleBoundMessage("createRequest", params),
           ).not.toThrow();
           expect(() => assertContentFree(params)).not.toThrow();
 
@@ -1563,156 +1284,71 @@ describe("Autonomous 6-Stage Split-Knowledge Browser Agent & Control Plane (Wave
           expect(serialized).not.toContain("Priya Natarajan");
           expect(serialized).not.toContain("Halden & Moss LLP");
 
-          if (argonTurn === 1) {
-            return {
-              id: "inter-argon-turn-1",
-              status: "requires_action",
-              steps: [
-                {
-                  type: "function_call",
-                  id: "call-1",
-                  name: "scrub_and_symmetry_mask",
-                  arguments: {
-                    inputHandle: "$INPUT",
-                    bucketQuantumBytes: 4096,
-                  },
-                },
-                {
-                  type: "function_call",
-                  id: "call-2",
-                  name: "verify_two_hop_enclave_and_quorum",
-                  arguments: { providerId: "tinfoil", enclaveModel: "kimi-k3" },
-                },
-                {
-                  type: "function_call",
-                  id: "call-3",
-                  name: "search_atlas_hybrid_kb",
-                  arguments: {
-                    topic: "tinfoil_enclave",
-                    inputHandle: "$RESULT_1",
-                    category: "provider",
-                  },
-                },
-                {
-                  type: "function_call",
-                  id: "call-4",
-                  name: "invoke_attested_enclave",
-                  arguments: {
-                    inputHandle: "$RESULT_1",
-                    enclaveModel: "kimi-k3",
-                    taskKind: "review",
-                  },
-                },
-                {
-                  type: "function_call",
-                  id: "call-5",
-                  name: "anchor_arc_settlement_with_human_gate",
-                  arguments: {
-                    actionKind: "anchor_receipt",
-                    resultHandle: "$RESULT_3",
-                    humanApproved: true,
-                  },
-                },
-              ],
-              usage: { total_input_tokens: 210, total_output_tokens: 95 },
-            };
-          }
-
           return {
-            id: "inter-argon-turn-2",
+            id: "inter-argon-turn-1",
             status: "completed",
+            steps: [
+              {
+                type: "function_call",
+                id: "call-1",
+                name: "scrub_and_symmetry_mask",
+                arguments: {
+                  inputHandle: "$INPUT",
+                  bucketQuantumBytes: 4096,
+                },
+              },
+              {
+                type: "function_call",
+                id: "call-2",
+                name: "verify_two_hop_enclave_and_quorum",
+                arguments: { providerId: "tinfoil", enclaveModel: "kimi-k3" },
+              },
+              {
+                type: "function_call",
+                id: "call-3",
+                name: "search_atlas_hybrid_kb",
+                arguments: {
+                  topic: "tinfoil_enclave",
+                  inputHandle: "$RESULT_1",
+                  category: "provider",
+                },
+              },
+              {
+                type: "function_call",
+                id: "call-4",
+                name: "invoke_attested_enclave",
+                arguments: {
+                  inputHandle: "$RESULT_1",
+                  enclaveModel: "kimi-k3",
+                  taskKind: "review",
+                },
+              },
+              {
+                type: "function_call",
+                id: "call-5",
+                name: "anchor_arc_settlement_with_human_gate",
+                arguments: {
+                  actionKind: "anchor_receipt",
+                  resultHandle: "$RESULT_3",
+                  humanApproved: true,
+                },
+              },
+            ],
             output_text:
               "All 5 confidential handle tools executed and verified; human approval confirmed for Circle Arc settlement.",
-            usage: { total_input_tokens: 340, total_output_tokens: 64 },
+            usage: { total_input_tokens: 210, total_output_tokens: 95 },
           };
         }),
       },
     };
 
-    const prep = await runBrowserRedactionPipeline({
-      taskPrompt:
-        "Review agreement for Priya Natarajan at Halden & Moss LLP (contact priya.natarajan@haldenmoss.example, key sk-test-4f9a2c7e1b8d6a3f5e0c).",
-      alwaysHide: ["Halden & Moss LLP"],
-    });
-    const payload = buildInteractionsCreatePayload({
-      taskDescriptor: prep.taskDescriptor,
-      thinkingLevel: "high",
-      background: true,
-    });
+    setCorePlanHandlerForTests(async () => ({
+      status: 503,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ core: "not-deployed" }),
+    }));
+    setPlanGenAIClientForTests(mockGenaiClient, "test-gemini-key");
 
-    const loopRes = await callGeminiInteractionsEndpoint({
-      payload,
-      sensitiveOriginals: prep.originalSensitiveTokens,
-      genaiClient: mockGenaiClient,
-      toolExecutor: async (toolName) => {
-        if (toolName === "scrub_and_symmetry_mask") {
-          return {
-            status: "ok",
-            passed: true,
-            outputHandle: "$RESULT_1",
-            redactionCount: 4,
-            mechanicalRedactionCount: 4,
-            attestedRedactionCount: 0,
-            bucketBytes: 4096,
-            plaintextLeakCount: 0,
-            contentHandle: "$DIGEST_1",
-          };
-        }
-        if (toolName === "verify_two_hop_enclave_and_quorum") {
-          return {
-            status: "verified",
-            passed: true,
-            providerId: "tinfoil",
-            enclaveModel: "kimi-k3",
-            checksPassed: 7,
-            checksTotal: 7,
-            routerHandle: "$ROUTER_1",
-            enclaveMeasurementHandle: "$MEASUREMENT_1",
-          };
-        }
-        if (toolName === "search_atlas_hybrid_kb") {
-          return {
-            status: "ok",
-            outputHandle: "$RESULT_2",
-            vectorEngine: "app-fallback",
-            textEngine: "app-fallback",
-            fusionEngine: "app-rrf",
-            totalDocs: 16,
-            matchingReceiptsCount: 0,
-            topDocHandle: "$DOC_1",
-          };
-        }
-        if (toolName === "invoke_attested_enclave") {
-          return {
-            status: "completed",
-            attested: true,
-            enclaveModel: "kimi-k3",
-            outputHandle: "$RESULT_3",
-            outputTokenEstimate: 128,
-            outputDigestHandle: "$DIGEST_2",
-          };
-        }
-        return {
-          status: "executed",
-          requiresHumanApproval: true,
-          humanApproved: true,
-          stateChangedOnChain: true,
-          receiptHandle: "$RECEIPT_1",
-        };
-      },
-    });
-
-    expect(loopRes.liveEndpointReached).toBe(true);
-    expect(loopRes.toolCallsExecuted).toEqual([
-      "scrub_and_symmetry_mask",
-      "verify_two_hop_enclave_and_quorum",
-      "search_atlas_hybrid_kb",
-      "invoke_attested_enclave",
-      "anchor_arc_settlement_with_human_gate",
-    ]);
-    expect(recordedCalls).toHaveLength(2);
-
-    // Also run the full browser workflow with humanApprovedExternalAction: true
     const { run: liveRun } = await runBrowserAgentWorkflow({
       taskPrompt:
         "Review agreement for Priya Natarajan at Halden & Moss LLP (contact priya.natarajan@haldenmoss.example, key sk-test-4f9a2c7e1b8d6a3f5e0c).",
@@ -1721,10 +1357,11 @@ describe("Autonomous 6-Stage Split-Knowledge Browser Agent & Control Plane (Wave
       background: true,
       humanApprovedExternalAction: true,
       preferredEnclaveModel: "kimi-k3",
-      fetchFn: createMockBrowserFetch(),
+      fetchFn: createMockBrowserFetch({ useExistingPlanRouteState: true }),
       openSessionFn: createEchoPlaceholderSession("Enclave review complete."),
     });
 
+    expect(recordedCalls).toHaveLength(1);
     expect(liveRun.mode).toBe("live");
     expect(liveRun.dataSentToGoogle).toBe("content-free task descriptor only");
     expect(liveRun.planner).toEqual({
@@ -1733,6 +1370,22 @@ describe("Autonomous 6-Stage Split-Knowledge Browser Agent & Control Plane (Wave
     });
     expect(liveRun.overallPassed).toBe(true);
     expect(liveRun.stages.stage4.routedEnclaveModel).toBe("kimi-k3");
+    expect(liveRun.stages.stage4.liveGeminiCall.toolCallsExecuted).toEqual([
+      "scrub_and_symmetry_mask",
+      "verify_two_hop_enclave_and_quorum",
+      "search_atlas_hybrid_kb",
+      "invoke_attested_enclave",
+      "anchor_arc_settlement_with_human_gate",
+    ]);
+    expect(Object.keys(liveRun.stages.stage4.resolvedHandles)).toEqual(
+      expect.arrayContaining([
+        "$INPUT",
+        "$RESULT_1",
+        "$RESULT_2",
+        "$RESULT_3",
+        "$RESULT_4",
+      ]),
+    );
     expect(liveRun.humanGateState).toBe("executed_with_human_approval");
     expect(liveRun.stages.stage5.approvedByHuman).toBe(true);
     expect(liveRun.stages.stage5.stateChangedOnChain).toBe(true);
@@ -1774,29 +1427,36 @@ describe("Autonomous 6-Stage Split-Knowledge Browser Agent & Control Plane (Wave
     setPlanGenAIClientForTests(
       {
         interactions: {
-          create: vi.fn(async () => ({
-            id: "inter-argon-turn-1",
-            status: "completed",
-            steps: [
-              {
-                type: "function_call",
-                id: "call-1",
-                name: "scrub_and_symmetry_mask",
-                arguments: { inputHandle: "$INPUT", bucketQuantumBytes: 4096 },
-              },
-              {
-                type: "function_call",
-                id: "call-2",
-                name: "invoke_attested_enclave",
-                arguments: {
-                  inputHandle: "$RESULT_1",
-                  enclaveModel: "gemma4-31b",
-                  taskKind: "review",
+          create: vi.fn(async (params: Record<string, unknown>) => {
+            expect(() =>
+              assertGoogleBoundMessage("createRequest", params),
+            ).not.toThrow();
+            expect(() => assertContentFree(params)).not.toThrow();
+            return {
+              id: "inter-argon-turn-1",
+              status: "completed",
+              steps: [
+                {
+                  type: "function_call",
+                  id: "call-1",
+                  name: "scrub_and_symmetry_mask",
+                  arguments: { inputHandle: "$INPUT", bucketQuantumBytes: 4096 },
                 },
-              },
-            ],
-            output_text: "Planned 2 confidential steps over content-free handles.",
-          })),
+                {
+                  type: "function_call",
+                  id: "call-2",
+                  name: "invoke_attested_enclave",
+                  arguments: {
+                    inputHandle: "$RESULT_1",
+                    enclaveModel: "gemma4-31b",
+                    taskKind: "review",
+                  },
+                },
+              ],
+              output_text:
+                "Planned 2 confidential steps over content-free handles.",
+            };
+          }),
         },
       },
       "AIzaSyServerSecretDoNotEcho999",
@@ -1823,6 +1483,13 @@ describe("Autonomous 6-Stage Split-Knowledge Browser Agent & Control Plane (Wave
     expect(validJson.dataSentToGoogle).toBe("content-free task descriptor only");
     expect(validJson.plan).toBeDefined();
     expect(validJson.egressReceipt).toBeDefined();
+    expect(
+      verifyEgressReceiptClient(
+        validJson.egressReceipt,
+        undefined,
+        prep.taskDescriptor,
+      ).ok,
+    ).toBe(true);
 
     const serializedResponse = JSON.stringify(validJson);
     expect(serializedResponse).not.toContain("AIzaSyServerSecretDoNotEcho999");

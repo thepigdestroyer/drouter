@@ -5,12 +5,15 @@ import {
   DEFAULT_CONFIDENTIAL_SPACE_AUDIENCE,
   verifyConfidentialSpaceAttestation,
 } from "@/lib/attestation/confidential-space";
+import expectedCoreDigestsJson from "@/lib/attestation/expected-core-digests.json";
 import {
-  ALLOWED_PLANNER_TOOLS,
-  ARGON_CONFIDENTIAL_TOOLS,
   assertContentFree,
   assertGoogleBoundMessage,
   assertTaskDescriptorSchema,
+} from "@/lib/gemini/egress-schemas";
+import {
+  ALLOWED_PLANNER_TOOLS,
+  ARGON_CONFIDENTIAL_TOOLS,
   CLOSED_CALL_ID_REGEX,
   ContentFreeEgressError,
   GEMINI_4_ARGON_MODEL_ID,
@@ -25,10 +28,12 @@ import {
   type PlannerToolName,
   type TaskDescriptor,
   type TaskKind,
-} from "@/lib/gemini";
+} from "@/lib/gemini/shared";
 import {
   canonicalJson,
-  treeHeadSigningPayload,
+  createVerificationLogEvent,
+  verifyTransparencyProofBundleClient,
+  type AuditStep,
 } from "@/lib/transparency/log";
 
 export const SEALED_GOOGLE_COMPUTER_RECEIPT_LABEL =
@@ -50,27 +55,24 @@ export function extractEd25519RawPublicKeyHex(rawKeyHex: string): string {
   return cleaned;
 }
 
-export function getExpectedCoreImageDigestsFromEnv(
+export const COMMITTED_CORE_IMAGE_DIGESTS: readonly string[] =
+  expectedCoreDigestsJson.digests;
+
+export function getExpectedCoreImageDigests(
   override?: readonly string[],
 ): string[] {
   if (override && override.length > 0) {
     return override.map((d) => d.trim()).filter(Boolean);
   }
-  const raw =
-    (typeof process !== "undefined" &&
-      (process.env?.NEXT_PUBLIC_CORE_IMAGE_DIGESTS ||
-        process.env?.CORE_IMAGE_DIGESTS)) ||
-    "";
-  return raw
-    .split(",")
-    .map((d) => d.trim())
-    .filter(Boolean);
+  return COMMITTED_CORE_IMAGE_DIGESTS.map((d) => d.trim()).filter(Boolean);
 }
+
+export const getExpectedCoreImageDigestsFromEnv = getExpectedCoreImageDigests;
 
 /**
  * Fetches `/api/core/attestation` and verifies the Google Cloud Confidential Space
- * PKI attestation token using `verifyConfidentialSpaceAttestation` and the expected
- * container image digests from `NEXT_PUBLIC_CORE_IMAGE_DIGESTS` / `CORE_IMAGE_DIGESTS`.
+ * PKI attestation token using `verifyConfidentialSpaceAttestation` and the committed
+ * expected container image digests from `src/lib/attestation/expected-core-digests.json`.
  * Returns the hardware-attested Ed25519 `keys.egress` public key in 64-char hex.
  */
 export async function verifyCoreAttestationForEgressKey(opts?: {
@@ -81,12 +83,12 @@ export async function verifyCoreAttestationForEgressKey(opts?: {
   nowSec?: number;
 }): Promise<string> {
   const fetchImpl = opts?.fetchFn ?? globalThis.fetch;
-  const expectedImageDigests = getExpectedCoreImageDigestsFromEnv(
+  const expectedImageDigests = getExpectedCoreImageDigests(
     opts?.expectedImageDigests,
   );
   if (expectedImageDigests.length === 0) {
     throw new Error(
-      "Missing expected Confidential Space image digests (NEXT_PUBLIC_CORE_IMAGE_DIGESTS).",
+      "Missing expected Confidential Space image digests in expected-core-digests.json.",
     );
   }
 
@@ -714,7 +716,7 @@ export function verifyEgressReceiptClient(
       };
     }
 
-    // signer === "next-server": verify transparency log tree-head signature
+    // signer === "next-server": verify leaf commitment to receipt.sha256, RFC 6962 inclusion proof, and signed tree head
     const tLog =
       rec.transparencyLog && typeof rec.transparencyLog === "object"
         ? (rec.transparencyLog as Record<string, unknown>)
@@ -726,28 +728,76 @@ export function verifyEgressReceiptClient(
       !/^[0-9a-f]{64}$/i.test(tLog.rootHash) ||
       typeof tLog.leafHash !== "string" ||
       !/^[0-9a-f]{64}$/i.test(tLog.leafHash) ||
-      typeof tLog.leafIndex !== "number"
+      typeof tLog.leafIndex !== "number" ||
+      !Array.isArray(tLog.auditPath)
     ) {
       return {
         ok: false,
-        detail: "Server-recorded receipt is missing valid transparencyLog metadata.",
+        detail: "Server-recorded receipt is missing valid transparencyLog inclusion proof metadata.",
       };
     }
 
-    const sthPayload = treeHeadSigningPayload({
-      treeSize: tLog.treeSize,
-      rootHash: tLog.rootHash.toLowerCase(),
+    const expectedLeafEvent = createVerificationLogEvent({
+      index: tLog.leafIndex,
+      kind: "verification_event",
+      nodeId: "tinfoil-router",
+      nodeKind: "tinfoil",
+      ok: true,
+      measurement: sha256Digest,
+      evidenceHash: sha256Digest,
       timestampSec: epochHourSec,
     });
-    const sthValid = ed25519.verify(
-      hexToBytes(sigHex),
-      sthPayload,
-      hexToBytes(pubHex),
-    );
-    if (!sthValid) {
+    const actualLeafHash = tLog.leafHash.toLowerCase();
+    if (actualLeafHash !== expectedLeafEvent.leafHash.toLowerCase()) {
       return {
         ok: false,
-        detail: "Operator tree-head Ed25519 signature verification failed on server receipt.",
+        detail:
+          "Server-recorded receipt leafHash does not commit to receipt.sha256.",
+      };
+    }
+
+    const auditPath: AuditStep[] = [];
+    for (const step of tLog.auditPath) {
+      if (
+        !step ||
+        typeof step !== "object" ||
+        ((step as { side?: unknown }).side !== "left" &&
+          (step as { side?: unknown }).side !== "right") ||
+        typeof (step as { hash?: unknown }).hash !== "string" ||
+        !/^[0-9a-f]{64}$/i.test((step as { hash: string }).hash)
+      ) {
+        return {
+          ok: false,
+          detail: "Invalid auditPath step in server-recorded receipt.",
+        };
+      }
+      auditPath.push({
+        side: (step as { side: "left" | "right" }).side,
+        hash: (step as { hash: string }).hash.toLowerCase(),
+      });
+    }
+
+    const proofVerification = verifyTransparencyProofBundleClient({
+      sth: {
+        treeSize: tLog.treeSize,
+        rootHash: tLog.rootHash.toLowerCase(),
+        timestampSec: epochHourSec,
+        operatorPublicKey: pubHex,
+        signature: sigHex,
+      },
+      expectedOperatorPublicKey: pubHex,
+      inclusionProof: {
+        leafHash: actualLeafHash,
+        root: tLog.rootHash.toLowerCase(),
+        auditPath,
+        leafIndex: tLog.leafIndex,
+        treeSize: tLog.treeSize,
+      },
+    });
+    if (!proofVerification.ok) {
+      return {
+        ok: false,
+        detail: proofVerification.detail,
       };
     }
 
@@ -766,9 +816,10 @@ export function verifyEgressReceiptClient(
       keyId: "operator-tree-head",
       transparencyLog: {
         leafIndex: tLog.leafIndex,
-        leafHash: tLog.leafHash.toLowerCase(),
+        leafHash: actualLeafHash,
         treeSize: tLog.treeSize,
         rootHash: tLog.rootHash.toLowerCase(),
+        auditPath,
         operatorPublicKey: pubHex,
         treeHeadSignature: sigHex,
       },
@@ -776,7 +827,7 @@ export function verifyEgressReceiptClient(
     return {
       ok: true,
       detail:
-        "Server-recorded egress receipt SHA-256, closed schema, and transparency log tree-head signature verified.",
+        "Server-recorded egress receipt SHA-256, closed schema, RFC 6962 leaf inclusion proof, and transparency log tree-head signature verified.",
       receipt: normalized,
     };
   } catch {

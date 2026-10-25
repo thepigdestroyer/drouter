@@ -28,7 +28,11 @@ import {
   type ClosedAgentPlan,
   type GeminiEgressReceipt,
 } from "@/lib/gemini";
-import { coarsenEpochSecToHour, signTreeHead } from "@/lib/transparency/log";
+import {
+  coarsenEpochSecToHour,
+  createVerificationLogEvent,
+  signTreeHead,
+} from "@/lib/transparency/log";
 import {
   AGENT_INTRO_SENTENCE,
   APPROVAL_CARD_QUESTION,
@@ -54,7 +58,7 @@ import {
 
 const TEST_NOW_SEC = 1_792_886_400;
 const TEST_CORE_IMAGE_DIGEST =
-  "sha256:4a5d8e2c79a416b1f81c36f0b9e1e2c5f9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4";
+  "sha256:82be4787cf95bc8776b1e4c0b91dabfc4e0b6fe967d0200203be7dd0c6c64c86";
 const SEALED_SECRET_KEY = new Uint8Array(32).fill(0x21);
 const SEALED_PUBLIC_KEY_HEX = bytesToHex(
   ed25519.getPublicKey(SEALED_SECRET_KEY),
@@ -464,9 +468,19 @@ function createMockBrowserFetch(opts?: {
           keyId: "egress-signing",
         };
       } else {
+        const leafEvent = createVerificationLogEvent({
+          index: 0,
+          kind: "verification_event",
+          nodeId: "tinfoil-router",
+          nodeKind: "tinfoil",
+          ok: true,
+          measurement: requestSha256,
+          evidenceHash: requestSha256,
+          timestampSec: epochHourSec,
+        });
         const sth = signTreeHead({
           treeSize: 1,
-          rootHash: requestSha256,
+          rootHash: leafEvent.leafHash,
           timestampSec: epochHourSec,
         });
         egressReceipt = {
@@ -481,9 +495,10 @@ function createMockBrowserFetch(opts?: {
           keyId: "operator-tree-head",
           transparencyLog: {
             leafIndex: 0,
-            leafHash: requestSha256,
+            leafHash: leafEvent.leafHash,
             treeSize: 1,
             rootHash: sth.rootHash,
+            auditPath: [],
             operatorPublicKey: sth.operatorPublicKey,
             treeHeadSignature: sth.signature,
           },

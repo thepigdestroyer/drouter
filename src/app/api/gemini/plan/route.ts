@@ -18,6 +18,8 @@ import {
   assertContentFree,
   assertGoogleBoundMessage,
   assertValidToolCall,
+} from "@/lib/gemini/egress-schemas";
+import {
   ContentFreeEgressError,
   DATA_SENT_TO_GOOGLE,
   GEMINI_4_ARGON_MODEL_ID,
@@ -33,7 +35,7 @@ import {
   type GeminiEgressReceipt,
   type GenAIInteractionsClientLike,
   type PlannerToolName,
-} from "@/lib/gemini";
+} from "@/lib/gemini/shared";
 import {
   createGlobalBucketLimiter,
   createTokenBucketLimiter,
@@ -374,6 +376,7 @@ export async function POST(request: Request) {
             leafHash: logEntry.event.leafHash,
             treeSize: logEntry.signedTreeHead.treeSize,
             rootHash: logEntry.signedTreeHead.rootHash,
+            auditPath: logEntry.inclusionProof.auditPath,
             operatorPublicKey: logEntry.signedTreeHead.operatorPublicKey,
             treeHeadSignature: logEntry.signedTreeHead.signature,
           },
@@ -606,6 +609,7 @@ export async function POST(request: Request) {
         leafHash: logEntry.event.leafHash,
         treeSize: logEntry.signedTreeHead.treeSize,
         rootHash: logEntry.signedTreeHead.rootHash,
+        auditPath: logEntry.inclusionProof.auditPath,
         operatorPublicKey: logEntry.signedTreeHead.operatorPublicKey,
         treeHeadSignature: logEntry.signedTreeHead.signature,
       },

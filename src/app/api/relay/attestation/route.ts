@@ -15,6 +15,7 @@ const limiter = createTokenBucketLimiter({
 
 const ALLOWED_REPOS = new Set<string>([
   "tinfoilsh/confidential-model-router",
+  "tinfoilsh/confidential-pii-cpu",
   "tinfoilsh/confidential-kimi-k3",
   "tinfoilsh/confidential-glm5-3-nvfp4",
   "tinfoilsh/confidential-deepseek-v4-1-flash",

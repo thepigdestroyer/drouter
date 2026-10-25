@@ -79,6 +79,9 @@ const globalForAttestedPii = globalThis as unknown as {
   __drouterVerifiedPiiRelayClientPromise?: Promise<CachedVerifiedPiiClient>;
   __drouterAttestedPiiResultCache?: Map<string, AttestedPiiFilterResult>;
   __drouterTestPiiSecureClient?: AttestedPiiSecureClientLike | null;
+  __drouterTestPiiSecureClientFactory?:
+    | ((opts: Record<string, unknown>) => AttestedPiiSecureClientLike)
+    | null;
 };
 
 function getResultCache(): Map<string, AttestedPiiFilterResult> {
@@ -95,6 +98,16 @@ export function setAttestedPiiFilterClientForTests(
   client: AttestedPiiSecureClientLike | null,
 ): void {
   globalForAttestedPii.__drouterTestPiiSecureClient = client;
+  globalForAttestedPii.__drouterVerifiedPiiClientPromise = undefined;
+  globalForAttestedPii.__drouterVerifiedPiiRelayClientPromise = undefined;
+}
+
+export function setAttestedPiiSecureClientFactoryForTests(
+  factory:
+    | ((opts: Record<string, unknown>) => AttestedPiiSecureClientLike)
+    | null,
+): void {
+  globalForAttestedPii.__drouterTestPiiSecureClientFactory = factory;
   globalForAttestedPii.__drouterVerifiedPiiClientPromise = undefined;
   globalForAttestedPii.__drouterVerifiedPiiRelayClientPromise = undefined;
 }
@@ -157,7 +170,7 @@ async function getVerifiedPiiSecureClient(opts?: {
       enclaveHost: doc?.enclaveHost || "pii-filter.tinfoil.sh",
       releaseTag: doc?.releaseTag,
       securityVerified: Boolean(doc?.securityVerified),
-      viaRelay: false,
+      viaRelay: Boolean(opts?.useRelay) || typeof window !== "undefined",
     };
   }
 
@@ -167,7 +180,6 @@ async function getVerifiedPiiSecureClient(opts?: {
   if (viaRelay) {
     if (!globalForAttestedPii.__drouterVerifiedPiiRelayClientPromise) {
       globalForAttestedPii.__drouterVerifiedPiiRelayClientPromise = (async () => {
-        const { SecureClient } = await import("tinfoil");
         const origin =
           opts?.relayOrigin ??
           (typeof window !== "undefined" && window.location?.origin
@@ -179,14 +191,22 @@ async function getVerifiedPiiSecureClient(opts?: {
           ? `${origin}/api/relay`
           : undefined;
 
-        const client = new SecureClient({
+        const clientOptions = {
           baseURL,
+          enclaveURL: TINFOIL_PII_FILTER_ENCLAVE_URL,
+          configRepo: TINFOIL_PII_FILTER_CONFIG_REPO,
           attestationBundleURL,
           userCacheSecret,
-        });
+        };
+
+        const client = globalForAttestedPii.__drouterTestPiiSecureClientFactory
+          ? globalForAttestedPii.__drouterTestPiiSecureClientFactory(
+              clientOptions,
+            )
+          : new (await import("tinfoil")).SecureClient(clientOptions);
 
         await client.ready();
-        const doc = client.getVerificationDocument();
+        const doc = await client.getVerificationDocument();
 
         // Wrap internal transport fetch to pad JSON payloads to 4096-byte power-of-two buckets
         // and attach X-Tinfoil-Model: pii-filter before HPKE sealing (matching src/lib/tinfoil/client.ts).
@@ -360,6 +380,7 @@ export async function attestedPiiFilter(
     typeof process !== "undefined" &&
     process.env?.VITEST === "true" &&
     !globalForAttestedPii.__drouterTestPiiSecureClient &&
+    !globalForAttestedPii.__drouterTestPiiSecureClientFactory &&
     !opts?.relayOrigin
   ) {
     return buildMechanicalFallback(text, opts?.customTerms);

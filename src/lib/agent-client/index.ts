@@ -3,15 +3,17 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 import { nodeIdFor } from "@/lib/arc/nodes";
 import {
-  ALLOWED_PLANNER_TOOLS,
-  ARGON_MAX_UNIFIED_CONTEXT_TOKENS,
   assertContentFree,
   assertGoogleBoundMessage,
-  assertOutboundPrivacyInvariant,
   assertValidToolCall,
-  bucketScrubRedactionCount,
   buildInteractionsCreatePayload,
   buildTaskDescriptor,
+} from "@/lib/gemini/egress-schemas";
+import {
+  ALLOWED_PLANNER_TOOLS,
+  ARGON_MAX_UNIFIED_CONTEXT_TOKENS,
+  assertOutboundPrivacyInvariant,
+  bucketScrubRedactionCount,
   classifyTaskKind,
   DATA_SENT_TO_GOOGLE,
   DEFAULT_TASK_PROMPT,
@@ -43,7 +45,7 @@ import {
   type Stage6MultimodalReadoutResult,
   type SubagentTaskTrace,
   type TaskDescriptor,
-} from "@/lib/gemini";
+} from "@/lib/gemini/shared";
 import {
   attestedPiiFilter as realAttestedPiiFilter,
   TINFOIL_PII_FILTER_MODEL_ID,
@@ -86,8 +88,10 @@ import {
   assertClosedPlanSchema,
   assertNoDuplicateJsonKeys,
   buildGeminiCreateRequestFromDescriptor,
+  COMMITTED_CORE_IMAGE_DIGESTS,
   extractEd25519RawPublicKeyHex,
   geminiEgressSigningPayload,
+  getExpectedCoreImageDigests,
   getExpectedCoreImageDigestsFromEnv,
   NEXT_SERVER_RECEIPT_LABEL,
   SEALED_GOOGLE_COMPUTER_RECEIPT_LABEL,
@@ -101,10 +105,12 @@ export {
   assertNoDuplicateJsonKeys,
   buildGeminiCreateRequestFromDescriptor,
   clearCorpusCache,
+  COMMITTED_CORE_IMAGE_DIGESTS,
   computeCorpusContentSha256,
   extractEd25519RawPublicKeyHex,
   fetchWholeCorpusAndRankInBrowser,
   geminiEgressSigningPayload,
+  getExpectedCoreImageDigests,
   getExpectedCoreImageDigestsFromEnv,
   LOOKUP_TOPICS,
   NEXT_SERVER_RECEIPT_LABEL,

@@ -19,10 +19,14 @@
  *   `ARGON_CONFIDENTIAL_TOOLS`, `subagent_routing`, and `metadata`.
  */
 
+import { estimateTokens } from "@/lib/privacy/padding";
 import { canonicalJson } from "@/lib/transparency/log";
 import {
+  ALLOW_LEGACY_ORCHESTRATOR_SHA256_UNTIL_MIGRATED,
   ALLOWED_ATLAS_CATEGORIES,
   ALLOWED_ATLAS_TOPICS,
+  ALLOWED_HANDLE_KEYS,
+  ALLOWED_HASH_KEYS,
   ALLOWED_PLANNER_TOOLS,
   ALLOWED_REDACTION_COUNT_KEYS,
   ALLOWED_VERIFICATION_KEYS,
@@ -30,6 +34,7 @@ import {
   ARGON_CONFIDENTIAL_TOOLS,
   ARGON_MAX_UNIFIED_CONTEXT_TOKENS,
   CLOSED_CALL_ID_REGEX,
+  classifyTaskKind,
   ContentFreeEgressError,
   DATA_SENT_TO_GOOGLE,
   DIGEST_HANDLE_REGEX,
@@ -40,6 +45,7 @@ import {
   INPUT_OR_RESULT_HANDLE_REGEX,
   isPowerOfTwoInRange,
   LOOKUP_TOPICS,
+  MAX_GOOGLE_BOUND_HEX_LENGTH,
   MAX_HANDLE_INDEX,
   MAX_PLANNER_STEPS,
   MAX_PLAINTEXT_LEAK_COUNT,
@@ -49,13 +55,19 @@ import {
   RECEIPT_HANDLE_REGEX,
   RESULT_HANDLE_REGEX,
   ROUTER_HANDLE_REGEX,
+  roundUpToPowerOfTwo,
+  SAFE_CALL_ID_REGEX,
   SPLIT_KNOWLEDGE_SYSTEM_INSTRUCTION,
+  ToolPolicyViolationError,
   VALID_TASK_KINDS,
   VALID_THINKING_LEVELS,
+  validateArgonRequestConfig,
   type ArgonInteractionToolDeclaration,
+  type ArgonThinkingLevel,
   type InteractionsCreatePayload,
   type PlannerToolName,
   type TaskDescriptor,
+  type TaskKind,
 } from "./shared";
 
 export {
@@ -1509,4 +1521,1410 @@ export function assertGoogleBoundMessage(
     `<unknown_schema_kind:${String(kind)}>`,
     path ?? "$",
   );
+}
+
+const SHORT_HEX_REGEX = /^0x(?:[0-9a-f]{2}){1,7}$/;
+const FIXED_SHA256_HEX_REGEX = /^0x[0-9a-f]{64}$/;
+
+export const ALLOWED_NUMERIC_KEYS: ReadonlySet<string> = new Set<string>([
+  "inputTokenEstimate",
+  "max_output_tokens",
+  "max_context_tokens",
+  "max_tokens",
+  "bucketQuantumBytes",
+  "bucketBytes",
+  "redactionCount",
+  "mechanicalRedactionCount",
+  "attestedRedactionCount",
+  "plaintextLeakCount",
+  "checksPassed",
+  "checksTotal",
+  "totalDocs",
+  "matchingReceiptsCount",
+  "outputTokenEstimate",
+  ...ALLOWED_REDACTION_COUNT_KEYS,
+]);
+
+export const ALLOWED_BOOLEAN_KEYS: ReadonlySet<string> = new Set<string>([
+  "background",
+  "store",
+  "humanApproved",
+  "passed",
+  "selfHealed",
+  "failedOver",
+  "attested",
+  "requiresHumanApproval",
+  "stateChangedOnChain",
+  "applyAttestedFilter",
+  ...ALLOWED_VERIFICATION_KEYS,
+]);
+
+export const ALLOWED_ARRAY_KEYS: ReadonlySet<string> = new Set<string>([
+  "input",
+  "tools",
+  "allowedTools",
+  "required",
+  "enum",
+  "messages",
+  "tool_calls",
+]);
+
+const ALLOWED_STRING_ARRAY_KEYS: ReadonlySet<string> = new Set<string>([
+  "allowedTools",
+  "required",
+  "enum",
+]);
+
+const ALLOWED_JSON_STRING_KEYS: ReadonlySet<string> = new Set<string>([
+  "text",
+  "content",
+  "result",
+  "arguments",
+]);
+
+const ALLOWED_OBJECT_ONLY_KEYS: ReadonlySet<string> = new Set<string>([
+  "taskDescriptor",
+  "redactionCounts",
+  "verification",
+  "generation_config",
+  "subagent_routing",
+  "metadata",
+  "parameters",
+  "properties",
+  "arguments",
+]);
+
+const ALLOWED_STATIC_SCHEMA_DESCRIPTIONS = new Set<string>([
+  SPLIT_KNOWLEDGE_SYSTEM_INSTRUCTION,
+  ...ARGON_CONFIDENTIAL_TOOLS.flatMap((t) => [
+    t.description,
+    ...Object.values(t.parameters.properties).map((p) => p.description),
+  ]),
+]);
+
+export const ALLOWED_CONTENT_FREE_ENUMS: ReadonlySet<string> = new Set<string>([
+  GEMINI_4_ARGON_MODEL_ID,
+  ARGON_COMPANION_MODELS.sandboxAgent,
+  ARGON_COMPANION_MODELS.parallelSubagentFast,
+  ARGON_COMPANION_MODELS.parallelSubagentLite,
+  ARGON_COMPANION_MODELS.deepResearch,
+  ARGON_COMPANION_MODELS.realtimeVoice,
+  ARGON_COMPANION_MODELS.voiceTts,
+  ARGON_COMPANION_MODELS.confidentialOpenCloud,
+  ARGON_COMPANION_MODELS.confidentialOnDevice,
+  ARGON_COMPANION_MODELS.tinfoilEnclaveGemma,
+  ARGON_COMPANION_MODELS.tinfoilEnclaveKimi,
+  "pii-filter",
+  "@google/genai>=2.31.0",
+  "client.interactions.create",
+  "redacted_clinical_scientist_persona",
+  "RFC 9180 HPKE EHBP + AMD SEV-SNP Router + Intel TDX / NVIDIA CC GPU Enclaves",
+  DATA_SENT_TO_GOOGLE,
+  "low",
+  "medium",
+  "high",
+  "enabled",
+  ...VALID_TASK_KINDS,
+  "user",
+  "system",
+  "assistant",
+  "tool",
+  "text",
+  "function",
+  "function_call",
+  "function_result",
+  "model_output",
+  "auto",
+  "none",
+  "OBJECT",
+  "STRING",
+  "INTEGER",
+  "BOOLEAN",
+  "NUMBER",
+  "ARRAY",
+  "object",
+  "string",
+  "integer",
+  "boolean",
+  "number",
+  "array",
+  ...ALLOWED_PLANNER_TOOLS,
+  "tinfoil",
+  ...ALLOWED_ATLAS_TOPICS,
+  ...ALLOWED_ATLAS_CATEGORIES,
+  ...LOOKUP_TOPICS,
+  "allowed",
+  "denied",
+  "anchor_receipt",
+  "ok",
+  "verified",
+  "completed",
+  "failed",
+  "blocked_pending_human",
+  "ready_for_anchor",
+  "anchored",
+  "dispatched_over_hpke_ehbp",
+  "paused_awaiting_human",
+  "executed_with_human_approval",
+  "executed",
+  "atlas",
+  "app-fallback",
+  "$rankFusion",
+  "rank_fusion",
+  "app-rrf",
+  "app_rrf",
+]);
+
+export const ALLOWED_CONTENT_FREE_KEYS: ReadonlySet<string> = new Set<string>([
+  "model",
+  "thinking_level",
+  "background",
+  "store",
+  "max_output_tokens",
+  "max_context_tokens",
+  "implicit_caching",
+  "generation_config",
+  "system_instruction",
+  "input",
+  "tools",
+  "subagent_routing",
+  "metadata",
+  "taskDescriptor",
+  "previous_interaction_id",
+  "role",
+  "content",
+  "type",
+  "text",
+  "name",
+  "description",
+  "parameters",
+  "properties",
+  "required",
+  "enum",
+  "id",
+  "call_id",
+  "tool_call_id",
+  "arguments",
+  "result",
+  "messages",
+  "tool_choice",
+  "max_tokens",
+  "function",
+  "tool_calls",
+  "sandbox_verifier",
+  "fast_swarm",
+  "quorum_checker",
+  "deep_research",
+  "on_device_filter",
+  "attested_enclave_model",
+  "tinfoil_enclave_target",
+  "voice_briefing",
+  "live_voice_gate",
+  "sdk_target",
+  "api_surface",
+  "persona",
+  "enclave_protocol",
+  "data_sent_to_google",
+  "taskKind",
+  "inputHandle",
+  "inputTokenEstimate",
+  "redactionCounts",
+  "verification",
+  "allowedTools",
+  "SECRET",
+  "EMAIL",
+  "PHONE",
+  "IP",
+  "ACCT",
+  "ENTITY",
+  "NAME",
+  "DIGITS",
+  "ENTROPY",
+  "URL",
+  "ADDRESS",
+  "DATE",
+  "CUSTOM",
+  "SYMMETRY",
+  "ATTESTED_PII",
+  "TOTAL",
+  "mechanicalRedactionPassed",
+  "attestedPiiFilterVerified",
+  "bucketAligned4096",
+  "routerSevSnpVerified",
+  "enclaveTdxGpuVerified",
+  "hpkeKeyBound",
+  "sigstoreManifestVerified",
+  "arcRegistryVerified",
+  "bucketQuantumBytes",
+  "applyAttestedFilter",
+  "providerId",
+  "enclaveModel",
+  "topic",
+  "category",
+  "actionKind",
+  "resultHandle",
+  "outputHandle",
+  "docHandle",
+  "topDocHandle",
+  "receiptHandle",
+  "digestHandle",
+  "contentHandle",
+  "outputDigestHandle",
+  "routerHandle",
+  "enclaveMeasurementHandle",
+  "humanApproved",
+  "status",
+  "passed",
+  "redactionCount",
+  "mechanicalRedactionCount",
+  "attestedRedactionCount",
+  "bucketBytes",
+  "plaintextLeakCount",
+  "contentSha256",
+  "checksPassed",
+  "checksTotal",
+  "selfHealed",
+  "failedOver",
+  "routerDigestHex",
+  "enclaveMeasurementHex",
+  "vectorEngine",
+  "textEngine",
+  "fusionEngine",
+  "totalDocs",
+  "matchingReceiptsCount",
+  "topDocSha256",
+  "outputTokenEstimate",
+  "outputSha256",
+  "attested",
+  "requiresHumanApproval",
+  "stateChangedOnChain",
+  "receiptSha256",
+]);
+
+const ALLOWED_REQUIRED_PARAM_NAMES = new Set<string>([
+  "inputHandle",
+  "bucketQuantumBytes",
+  "providerId",
+  "enclaveModel",
+  "topic",
+  "category",
+  "taskKind",
+  "actionKind",
+  "resultHandle",
+  "humanApproved",
+]);
+
+export const ALLOWED_OBJECT_KEYS: ReadonlySet<string> = new Set<string>([
+  "taskDescriptor",
+  "redactionCounts",
+  "verification",
+  "generation_config",
+  "subagent_routing",
+  "metadata",
+  "parameters",
+  "properties",
+  "arguments",
+  "result",
+  "function",
+  "input",
+  "tools",
+  "messages",
+  "tool_calls",
+]);
+
+const GOOGLE_BOUND_PATH_PREFIXES = [
+  "$.createRequest",
+  "$.followUpRequest",
+  "$.functionResult",
+  "$.toolResult",
+  "$.tinfoilToolResult",
+  "$.payload",
+  "$.interactionsPayload",
+  "$.outboundGeminiRequest",
+  "$.canonicalRequest",
+  "$.taskDescriptor",
+  "$.mockedGeminiReceived",
+  "$.googleBound",
+] as const;
+
+function isStrictGoogleBoundPath(
+  path: string,
+  insideJsonString: boolean,
+): boolean {
+  if (insideJsonString) {
+    return true;
+  }
+  for (let i = 0; i < GOOGLE_BOUND_PATH_PREFIXES.length; i++) {
+    if (path.startsWith(GOOGLE_BOUND_PATH_PREFIXES[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+const ALLOWED_SUBAGENT_ROUTING_KEYS = new Set<string>([
+  "sandbox_verifier",
+  "fast_swarm",
+  "quorum_checker",
+  "deep_research",
+  "on_device_filter",
+  "attested_enclave_model",
+  "tinfoil_enclave_target",
+  "voice_briefing",
+  "live_voice_gate",
+]);
+
+const ALLOWED_METADATA_KEYS = new Set<string>([
+  "sdk_target",
+  "api_surface",
+  "persona",
+  "enclave_protocol",
+  "data_sent_to_google",
+]);
+
+const ALLOWED_GENERATION_CONFIG_KEYS = new Set<string>([
+  "thinking_level",
+  "max_output_tokens",
+]);
+
+const HIGH_RANGE_NUMERIC_KEYS = new Set<string>([
+  "inputTokenEstimate",
+  "outputTokenEstimate",
+  "max_output_tokens",
+  "max_context_tokens",
+  "max_tokens",
+  "bucketQuantumBytes",
+  "bucketBytes",
+]);
+
+function hasAsciiRunOrCount(byteValues: readonly number[]): boolean {
+  let consecutivePrintableAscii = 0;
+  let maxConsecutivePrintableAscii = 0;
+  let totalPrintableLettersOrSpaces = 0;
+  let totalPrintableAscii = 0;
+  for (let i = 0; i < byteValues.length; i++) {
+    const byteVal = byteValues[i];
+    if (byteVal >= 0x20 && byteVal <= 0x7e) {
+      consecutivePrintableAscii += 1;
+      if (consecutivePrintableAscii > maxConsecutivePrintableAscii) {
+        maxConsecutivePrintableAscii = consecutivePrintableAscii;
+      }
+      totalPrintableAscii += 1;
+      if (
+        byteVal === 0x20 ||
+        (byteVal >= 0x41 && byteVal <= 0x5a) ||
+        (byteVal >= 0x61 && byteVal <= 0x7a)
+      ) {
+        totalPrintableLettersOrSpaces += 1;
+      }
+      if (consecutivePrintableAscii >= 8) {
+        return true;
+      }
+    } else {
+      consecutivePrintableAscii = 0;
+    }
+  }
+  if (byteValues.length > 0 && byteValues.length < 16) {
+    return (
+      maxConsecutivePrintableAscii >= 2 ||
+      totalPrintableLettersOrSpaces >= 2 ||
+      totalPrintableAscii >= 3
+    );
+  }
+  return totalPrintableLettersOrSpaces >= 18 || totalPrintableAscii >= 20;
+}
+
+export function hasSmuggledAsciiInHex(hexWithoutPrefix: string): boolean {
+  if (
+    typeof hexWithoutPrefix !== "string" ||
+    hexWithoutPrefix.length < 2 ||
+    hexWithoutPrefix.length % 2 !== 0 ||
+    !/^[0-9a-f]+$/.test(hexWithoutPrefix)
+  ) {
+    return true;
+  }
+  if (/^\d+$/.test(hexWithoutPrefix)) {
+    return true;
+  }
+  if (
+    /^([0-9a-f]{1,4})\1{15,}$/.test(hexWithoutPrefix) ||
+    (hexWithoutPrefix.length <= 14 &&
+      /^([0-9a-f]{1,2})\1{2,}$/.test(hexWithoutPrefix))
+  ) {
+    return true;
+  }
+  const bytes: number[] = [];
+  const freq = new Map<number, number>();
+  let maxFreq = 0;
+  for (let i = 0; i < hexWithoutPrefix.length; i += 2) {
+    const byteVal = parseInt(hexWithoutPrefix.slice(i, i + 2), 16);
+    bytes.push(byteVal);
+    const count = (freq.get(byteVal) ?? 0) + 1;
+    freq.set(byteVal, count);
+    if (count > maxFreq) {
+      maxFreq = count;
+    }
+  }
+  if (bytes.length >= 16) {
+    if (freq.size < 12 || maxFreq >= 6) {
+      return true;
+    }
+  } else if (bytes.length >= 4) {
+    if (freq.size < Math.ceil(bytes.length * 0.75) || maxFreq >= 3) {
+      return true;
+    }
+  }
+  if (hasAsciiRunOrCount(bytes)) {
+    return true;
+  }
+  const strippedNulls = bytes.filter((b) => b !== 0x00 && b !== 0xff);
+  if (hasAsciiRunOrCount(strippedNulls)) {
+    return true;
+  }
+  if (bytes.length < 16) {
+    const strippedControls = bytes.filter(
+      (b) => b > 0x1f && b !== 0x7f && b !== 0xff,
+    );
+    if (hasAsciiRunOrCount(strippedControls)) {
+      return true;
+    }
+  }
+  let consecutiveHighBitText = 0;
+  let totalHighBitLettersOrSpaces = 0;
+  let consecutiveLow7Text = 0;
+  let totalLow7Text = 0;
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    const low7 = b & 0x7f;
+    const isLetterOrSpace =
+      low7 === 0x20 ||
+      (low7 >= 0x41 && low7 <= 0x5a) ||
+      (low7 >= 0x61 && low7 <= 0x7a);
+    const isDigitOrCommonPunct =
+      (low7 >= 0x30 && low7 <= 0x39) ||
+      low7 === 0x2d ||
+      low7 === 0x5f ||
+      low7 === 0x2e;
+    if (isLetterOrSpace || isDigitOrCommonPunct) {
+      consecutiveLow7Text += 1;
+      totalLow7Text += 1;
+      if (consecutiveLow7Text >= (bytes.length < 16 ? 2 : 16)) {
+        return true;
+      }
+      if ((b & 0x80) !== 0) {
+        consecutiveHighBitText += 1;
+        if (isLetterOrSpace) {
+          totalHighBitLettersOrSpaces += 1;
+        }
+        if (consecutiveHighBitText >= (bytes.length < 16 ? 2 : 8)) {
+          return true;
+        }
+      } else {
+        consecutiveHighBitText = 0;
+      }
+    } else {
+      consecutiveHighBitText = 0;
+      consecutiveLow7Text = 0;
+    }
+  }
+  if (bytes.length < 16) {
+    return (
+      totalHighBitLettersOrSpaces >= 3 ||
+      totalLow7Text >= Math.max(3, Math.ceil(bytes.length * 0.7))
+    );
+  }
+  return totalHighBitLettersOrSpaces >= 16 || totalLow7Text >= 28;
+}
+
+export function isContentFreeString(
+  value: string,
+  keyContext?: string,
+  strictGoogleBound = false,
+): boolean {
+  if (typeof value !== "string" || value.length === 0 || !keyContext) {
+    return false;
+  }
+  if (
+    ALLOWED_NUMERIC_KEYS.has(keyContext) ||
+    ALLOWED_BOOLEAN_KEYS.has(keyContext) ||
+    ALLOWED_OBJECT_ONLY_KEYS.has(keyContext) ||
+    (ALLOWED_ARRAY_KEYS.has(keyContext) &&
+      !ALLOWED_STRING_ARRAY_KEYS.has(keyContext))
+  ) {
+    return false;
+  }
+  if (ALLOWED_HASH_KEYS.has(keyContext)) {
+    if (
+      SHORT_HEX_REGEX.test(value) &&
+      value.length <= MAX_GOOGLE_BOUND_HEX_LENGTH
+    ) {
+      return !hasSmuggledAsciiInHex(value.slice(2));
+    }
+    if (
+      !strictGoogleBound &&
+      ALLOW_LEGACY_ORCHESTRATOR_SHA256_UNTIL_MIGRATED &&
+      FIXED_SHA256_HEX_REGEX.test(value)
+    ) {
+      return !hasSmuggledAsciiInHex(value.slice(2));
+    }
+    return false;
+  }
+  if (keyContext === "required") {
+    return ALLOWED_REQUIRED_PARAM_NAMES.has(value);
+  }
+  if (keyContext === "allowedTools") {
+    return (ALLOWED_PLANNER_TOOLS as readonly string[]).includes(value);
+  }
+  if (
+    keyContext === "id" ||
+    keyContext === "call_id" ||
+    keyContext === "tool_call_id" ||
+    keyContext === "previous_interaction_id"
+  ) {
+    return SAFE_CALL_ID_REGEX.test(value) && !/\d{4,}/.test(value);
+  }
+  if (keyContext === "system_instruction" || keyContext === "description") {
+    return ALLOWED_STATIC_SCHEMA_DESCRIPTIONS.has(value);
+  }
+  if (ALLOWED_HANDLE_KEYS.has(keyContext)) {
+    return HANDLE_KEY_TO_REGEX[keyContext]?.test(value) ?? false;
+  }
+  if (
+    /^(?:0x)?[0-9a-fA-F]{15,}$/.test(value) &&
+    value.length > MAX_GOOGLE_BOUND_HEX_LENGTH
+  ) {
+    return false;
+  }
+  return ALLOWED_CONTENT_FREE_ENUMS.has(value);
+}
+
+export type DigestHandlePrefix =
+  | "DOC"
+  | "RECEIPT"
+  | "DIGEST"
+  | "ROUTER"
+  | "MEASUREMENT";
+
+export interface DigestHandleMapState {
+  byHandle: Record<string, string>;
+  byDigest: Map<string, string>;
+  counters: Record<DigestHandlePrefix, number>;
+}
+
+const HASH_KEY_TO_HANDLE_SPEC: Record<
+  string,
+  { handleKey: string; prefix: DigestHandlePrefix }
+> = {
+  topDocSha256: { handleKey: "topDocHandle", prefix: "DOC" },
+  receiptSha256: { handleKey: "receiptHandle", prefix: "RECEIPT" },
+  contentSha256: { handleKey: "contentHandle", prefix: "DIGEST" },
+  outputSha256: { handleKey: "outputDigestHandle", prefix: "DIGEST" },
+  routerDigestHex: { handleKey: "routerHandle", prefix: "ROUTER" },
+  enclaveMeasurementHex: {
+    handleKey: "enclaveMeasurementHandle",
+    prefix: "MEASUREMENT",
+  },
+};
+
+export function createDigestHandleMapState(): DigestHandleMapState {
+  return {
+    byHandle: {},
+    byDigest: new Map<string, string>(),
+    counters: {
+      DOC: 0,
+      RECEIPT: 0,
+      DIGEST: 0,
+      ROUTER: 0,
+      MEASUREMENT: 0,
+    },
+  };
+}
+
+/**
+ * Replaces any hex digest fields (`contentSha256`, `routerDigestHex`, `enclaveMeasurementHex`,
+ * `topDocSha256`, `outputSha256`, `receiptSha256`) in a tool result object with opaque handles
+ * (`$DOC_<n>`, `$RECEIPT_<n>`, `$DIGEST_<n>`, `$ROUTER_<n>`, `$MEASUREMENT_<n>`) before the
+ * tool result is serialized into a Google-bound request, keeping the real hashes only in
+ * `state.byHandle` on the server side.
+ */
+export function replaceDigestsWithOpaqueHandles(
+  rawResult: Record<string, unknown>,
+  state: DigestHandleMapState = createDigestHandleMapState(),
+): Record<string, unknown> {
+  if (!isPlainObject(rawResult)) {
+    throw new ContentFreeEgressError(String(rawResult), "$");
+  }
+  const out: Record<string, unknown> = {};
+  for (const key of Object.getOwnPropertyNames(rawResult)) {
+    const desc = Object.getOwnPropertyDescriptor(rawResult, key);
+    if (!desc || !("value" in desc) || desc.enumerable !== true) {
+      throw new ContentFreeEgressError(key, `$.${key}`);
+    }
+    const value = desc.value;
+    if (value === undefined) {
+      throw new ContentFreeEgressError("undefined", `$.${key}`);
+    }
+    const spec = HASH_KEY_TO_HANDLE_SPEC[key];
+    if (spec) {
+      if (typeof value !== "string") {
+        throw new ContentFreeEgressError(String(value), `$.${key}`);
+      }
+      const handleRegex = HANDLE_KEY_TO_REGEX[spec.handleKey];
+      if (Object.prototype.hasOwnProperty.call(rawResult, spec.handleKey)) {
+        const existingHandle = rawResult[spec.handleKey];
+        if (
+          typeof existingHandle !== "string" ||
+          !handleRegex ||
+          !handleRegex.test(existingHandle)
+        ) {
+          throw new ContentFreeEgressError(
+            String(existingHandle),
+            `$.${spec.handleKey}`,
+          );
+        }
+      }
+      if (handleRegex && handleRegex.test(value)) {
+        out[spec.handleKey] = value;
+        continue;
+      }
+      const isValidDigestHex =
+        (FIXED_SHA256_HEX_REGEX.test(value) || SHORT_HEX_REGEX.test(value)) &&
+        !hasSmuggledAsciiInHex(value.slice(2));
+      if (!isValidDigestHex) {
+        throw new ContentFreeEgressError(value, `$.${key}`);
+      }
+      const cacheKey = `${spec.prefix}:${value}`;
+      let handle = state.byDigest.get(cacheKey);
+      if (!handle) {
+        const currentCount = state.counters[spec.prefix] ?? 0;
+        if (currentCount >= MAX_HANDLE_INDEX) {
+          throw new ContentFreeEgressError(
+            "<handle_table_exhausted>",
+            `$.${key}`,
+          );
+        }
+        const nextIdx = currentCount + 1;
+        state.counters[spec.prefix] = nextIdx;
+        handle = `$${spec.prefix}_${nextIdx}`;
+        state.byDigest.set(cacheKey, handle);
+        state.byHandle[handle] = value;
+      }
+      out[spec.handleKey] = handle;
+      continue;
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.prototype.toString.call(value) !== "[object Object]"
+  ) {
+    return false;
+  }
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+/**
+ * Egress firewall (D1): recursively inspects any outbound value before it leaves
+ * for Google Gemini. Rejects any string not in the strict allowlist of opaque
+ * handles (`$INPUT`, `$RESULT_<n>`, `$DOC_<n>`, `$RECEIPT_<n>`, etc.) or allowlisted
+ * enum literals, rejects any hex string > 16 characters in Google-bound payloads,
+ * and rejects any unallowlisted object keys, numbers, arrays, or JSON-smuggled content.
+ */
+export function assertContentFree(
+  value: unknown,
+  path = "$",
+  keyContext?: string,
+  depth = 0,
+  insideJsonString = false,
+  isJsonRoot = false,
+): void {
+  if (depth > 8) {
+    throw new ContentFreeEgressError("<max_depth_exceeded>", path);
+  }
+  if (depth === 0) {
+    if (!isPlainObject(value)) {
+      throw new ContentFreeEgressError(String(value), path);
+    }
+  }
+  if (value === null || value === undefined) {
+    throw new ContentFreeEgressError(String(value), path);
+  }
+  const valueType = typeof value;
+  if (valueType === "boolean") {
+    if (!keyContext || !ALLOWED_BOOLEAN_KEYS.has(keyContext)) {
+      throw new ContentFreeEgressError(String(value), path);
+    }
+    return;
+  }
+  if (valueType === "number") {
+    const num = value as number;
+    if (
+      !keyContext ||
+      !ALLOWED_NUMERIC_KEYS.has(keyContext) ||
+      !Number.isInteger(num) ||
+      Object.is(num, -0) ||
+      num < 0 ||
+      num > MAX_TOKEN_BUCKET
+    ) {
+      throw new ContentFreeEgressError(String(value), path);
+    }
+    if (ALLOWED_REDACTION_COUNT_KEYS.has(keyContext)) {
+      if (num > MAX_REDACTION_COUNT_PER_KIND) {
+        throw new ContentFreeEgressError(String(value), path);
+      }
+    } else if (keyContext === "plaintextLeakCount") {
+      if (num > MAX_PLAINTEXT_LEAK_COUNT) {
+        throw new ContentFreeEgressError(String(value), path);
+      }
+    } else if (
+      keyContext === "bucketQuantumBytes" ||
+      keyContext === "bucketBytes"
+    ) {
+      if (!isPowerOfTwoInRange(num, 512, 65_536)) {
+        throw new ContentFreeEgressError(String(value), path);
+      }
+    } else if (keyContext === "checksPassed") {
+      if (num > 16) {
+        throw new ContentFreeEgressError(String(value), path);
+      }
+    } else if (keyContext === "checksTotal") {
+      if (num < 1 || num > 16) {
+        throw new ContentFreeEgressError(String(value), path);
+      }
+    } else if (
+      keyContext === "redactionCount" ||
+      keyContext === "mechanicalRedactionCount" ||
+      keyContext === "attestedRedactionCount"
+    ) {
+      if (num !== 0 && !isPowerOfTwoInRange(num, 1, 64)) {
+        throw new ContentFreeEgressError(String(value), path);
+      }
+    } else if (
+      keyContext === "totalDocs" ||
+      keyContext === "matchingReceiptsCount"
+    ) {
+      if (num > 64) {
+        throw new ContentFreeEgressError(String(value), path);
+      }
+    } else if (keyContext === "max_tokens") {
+      if (num < 1 || num > 4096) {
+        throw new ContentFreeEgressError(String(value), path);
+      }
+    } else if (keyContext === "max_output_tokens") {
+      if (!isPowerOfTwoInRange(num, 1024, 131_072)) {
+        throw new ContentFreeEgressError(String(value), path);
+      }
+    } else if (keyContext === "max_context_tokens") {
+      if (
+        num !== ARGON_MAX_UNIFIED_CONTEXT_TOKENS &&
+        !isPowerOfTwoInRange(num, 1024, MAX_TOKEN_BUCKET)
+      ) {
+        throw new ContentFreeEgressError(String(value), path);
+      }
+    } else if (
+      keyContext === "inputTokenEstimate" ||
+      keyContext === "outputTokenEstimate"
+    ) {
+      if (!isPowerOfTwoInRange(num, 1, MAX_TOKEN_BUCKET)) {
+        throw new ContentFreeEgressError(String(value), path);
+      }
+    }
+    return;
+  }
+  if (valueType === "string") {
+    const str = value as string;
+    if (str.length === 0 || str.trim().length === 0) {
+      throw new ContentFreeEgressError("<empty_string>", path);
+    }
+    if (str.startsWith("{") || str.startsWith("[")) {
+      if (
+        insideJsonString ||
+        !keyContext ||
+        !ALLOWED_JSON_STRING_KEYS.has(keyContext) ||
+        !str.startsWith("{") ||
+        !str.endsWith("}")
+      ) {
+        throw new ContentFreeEgressError(str, path);
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(str);
+      } catch {
+        throw new ContentFreeEgressError(str, path);
+      }
+      if (!isPlainObject(parsed)) {
+        throw new ContentFreeEgressError(str, path);
+      }
+      let canonical: string;
+      try {
+        canonical = canonicalJson(parsed);
+      } catch {
+        throw new ContentFreeEgressError(str, path);
+      }
+      if (canonical !== str) {
+        throw new ContentFreeEgressError(str, path);
+      }
+      assertContentFree(
+        parsed,
+        `${path}(json)`,
+        undefined,
+        depth + 1,
+        true,
+        true,
+      );
+      return;
+    }
+    const strictGoogleBound = isStrictGoogleBoundPath(path, insideJsonString);
+    if (!isContentFreeString(str, keyContext, strictGoogleBound)) {
+      throw new ContentFreeEgressError(str, path);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    if (
+      !keyContext ||
+      !ALLOWED_ARRAY_KEYS.has(keyContext) ||
+      value.length === 0 ||
+      value.length > 32
+    ) {
+      throw new ContentFreeEgressError("<disallowed_array>", path);
+    }
+    if (keyContext === "allowedTools") {
+      if (
+        value.length > ALLOWED_PLANNER_TOOLS.length ||
+        new Set(value).size !== value.length
+      ) {
+        throw new ContentFreeEgressError("<invalid_allowedTools>", path);
+      }
+      let lastCanonicalIdx = -1;
+      for (let i = 0; i < value.length; i++) {
+        const idx = (ALLOWED_PLANNER_TOOLS as readonly string[]).indexOf(
+          String(value[i]),
+        );
+        if (idx === -1 || idx <= lastCanonicalIdx) {
+          throw new ContentFreeEgressError(String(value[i]), `${path}[${i}]`);
+        }
+        lastCanonicalIdx = idx;
+      }
+    } else if (keyContext === "required") {
+      if (
+        !path.endsWith(".parameters.required") ||
+        value.length > ALLOWED_REQUIRED_PARAM_NAMES.size ||
+        new Set(value).size !== value.length
+      ) {
+        throw new ContentFreeEgressError("<invalid_required>", path);
+      }
+    } else if (keyContext === "enum") {
+      if (
+        !/\.properties\.[A-Za-z0-9_]+\.enum$/.test(path) ||
+        value.length > 32 ||
+        new Set(value).size !== value.length
+      ) {
+        throw new ContentFreeEgressError("<invalid_enum>", path);
+      }
+    } else if (keyContext === "tools") {
+      if (depth !== 1 || value.length > ALLOWED_PLANNER_TOOLS.length) {
+        throw new ContentFreeEgressError("<invalid_tools>", path);
+      }
+    } else if (keyContext === "input" || keyContext === "messages") {
+      if (depth !== 1 || value.length > 16) {
+        throw new ContentFreeEgressError("<invalid_input_array>", path);
+      }
+    } else if (keyContext === "tool_calls") {
+      if (!path.endsWith(".tool_calls") || value.length > MAX_PLANNER_STEPS) {
+        throw new ContentFreeEgressError("<invalid_tool_calls>", path);
+      }
+    }
+    const expectsStringElements = ALLOWED_STRING_ARRAY_KEYS.has(keyContext);
+    for (let i = 0; i < value.length; i++) {
+      const item = value[i];
+      if (expectsStringElements) {
+        if (typeof item !== "string") {
+          throw new ContentFreeEgressError(String(item), `${path}[${i}]`);
+        }
+      } else if (!isPlainObject(item)) {
+        throw new ContentFreeEgressError(String(item), `${path}[${i}]`);
+      }
+      assertContentFree(
+        item,
+        `${path}[${i}]`,
+        keyContext,
+        depth + 1,
+        insideJsonString,
+        false,
+      );
+    }
+    return;
+  }
+  if (isPlainObject(value)) {
+    const isToolPropertySchemaDef =
+      typeof keyContext === "string" &&
+      ALLOWED_REQUIRED_PARAM_NAMES.has(keyContext) &&
+      path.endsWith(`.properties.${keyContext}`);
+    if (
+      depth > 0 &&
+      !isJsonRoot &&
+      !isToolPropertySchemaDef &&
+      (!keyContext || !ALLOWED_OBJECT_KEYS.has(keyContext))
+    ) {
+      throw new ContentFreeEgressError("<disallowed_object>", path);
+    }
+    if (Object.getOwnPropertySymbols(value).length > 0) {
+      throw new ContentFreeEgressError("<symbol_property>", path);
+    }
+    if (typeof (value as { toJSON?: unknown }).toJSON === "function") {
+      throw new ContentFreeEgressError("<custom_toJSON>", path);
+    }
+    const ownKeys = Object.getOwnPropertyNames(value);
+    if (ownKeys.length === 0) {
+      throw new ContentFreeEgressError("<empty_object>", path);
+    }
+    if (ownKeys.length > 64) {
+      throw new ContentFreeEgressError("<too_many_keys>", path);
+    }
+    let numericKeyCount = 0;
+    let highRangeNumericCount = 0;
+    let hasInputEstimate = false;
+    let hasOutputEstimate = false;
+    for (const k of ownKeys) {
+      if (
+        k === "__proto__" ||
+        k === "constructor" ||
+        k === "prototype" ||
+        !ALLOWED_CONTENT_FREE_KEYS.has(k)
+      ) {
+        throw new ContentFreeEgressError(k, `${path}.${k}`);
+      }
+      if (
+        keyContext === "redactionCounts" &&
+        !ALLOWED_REDACTION_COUNT_KEYS.has(k)
+      ) {
+        throw new ContentFreeEgressError(k, `${path}.${k}`);
+      }
+      if (
+        keyContext === "verification" &&
+        !ALLOWED_VERIFICATION_KEYS.has(k)
+      ) {
+        throw new ContentFreeEgressError(k, `${path}.${k}`);
+      }
+      if (
+        keyContext === "generation_config" &&
+        !ALLOWED_GENERATION_CONFIG_KEYS.has(k)
+      ) {
+        throw new ContentFreeEgressError(k, `${path}.${k}`);
+      }
+      if (
+        keyContext === "subagent_routing" &&
+        !ALLOWED_SUBAGENT_ROUTING_KEYS.has(k)
+      ) {
+        throw new ContentFreeEgressError(k, `${path}.${k}`);
+      }
+      if (keyContext === "metadata" && !ALLOWED_METADATA_KEYS.has(k)) {
+        throw new ContentFreeEgressError(k, `${path}.${k}`);
+      }
+      const desc = Object.getOwnPropertyDescriptor(value, k);
+      if (!desc || !("value" in desc) || desc.enumerable !== true) {
+        throw new ContentFreeEgressError(k, `${path}.${k}`);
+      }
+      if (desc.value === undefined) {
+        throw new ContentFreeEgressError("undefined", `${path}.${k}`);
+      }
+      if (typeof desc.value === "number") {
+        numericKeyCount += 1;
+        if (HIGH_RANGE_NUMERIC_KEYS.has(k)) {
+          highRangeNumericCount += 1;
+        }
+        if (k === "inputTokenEstimate") hasInputEstimate = true;
+        if (k === "outputTokenEstimate") hasOutputEstimate = true;
+        if (keyContext !== "redactionCounts" && numericKeyCount > 5) {
+          throw new ContentFreeEgressError("<too_many_numeric_keys>", path);
+        }
+        if (
+          highRangeNumericCount > 2 ||
+          (hasInputEstimate && hasOutputEstimate)
+        ) {
+          throw new ContentFreeEgressError(
+            "<incompatible_numeric_keys>",
+            path,
+          );
+        }
+      }
+      assertContentFree(
+        desc.value,
+        `${path}.${k}`,
+        k,
+        depth + 1,
+        insideJsonString,
+        false,
+      );
+    }
+    return;
+  }
+  throw new ContentFreeEgressError(String(value), path);
+}
+
+export interface ToolArgumentFieldSchema {
+  type: "STRING" | "INTEGER" | "BOOLEAN";
+  required?: boolean;
+  isHandle?: boolean;
+  enum?: readonly string[];
+  min?: number;
+  max?: number;
+}
+
+export const TOOL_ARGUMENT_SCHEMAS: Record<
+  PlannerToolName,
+  Record<string, ToolArgumentFieldSchema>
+> = {
+  scrub_and_symmetry_mask: {
+    inputHandle: { type: "STRING", required: true, isHandle: true },
+    bucketQuantumBytes: {
+      type: "INTEGER",
+      required: true,
+      min: 512,
+      max: 65536,
+    },
+  },
+  verify_two_hop_enclave_and_quorum: {
+    providerId: { type: "STRING", required: true, enum: ["tinfoil"] },
+    enclaveModel: {
+      type: "STRING",
+      required: true,
+      enum: ["gemma4-31b", "kimi-k3"],
+    },
+  },
+  search_atlas_hybrid_kb: {
+    topic: {
+      type: "STRING",
+      required: true,
+      enum: [...ALLOWED_ATLAS_TOPICS, ...LOOKUP_TOPICS],
+    },
+    inputHandle: { type: "STRING", required: false, isHandle: true },
+    category: {
+      type: "STRING",
+      required: false,
+      enum: ALLOWED_ATLAS_CATEGORIES,
+    },
+  },
+  invoke_attested_enclave: {
+    inputHandle: { type: "STRING", required: true, isHandle: true },
+    enclaveModel: {
+      type: "STRING",
+      required: true,
+      enum: ["gemma4-31b", "kimi-k3"],
+    },
+    taskKind: { type: "STRING", required: false, enum: VALID_TASK_KINDS },
+  },
+  anchor_arc_settlement_with_human_gate: {
+    actionKind: { type: "STRING", required: true, enum: ["anchor_receipt"] },
+    resultHandle: { type: "STRING", required: false, isHandle: true },
+    humanApproved: { type: "BOOLEAN", required: true },
+  },
+};
+
+export interface ToolCallValidationResult {
+  valid: boolean;
+  errors: string[];
+  sanitizedArgs?: Record<string, unknown>;
+}
+
+/**
+ * Validates a planner tool call against the strict tool allowlist and JSON argument schema.
+ * Rejects unknown tools, unexpected properties, wrong types, non-handle strings, or free text.
+ */
+export function validateToolCallArguments(
+  toolName: string,
+  args: unknown,
+): ToolCallValidationResult {
+  if (!(ALLOWED_PLANNER_TOOLS as readonly string[]).includes(toolName)) {
+    return {
+      valid: false,
+      errors: [`Tool '${String(toolName)}' is not in ALLOWED_PLANNER_TOOLS.`],
+    };
+  }
+
+  if (
+    !args ||
+    typeof args !== "object" ||
+    Array.isArray(args) ||
+    Object.prototype.toString.call(args) !== "[object Object]"
+  ) {
+    return {
+      valid: false,
+      errors: [`Arguments for '${toolName}' must be a non-null plain object.`],
+    };
+  }
+
+  const schema = TOOL_ARGUMENT_SCHEMAS[toolName as PlannerToolName];
+  const rawObj = args as Record<string, unknown>;
+  const errors: string[] = [];
+  const sanitizedArgs: Record<string, unknown> = {};
+
+  for (const key of Object.keys(rawObj)) {
+    if (!Object.prototype.hasOwnProperty.call(schema, key)) {
+      errors.push(`Unexpected argument '${key}' on tool '${toolName}'.`);
+    }
+  }
+
+  for (const [field, spec] of Object.entries(schema)) {
+    const val = rawObj[field];
+    if (val === undefined) {
+      if (spec.required) {
+        errors.push(
+          `Missing required argument '${field}' on tool '${toolName}'.`,
+        );
+      }
+      continue;
+    }
+
+    if (spec.type === "STRING") {
+      if (typeof val !== "string") {
+        errors.push(`Argument '${field}' on '${toolName}' must be a string.`);
+        continue;
+      }
+      if (spec.isHandle && !INPUT_OR_RESULT_HANDLE_REGEX.test(val)) {
+        errors.push(
+          `Argument '${field}' on '${toolName}' must be an opaque handle ($INPUT or $RESULT_1..$RESULT_16), got '${val.slice(0, 24)}'.`,
+        );
+        continue;
+      }
+      if (spec.enum && !spec.enum.includes(val)) {
+        errors.push(
+          `Argument '${field}' on '${toolName}' must be one of [${spec.enum.join(", ")}], got '${val.slice(0, 24)}'.`,
+        );
+        continue;
+      }
+      sanitizedArgs[field] = val;
+    } else if (spec.type === "INTEGER") {
+      if (typeof val !== "number" || !Number.isInteger(val)) {
+        errors.push(`Argument '${field}' on '${toolName}' must be an integer.`);
+        continue;
+      }
+      if (spec.min !== undefined && val < spec.min) {
+        errors.push(
+          `Argument '${field}' on '${toolName}' must be >= ${spec.min}.`,
+        );
+        continue;
+      }
+      if (spec.max !== undefined && val > spec.max) {
+        errors.push(
+          `Argument '${field}' on '${toolName}' must be <= ${spec.max}.`,
+        );
+        continue;
+      }
+      if (
+        field === "bucketQuantumBytes" &&
+        !isPowerOfTwoInRange(val, 512, 65_536)
+      ) {
+        errors.push(
+          `Argument '${field}' on '${toolName}' must be a power-of-two byte bucket between 512 and 65536.`,
+        );
+        continue;
+      }
+      sanitizedArgs[field] = val;
+    } else if (spec.type === "BOOLEAN") {
+      if (typeof val !== "boolean") {
+        errors.push(`Argument '${field}' on '${toolName}' must be a boolean.`);
+        continue;
+      }
+      sanitizedArgs[field] = val;
+    }
+  }
+
+  if (errors.length === 0) {
+    try {
+      assertGoogleBoundMessage(
+        `toolCall:${toolName}`,
+        args,
+        `$.toolCall(${toolName})`,
+      );
+      assertGoogleBoundMessage(
+        `toolCall:${toolName}`,
+        sanitizedArgs,
+        `$.toolCall(${toolName})`,
+      );
+      assertContentFree(args, `$.toolCall(${toolName})`);
+      assertContentFree(sanitizedArgs, `$.toolCall(${toolName})`);
+    } catch (err) {
+      errors.push(
+        err instanceof Error ? err.message : "Failed content-free check.",
+      );
+    }
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    ...(errors.length === 0 ? { sanitizedArgs } : {}),
+  };
+}
+
+export function assertValidToolCall(
+  toolName: string,
+  args: unknown,
+  allowedToolsSubset?: readonly string[],
+): Record<string, unknown> {
+  const res = validateToolCallArguments(toolName, args);
+  if (!res.valid || !res.sanitizedArgs) {
+    throw new ToolPolicyViolationError(toolName, res.errors);
+  }
+  if (
+    Array.isArray(allowedToolsSubset) &&
+    !allowedToolsSubset.includes(toolName)
+  ) {
+    throw new ToolPolicyViolationError(toolName, [
+      `Tool '${toolName}' is not permitted by this descriptor's allowedTools list.`,
+    ]);
+  }
+  return res.sanitizedArgs;
+}
+
+export function buildTaskDescriptor(params: {
+  taskKind?: TaskKind;
+  rawTextForClassification?: string;
+  inputTokenEstimate?: number;
+  redactionCounts?: Record<string, number>;
+  verification?: Record<string, boolean>;
+  allowedTools?: readonly string[];
+}): TaskDescriptor {
+  const taskKind: TaskKind =
+    params.taskKind ?? classifyTaskKind(params.rawTextForClassification ?? "");
+  const inputTokenEstimate = roundUpToPowerOfTwo(
+    params.inputTokenEstimate ??
+      estimateTokens(params.rawTextForClassification ?? "task"),
+  );
+
+  const sanitizedRedactionCounts: Record<string, number> = {};
+  for (const [k, v] of Object.entries(params.redactionCounts ?? { TOTAL: 0 })) {
+    if (
+      ALLOWED_REDACTION_COUNT_KEYS.has(k) &&
+      typeof v === "number" &&
+      Number.isFinite(v)
+    ) {
+      sanitizedRedactionCounts[k] = Math.min(
+        MAX_REDACTION_COUNT_PER_KIND,
+        Math.max(0, Math.trunc(v)),
+      );
+    }
+  }
+  if (Object.keys(sanitizedRedactionCounts).length === 0) {
+    sanitizedRedactionCounts.TOTAL = 0;
+  }
+
+  const sanitizedVerification: Record<string, boolean> = {};
+  for (const [k, v] of Object.entries(
+    params.verification ?? { mechanicalRedactionPassed: true },
+  )) {
+    if (ALLOWED_VERIFICATION_KEYS.has(k) && typeof v === "boolean") {
+      sanitizedVerification[k] = v;
+    }
+  }
+  if (Object.keys(sanitizedVerification).length === 0) {
+    sanitizedVerification.mechanicalRedactionPassed = true;
+  }
+
+  const requestedTools = params.allowedTools ?? ALLOWED_PLANNER_TOOLS;
+  const allowedTools = ALLOWED_PLANNER_TOOLS.filter((t) =>
+    (requestedTools as readonly string[]).includes(t),
+  );
+
+  const descriptor: TaskDescriptor = {
+    taskKind,
+    inputHandle: "$INPUT",
+    inputTokenEstimate,
+    redactionCounts: sanitizedRedactionCounts,
+    verification: sanitizedVerification,
+    allowedTools:
+      allowedTools.length > 0 ? [...allowedTools] : [...ALLOWED_PLANNER_TOOLS],
+  };
+
+  assertGoogleBoundMessage("taskDescriptor", descriptor, "$.taskDescriptor");
+  assertContentFree(descriptor, "$.taskDescriptor");
+  return descriptor;
+}
+
+export function buildInteractionsCreatePayload(params: {
+  taskDescriptor?: TaskDescriptor;
+  scrubbedPrompt?: string;
+  thinkingLevel?: ArgonThinkingLevel;
+  background?: boolean;
+  maxOutputTokens?: number;
+  persona?: string;
+}): InteractionsCreatePayload {
+  const validation = validateArgonRequestConfig({
+    model: GEMINI_4_ARGON_MODEL_ID,
+    thinking_level: params.thinkingLevel ?? "medium",
+    background: params.background ?? true,
+    max_output_tokens: params.maxOutputTokens ?? 131_072,
+    max_context_tokens: ARGON_MAX_UNIFIED_CONTEXT_TOKENS,
+    autonomousMultiStep: true,
+  });
+
+  if (!validation.valid || !validation.normalizedConfig) {
+    throw new Error(
+      `Invalid Gemini 4 Argon configuration: ${validation.errors.join("; ")}`,
+    );
+  }
+
+  const cfg = validation.normalizedConfig;
+  const descriptor =
+    params.taskDescriptor ??
+    buildTaskDescriptor({
+      rawTextForClassification: params.scrubbedPrompt ?? "",
+    });
+
+  assertGoogleBoundMessage("taskDescriptor", descriptor, "$.taskDescriptor");
+  assertContentFree(descriptor, "$.taskDescriptor");
+
+  const payload: InteractionsCreatePayload = {
+    model: cfg.model,
+    thinking_level: cfg.thinking_level,
+    background: cfg.background,
+    max_output_tokens: cfg.max_output_tokens,
+    max_context_tokens: cfg.max_context_tokens,
+    implicit_caching: cfg.implicit_caching,
+    generation_config: {
+      thinking_level: cfg.thinking_level,
+      max_output_tokens: cfg.max_output_tokens,
+    },
+    system_instruction: SPLIT_KNOWLEDGE_SYSTEM_INSTRUCTION,
+    taskDescriptor: descriptor,
+    input: [
+      {
+        role: "user",
+        content: canonicalJson(descriptor),
+      },
+    ],
+    tools: ARGON_CONFIDENTIAL_TOOLS,
+    subagent_routing: {
+      sandbox_verifier: ARGON_COMPANION_MODELS.sandboxAgent,
+      fast_swarm: ARGON_COMPANION_MODELS.parallelSubagentFast,
+      quorum_checker: ARGON_COMPANION_MODELS.parallelSubagentLite,
+      deep_research: ARGON_COMPANION_MODELS.deepResearch,
+      on_device_filter: ARGON_COMPANION_MODELS.confidentialOnDevice,
+      attested_enclave_model: ARGON_COMPANION_MODELS.confidentialOpenCloud,
+      tinfoil_enclave_target: ARGON_COMPANION_MODELS.tinfoilEnclaveGemma,
+      voice_briefing: ARGON_COMPANION_MODELS.voiceTts,
+      live_voice_gate: ARGON_COMPANION_MODELS.realtimeVoice,
+    },
+    metadata: {
+      sdk_target: "@google/genai>=2.31.0",
+      api_surface: "client.interactions.create",
+      persona: "redacted_clinical_scientist_persona",
+      enclave_protocol:
+        "RFC 9180 HPKE EHBP + AMD SEV-SNP Router + Intel TDX / NVIDIA CC GPU Enclaves",
+      data_sent_to_google: DATA_SENT_TO_GOOGLE,
+    },
+  };
+
+  assertGoogleBoundMessage("interactionsPayload", payload, "$.payload");
+  assertContentFree(payload, "$.payload");
+  return payload;
 }

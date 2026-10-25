@@ -36,15 +36,13 @@ import {
   ARGON_TOOLKIT_MANIFEST,
   FORBIDDEN_ARGON_PARAMETERS,
   GEMINI_4_ARGON_MODEL_ID,
+  HONEST_DATA_HANDLING_STATEMENT,
   validateArgonRequestConfig,
+  type ArgonAutonomousRunResult,
   type ArgonThinkingLevel,
   type ArgonValidationResult,
   type TaskDescriptor,
-} from "@/lib/gemini/interactions";
-import {
-  HONEST_DATA_HANDLING_STATEMENT,
-  type ArgonAutonomousRunResult,
-} from "@/lib/gemini/orchestrator";
+} from "@/lib/gemini/shared";
 
 export { resolvePlannerModeBadgeText, type ArgonPlannerInfo };
 

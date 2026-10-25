@@ -1,10 +1,12 @@
 import { NextResponse, connection } from "next/server";
 import {
+  buildInteractionsCreatePayload,
+  buildTaskDescriptor,
+} from "@/lib/gemini/egress-schemas";
+import {
   ALLOWED_PLANNER_TOOLS,
   ARGON_COMPANION_MODELS,
   ARGON_TOOLKIT_MANIFEST,
-  buildInteractionsCreatePayload,
-  buildTaskDescriptor,
   DATA_SENT_TO_GOOGLE,
   DEMO_PERSONA,
   FORBIDDEN_ARGON_PARAMETERS,
@@ -12,7 +14,7 @@ import {
   generateInteractionsSdkSnippets,
   HONEST_DATA_HANDLING_STATEMENT,
   validateArgonRequestConfig,
-} from "@/lib/gemini";
+} from "@/lib/gemini/shared";
 
 /**
  * Content-free metadata endpoint (`GET /api/gemini`).

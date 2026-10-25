@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import type * as x509Types from "@peculiar/x509";
@@ -8,6 +10,8 @@ import {
   setPlanGenAIClientForTests,
 } from "@/app/api/gemini/plan/route";
 import * as geminiRouteModule from "@/app/api/gemini/route";
+import { POST as relayHopAttestationPost } from "@/app/api/relay/[relayId]/attestation/route";
+import { POST as relayAttestationPost } from "@/app/api/relay/attestation/route";
 import {
   buildPlainTimelineSteps,
   DEVICE_PREPARATION_PLAIN_SENTENCE,
@@ -22,8 +26,10 @@ import {
   buildBrowserRedactedTaskAndDescriptor,
   buildGeminiCreateRequestFromDescriptor,
   clearCorpusCache,
+  COMMITTED_CORE_IMAGE_DIGESTS,
   computeCorpusContentSha256,
   geminiEgressSigningPayload,
+  getExpectedCoreImageDigests,
   NEXT_SERVER_RECEIPT_LABEL,
   requestAgentPlanFromBrowser,
   runBrowserAgentWorkflow,
@@ -41,29 +47,37 @@ import {
   ensureReflectMetadata,
   EXPECTED_CONFIDENTIAL_SPACE_ISSUER,
 } from "@/lib/attestation/confidential-space";
+import expectedCoreDigestsJson from "@/lib/attestation/expected-core-digests.json";
+import { parseCoreImageDigests } from "@/lib/core-proxy";
 import {
-  ALLOWED_PLANNER_TOOLS,
   assertContentFree,
   assertGoogleBoundMessage,
   buildTaskDescriptor,
+} from "@/lib/gemini/egress-schemas";
+import {
+  ALLOWED_PLANNER_TOOLS,
+  assertOutboundPrivacyInvariant,
   ContentFreeEgressError,
   GEMINI_4_ARGON_MODEL_ID,
   HONEST_DATA_HANDLING_STATEMENT,
   type ClosedAgentPlan,
   type GeminiEgressReceipt,
   type GenAIInteractionsClientLike,
-} from "@/lib/gemini";
+} from "@/lib/gemini/shared";
 import {
   attestedPiiFilter,
   clearAttestedPiiFilterCacheForTests,
   setAttestedPiiFilterClientForTests,
+  setAttestedPiiSecureClientFactoryForTests,
+  TINFOIL_PII_FILTER_CONFIG_REPO,
+  TINFOIL_PII_FILTER_ENCLAVE_URL,
 } from "@/lib/privacy/attested-filter";
 import { canonicalJson, coarsenEpochSecToHour } from "@/lib/transparency/log";
 import { resetAnchorRateLimitState } from "@/lib/transparency/store";
 
 const TEST_NOW_SEC = 1_792_886_400;
 const TEST_CORE_IMAGE_DIGEST =
-  "sha256:4a5d8e2c79a416b1f81c36f0b9e1e2c5f9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4";
+  "sha256:82be4787cf95bc8776b1e4c0b91dabfc4e0b6fe967d0200203be7dd0c6c64c86";
 const SEALED_SECRET_KEY = new Uint8Array(32).fill(0x42);
 const SEALED_PUBLIC_KEY_HEX = bytesToHex(
   ed25519.getPublicKey(SEALED_SECRET_KEY),
@@ -235,7 +249,6 @@ beforeAll(async () => {
   );
   const token = `${h}.${p}.${bytesToBase64Url(sig)}`;
 
-  process.env.NEXT_PUBLIC_CORE_IMAGE_DIGESTS = TEST_CORE_IMAGE_DIGEST;
   coreAttestationFixture = {
     pinnedRootCaPem: rootCert.toString("pem"),
     attestationResponseJson: {
@@ -254,6 +267,7 @@ afterEach(() => {
   setCorePlanHandlerForTests(null);
   setPlanGenAIClientForTests(null, null);
   setAttestedPiiFilterClientForTests(null);
+  setAttestedPiiSecureClientFactoryForTests(null);
   clearAttestedPiiFilterCacheForTests();
   clearCorpusCache();
   resetAnchorRateLimitState();
@@ -577,12 +591,30 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
           });
         }
 
-        if (url === "/api/relay/v1/chat/completions") {
-          // Enclave call: extract placeholders from the redacted prompt and echo them in the response
+        if (url === "/api/relay/v1/chat/completions" || url === "chat/completions") {
+          const reqHeaders = new Headers(init?.headers);
+          const tinfoilModel = reqHeaders.get("X-Tinfoil-Model");
           const parsedEnclaveReq = JSON.parse(body ?? "{}") as {
+            model?: string;
             messages?: Array<{ role: string; content: string }>;
           };
           const userMsg = parsedEnclaveReq.messages?.[0]?.content ?? "";
+
+          if (
+            tinfoilModel === "pii-filter" ||
+            parsedEnclaveReq.model === "pii-filter"
+          ) {
+            return new Response(
+              JSON.stringify({
+                redacted_text: userMsg,
+                summary: { span_count: 0 },
+                detected_spans: [],
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            );
+          }
+
+          // Enclave call: extract placeholders from the redacted prompt and echo them in the response
           const placeholdersInPrompt = Array.from(
             new Set(
               userMsg.match(
@@ -601,6 +633,22 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
         throw new Error(`Unexpected fetch URL in browser agent run: ${url}`);
       },
     );
+
+    // Exercise the D4 attested second-pass filter via the relay path so its request is captured in recordedFetches
+    setAttestedPiiFilterClientForTests({
+      ready: async () => {},
+      getVerificationDocument: () => ({
+        securityVerified: true,
+        enclaveHost: "pii-filter.tinfoil.sh",
+      }),
+      fetch: (input, init) =>
+        mockFetch(
+          String(input) === "chat/completions"
+            ? "/api/relay/v1/chat/completions"
+            : input,
+          init,
+        ),
+    });
 
     const openSessionSpy = vi.fn(async (_model: "gemma4-31b" | "kimi-k3") => ({
       async *send(
@@ -637,6 +685,19 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
     expect(outcome.run.overallPassed).toBe(true);
     expect(outcome.run.mode).toBe("live");
     expect(outcome.run.egressReceipt?.signer).toBe("sealed-google-computer");
+    expect(outcome.run.stages.stage1.attestedFilter.verified).toBe(true);
+    expect(
+      outcome.run.taskDescriptor.verification.attestedPiiFilterVerified,
+    ).toBe(true);
+    expect(
+      outcome.run.stages.stage4.liveGeminiCall.toolCallsExecuted,
+    ).toEqual([
+      "scrub_and_symmetry_mask",
+      "verify_two_hop_enclave_and_quorum",
+      "search_atlas_hybrid_kb",
+      "invoke_attested_enclave",
+      "anchor_arc_settlement_with_human_gate",
+    ]);
 
     // Verify names and personal details were restored on the device
     const restoredOutput = outcome.run.stages.stage4.restoredClientOutput;
@@ -648,8 +709,25 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
       outcome.run.stages.stage4.verificationSignal.homomorphicRestoreVerified,
     ).toBe(true);
 
+    // Collect every original sensitive value from stage1.placeholders and stage1.appliedSymmetryMasks
+    const allStage1Originals = [
+      ...Object.values(outcome.run.stages.stage1.placeholders),
+      ...outcome.run.stages.stage1.appliedSymmetryMasks.map((m) => m.original),
+    ];
+    expect(allStage1Originals.length).toBeGreaterThanOrEqual(6);
+    expect(allStage1Originals).toEqual(
+      expect.arrayContaining([
+        "Priya Natarajan",
+        "Halden & Moss LLP",
+        "priya.natarajan@example.org",
+        "sk-test-4f9a2c7e1b8d6a3f5e0c",
+        "2026-05-10",
+      ]),
+    );
+    expect(allStage1Originals.some((v) => v.includes("125,000.00"))).toBe(true);
+
     // Assert on EVERY mocked fetch call leaving the browser:
-    expect(recordedFetches.length).toBeGreaterThanOrEqual(5);
+    expect(recordedFetches.length).toBeGreaterThanOrEqual(6);
     const nonEnclaveCalls = recordedFetches.filter(
       (f) => f.url !== "/api/relay/v1/chat/completions",
     );
@@ -657,7 +735,8 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
       (f) => f.url === "/api/relay/v1/chat/completions",
     );
     expect(nonEnclaveCalls.length).toBeGreaterThanOrEqual(4);
-    expect(enclaveCalls).toHaveLength(1);
+    // 2 enclave calls: 1 to pii-filter (D4 second-pass filter) and 1 to gemma4-31b (Stage 4 enclave execution)
+    expect(enclaveCalls).toHaveLength(2);
 
     for (const call of nonEnclaveCalls) {
       const lowerBody = (call.body ?? "").toLowerCase();
@@ -674,6 +753,9 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
           `Expected task word '${word}' to be absent from url ${call.url}`,
         ).toBe(false);
       }
+      for (const origVal of allStage1Originals) {
+        expect(lowerBody).not.toContain(origVal.toLowerCase());
+      }
 
       if (call.url === "/api/gemini/plan") {
         expect(call.body).toBeDefined();
@@ -689,14 +771,23 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
       }
     }
 
-    // And the enclave call itself contains ONLY the redacted task (zero raw PII/secrets)
-    const enclaveBody = enclaveCalls[0].body ?? "";
-    expect(enclaveBody).toContain("oncology survival study protocol");
-    expect(enclaveBody).not.toContain("Priya Natarajan");
-    expect(enclaveBody).not.toContain("Halden & Moss LLP");
-    expect(enclaveBody).not.toContain("priya.natarajan@example.org");
-    expect(enclaveBody).not.toContain("sk-test-4f9a2c7e1b8d6a3f5e0c");
-    expect(enclaveBody).not.toContain("7911 123456");
+    // And EVERY enclave call (both pii-filter and gemma4-31b) contains zero original values from stage1.placeholders or stage1.appliedSymmetryMasks
+    for (const encCall of enclaveCalls) {
+      const encBody = encCall.body ?? "";
+      expect(encBody).toContain("oncology survival study protocol");
+      expect(() =>
+        assertOutboundPrivacyInvariant(encBody, allStage1Originals),
+      ).not.toThrow();
+      for (const origVal of allStage1Originals) {
+        expect(
+          encBody.toLowerCase(),
+          `Expected original sensitive value '${origVal}' to be absent from enclave body`,
+        ).not.toContain(origVal.toLowerCase());
+      }
+      expect(encBody).not.toContain("2026-05-10");
+      expect(encBody).not.toContain("125,000");
+      expect(encBody).not.toContain("7911 123456");
+    }
   });
 
   it("rejects any payload with text, extra keys, missing keys, duplicate keys, or unknown values on POST /api/gemini/plan", async () => {
@@ -1170,9 +1261,77 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
     expect(nextJson.egressReceipt.keyId).toBe("operator-tree-head");
     expect(nextJson.egressReceipt.signerLabel).toBe(NEXT_SERVER_RECEIPT_LABEL);
     expect(nextJson.egressReceipt.transparencyLog).toBeDefined();
+    expect(
+      Array.isArray(nextJson.egressReceipt.transparencyLog?.auditPath),
+    ).toBe(true);
 
-    const verifiedNext = verifyEgressReceiptClient(nextJson.egressReceipt);
+    const verifiedNext = verifyEgressReceiptClient(
+      nextJson.egressReceipt,
+      undefined,
+      descriptor,
+    );
     expect(verifiedNext.ok).toBe(true);
+
+    // Append a second server-recorded receipt so treeSize === 2 and auditPath is non-empty, and verify RFC 6962 inclusion proof
+    const nextReq2 = new Request("http://localhost:3000/api/gemini/plan", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-forwarded-for": "198.51.100.33",
+      },
+      body: canonicalJson(otherDescriptor),
+    });
+    const nextRes2 = await planPost(nextReq2);
+    expect(nextRes2.status).toBe(200);
+    const nextJson2 = (await nextRes2.json()) as {
+      egressReceipt: GeminiEgressReceipt;
+    };
+    expect(nextJson2.egressReceipt.transparencyLog?.treeSize).toBeGreaterThanOrEqual(
+      2,
+    );
+    expect(
+      nextJson2.egressReceipt.transparencyLog?.leafIndex,
+    ).toBeGreaterThanOrEqual(1);
+    expect(
+      nextJson2.egressReceipt.transparencyLog?.auditPath.length,
+    ).toBeGreaterThanOrEqual(1);
+    expect(
+      verifyEgressReceiptClient(
+        nextJson2.egressReceipt,
+        undefined,
+        otherDescriptor,
+      ).ok,
+    ).toBe(true);
+
+    // Reject if leafHash does not commit to receipt.sha256
+    expect(
+      verifyEgressReceiptClient(
+        {
+          ...nextJson2.egressReceipt,
+          transparencyLog: {
+            ...nextJson2.egressReceipt.transparencyLog!,
+            leafHash: nextJson2.egressReceipt.sha256,
+          },
+        },
+        undefined,
+        otherDescriptor,
+      ).ok,
+    ).toBe(false);
+
+    // Reject if auditPath is tampered or missing
+    expect(
+      verifyEgressReceiptClient(
+        {
+          ...nextJson2.egressReceipt,
+          transparencyLog: {
+            ...nextJson2.egressReceipt.transparencyLog!,
+            auditPath: [],
+          },
+        },
+        undefined,
+        otherDescriptor,
+      ).ok,
+    ).toBe(false);
 
     const displayNext = formatEgressReceiptDisplay(nextJson.egressReceipt);
     expect(displayNext.hasReceipt).toBe(true);
@@ -1247,28 +1406,118 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
     ).toBe(false);
     expect(fallbackPrep.stage1.attestedFilter.note).toContain("unavailable");
 
-    // 3. Also test attestedPiiFilter directly with an injected SecureClient mock
-    setAttestedPiiFilterClientForTests({
-      ready: async () => {},
-      getVerificationDocument: () => ({
-        securityVerified: true,
-        enclaveHost: "pii-filter.tinfoil.sh",
-      }),
-      fetch: async () =>
-        new Response(
-          JSON.stringify({
-            redacted_text: "Review the protocol with <PRIVATE_PERSON>",
-            summary: { span_count: 1 },
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        ),
+    // 3. Also test attestedPiiFilter via the browser relay path using setAttestedPiiSecureClientFactoryForTests
+    // to prove SecureClient is constructed with enclaveURL: "https://pii-filter.tinfoil.sh" and configRepo: "tinfoilsh/confidential-pii-cpu"
+    let capturedRelayOptions: Record<string, unknown> = {};
+    setAttestedPiiSecureClientFactoryForTests((opts) => {
+      capturedRelayOptions = opts;
+      return {
+        ready: async () => {},
+        getVerificationDocument: () => ({
+          securityVerified: true,
+          enclaveHost: "pii-filter.tinfoil.sh",
+        }),
+        fetch: async (_url, init) => {
+          const headers = new Headers(init?.headers);
+          expect(headers.get("X-Tinfoil-Model")).toBe("pii-filter");
+          expect(headers.get("Authorization")).toBe("Bearer drouter-demo");
+          expect(typeof init?.body).toBe("string");
+          expect(new TextEncoder().encode(String(init?.body)).byteLength).toBe(
+            4096,
+          );
+          return new Response(
+            JSON.stringify({
+              redacted_text: "Review the protocol with <PRIVATE_PERSON>",
+              summary: { span_count: 1 },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        },
+      };
     });
     const directRes = await attestedPiiFilter(
       "Review the protocol with Cousin Leo",
-      { useRelay: true },
+      { useRelay: true, relayOrigin: "https://drouter.example" },
     );
     expect(directRes.verified).toBe(true);
     expect(directRes.redactionCount).toBe(1);
+    expect(capturedRelayOptions.enclaveURL).toBe(
+      TINFOIL_PII_FILTER_ENCLAVE_URL,
+    );
+    expect(capturedRelayOptions.configRepo).toBe(
+      TINFOIL_PII_FILTER_CONFIG_REPO,
+    );
+    expect(capturedRelayOptions.baseURL).toBe(
+      "https://drouter.example/api/relay/v1/",
+    );
+    expect(capturedRelayOptions.attestationBundleURL).toBe(
+      "https://drouter.example/api/relay",
+    );
+
+    // Verify /api/relay/attestation and /api/relay/[relayId]/attestation allow tinfoilsh/confidential-pii-cpu and reject unknown repos
+    const prevStub = process.env.DROUTER_STUB_UPSTREAM;
+    process.env.DROUTER_STUB_UPSTREAM = "1";
+    try {
+      const piiAttestReq = new Request(
+        "http://localhost:3000/api/relay/attestation",
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-forwarded-for": "198.51.100.41",
+          },
+          body: JSON.stringify({
+            enclaveUrl: TINFOIL_PII_FILTER_ENCLAVE_URL,
+            repo: TINFOIL_PII_FILTER_CONFIG_REPO,
+          }),
+        },
+      );
+      const piiAttestRes = await relayAttestationPost(piiAttestReq);
+      // Passes validation (503 stub upstream, NOT 400 unsupported repo)
+      expect(piiAttestRes.status).toBe(503);
+
+      const piiHopAttestReq = new Request(
+        "http://localhost:3000/api/relay/relay-eu-zurich/attestation",
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-forwarded-for": "198.51.100.42",
+          },
+          body: JSON.stringify({
+            enclaveUrl: TINFOIL_PII_FILTER_ENCLAVE_URL,
+            repo: TINFOIL_PII_FILTER_CONFIG_REPO,
+          }),
+        },
+      );
+      const piiHopAttestRes = await relayHopAttestationPost(piiHopAttestReq, {
+        params: Promise.resolve({ relayId: "relay-eu-zurich" }),
+      });
+      expect(piiHopAttestRes.status).toBe(503);
+
+      const badRepoReq = new Request(
+        "http://localhost:3000/api/relay/attestation",
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-forwarded-for": "198.51.100.43",
+          },
+          body: JSON.stringify({
+            enclaveUrl: TINFOIL_PII_FILTER_ENCLAVE_URL,
+            repo: "attacker/rogue-pii-repo",
+          }),
+        },
+      );
+      const badRepoRes = await relayAttestationPost(badRepoReq);
+      expect(badRepoRes.status).toBe(400);
+    } finally {
+      if (prevStub === undefined) {
+        delete process.env.DROUTER_STUB_UPSTREAM;
+      } else {
+        process.env.DROUTER_STUB_UPSTREAM = prevStub;
+      }
+    }
 
     // 4. Plain data handling includes the explicit device preparation sentence
     const plainView = formatPlainDataHandling(HONEST_DATA_HANDLING_STATEMENT);
@@ -1279,14 +1528,39 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
       [],
     );
 
-    // 5. Verify core attestation helper extracts the attested egress key
+    // 5. Verify core attestation helper extracts the attested egress key using committed expected-core-digests.json
+    expect(expectedCoreDigestsJson).toEqual({
+      digests: [
+        "sha256:82be4787cf95bc8776b1e4c0b91dabfc4e0b6fe967d0200203be7dd0c6c64c86",
+      ],
+      updated: "2026-10-25",
+    });
+    expect(COMMITTED_CORE_IMAGE_DIGESTS).toEqual([TEST_CORE_IMAGE_DIGEST]);
+    expect(getExpectedCoreImageDigests()).toEqual([TEST_CORE_IMAGE_DIGEST]);
+
+    // Verify parseCoreImageDigests in src/lib/core-proxy uses the committed file and only allows env to narrow, never widen
+    expect(parseCoreImageDigests(undefined, "")).toEqual([
+      TEST_CORE_IMAGE_DIGEST,
+    ]);
+    expect(
+      parseCoreImageDigests(
+        undefined,
+        `${TEST_CORE_IMAGE_DIGEST},sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff`,
+      ),
+    ).toEqual([TEST_CORE_IMAGE_DIGEST]);
+    expect(
+      parseCoreImageDigests(
+        undefined,
+        "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      ),
+    ).toEqual([]);
+
     const verifiedEgressKey = await verifyCoreAttestationForEgressKey({
       fetchFn: async () =>
         new Response(
           JSON.stringify(coreAttestationFixture.attestationResponseJson),
           { status: 200, headers: { "Content-Type": "application/json" } },
         ),
-      expectedImageDigests: [TEST_CORE_IMAGE_DIGEST],
       pinnedRootCaPem: coreAttestationFixture.pinnedRootCaPem,
       nowSec: TEST_NOW_SEC,
     });
@@ -1349,5 +1623,156 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
         },
       }),
     ).rejects.toThrow(/Invalid or mismatched Ed25519 public key/);
+  });
+
+  it("statically walks all imports from src/app/argon/page.tsx and src/lib/agent-client/index.ts and fails if any reachable module imports @google/genai, mongodb, node:*, or a server-only module", () => {
+    const repoRoot = path.resolve(__dirname, "../..");
+    const srcRoot = path.join(repoRoot, "src");
+
+    function resolveLocalImport(
+      fromFile: string,
+      specifier: string,
+    ): string | null {
+      let baseCandidate: string;
+      if (specifier.startsWith("@/")) {
+        baseCandidate = path.join(srcRoot, specifier.slice(2));
+      } else if (specifier.startsWith(".")) {
+        baseCandidate = path.resolve(path.dirname(fromFile), specifier);
+      } else {
+        return null;
+      }
+
+      const candidates = [
+        baseCandidate,
+        `${baseCandidate}.ts`,
+        `${baseCandidate}.tsx`,
+        `${baseCandidate}.json`,
+        path.join(baseCandidate, "index.ts"),
+        path.join(baseCandidate, "index.tsx"),
+      ];
+      for (const c of candidates) {
+        if (fs.existsSync(c) && fs.statSync(c).isFile()) {
+          return c;
+        }
+      }
+      throw new Error(
+        `Could not resolve local import '${specifier}' from ${path.relative(repoRoot, fromFile)}`,
+      );
+    }
+
+    function extractModuleSpecifiers(sourceText: string): string[] {
+      const strippedComments = sourceText
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/^\s*\/\/.*$/gm, "");
+      const specs = new Set<string>();
+      const staticImportExportRe =
+        /^\s*(?:import|export)\s+(?:[^`"']*?\s+from\s+)?["']([^"']+)["']/gm;
+      const dynamicImportRe = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
+      let match: RegExpExecArray | null;
+      while ((match = staticImportExportRe.exec(strippedComments)) !== null) {
+        specs.add(match[1]);
+      }
+      while ((match = dynamicImportRe.exec(strippedComments)) !== null) {
+        specs.add(match[1]);
+      }
+      return Array.from(specs);
+    }
+
+    // 1. Direct check on src/app/argon/page.tsx and src/lib/agent-client/**
+    const directClientEntryFiles = [
+      path.join(srcRoot, "app/argon/page.tsx"),
+      path.join(srcRoot, "lib/agent-client/index.ts"),
+      path.join(srcRoot, "lib/agent-client/plan-schema.ts"),
+      path.join(srcRoot, "lib/agent-client/corpus.ts"),
+    ];
+    for (const file of directClientEntryFiles) {
+      const specs = extractModuleSpecifiers(fs.readFileSync(file, "utf8"));
+      for (const s of specs) {
+        expect(
+          ["@/lib/gemini", "@/lib/gemini/index", "@/lib/gemini/interactions"].includes(
+            s,
+          ),
+          `File ${path.relative(repoRoot, file)} must not import from '${s}'`,
+        ).toBe(false);
+      }
+    }
+
+    // 2. Transitive walk from src/app/argon/page.tsx and src/lib/agent-client/index.ts
+    const visited = new Set<string>();
+    const queue = [
+      path.join(srcRoot, "app/argon/page.tsx"),
+      path.join(srcRoot, "lib/agent-client/index.ts"),
+    ];
+
+    const forbiddenBareBuiltins = new Set([
+      "fs",
+      "path",
+      "crypto",
+      "https",
+      "http",
+      "tls",
+      "net",
+      "child_process",
+      "os",
+      "dns",
+      "dgram",
+      "cluster",
+      "worker_threads",
+    ]);
+
+    const serverOnlyPathSegments = [
+      "src/app/api/",
+      "src/lib/core-proxy/",
+      "src/lib/mongo/",
+      "src/lib/ratelimit.ts",
+      "src/lib/transparency/store.ts",
+    ];
+
+    while (queue.length > 0) {
+      const currentFile = queue.shift()!;
+      if (visited.has(currentFile)) continue;
+      visited.add(currentFile);
+
+      const relCurrent = path
+        .relative(repoRoot, currentFile)
+        .replace(/\\/g, "/");
+      for (const serverSeg of serverOnlyPathSegments) {
+        expect(
+          relCurrent.startsWith(serverSeg) || relCurrent === serverSeg,
+          `Reachable client module '${relCurrent}' is a server-only module`,
+        ).toBe(false);
+      }
+
+      if (currentFile.endsWith(".json")) continue;
+
+      const source = fs.readFileSync(currentFile, "utf8");
+      const specifiers = extractModuleSpecifiers(source);
+
+      for (const spec of specifiers) {
+        expect(
+          spec === "@google/genai" || spec.startsWith("@google/genai/"),
+          `Module ${relCurrent} must not import '@google/genai' (found '${spec}')`,
+        ).toBe(false);
+        expect(
+          spec === "mongodb" || spec.startsWith("mongodb/"),
+          `Module ${relCurrent} must not import 'mongodb' (found '${spec}')`,
+        ).toBe(false);
+        expect(
+          spec.startsWith("node:") || forbiddenBareBuiltins.has(spec),
+          `Module ${relCurrent} must not import Node built-in '${spec}'`,
+        ).toBe(false);
+        expect(
+          spec === "next/server" || spec === "server-only",
+          `Module ${relCurrent} must not import server-only package '${spec}'`,
+        ).toBe(false);
+
+        const resolved = resolveLocalImport(currentFile, spec);
+        if (resolved && !visited.has(resolved)) {
+          queue.push(resolved);
+        }
+      }
+    }
+
+    expect(visited.size).toBeGreaterThan(15);
   });
 });
