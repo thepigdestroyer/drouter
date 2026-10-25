@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// deRoute Private Local Proxy (source commit: 0567e917e341)
+// deRoute Private Local Proxy (source commit: 876e03cae29c)
 import { createRequire as __derouteCreateRequire } from "node:module";
 const require = __derouteCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -46075,7 +46075,7 @@ var arcTestnet = { id: 5042002, rpcUrls: { default: { http: ["https://rpc.testne
 // src/lib/privacy/mechanical-ruleset.ts
 var NAME_WORD_SRC = "(?:(?:Mc|Mac|O'|D')[A-Z][a-z]{1,25}|[A-Z][a-z]{1,25}(?:[-'][A-Z]?[a-z]{1,25})*)";
 var MECHANICAL_RULESET = {
-  version: "1.0.2",
+  version: "1.0.4",
   markerRule: {
     openMarker: "\xA3\xA3",
     closeMarker: "\xA3\xA3",
@@ -46455,7 +46455,7 @@ var MECHANICAL_RULESET = {
         flags: "gi"
       },
       {
-        source: `(?:(?<![A-Za-z0-9_.-])\\/(?:Users|home)\\/[A-Za-z0-9._-]+(?:\\/[^\\s"'<>)\\],;:]*)?|\\b[A-Za-z]:\\\\Users\\\\[A-Za-z0-9._-]+(?:\\\\[^\\s"'<>)\\],;:]*)?)`,
+        source: `(?:(?<![A-Za-z0-9_.-])\\/(?:Users|home)\\/[A-Za-z0-9._-]+(?:\\/[^\\s"'<>)\\],;:]*)?|\\b[A-Za-z]:[\\\\/](?:[Uu]sers|USERS)[\\\\/][A-Za-z0-9._-]+(?:[\\\\/][^\\s"'<>)\\],;:]*)?)`,
         flags: "g"
       },
       {
@@ -46535,12 +46535,12 @@ var MECHANICAL_RULESET = {
     },
     ip: [
       {
-        source: "(?<![0-9.])(?:(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(?::\\d{1,5})?(?![0-9.])\\b",
-        flags: "g"
+        source: "(?<![0-9A-Za-z_]:|[0-9A-Za-z_])(?=[0-9a-fA-F:.]*\\d)(?:(?:::ffff(?::0{1,4})?:|::|(?:0:){5}(?:ffff:)?)(?:(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(?::\\d{1,5})?|(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,5}|(?:[0-9a-fA-F]{1,4}:){1,7}:|::(?:[0-9a-fA-F]{1,4}:){0,6}[0-9a-fA-F]{1,4})(?:%[0-9A-Za-z]{1,16})?(?!:[0-9A-Za-z_:]|[0-9A-Za-z_]|\\.[0-9])",
+        flags: "gi"
       },
       {
-        source: "(?<![0-9a-fA-F:])(?:(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|(?:[0-9a-fA-F]{1,4}:){1,7}:|(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,5}|::(?:ffff(?::0{1,4})?:)?(?:(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)|::(?:[0-9a-fA-F]{1,4}:){0,6}[0-9a-fA-F]{1,4})(?:%[0-9a-zA-Z]{1,16})?(?![0-9a-fA-F:])",
-        flags: "gi"
+        source: "(?<![0-9A-Za-z_.])(?:(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(?::\\d{1,5})?(?!\\.\\d|\\d)\\b",
+        flags: "g"
       },
       {
         source: "\\b(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\\b|\\b(?:[0-9a-fA-F]{2}-){5}[0-9a-fA-F]{2}\\b|\\b[0-9a-fA-F]{4}\\.[0-9a-fA-F]{4}\\.[0-9a-fA-F]{4}\\b",
@@ -46987,7 +46987,11 @@ var MECHANICAL_RULESET = {
       "northvale institute",
       "atlas cellular unit",
       "atlas cellular",
-      "cellular unit"
+      "cellular unit",
+      "program files",
+      "windows defender",
+      "system volume",
+      "system volume information"
     ],
     technicalSingleWords: [
       "trusted",
@@ -47021,11 +47025,11 @@ var MECHANICAL_RULESET = {
 
 // src/lib/privacy/published-fingerprint.json
 var published_fingerprint_default = {
-  version: "1.0.2",
-  fingerprint: "0x3af573c7e8e3a4e52e9519e639de9cf35c9ed731490c369fd6b5337d7d8fbcf0",
-  anchorTx: "0x8cddab9a2a5f56cc51bc6abf0c5ac5bc914858b7839ce3dc4327e34745150670",
+  version: "1.0.4",
+  fingerprint: "0x5bc6cc77d31374e8aaa633a43930cef64b86956d71f18e8bf93a792cec8d9e09",
+  anchorTx: "0xff43cfff01759aed0c61eeef85d40235ea5c96c82f6b86f9c7f4e3b9eaef5e7d",
   chainId: 5042002,
-  anchoredAt: "2026-10-25T10:08:57.757Z"
+  anchoredAt: "2026-10-25T10:37:22.660Z"
 };
 
 // src/lib/privacy/fingerprint.ts
@@ -47660,26 +47664,77 @@ function mechanicalRedact(text, opts) {
       reservedLiterals.add(upperLit);
     }
   }
-  const addSpanFromNormalizedRange = (normStart, normEnd, kind, keySuffix) => {
+  const addSpanFromNormalizedRange = (normStart, normEnd, kind, keySuffix, trimTrailingPunct) => {
     if (normStart < 0 || normEnd <= normStart || normEnd > mapToOriginal.length) {
       return;
     }
     const origStart = mapToOriginal[normStart];
     const origEnd = mapToOriginalEnd[normEnd - 1];
-    if (origEnd <= origStart || overlaps(origStart, origEnd)) {
+    if (origEnd <= origStart) {
       return;
     }
-    const raw = text.slice(origStart, origEnd);
-    const normSlice = normalized.slice(normStart, normEnd);
-    const defaultKey = kind === "SECRET" || kind === "ENTROPY" ? normSlice : normSlice.toLowerCase();
-    occupied.push({ start: origStart, end: origEnd });
-    candidates.push({
-      start: origStart,
-      end: origEnd,
-      kind,
-      raw,
-      canonicalKey: `${kind}:${keySuffix ?? defaultKey}`
-    });
+    if (!overlaps(origStart, origEnd)) {
+      const raw = text.slice(origStart, origEnd);
+      const normSlice = normalized.slice(normStart, normEnd);
+      const defaultKey = kind === "SECRET" || kind === "ENTROPY" ? normSlice : normSlice.toLowerCase();
+      occupied.push({ start: origStart, end: origEnd });
+      candidates.push({
+        start: origStart,
+        end: origEnd,
+        kind,
+        raw,
+        canonicalKey: `${kind}:${keySuffix ?? defaultKey}`
+      });
+      return;
+    }
+    const overlapping = occupied.filter(
+      (s) => origStart < s.end && origEnd > s.start
+    );
+    const allOverlappingAreMarked = overlapping.every(
+      (s) => candidates.some(
+        (c) => c.kind === "MARKED" && c.start === s.start && c.end === s.end
+      )
+    );
+    if (!allOverlappingAreMarked) {
+      return;
+    }
+    let subStart = normStart;
+    while (subStart < normEnd) {
+      while (subStart < normEnd && overlaps(mapToOriginal[subStart], mapToOriginalEnd[subStart])) {
+        subStart += 1;
+      }
+      if (subStart >= normEnd) break;
+      let subEnd = subStart + 1;
+      while (subEnd < normEnd && !overlaps(mapToOriginal[subEnd], mapToOriginalEnd[subEnd])) {
+        subEnd += 1;
+      }
+      let trimmedEnd = subEnd;
+      if (trimTrailingPunct) {
+        const subRaw = normalized.slice(subStart, trimmedEnd);
+        const trimLen = trimTrailingPunctuation(subRaw, ruleset);
+        if (trimLen > 0 && trimLen < subRaw.length) {
+          trimmedEnd -= trimLen;
+        }
+      }
+      if (trimmedEnd > subStart) {
+        const segOrigStart = mapToOriginal[subStart];
+        const segOrigEnd = mapToOriginalEnd[trimmedEnd - 1];
+        if (segOrigEnd > segOrigStart && !overlaps(segOrigStart, segOrigEnd)) {
+          const segRaw = text.slice(segOrigStart, segOrigEnd);
+          const segNorm = normalized.slice(subStart, trimmedEnd);
+          const segKey = kind === "SECRET" || kind === "ENTROPY" ? segNorm : segNorm.toLowerCase();
+          occupied.push({ start: segOrigStart, end: segOrigEnd });
+          candidates.push({
+            start: segOrigStart,
+            end: segOrigEnd,
+            kind,
+            raw: segRaw,
+            canonicalKey: `${kind}:${segKey}`
+          });
+        }
+      }
+      subStart = subEnd;
+    }
   };
   const addMatches = (spec, kind, options) => {
     const re = compileRuleSpec(spec);
@@ -47709,7 +47764,13 @@ function mechanicalRedact(text, opts) {
       if (options?.validate && !options.validate(normRaw, normStart, normalized)) {
         continue;
       }
-      addSpanFromNormalizedRange(normStart, normEnd, kind, options?.keySuffix);
+      addSpanFromNormalizedRange(
+        normStart,
+        normEnd,
+        kind,
+        options?.keySuffix,
+        options?.trimTrailingPunct
+      );
     }
   };
   if (customTerms.size > 0) {
@@ -48070,11 +48131,17 @@ var SpentNullifierStore = class {
       null,
       2
     );
-    fs.writeFileSync(this.filePath, `${payload}
+    const tmpPath = `${this.filePath}.tmp.${process.pid}`;
+    fs.writeFileSync(tmpPath, `${payload}
 `, {
       encoding: "utf8",
       mode: 384
     });
+    try {
+      fs.chmodSync(tmpPath, 384);
+    } catch {
+    }
+    fs.renameSync(tmpPath, this.filePath);
     try {
       fs.chmodSync(this.filePath, 384);
     } catch {
@@ -48136,42 +48203,53 @@ function redactConversationMessages(messages, session) {
   const out = messages.map((msg) => {
     if (!msg || typeof msg !== "object") return msg;
     const role = typeof msg.role === "string" ? msg.role.toLowerCase() : "";
-    const shouldRedact = role === "user" || role === "assistant";
+    const shouldRedact = role === "user" || role === "assistant" || role === "tool";
     if (!shouldRedact) {
       return { ...msg };
     }
+    const nextMsg = { ...msg };
     if (typeof msg.content === "string") {
-      return {
-        ...msg,
-        content: redactString(msg.content)
-      };
-    }
-    if (Array.isArray(msg.content)) {
-      return {
-        ...msg,
-        content: msg.content.map((part) => {
-          if (typeof part === "string") {
-            return redactString(part);
+      nextMsg.content = redactString(msg.content);
+    } else if (Array.isArray(msg.content)) {
+      nextMsg.content = msg.content.map((part) => {
+        if (typeof part === "string") {
+          return redactString(part);
+        }
+        if (part && typeof part === "object") {
+          const partObj = part;
+          const nextPart = { ...partObj };
+          if (typeof partObj.text === "string") {
+            nextPart.text = redactString(partObj.text);
           }
-          if (part && typeof part === "object") {
-            const partObj = part;
-            const nextPart = { ...partObj };
-            if (typeof partObj.text === "string") {
-              nextPart.text = redactString(partObj.text);
-            }
-            if (typeof partObj.content === "string") {
-              nextPart.content = redactString(partObj.content);
-            }
-            if (typeof partObj.input_text === "string") {
-              nextPart.input_text = redactString(partObj.input_text);
-            }
-            return nextPart;
+          if (typeof partObj.content === "string") {
+            nextPart.content = redactString(partObj.content);
           }
-          return part;
-        })
-      };
+          if (typeof partObj.input_text === "string") {
+            nextPart.input_text = redactString(partObj.input_text);
+          }
+          return nextPart;
+        }
+        return part;
+      });
     }
-    return { ...msg };
+    if (role === "assistant" && Array.isArray(msg.tool_calls)) {
+      nextMsg.tool_calls = msg.tool_calls.map((tc) => {
+        if (!tc || typeof tc !== "object") return tc;
+        const tcObj = tc;
+        const fnObj = tcObj.function && typeof tcObj.function === "object" ? tcObj.function : null;
+        if (fnObj && typeof fnObj.arguments === "string") {
+          return {
+            ...tcObj,
+            function: {
+              ...fnObj,
+              arguments: redactString(fnObj.arguments)
+            }
+          };
+        }
+        return { ...tcObj };
+      });
+    }
+    return nextMsg;
   });
   return { messages: out, redactionsCount };
 }
@@ -48215,10 +48293,7 @@ function evaluateSevenSealChecks(params) {
   const steps = doc?.steps ?? {};
   const hasStepsObject = Boolean(doc?.steps && Object.keys(steps).length > 0);
   const stepToStatus = (step) => {
-    if (!hasStepsObject) {
-      return doc?.securityVerified === false ? "fail" : "pass";
-    }
-    if (!step) return "fail";
+    if (!hasStepsObject || !step) return "fail";
     return step.status === "success" ? "pass" : "fail";
   };
   const snpChain = doc?.snpChainVerification ?? matrix?.routerSnpChain;
@@ -48226,12 +48301,12 @@ function evaluateSevenSealChecks(params) {
   const c2Status = steps.fetchDigest && steps.fetchDigest.status === "failed" ? "fail" : stepToStatus(steps.verifyCode);
   const c3Status = stepToStatus(steps.verifyCertificate);
   const c4Status = stepToStatus(steps.compareMeasurements);
-  const mAtt = matrix?.models?.[model] ?? matrix?.models?.[DEFAULT_MODEL];
-  const pMod = proxyTable?.models?.[model] ?? proxyTable?.models?.[DEFAULT_MODEL];
-  let c5Status = "pass";
-  let c5Detail = "Confidential GPU pool verified by attested router";
-  let c7Status = "pass";
-  let c7Detail = "Model weights and dm-verity root pinned in signed manifest";
+  const mAtt = matrix?.models?.[model];
+  const pMod = proxyTable?.models?.[model];
+  let c5Status = "fail";
+  let c5Detail = `Model ${model} not found in enclave attestation matrix`;
+  let c7Status = "fail";
+  let c7Detail = `Model ${model} manifest not found in enclave attestation matrix`;
   if (mAtt) {
     const healthy = mAtt.healthyHosts ?? 0;
     const configured = mAtt.configuredHosts ?? 1;
@@ -48250,14 +48325,14 @@ function evaluateSevenSealChecks(params) {
     c5Detail = healthy > 0 ? `Confidential GPU pool healthy (${healthy}/${configured} hosts)` : `No healthy confidential GPU hosts for ${model}`;
     c7Status = healthy > 0 && Boolean(pMod.repo && reg0) ? "pass" : "fail";
     c7Detail = pMod.repo && reg0 ? `Pinned ${pMod.repo}@${pMod.tag ?? "latest"} (${reg0.slice(0, 16)}...)` : `Missing measurement register for ${model}`;
-  } else if (matrix || proxyTable) {
+  } else {
     c5Status = "fail";
     c5Detail = `Model ${model} not found in enclave attestation matrix`;
     c7Status = "fail";
     c7Detail = `Model ${model} manifest not found in enclave attestation matrix`;
   }
-  let c6Status = "pass";
-  let c6Detail = "Verified in registry";
+  let c6Status = "fail";
+  let c6Detail = "Registry verification unavailable or failed";
   if (registry && Array.isArray(registry.nodes)) {
     const node = registry.nodes.find((n) => n.kind === "tinfoil");
     if (!node) {
@@ -48319,7 +48394,7 @@ function evaluateSevenSealChecks(params) {
   ];
 }
 function assertSevenSealChecksPass(doc, checks) {
-  if (!doc || doc.securityVerified === false) {
+  if (!doc || doc.securityVerified !== true) {
     const failedCheck = checks.find((c) => c.status === "fail");
     if (failedCheck) {
       throw new Error(
@@ -48327,7 +48402,7 @@ function assertSevenSealChecksPass(doc, checks) {
       );
     }
     throw new Error(
-      "Enclave attestation verification failed: securityVerified is false"
+      "Enclave attestation verification failed: securityVerified is not true"
     );
   }
   if (checks.length < 7) {
@@ -48416,19 +48491,19 @@ async function fetchAllowedChatModels(opts) {
   return SUPPORTED_GATEWAY_MODELS.filter((m) => isChatCapableGatewayModel(m.id));
 }
 function isLoopbackAddress(address) {
-  if (!address) return true;
+  if (!address) return false;
   const clean3 = address.trim().toLowerCase();
+  if (!clean3) return false;
   return clean3 === "127.0.0.1" || clean3 === "::1" || clean3 === "::ffff:127.0.0.1" || clean3 === "localhost";
 }
 function isLocalhostHostHeader(host) {
-  if (!host) return true;
+  if (!host) return false;
   const clean3 = host.trim().toLowerCase();
+  if (!clean3) return false;
   return /^(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/.test(clean3);
 }
 function isAllowedLocalOrigin(origin) {
-  if (!origin) return true;
-  const clean3 = origin.trim().toLowerCase();
-  return /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/.test(clean3);
+  return !origin;
 }
 function readBoundedJsonBody(req, maxBytes = MAX_REQUEST_BODY_BYTES) {
   return new Promise((resolve, reject) => {
@@ -48564,10 +48639,12 @@ function createDerouteProxyServer(opts) {
       return;
     }
     const originHeader = typeof req.headers.origin === "string" ? req.headers.origin : void 0;
-    if (!isAllowedLocalOrigin(originHeader)) {
+    const secFetchSiteHeader = req.headers["sec-fetch-site"];
+    const secFetchSite = typeof secFetchSiteHeader === "string" ? secFetchSiteHeader.trim().toLowerCase() : Array.isArray(secFetchSiteHeader) ? String(secFetchSiteHeader[0] ?? "").trim().toLowerCase() : void 0;
+    if (!isAllowedLocalOrigin(originHeader) || secFetchSite !== void 0 && secFetchSite !== "none") {
       sendJsonResponse(res, 403, {
         error: {
-          message: "Cross-origin requests from external origins are forbidden.",
+          message: "Cross-origin requests from browser origins are forbidden.",
           type: "forbidden"
         }
       });
@@ -48613,6 +48690,16 @@ function createDerouteProxyServer(opts) {
       return;
     }
     if (req.method === "POST" && (url.pathname === "/v1/chat/completions" || url.pathname === "/api/v1/chat/completions")) {
+      const contentType = (req.headers["content-type"] ?? "").toLowerCase();
+      if (!contentType.includes("application/json")) {
+        sendJsonResponse(res, 415, {
+          error: {
+            message: "POST /v1/chat/completions requires Content-Type: application/json",
+            type: "invalid_request_error"
+          }
+        });
+        return;
+      }
       let body;
       try {
         body = await readBoundedJsonBody(req);
@@ -48750,16 +48837,34 @@ function createDerouteProxyServer(opts) {
         );
         const rawChoices = Array.isArray(completion?.choices) ? completion.choices : [];
         const restoredChoices = rawChoices.map((choice) => {
-          if (typeof choice?.message?.content === "string") {
-            return {
-              ...choice,
-              message: {
-                ...choice.message,
-                content: session.restore(choice.message.content)
-              }
-            };
+          if (!choice?.message || typeof choice.message !== "object") {
+            return choice;
           }
-          return choice;
+          const nextMessage = { ...choice.message };
+          if (typeof choice.message.content === "string") {
+            nextMessage.content = session.restore(choice.message.content);
+          }
+          if (Array.isArray(choice.message.tool_calls)) {
+            nextMessage.tool_calls = choice.message.tool_calls.map((tc) => {
+              if (!tc || typeof tc !== "object") return tc;
+              const tcObj = tc;
+              const fnObj = tcObj.function && typeof tcObj.function === "object" ? tcObj.function : null;
+              if (fnObj && typeof fnObj.arguments === "string") {
+                return {
+                  ...tcObj,
+                  function: {
+                    ...fnObj,
+                    arguments: session.restore(fnObj.arguments)
+                  }
+                };
+              }
+              return { ...tcObj };
+            });
+          }
+          return {
+            ...choice,
+            message: nextMessage
+          };
         });
         sendJsonResponse(
           res,
