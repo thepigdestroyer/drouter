@@ -17,7 +17,7 @@ Private AI you can verify: your words are filtered on your device and only a ver
 - Live app: https://drouter-demo.vercel.app
 - GitHub (public): https://github.com/thepigdestroyer/drouter
 - Architecture in pictures: https://github.com/thepigdestroyer/drouter/blob/main/docs/ARCHITECTURE.md
-- Pitch deck: `pitch/deck/index.html` in the repo (https://github.com/thepigdestroyer/drouter/tree/main/pitch/deck)
+- Pitch deck (slides): https://deroute-deck.vercel.app (source: `pitch/deck/index.html` in the repo)
 - Demo video: [paste your video link]
 
 ## Short description (about 100 words)
@@ -46,7 +46,7 @@ What changes for them: they type normally; names, dates, numbers and secrets are
 - **Verification loop with pass/fail signals:** every Google-bound request must match an exact schema and pass a content-free check before it is sent (maximum about 67 bits per request); Gemini's returned plan is validated against the same closed schemas before use; the seven attestation checks must pass before the sealed computer runs the task (real failover to another model if they fail); the restore of hidden details is verified on the device; the sha256 of the exact bytes Google received is appended to the transparency log and the browser verifies the inclusion proof.
 - **gemma-4-31b** (open model) is available on the Agent page running inside a Tinfoil sealed computer.
 - **Human control:** the agent never writes to an external system on its own. Recording a public receipt on Circle Arc waits for the user's explicit approval, and only after a successful run; payments always need the user.
-- **Why Argon:** it plans long, tool-using workflows well from very little information, which is exactly what a planner that is never allowed to see the content needs. Next step (built, reviewed, not yet deployed): run the planner inside Google Cloud Confidential Space so Google's own attestation proves the planner code.
+- **Why Argon:** it plans long, tool-using workflows well from very little information, which is exactly what a planner that is never allowed to see the content needs. The planner runs inside Google Cloud Confidential Space (AMD SEV, production image, debugging disabled): Google's own attestation proves the exact planner image (sha256:220578e0…f03207), and every Google-bound request is signed by that sealed computer's key and logged. Anyone can check it with `node scripts/gcp/verify-core.mjs` (11 checks).
 
 ## MongoDB Atlas: features used (required by the MongoDB bounty)
 - **Atlas Vector Search** (`$vectorSearch`, 768-dimension embeddings, index `drouter_vector_index`).
@@ -61,7 +61,7 @@ What changes for them: they type normally; names, dates, numbers and secrets are
 - Human approval: before recording anything on chain, before any payment, and the user can see exactly what Google received.
 
 ## Tech stack
-Next.js 16 on Vercel, TypeScript, Tinfoil (SecureClient, EHBP/HPKE, attested enclaves), Google Gemini 4 Argon (`@google/genai` Interactions API), MongoDB Atlas 8.0 (Vector Search, Atlas Search, `$rankFusion`), Circle Arc testnet (registry, receipts, USDC), WebAuthn passkeys, RSA blind signatures, RFC 6962 Merkle log, GitHub Actions (hourly monitor), Vitest (51 suites, 493 tests).
+Next.js 16 on Vercel, TypeScript, Tinfoil (SecureClient, EHBP/HPKE, attested enclaves), Google Gemini 4 Argon (`@google/genai` Interactions API), Google Cloud Confidential Space (AMD SEV), MongoDB Atlas 8.0 (Vector Search, Atlas Search, `$rankFusion`), Circle Arc testnet (registry, receipts, USDC), WebAuthn passkeys, RSA blind signatures, RFC 6962 Merkle log, GitHub Actions (hourly monitor), Vitest (51 suites, 493 tests).
 
 ## Built during the hackathon
 First commit 24 October 2026 14:41 BST; every commit since is in the public repo history.
@@ -70,7 +70,7 @@ First commit 24 October 2026 14:41 BST; every commit since is in the public repo
 Proving privacy instead of promising it: a generic "does this look like content" filter kept being bypassed in review, so we replaced it with exact message schemas and measured the worst-case capacity. Making the browser verify hardware proofs, Arc records and log inclusion proofs itself. Keeping placeholders stable across a whole conversation so hidden details always come back correctly.
 
 ## What's next
-Deploy the planner inside Google Cloud Confidential Space; more independent operators in the Arc registry; a signed, reproducible release of the local proxy for coding tools, with automatic updates when a new filter version is published on Arc.
+More independent operators in the Arc registry; a signed, reproducible release of the local proxy for coding tools, with automatic updates when a new filter version is published on Arc.
 
 ## Team
 [Names and roles]

@@ -153,9 +153,9 @@ node scripts/drouter-cli.mjs verify --submit --upstream https://drouter-demo.ver
 
 ---
 
-## 5. `deroute-core` on Google Cloud Confidential Space (Built & Reviewed, Not Yet Deployed)
+## 5. `deroute-core` on Google Cloud Confidential Space (Live)
 
-The `deroute-core` enclave workload (`core/`, image `ghcr.io/thepigdestroyer/deroute-core@sha256:220578e0d103bfb6969cffde67e332cfaac278a4affc9eba7e84c96253f03207` in `src/lib/attestation/expected-core-digests.json`) and its operational scripts in `scripts/gcp/` are built and reviewed, but **not deployed to a live Google Cloud VM yet** until billing is confirmed.
+The `deroute-core` enclave workload (`core/`, image `ghcr.io/thepigdestroyer/deroute-core@sha256:220578e0d103bfb6969cffde67e332cfaac278a4affc9eba7e84c96253f03207` in `src/lib/attestation/expected-core-digests.json`) and its operational scripts in `scripts/gcp/` are deployed on an AMD SEV Confidential Space VM (`n2d-standard-2`, us-central1-a). Production sets `CORE_HOST` and `CORE_IMAGE_DIGESTS`, so `/api/core/*` and `POST /api/gemini/plan` route through the attested VM; `node scripts/gcp/verify-core.mjs` passes all 11 checks.
 
 Once ready to deploy:
 
