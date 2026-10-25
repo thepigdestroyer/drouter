@@ -1,0 +1,661 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="deRoute pitch deck: a privacy-preserving, verifiable AI router.">
+<title>deRoute · Private AI you can verify</title>
+<style>
+:root{
+  --paper:#f3f1ec; --paper-2:#ebe8e1; --ink:#151515; --ink-2:#3a3936; --muted:#595752; --rule:#d6d2c8; --accent:#d9531e;
+  --serif:'Iowan Old Style','Charter','Palatino',Georgia,serif;
+  --mono:'SF Mono',Menlo,monospace;
+  --sans:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;
+  --s:1;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;overflow:hidden;background:#d8d4ca;color:var(--ink);
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+.defs{position:absolute;width:0;height:0;overflow:hidden}
+.stage{position:absolute;left:50%;top:50%;width:1920px;height:1080px;transform:translate(-50%,-50%) scale(var(--s));
+  transform-origin:50% 50%;background:var(--paper);overflow:hidden;
+  box-shadow:0 1px 0 rgba(21,21,21,.05),0 28px 80px rgba(21,21,21,.18)}
+.slide{position:absolute;inset:0;font-family:var(--sans);opacity:0;visibility:hidden;
+  transition:opacity .5s ease,visibility 0s linear .5s}
+.slide.active{opacity:1;visibility:visible;transition:opacity .5s ease}
+.abs{position:absolute}
+svg{overflow:visible}
+
+/* ink blots, margins only */
+.blots{position:absolute;inset:0;width:1920px;height:1080px;pointer-events:none}
+
+/* chrome: top bar and footer */
+.top{position:absolute;left:150px;right:150px;top:34px;height:62px;display:flex;align-items:center;border-bottom:1.5px solid var(--rule)}
+.brand{display:flex;align-items:center;gap:12px;font-family:var(--serif);font-size:30px;letter-spacing:-.01em;color:var(--ink)}
+.brand svg{width:38px;height:38px;display:block}
+.plate{margin-left:26px;padding-left:26px;border-left:1.5px solid var(--rule);height:30px;display:flex;align-items:center;
+  font-family:var(--mono);font-size:18px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
+.top .right{margin-left:auto;font-family:var(--mono);font-size:18px;letter-spacing:.1em;color:var(--muted)}
+.foot{position:absolute;left:150px;right:150px;bottom:22px;height:50px;display:flex;align-items:center;gap:40px;
+  border-top:1.5px solid var(--rule);font-family:var(--mono);font-size:16px;letter-spacing:.04em;color:var(--muted);white-space:nowrap}
+.foot .num{margin-left:auto;font-size:18px;letter-spacing:.18em;color:var(--ink);white-space:nowrap}
+
+/* headings */
+.head{position:absolute;left:150px;top:116px;width:1180px}
+.kicker{font-family:var(--mono);font-size:18px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted)}
+.title{font-family:var(--serif);font-weight:400;font-size:60px;line-height:1.04;letter-spacing:-.014em;margin:12px 0 0;color:var(--ink)}
+.sub{font-size:25px;line-height:1.4;color:var(--ink-2);margin:12px 0 0;max-width:1040px}
+.mono{font-family:var(--mono)}
+.serif{font-family:var(--serif)}
+.label{font-family:var(--mono);font-size:17px;letter-spacing:.15em;text-transform:uppercase;color:var(--muted)}
+.acc{color:var(--accent)}
+code,.code{font-family:var(--mono)}
+
+/* number badge */
+.n{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;
+  border:1.6px solid var(--ink);font-family:var(--mono);font-size:17px;line-height:1;color:var(--ink);background:var(--paper);flex:none}
+.n.solid{background:var(--ink);color:var(--paper)}
+
+/* reveal motion */
+.rv{opacity:0;transform:translateY(14px);transition:opacity .6s cubic-bezier(.2,.7,.2,1),transform .6s cubic-bezier(.2,.7,.2,1);
+  transition-delay:calc(120ms + var(--d,0) * 70ms)}
+.slide.active .rv{opacity:1;transform:none}
+.draw{stroke-dasharray:1;stroke-dashoffset:1;transition:stroke-dashoffset 1.1s cubic-bezier(.4,0,.2,1);transition-delay:calc(300ms + var(--d,0) * 70ms)}
+.slide.active .draw{stroke-dashoffset:0}
+
+/* ---------- slide 1 ---------- */
+.s1-lock{left:150px;top:160px;display:flex;align-items:center;gap:26px}
+.s1-lock svg{width:104px;height:104px;display:block}
+.s1-lock .wm{font-family:var(--serif);font-size:108px;line-height:1;letter-spacing:-.02em;font-weight:600}
+.s1-tag{left:152px;top:300px}
+.s1-h{left:150px;top:338px;width:880px;font-family:var(--serif);font-weight:400;font-size:96px;line-height:1.0;letter-spacing:-.02em;margin:0}
+.s1-h em{font-style:italic}
+.s1-gap{left:152px;top:568px;width:860px;font-size:27px;line-height:1.42;color:var(--ink-2);margin:0}
+.s1-gap b{font-weight:600;color:var(--ink)}
+.s1-promise{left:152px;top:676px;width:860px;font-size:27px;line-height:1.42;color:var(--ink);margin:0}
+.s1-cta{left:152px;top:852px;display:flex;gap:16px}
+.chip{display:flex;align-items:center;gap:12px;height:56px;padding:0 18px;border:1.6px solid var(--ink);border-radius:8px;
+  font-family:var(--mono);font-size:20px;color:var(--ink);text-decoration:none;background:var(--paper);white-space:nowrap}
+.chip .k{font-size:15px;letter-spacing:.16em;color:var(--muted)}
+.chip.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.chip.primary .k{color:#c9c5bb}
+.fig{left:1060px;top:132px;width:710px;height:820px}
+
+/* ---------- slide 2 ---------- */
+.ni{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:50%;border:1.5px solid var(--ink);
+  font-family:var(--mono);font-size:14px;line-height:1;color:var(--ink);vertical-align:3px;margin-right:8px}
+.s2 .sub{font-size:24px;max-width:1250px;white-space:nowrap}
+.colhead{position:absolute;top:272px;display:flex;align-items:baseline;gap:12px}
+.colhead .label{color:var(--ink)}
+.colhead i{font-family:var(--serif);font-size:22px;color:var(--muted)}
+.box{position:absolute;border:1.6px solid var(--ink);border-radius:14px;background:var(--paper)}
+.cell{position:absolute;left:0;right:0;padding:15px 20px 0 66px;border-top:1.5px solid var(--rule)}
+.cell.first{border-top:0}
+.cell .n{position:absolute;left:20px;top:15px}
+.cell h4{font-family:var(--serif);font-weight:400;font-size:26px;line-height:1.1;margin:1px 0 0;color:var(--ink)}
+.cell p{font-size:22px;line-height:1.3;color:var(--ink-2);margin:6px 0 0}
+.party{position:absolute;padding:15px 22px 0 66px}
+.party > .n{position:absolute;left:20px;top:15px}
+.party h4{font-family:var(--serif);font-weight:400;font-size:27px;line-height:1.1;margin:1px 0 0}
+.party p{font-size:22px;line-height:1.3;color:var(--ink-2);margin:6px 0 0}
+.tf-rows{margin-top:8px}
+.tf-rows div{padding:7px 0;border-top:1.5px solid var(--rule);font-size:22px;line-height:1.28;color:var(--ink-2)}
+.tf-rows b{font-weight:600;color:var(--ink)}
+.arc{position:absolute;left:150px;width:1620px;top:902px;height:86px;border:1.6px solid var(--ink);border-radius:14px;background:var(--paper-2);
+  display:flex;align-items:center;padding:0 22px}
+.arc .who{display:flex;align-items:center;gap:14px;width:330px;flex:none}
+.arc .who h4{font-family:var(--serif);font-weight:400;font-size:27px;margin:0}
+.arc .who .label{font-size:15px;margin-top:3px}
+.arc .it{padding:0 18px;border-left:1.5px solid var(--rule);font-size:22px;line-height:1.28;color:var(--ink-2);white-space:nowrap}
+.arc .it.grow{flex:1}
+.legend{position:absolute;left:1470px;top:146px;width:300px;font-size:20px;color:var(--ink-2)}
+.legend div{display:flex;align-items:center;gap:14px;height:34px}
+.legend svg{width:56px;height:10px;flex:none}
+
+/* ---------- slide 3 ---------- */
+.lane-l{position:absolute;left:150px;width:330px;height:62px;display:flex;align-items:center;font-family:var(--serif);font-size:25px;color:var(--ink)}
+.mx-h{position:absolute;top:276px;width:96px;text-align:center;font-size:19px;line-height:1.15;color:var(--ink)}
+.mx-title{position:absolute;left:1190px;top:150px;width:580px}
+.mx-key{display:flex;gap:22px;margin-top:14px;font-size:20px;color:var(--ink-2);align-items:center}
+.mx-key span{display:flex;align-items:center;gap:8px}
+.steps{position:absolute;left:150px;top:730px;width:1620px;display:grid;grid-template-columns:repeat(3,1fr);grid-auto-flow:column;grid-template-rows:repeat(3,auto);column-gap:44px;row-gap:14px}
+.step{display:flex;gap:14px;align-items:flex-start;font-size:22px;line-height:1.3;color:var(--ink-2)}
+.step b{color:var(--ink);font-weight:600}
+.step .n{margin-top:-1px}
+.step .n.o{border-color:var(--accent);color:var(--accent)}
+
+/* ---------- slide 4 ---------- */
+.checks{position:absolute;left:150px;top:284px;width:730px}
+.checks .label{margin-bottom:12px;color:var(--ink)}
+.ck{display:grid;grid-template-columns:62px 250px 1fr;align-items:center;column-gap:16px;height:74px;border-top:1.5px solid var(--rule)}
+.ck:last-child{border-bottom:1.5px solid var(--rule)}
+.ck .id{font-family:var(--mono);font-size:20px;border:1.6px solid var(--ink);border-radius:6px;text-align:center;padding:5px 0;letter-spacing:.04em}
+.ck .nm{font-family:var(--serif);font-size:24px;line-height:1.12;white-space:nowrap}
+.ck .pr{font-size:22px;line-height:1.26;color:var(--ink-2)}
+.cli{position:absolute;left:150px;top:862px;width:730px}
+.cli .cmd{background:var(--ink);color:var(--paper);font-family:var(--mono);font-size:22px;border-radius:10px;height:54px;display:flex;align-items:center;padding:0 20px;gap:14px}
+.cli .cmd .p{color:#a9a59b}
+.cli p{margin:10px 0 0;font-size:22px;line-height:1.3;color:var(--ink-2)}
+.card{position:absolute;border:1.6px solid var(--ink);border-radius:14px;background:var(--paper);padding:22px 26px}
+.card .label{color:var(--ink)}
+.big{font-family:var(--serif);font-weight:400;line-height:1;letter-spacing:-.02em}
+.chips{display:flex;gap:10px;margin-top:10px}
+.fc{border:1.5px solid var(--rule);border-radius:8px;padding:8px 12px 9px;background:var(--paper-2);flex:1}
+.fc .v{font-family:var(--serif);font-size:27px;line-height:1.05;color:var(--ink)}
+.fc .l{font-size:18px;line-height:1.2;color:var(--ink-2);margin-top:4px;white-space:nowrap}
+.rowlab{display:flex;justify-content:space-between;margin-top:14px;font-family:var(--mono);font-size:16px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.kv{margin-top:12px}
+.kv .k{font-family:var(--mono);font-size:15px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.kv .v{font-family:var(--mono);font-size:20px;color:var(--ink);margin-top:3px}
+.card p{font-size:22px;line-height:1.32;color:var(--ink-2);margin:14px 0 0}
+
+/* ---------- slide 5 ---------- */
+.track{position:absolute;top:282px;width:792px;height:516px;border:1.6px solid var(--ink);border-radius:14px;background:var(--paper);padding:24px 30px}
+.track h3{font-family:var(--serif);font-weight:400;font-size:36px;line-height:1.08;letter-spacing:-.01em;margin:12px 0 0}
+.track ul{list-style:none;margin:16px 0 0;padding:0}
+.track li{position:relative;padding:9px 0 9px 26px;border-top:1.5px solid var(--rule);font-size:22px;line-height:1.3;color:var(--ink-2)}
+.track li:first-child{border-top:0}
+.track li::before{content:"";position:absolute;left:2px;top:20px;width:9px;height:9px;border-radius:50%;background:var(--ink)}
+.track li code{font-size:20px;color:var(--ink)}
+.track .status{position:absolute;left:30px;right:30px;bottom:20px;padding-top:12px;border-top:1.5px solid var(--ink);
+  font-size:20px;line-height:1.32;color:var(--ink-2)}
+.track .status b{font-family:var(--mono);font-weight:400;font-size:15px;letter-spacing:.14em;color:var(--ink);margin-right:10px}
+.next{position:absolute;left:150px;top:816px;width:792px;height:174px;border:1.6px dashed var(--ink);border-radius:14px;padding:18px 26px}
+.next h4{font-family:var(--serif);font-weight:400;font-size:27px;margin:8px 0 0}
+.next p{font-size:22px;line-height:1.3;color:var(--ink-2);margin:6px 0 0}
+.cta{position:absolute;left:978px;top:816px;width:792px;height:174px;border-radius:14px;background:var(--ink);color:var(--paper);padding:18px 28px;display:flex;flex-direction:column;justify-content:center}
+.cta .label{color:#bdb9af}
+.cta a{color:var(--paper);text-decoration:none}
+.cta .url{align-self:flex-start;font-family:var(--serif);font-size:44px;line-height:1.05;margin-top:8px;border-bottom:3px solid var(--accent);padding-bottom:3px}
+.cta .row{display:flex;gap:34px;margin-top:12px;font-family:var(--mono);font-size:19px;color:#dcd8ce;white-space:nowrap}
+.cta .row + .row{margin-top:6px}
+.cta .row .p{color:#8f8b82}
+
+/* on-screen controls */
+.ctrl{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);display:flex;align-items:center;gap:6px;padding:6px;border-radius:999px;
+  background:rgba(21,21,21,.86);color:#f3f1ec;font-family:var(--mono);font-size:13px;letter-spacing:.12em;opacity:0;transition:opacity .3s;z-index:10}
+.ctrl.show,.ctrl:focus-within{opacity:1}
+.ctrl button{all:unset;cursor:pointer;width:30px;height:30px;border-radius:50%;display:grid;place-items:center;font-size:16px}
+.ctrl button:hover,.ctrl button:focus-visible{background:rgba(243,241,236,.16)}
+.ctrl .count{min-width:64px;text-align:center}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+
+@media (prefers-reduced-motion: reduce){
+  .slide,.slide *{transition:none!important;animation:none!important}
+  .rv{opacity:1;transform:none}
+  .draw{stroke-dashoffset:0}
+}
+@page{size:1920px 1080px;margin:0}
+@media print{
+  html,body{height:auto;overflow:visible;background:var(--paper);margin:0;padding:0}
+  .sr{display:none!important}
+  .stage{position:static;transform:none!important;width:1920px;height:auto;box-shadow:none;overflow:visible;background:none}
+  .slide{position:relative;display:block;width:1920px;height:1080px;opacity:1!important;visibility:visible!important;
+    overflow:hidden;background:var(--paper);break-inside:avoid;page-break-inside:avoid;transition:none!important}
+  .slide + .slide{break-before:page;page-break-before:always}
+  .rv{opacity:1!important;transform:none!important;transition:none!important}
+  .draw{stroke-dashoffset:0!important;transition:none!important}
+  .ctrl{display:none!important}
+  *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+}
+</style>
+</head>
+<body>
+
+<svg class="defs" aria-hidden="true" focusable="false" width="0" height="0">
+  <defs>
+    
+<symbol id="mark" viewBox="0 0 64 64">
+  <rect x="3" y="3" width="58" height="58" rx="13" fill="#f3f1ec" stroke="#151515" stroke-width="2.5"/>
+  <circle cx="31" cy="35" r="14.2" fill="none" stroke="#151515" stroke-width="4.4"/>
+  <line x1="45.2" y1="11" x2="45.2" y2="49.2" stroke="#151515" stroke-width="4.4" stroke-linecap="round"/>
+  <line x1="8" y1="35" x2="23.5" y2="35" stroke="#f3f1ec" stroke-width="8.5" stroke-linecap="butt"/>
+  <line x1="9.5" y1="35" x2="22.5" y2="35" stroke="#151515" stroke-width="3.6" stroke-linecap="round"/>
+  <circle cx="31" cy="35" r="5.6" fill="#d9531e"/>
+</symbol>
+
+    <filter id="ink" x="-40%" y="-40%" width="180%" height="180%" color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="10" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 20 -8.5" result="goo"/>
+      <feTurbulence type="fractalNoise" baseFrequency="0.018" numOctaves="2" seed="9" result="warp"/>
+      <feDisplacementMap in="goo" in2="warp" scale="16" xChannelSelector="R" yChannelSelector="G" result="shape"/>
+      <feGaussianBlur in="shape" stdDeviation="1.6" result="soft"/>
+      <feTurbulence type="fractalNoise" baseFrequency="0.75" numOctaves="2" seed="4" result="noise"/>
+      <feColorMatrix in="noise" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1.5 0.05" result="grain"/>
+      <feComposite in="soft" in2="grain" operator="in"/>
+    </filter>
+    <marker id="ah" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M1 1 L10 6 L1 11" fill="none" stroke="#151515" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="aho" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="13" markerHeight="13" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M1 1 L10 6 L1 11" fill="none" stroke="#d9531e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+</svg>
+
+<main class="stage" aria-roledescription="slide deck">
+
+<section class="slide" id="s1" aria-label="Slide 1 of 5: deRoute, private AI you can verify">
+<svg class="blots" viewBox="0 0 1920 1080" aria-hidden="true">
+<g filter="url(#ink)" fill="#151515" opacity="0.56">
+<circle cx="-10" cy="210" r="74"/>
+<circle cx="60" cy="262" r="40"/>
+<circle cx="34" cy="330" r="22"/>
+<circle cx="88" cy="196" r="16"/>
+</g>
+<g filter="url(#ink)" fill="#151515" opacity="0.56">
+<circle cx="30" cy="820" r="56"/>
+<circle cx="88" cy="870" r="26"/>
+<circle cx="-20" cy="900" r="40"/>
+</g>
+<g filter="url(#ink)" fill="#151515" opacity="0.56">
+<circle cx="1900" cy="420" r="70"/>
+<circle cx="1838" cy="470" r="30"/>
+<circle cx="1872" cy="540" r="18"/>
+</g>
+<g filter="url(#ink)" fill="#151515" opacity="0.56">
+<circle cx="1890" cy="930" r="46"/>
+<circle cx="1832" cy="980" r="18"/>
+</g>
+</svg>
+
+<header class="top">
+  <div class="brand"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#mark"/></svg><span>deRoute</span></div>
+  <span class="plate">Plate 01 · The promise</span>
+  <span class="right">Edition 2026.10</span>
+</header>
+<div class="abs s1-lock rv" style="--d:0"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#mark"/></svg><span class="wm">deRoute</span></div>
+<div class="abs s1-tag label rv" style="--d:1">Private · verifiable · AI router</div>
+<h1 class="abs s1-h rv" style="--d:1">Private AI<br>you can <em>verify.</em></h1>
+<p class="abs s1-gap rv" style="--d:2"><b>The trust gap:</b> on a typical AI service the app, the cloud and the model host can all read your prompt. You only have their word.</p>
+<p class="abs s1-promise rv" style="--d:3">deRoute swaps their word for proof. Your browser hides your personal details, verifies the sealed hardware, and locks each message so only that hardware can open it. Not us, not Google, not MongoDB.</p>
+<div class="abs s1-cta rv" style="--d:4">
+  <a class="chip primary" href="https://drouter-demo.vercel.app"><span class="k">LIVE</span>drouter-demo.vercel.app</a>
+  <a class="chip" href="https://github.com/thepigdestroyer/drouter"><span class="k">CODE</span>github.com/thepigdestroyer/drouter</a>
+</div>
+
+<svg class="abs fig rv" style="--d:3" viewBox="0 0 710 820" role="img" aria-label="One message: filtered on your device, padded and sealed on the wire, opened only inside the sealed computer">
+  <text x="0" y="18" class="lab">FIG 1 · ONE MESSAGE, START TO FINISH</text>
+  <line x1="0" y1="36" x2="710" y2="36" stroke="#d6d2c8" stroke-width="1.5"/>
+
+  <!-- orange route of the private message (behind boxes) -->
+  <path class="draw" style="--d:6" pathLength="1" d="M 110 292 L 110 612" stroke="#d9531e" stroke-width="3.2" fill="none" marker-end="url(#aho)"/>
+
+  <!-- 01 device -->
+  <text x="0" y="80" class="lab ink">01 · ON YOUR DEVICE</text>
+  <rect x="0" y="96" width="710" height="196" rx="12" fill="#f3f1ec" stroke="#151515" stroke-width="2"/>
+  <line x1="0" y1="138" x2="710" y2="138" stroke="#151515" stroke-width="1.5"/>
+  <circle cx="24" cy="117" r="4.5" fill="#151515"/><circle cx="40" cy="117" r="4.5" fill="#151515"/><circle cx="56" cy="117" r="4.5" fill="#151515"/>
+  <text x="80" y="123.5" class="m18">filter v1.0.5 · matches the Arc fingerprint</text>
+  <text x="24" y="184" class="s22 mut">Email dana.reyes@example.org the key sk-test-4f9a…</text>
+  <line x1="24" y1="178" x2="530" y2="178" stroke="#595752" stroke-width="1.6"/>
+  <text x="24" y="250" class="s22">Email</text>
+  <rect x="88" y="226" width="124" height="34" rx="5" fill="#151515"/>
+  <text x="150" y="249.5" text-anchor="middle" class="m18 paper">[EMAIL_1]</text>
+  <text x="226" y="250" class="s22">the key</text>
+  <rect x="310" y="226" width="136" height="34" rx="5" fill="#151515"/>
+  <text x="378" y="249.5" text-anchor="middle" class="m18 paper">[SECRET_1]</text>
+
+  <!-- 02 wire -->
+  <text x="0" y="356" class="lab ink ko">02 · ON THE WIRE, THROUGH OUR BLIND RELAY</text>
+  <g transform="translate(30,378)"><rect width="160" height="112" rx="8" fill="#f3f1ec" stroke="#151515" stroke-width="2"/><line x1="14" y1="44" x2="146" y2="44" stroke="#151515" stroke-width="1.5"/><text x="80" y="31" text-anchor="middle" class="m18">4,096 B</text><text x="80" y="74" text-anchor="middle" class="m16 mut">8f4a·c901</text><text x="80" y="98" text-anchor="middle" class="m16 mut">e27b·50d3</text></g><g transform="translate(213,378)"><rect width="160" height="112" rx="8" fill="#f3f1ec" stroke="#151515" stroke-width="2"/><line x1="14" y1="44" x2="146" y2="44" stroke="#151515" stroke-width="1.5"/><text x="80" y="31" text-anchor="middle" class="m18">4,096 B</text><text x="80" y="74" text-anchor="middle" class="m16 mut">3b7e·d114</text><text x="80" y="98" text-anchor="middle" class="m16 mut">9a0c·f6e2</text></g><g transform="translate(396,378)"><rect width="160" height="112" rx="8" fill="#f3f1ec" stroke="#151515" stroke-width="2"/><line x1="14" y1="44" x2="146" y2="44" stroke="#151515" stroke-width="1.5"/><text x="80" y="31" text-anchor="middle" class="m18">4,096 B</text><text x="80" y="74" text-anchor="middle" class="m16 mut">a29c·77e0</text><text x="80" y="98" text-anchor="middle" class="m16 mut">1d8b·4c5f</text></g>
+  <g transform="translate(579,378)"><rect width="131" height="112" rx="8" fill="#f3f1ec" stroke="#151515" stroke-width="2" stroke-dasharray="6 6"/><text x="65" y="64" text-anchor="middle" class="m18 mut">…</text></g>
+  <text x="0" y="532" class="s22 ko">Sealed with HPKE and padded, so sizes reveal only a bucket.</text>
+
+  <!-- 03 sealed computer -->
+  <text x="0" y="596" class="lab ink ko">03 · INSIDE THE SEALED COMPUTER</text>
+  <g transform="translate(110,712)">
+    <circle r="92" fill="#f3f1ec" stroke="#151515" stroke-width="2.6"/>
+    <circle r="76" fill="none" stroke="#151515" stroke-width="1.4" stroke-dasharray="4 5"/>
+    <line x1="0" y1="-92" x2="0" y2="-104" stroke="#151515" stroke-width="2.2" transform="rotate(0)"/><line x1="0" y1="-92" x2="0" y2="-104" stroke="#151515" stroke-width="2.2" transform="rotate(30)"/><line x1="0" y1="-92" x2="0" y2="-104" stroke="#151515" stroke-width="2.2" transform="rotate(60)"/><line x1="0" y1="-92" x2="0" y2="-104" stroke="#151515" stroke-width="2.2" transform="rotate(90)"/><line x1="0" y1="-92" x2="0" y2="-104" stroke="#151515" stroke-width="2.2" transform="rotate(120)"/><line x1="0" y1="-92" x2="0" y2="-104" stroke="#151515" stroke-width="2.2" transform="rotate(150)"/><line x1="0" y1="-92" x2="0" y2="-104" stroke="#151515" stroke-width="2.2" transform="rotate(180)"/><line x1="0" y1="-92" x2="0" y2="-104" stroke="#151515" stroke-width="2.2" transform="rotate(210)"/><line x1="0" y1="-92" x2="0" y2="-104" stroke="#151515" stroke-width="2.2" transform="rotate(240)"/><line x1="0" y1="-92" x2="0" y2="-104" stroke="#151515" stroke-width="2.2" transform="rotate(270)"/><line x1="0" y1="-92" x2="0" y2="-104" stroke="#151515" stroke-width="2.2" transform="rotate(300)"/><line x1="0" y1="-92" x2="0" y2="-104" stroke="#151515" stroke-width="2.2" transform="rotate(330)"/>
+    <circle r="30" fill="#d9531e"/>
+  </g>
+  <text x="240" y="684" class="ser30">Opened only here.</text>
+  <text x="240" y="722" class="s22">AMD SEV-SNP router; model enclaves on</text>
+  <text x="240" y="752" class="s22">Intel TDX or SEV-SNP with NVIDIA</text>
+  <text x="240" y="782" class="s22">confidential GPUs, checked before sending.</text>
+</svg>
+<style>
+.fig .lab{font-family:var(--mono);font-size:16px;letter-spacing:.15em;fill:#595752}
+.fig .lab.ink{fill:#151515}
+.fig .m18{font-family:var(--mono);font-size:18px;fill:#151515}
+.fig .m16{font-family:var(--mono);font-size:16px;fill:#151515}
+.fig .s22{font-family:var(--sans);font-size:22px;fill:#3a3936}
+.fig .ser30{font-family:var(--serif);font-size:32px;fill:#151515}
+.fig .mut{fill:#595752}
+.fig .paper{fill:#f3f1ec}
+.fig .ko{paint-order:stroke;stroke:#f3f1ec;stroke-width:12px;stroke-linejoin:round}
+</style>
+
+<footer class="foot"><span class="src">Hackathon tracks: Google DeepMind Gemini 4 Argon · MongoDB Atlas</span><span class="num">01 / 05</span></footer>
+</section>
+
+<section class="slide s2" id="s2" aria-label="Slide 2 of 5: the seven building blocks">
+<svg class="blots" viewBox="0 0 1920 1080" aria-hidden="true">
+<g filter="url(#ink)" fill="#151515" opacity="0.56">
+<circle cx="-6" cy="470" r="64"/>
+<circle cx="56" cy="520" r="30"/>
+<circle cx="24" cy="590" r="20"/>
+</g>
+<g filter="url(#ink)" fill="#151515" opacity="0.56">
+<circle cx="1904" cy="250" r="58"/>
+<circle cx="1846" cy="300" r="22"/>
+</g>
+<g filter="url(#ink)" fill="#151515" opacity="0.56">
+<circle cx="1898" cy="760" r="60"/>
+<circle cx="1838" cy="812" r="24"/>
+<circle cx="1880" cy="860" r="16"/>
+</g>
+</svg>
+
+<header class="top">
+  <div class="brand"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#mark"/></svg><span>deRoute</span></div>
+  <span class="plate">Plate 02 · Architecture</span>
+  <span class="right">drouter-demo.vercel.app</span>
+</header>
+<div class="head">
+  <div class="kicker rv" style="--d:0">Seven building blocks</div>
+  <h2 class="title rv" style="--d:1">One private route, seven safeguards</h2>
+  <p class="sub rv" style="--d:2">Plain text exists only in your browser and in sealed hardware. Others see ciphertext, hashes or a 67-bit outline.</p>
+</div>
+
+<div class="legend rv" style="--d:2">
+  <div><svg viewBox="0 0 56 10"><line x1="0" y1="5" x2="56" y2="5" stroke="#d9531e" stroke-width="3.2"/></svg>your words, sealed</div>
+  <div><svg viewBox="0 0 56 10"><line x1="0" y1="5" x2="56" y2="5" stroke="#151515" stroke-width="2"/></svg>content-free data</div>
+  <div><svg viewBox="0 0 56 10"><line x1="0" y1="5" x2="56" y2="5" stroke="#151515" stroke-width="2" stroke-dasharray="5 5"/></svg>public anchors on Arc</div>
+</div>
+<div class="colhead rv" style="--d:2;left:150px"><span class="label">Your browser</span><i>plain text lives only here</i></div>
+<div class="colhead rv" style="--d:3;left:720px"><span class="label">Our server + relay</span><i>on Vercel</i></div>
+<div class="colhead rv" style="--d:4;left:1200px"><span class="label">Outside parties</span><i>each sees only what it must</i></div>
+<div class="box rv" style="--d:2;left:150px;top:306px;width:490px;height:570px"><div class="cell first" style="top:0px;height:114px"><span class="n">4</span><h4>Lock and pad</h4><p>HPKE (RFC 9180) to the enclave’s attested key, in 4,096-byte buckets.</p></div>
+<div class="cell" style="top:114px;height:114px"><span class="n">2</span><h4>Check the seal: C1 to C7</h4><p>Seven checks before sending. Any failure blocks the message.</p></div>
+<div class="cell" style="top:228px;height:114px"><span class="n">1</span><h4>Personal-detail filter</h4><p>Details become tags like [EMAIL_1]; its rules are fingerprinted on Arc.</p></div>
+<div class="cell" style="top:342px;height:114px"><span class="n">6</span><h4>Rank the library locally</h4><p>BM25 over the whole downloaded corpus, in browser memory.</p></div>
+<div class="cell" style="top:456px;height:114px"><span class="n">5</span><h4>Passkey account, blind credits</h4><p>No email or password. Each credit is spent once via a nullifier.</p></div></div>
+<div class="box rv" style="--d:3;left:720px;top:306px;width:400px;height:570px"><div class="cell first" style="top:0px;height:114px"><span class="n">4</span><h4>Blind relay</h4><p>Adds the API key, forwards only ciphertext.</p></div>
+<div class="cell" style="top:114px;height:114px"><span class="n">7</span><h4>Hourly monitor and log</h4><p>Checks 6 sealed computers into an RFC 6962 log.</p></div>
+<div class="cell" style="top:228px;height:114px"><span class="n">6</span><h4>Egress gate</h4><p>Closed schema: at most 66.89 bits per request.</p></div>
+<div class="cell" style="top:342px;height:114px"><span class="n">6</span><h4>Whole-library endpoint</h4><p>Same file for all; any query gets HTTP 400.</p></div>
+<div class="cell" style="top:456px;height:114px"><span class="n">5</span><h4>Blind-signing issuer</h4><p>One-time deposit address; payer not stored.</p></div></div>
+
+<div class="box rv" style="--d:4;left:1200px;top:306px;width:570px;height:220px">
+  <div class="party" style="left:0;right:0;top:0"><span class="n">2</span><h4>Tinfoil sealed computers</h4>
+    <div class="tf-rows">
+      <div><b>Router:</b> AMD SEV-SNP, signed open-source code</div>
+      <div><b>Models:</b> Intel TDX or AMD SEV-SNP, with NVIDIA confidential GPUs</div>
+      <div><span class="ni">1</span><b>pii-filter:</b> the second filtering pass</div>
+    </div>
+  </div>
+</div>
+<div class="box rv" style="--d:5;left:1200px;top:540px;width:570px;height:94px">
+  <div class="party" style="left:0;right:0;top:0"><span class="n">6</span><h4>Google Gemini 4 Argon</h4><p>Plans over <code>$INPUT</code> handles. Never sees a word.</p></div>
+</div>
+<div class="box rv" style="--d:6;left:1200px;top:654px;width:570px;height:94px">
+  <div class="party" style="left:0;right:0;top:0"><span class="n">6</span><h4>MongoDB Atlas</h4><p>16-document library, <code>$rankFusion</code> search.</p></div>
+</div>
+<div class="box rv" style="--d:7;left:1200px;top:768px;width:570px;height:94px">
+  <div class="party" style="left:0;right:0;top:0"><span class="n">7</span><h4>Anyone, from a terminal</h4><p>The open CLI re-runs C1 to C7 and signs it.</p></div>
+</div>
+<div class="rv" style="--d:6"><svg class="abs" style="left:0;top:0" width="1920" height="1080" viewBox="0 0 1920 1080" aria-hidden="true"><path class="draw" style="--d:4" pathLength="1" d="M 646 363 H 714" stroke="#d9531e" stroke-width="3.2" fill="none" marker-start="url(#aho)" marker-end="url(#aho)"/><path class="draw" style="--d:5" pathLength="1" d="M 1126 363 H 1194" stroke="#d9531e" stroke-width="3.2" fill="none" marker-start="url(#aho)" marker-end="url(#aho)"/><path d="M 1126 477 H 1194" stroke="#151515" stroke-width="2" fill="none" marker-end="url(#ah)"/><path d="M 646 591 H 714" stroke="#151515" stroke-width="2" fill="none" marker-end="url(#ah)"/><path d="M 1126 591 H 1194" stroke="#151515" stroke-width="2" fill="none" marker-end="url(#ah)"/><path d="M 1194 705 H 1126" stroke="#151515" stroke-width="2" fill="none" marker-end="url(#ah)"/><path d="M 714 705 H 646" stroke="#151515" stroke-width="2" fill="none" marker-end="url(#ah)"/><path d="M 646 819 H 714" stroke="#151515" stroke-width="2" fill="none" marker-start="url(#ah)" marker-end="url(#ah)"/><path d="M 395 876 V 902" stroke="#151515" stroke-width="2" stroke-dasharray="5 5" fill="none"/><circle cx="395" cy="876" r="4" fill="#151515"/><path d="M 920 876 V 902" stroke="#151515" stroke-width="2" stroke-dasharray="5 5" fill="none"/><circle cx="920" cy="876" r="4" fill="#151515"/><path d="M 1485 876 V 902" stroke="#151515" stroke-width="2" stroke-dasharray="5 5" fill="none"/><circle cx="1485" cy="876" r="4" fill="#151515"/></svg></div>
+<div class="arc rv" style="--d:7">
+  <div class="who"><span class="n">3</span><div><h4>Circle Arc</h4><div class="label" style="white-space:nowrap">Testnet · chain 5042002</div></div></div>
+  <div class="it grow">Registry: 6 nodes admitted with staked USDC</div>
+  <div class="it"><span class="ni">1</span>Filter fingerprint</div>
+  <div class="it"><span class="ni">7</span>Hourly log roots</div>
+  <div class="it"><span class="ni">5</span>One-time USDC deposits</div>
+</div>
+
+<footer class="foot"><span class="src">1 filter · 2 sealed computers · 3 registry · 4 encrypted relay · 5 unlinkable payments · 6 planner + library · 7 accountability</span><span class="num">02 / 05</span></footer>
+</section>
+
+<section class="slide" id="s3" aria-label="Slide 3 of 5: the life of one request">
+<svg class="blots" viewBox="0 0 1920 1080" aria-hidden="true">
+<g filter="url(#ink)" fill="#151515" opacity="0.56">
+<circle cx="-8" cy="560" r="60"/>
+<circle cx="52" cy="604" r="26"/>
+</g>
+<g filter="url(#ink)" fill="#151515" opacity="0.56">
+<circle cx="1902" cy="360" r="54"/>
+<circle cx="1846" cy="404" r="20"/>
+</g>
+<g filter="url(#ink)" fill="#151515" opacity="0.56">
+<circle cx="1900" cy="880" r="50"/>
+<circle cx="1846" cy="926" r="22"/>
+<circle cx="1880" cy="980" r="14"/>
+</g>
+</svg>
+
+<header class="top">
+  <div class="brand"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#mark"/></svg><span>deRoute</span></div>
+  <span class="plate">Plate 03 · Under the hood</span>
+  <span class="right">drouter-demo.vercel.app</span>
+</header>
+<div class="head">
+  <div class="kicker rv" style="--d:0">One agent run, left to right</div>
+  <h2 class="title rv" style="--d:1">The life of one request</h2>
+  <p class="sub rv" style="--d:2;max-width:1010px">An agent run on /argon takes all nine steps; a plain chat message takes 1, 2, 5, 7 and 8.</p>
+</div>
+
+<div class="mx-title rv" style="--d:2">
+  <div class="label" style="color:var(--ink)">Who can see what</div>
+  <div class="mx-key">
+    <span><svg width="22" height="22" viewBox="-11 -11 22 22"><circle r="10" fill="#151515"/></svg>can see</span>
+    <span><svg width="22" height="22" viewBox="-11 -11 22 22"><circle r="9" fill="#f3f1ec" stroke="#151515" stroke-width="2"/><path d="M0 -9 A 9 9 0 0 1 0 9 Z" fill="#151515"/></svg>hash only</span>
+    <span><svg width="22" height="22" viewBox="-11 -11 22 22"><circle r="9" fill="none" stroke="#a9a498" stroke-width="1.8"/></svg>never</span>
+  </div>
+</div>
+<svg class="abs rv" style="--d:3;left:0;top:0" width="1920" height="1080" viewBox="0 0 1920 1080" aria-hidden="true"><rect x="1162" y="262" width="608" height="448" rx="12" fill="#ebe8e1"/><line x1="150" y1="330" x2="1770" y2="330" stroke="#d6d2c8" stroke-width="1.5"/><line x1="150" y1="392" x2="1770" y2="392" stroke="#d6d2c8" stroke-width="1.5"/><line x1="150" y1="454" x2="1770" y2="454" stroke="#d6d2c8" stroke-width="1.5"/><line x1="150" y1="516" x2="1770" y2="516" stroke="#d6d2c8" stroke-width="1.5"/><line x1="150" y1="578" x2="1770" y2="578" stroke="#d6d2c8" stroke-width="1.5"/><line x1="150" y1="640" x2="1770" y2="640" stroke="#d6d2c8" stroke-width="1.5"/><line x1="150" y1="702" x2="1770" y2="702" stroke="#d6d2c8" stroke-width="1.5"/><path style="--d:4" d="M 520.0 361 V 671" stroke="#151515" stroke-width="2" fill="none" stroke-dasharray="5 5"/><circle cx="520.0" cy="361" r="8" fill="#151515"/><circle cx="520.0" cy="671" r="8" fill="#151515"/><polyline points="513.0,396.0 520.0,388.0 527.0,396.0" fill="none" stroke="#151515" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="520.0" cy="300" r="17" fill="#f3f1ec" stroke="#151515" stroke-width="1.8"/><text x="520.0" y="306" text-anchor="middle" style="font-family:var(--mono);font-size:17px;fill:#151515">1</text><circle cx="595.0" cy="361" r="8" fill="#151515"/><circle cx="595.0" cy="361" r="15" fill="none" stroke="#151515" stroke-width="1.8"/><circle cx="595.0" cy="300" r="17" fill="#f3f1ec" stroke="#151515" stroke-width="1.8"/><text x="595.0" y="306" text-anchor="middle" style="font-family:var(--mono);font-size:17px;fill:#151515">2</text><path class="draw" pathLength="1" style="--d:6" d="M 670.0 361 V 485" stroke="#d9531e" stroke-width="3" fill="none"/><circle cx="670.0" cy="361" r="8" fill="#d9531e"/><circle cx="670.0" cy="423" r="8" fill="#d9531e"/><circle cx="670.0" cy="485" r="8" fill="#d9531e"/><polyline points="663.0,388.0 670.0,396.0 677.0,388.0" fill="none" stroke="#d9531e" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="670.0" cy="300" r="17" fill="#f3f1ec" stroke="#d9531e" stroke-width="1.8"/><text x="670.0" y="306" text-anchor="middle" style="font-family:var(--mono);font-size:17px;fill:#d9531e">3</text><path style="--d:7" d="M 745.0 361 V 609" stroke="#151515" stroke-width="2" fill="none"/><circle cx="745.0" cy="361" r="8" fill="#151515"/><circle cx="745.0" cy="423" r="8" fill="#151515"/><circle cx="745.0" cy="547" r="8" fill="#151515"/><circle cx="745.0" cy="609" r="8" fill="#f3f1ec" stroke="#151515" stroke-width="2.4"/><polyline points="738.0,388.0 745.0,396.0 752.0,388.0" fill="none" stroke="#151515" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="745.0" cy="300" r="17" fill="#f3f1ec" stroke="#151515" stroke-width="1.8"/><text x="745.0" y="306" text-anchor="middle" style="font-family:var(--mono);font-size:17px;fill:#151515">4</text><path style="--d:8" d="M 820.0 361 V 671" stroke="#151515" stroke-width="2" fill="none"/><circle cx="820.0" cy="361" r="8" fill="#151515"/><circle cx="820.0" cy="423" r="8" fill="#151515"/><circle cx="820.0" cy="485" r="8" fill="#151515"/><circle cx="820.0" cy="671" r="8" fill="#151515"/><polyline points="813.0,396.0 820.0,388.0 827.0,396.0" fill="none" stroke="#151515" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="820.0" cy="300" r="17" fill="#f3f1ec" stroke="#151515" stroke-width="1.8"/><text x="820.0" y="306" text-anchor="middle" style="font-family:var(--mono);font-size:17px;fill:#151515">5</text><path style="--d:9" d="M 895.0 361 V 609" stroke="#151515" stroke-width="2" fill="none"/><circle cx="895.0" cy="361" r="8" fill="#151515"/><circle cx="895.0" cy="423" r="8" fill="#151515"/><circle cx="895.0" cy="609" r="8" fill="#151515"/><polyline points="888.0,396.0 895.0,388.0 902.0,396.0" fill="none" stroke="#151515" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="895.0" cy="300" r="17" fill="#f3f1ec" stroke="#151515" stroke-width="1.8"/><text x="895.0" y="306" text-anchor="middle" style="font-family:var(--mono);font-size:17px;fill:#151515">6</text><path class="draw" pathLength="1" style="--d:10" d="M 970.0 361 V 485" stroke="#d9531e" stroke-width="3" fill="none"/><circle cx="970.0" cy="361" r="8" fill="#d9531e"/><circle cx="970.0" cy="423" r="8" fill="#d9531e"/><circle cx="970.0" cy="485" r="8" fill="#d9531e"/><polyline points="963.0,388.0 970.0,396.0 977.0,388.0" fill="none" stroke="#d9531e" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="970.0" cy="300" r="17" fill="#f3f1ec" stroke="#d9531e" stroke-width="1.8"/><text x="970.0" y="306" text-anchor="middle" style="font-family:var(--mono);font-size:17px;fill:#d9531e">7</text><path class="draw" pathLength="1" style="--d:11" d="M 1045.0 361 V 485" stroke="#d9531e" stroke-width="3" fill="none"/><circle cx="1045.0" cy="361" r="8" fill="#d9531e"/><circle cx="1045.0" cy="423" r="8" fill="#d9531e"/><circle cx="1045.0" cy="485" r="8" fill="#d9531e"/><polyline points="1038.0,396.0 1045.0,388.0 1052.0,396.0" fill="none" stroke="#d9531e" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="1045.0" cy="300" r="17" fill="#f3f1ec" stroke="#d9531e" stroke-width="1.8"/><text x="1045.0" y="306" text-anchor="middle" style="font-family:var(--mono);font-size:17px;fill:#d9531e">8</text><path style="--d:12" d="M 1120.0 361 V 671" stroke="#151515" stroke-width="2" fill="none" stroke-dasharray="5 5"/><circle cx="1120.0" cy="361" r="8" fill="#151515"/><circle cx="1120.0" cy="671" r="8" fill="#151515"/><polyline points="1113.0,388.0 1120.0,396.0 1127.0,388.0" fill="none" stroke="#151515" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="1120.0" cy="300" r="17" fill="#f3f1ec" stroke="#151515" stroke-width="1.8"/><text x="1120.0" y="306" text-anchor="middle" style="font-family:var(--mono);font-size:17px;fill:#151515">9</text><circle cx="1224.3" cy="361" r="11" fill="#151515"/><circle cx="1321.0" cy="361" r="11" fill="#151515"/><circle cx="1417.7" cy="361" r="11" fill="#151515"/><circle cx="1514.3" cy="361" r="11" fill="#151515"/><circle cx="1611.0" cy="361" r="11" fill="#151515"/><circle cx="1707.7" cy="361" r="11" fill="#151515"/><circle cx="1224.3" cy="423" r="10" fill="none" stroke="#a9a498" stroke-width="1.8"/><circle cx="1321.0" cy="423" r="10" fill="none" stroke="#a9a498" stroke-width="1.8"/><circle cx="1417.7" cy="423" r="10" fill="none" stroke="#a9a498" stroke-width="1.8"/><circle cx="1514.3" cy="423" r="11" fill="#151515"/><circle cx="1611.0" cy="423" r="11" fill="#151515"/><circle cx="1707.7" cy="423" r="10" fill="none" stroke="#a9a498" stroke-width="1.8"/><circle cx="1224.3" cy="485" r="10" fill="none" stroke="#a9a498" stroke-width="1.8"/><circle cx="1321.0" cy="485" r="11" fill="#151515"/><circle cx="1417.7" cy="485" r="11" fill="#151515"/><circle cx="1514.3" cy="485" r="10" fill="none" stroke="#a9a498" stroke-width="1.8"/><circle cx="1611.0" cy="485" r="10" fill="none" stroke="#a9a498" stroke-width="1.8"/><circle cx="1707.7" cy="485" r="10" fill="none" stroke="#a9a498" stroke-width="1.8"/><circle cx="1224.3" cy="547" r="10" fill="none" stroke="#a9a498" stroke-width="1.8"/><circle cx="1321.0" cy="547" r="10" fill="none" stroke="#a9a498" stroke-width="1.8"/><circle cx="1417.7" cy="547" r="10" fill="none" stroke="#a9a498" stroke-width="1.8"/><circle cx="1514.3" cy="547" r="11" fill="#151515"/><circle cx="1611.0" cy="547" r="10" fill="none" stroke="#a9a498" stroke-width="1.8"/><circle cx="1707.7" cy="547" r="10" fill="none" stroke="#a9a498" stroke-width="1.8"/><circle cx="1224.3" cy="609" r="10" fill="none" stroke="#a9a498" stroke-width="1.8"/><circle cx="1321.0" cy="609" r="10" fill="none" stroke="#a9a498" stroke-width="1.8"/><circle cx="1417.7" cy="609" r="10" fill="none" stroke="#a9a498" stroke-width="1.8"/><circle cx="1514.3" cy="609" r="10" fill="#f3f1ec" stroke="#151515" stroke-width="2"/><path d="M 1514.3 599 A 10 10 0 0 1 1514.3 619 Z" fill="#151515"/><circle cx="1611.0" cy="609" r="10" fill="none" stroke="#a9a498" stroke-width="1.8"/><circle cx="1707.7" cy="609" r="10" fill="none" stroke="#a9a498" stroke-width="1.8"/><circle cx="1224.3" cy="671" r="10" fill="none" stroke="#a9a498" stroke-width="1.8"/><circle cx="1321.0" cy="671" r="10" fill="none" stroke="#a9a498" stroke-width="1.8"/><circle cx="1417.7" cy="671" r="10" fill="none" stroke="#a9a498" stroke-width="1.8"/><circle cx="1514.3" cy="671" r="10" fill="none" stroke="#a9a498" stroke-width="1.8"/><circle cx="1611.0" cy="671" r="10" fill="none" stroke="#a9a498" stroke-width="1.8"/><circle cx="1707.7" cy="671" r="10" fill="none" stroke="#a9a498" stroke-width="1.8"/></svg>
+<div class="mx-h rv" style="--d:3;left:1176.3px">Your<br>words</div>
+<div class="mx-h rv" style="--d:3;left:1273.0px">Filtered<br>text</div>
+<div class="mx-h rv" style="--d:3;left:1369.7px">Model<br>answer</div>
+<div class="mx-h rv" style="--d:3;left:1466.3px">Task<br>outline</div>
+<div class="mx-h rv" style="--d:3;left:1563.0px">Your<br>IP</div>
+<div class="mx-h rv" style="--d:3;left:1659.7px">Your<br>lookups</div>
+<div class="lane-l rv" style="--d:2;top:330px">You, in your browser</div>
+<div class="lane-l rv" style="--d:3;top:392px">Our server and relay</div>
+<div class="lane-l rv" style="--d:4;top:454px">Tinfoil sealed computers</div>
+<div class="lane-l rv" style="--d:5;top:516px">Google Gemini 4 Argon</div>
+<div class="lane-l rv" style="--d:6;top:578px">MongoDB Atlas</div>
+<div class="lane-l rv" style="--d:7;top:640px">Circle Arc, public chain</div>
+<div class="steps rv" style="--d:8">
+<div class="step"><span class="n ">1</span><span><b>Check the filter.</b> Browser matches the rule-set fingerprint to its Arc transaction.</span></div>
+<div class="step"><span class="n ">2</span><span><b>Hide details.</b> Names, emails and keys become [EMAIL_1], [SECRET_1]; dates shift.</span></div>
+<div class="step"><span class="n o">3</span><span><b>Second pass.</b> Filtered text goes HPKE-sealed to Tinfoil’s pii-filter enclave.</span></div>
+<div class="step"><span class="n ">4</span><span><b>Plan.</b> Only the task outline reaches Gemini 4 Argon. Its hash is logged.</span></div>
+<div class="step"><span class="n ">5</span><span><b>Verify.</b> C1 to C7 on router, model enclave and Arc registry. A fail blocks sending.</span></div>
+<div class="step"><span class="n ">6</span><span><b>Library.</b> All 16 documents in one identical file for everyone, ranked in the browser.</span></div>
+<div class="step"><span class="n o">7</span><span><b>Send.</b> Padded to 4,096-byte buckets, sealed to the enclave’s key, relayed blind.</span></div>
+<div class="step"><span class="n o">8</span><span><b>Restore.</b> The answer streams back sealed. Your browser puts the real names back.</span></div>
+<div class="step"><span class="n ">9</span><span><b>Approve.</b> Nothing is written to Arc until you explicitly say yes.</span></div>
+</div>
+
+<footer class="foot"><span class="src">Orange = your words, sealed end to end · the relay also sees padded sizes and timing · if Gemini is unavailable, runs stop at step 4 and say so</span><span class="num">03 / 05</span></footer>
+</section>
+
+<section class="slide" id="s4" aria-label="Slide 4 of 5: proof, not promises">
+<svg class="blots" viewBox="0 0 1920 1080" aria-hidden="true">
+<g filter="url(#ink)" fill="#151515" opacity="0.56">
+<circle cx="-10" cy="640" r="62"/>
+<circle cx="50" cy="690" r="28"/>
+<circle cx="20" cy="752" r="16"/>
+</g>
+<g filter="url(#ink)" fill="#151515" opacity="0.56">
+<circle cx="1904" cy="190" r="50"/>
+<circle cx="1850" cy="232" r="18"/>
+</g>
+<g filter="url(#ink)" fill="#151515" opacity="0.56">
+<circle cx="1898" cy="640" r="60"/>
+<circle cx="1840" cy="690" r="24"/>
+</g>
+</svg>
+
+<header class="top">
+  <div class="brand"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#mark"/></svg><span>deRoute</span></div>
+  <span class="plate">Plate 04 · Proof, not promises</span>
+  <span class="right">drouter-demo.vercel.app</span>
+</header>
+<div class="head">
+  <div class="kicker rv" style="--d:0">Checked, counted, anchored</div>
+  <h2 class="title rv" style="--d:1">Proof, not promises</h2>
+  <p class="sub rv" style="--d:2">Each claim can be checked by a browser, a script or a stranger, with live values.</p>
+</div>
+<div class="checks rv" style="--d:3">
+  <div class="label">The seven checks · run in your browser before sending</div>
+  <div class="ck"><span class="id">C1</span><span class="nm">Hardware signature</span><span class="pr">Router’s AMD SEV-SNP report chains to AMD’s root (VCEK, ASK, ARK).</span></div>
+<div class="ck"><span class="id">C2</span><span class="nm">Approved software</span><span class="pr">Signed release of the open-source router, logged in Sigstore Rekor.</span></div>
+<div class="ck"><span class="id">C3</span><span class="nm">Key in the report</span><span class="pr">The HPKE key we encrypt to is committed inside the hardware report.</span></div>
+<div class="ck"><span class="id">C4</span><span class="nm">Code matches release</span><span class="pr">Launch measurement equals the signed release measurement.</span></div>
+<div class="ck"><span class="id">C5</span><span class="nm">Confidential GPUs</span><span class="pr">The attested router vouches for the model’s confidential GPU pool.</span></div>
+<div class="ck"><span class="id">C6</span><span class="nm">Registry admission</span><span class="pr">The node is active on the Arc registry with staked USDC.</span></div>
+<div class="ck"><span class="id">C7</span><span class="nm">Pinned model</span><span class="pr">Model weights pinned by manifest on a <span style="white-space:nowrap">dm-verity</span> root hash.</span></div>
+</div>
+<div class="cli rv" style="--d:5">
+  <div class="cmd"><span class="p">$</span>node scripts/drouter-cli.mjs verify --submit</div>
+  <p>Anyone re-runs C1 to C7, signs the result with their own Ed25519 key and gets RFC 6962 inclusion and consistency proofs back.</p>
+</div>
+
+<div class="card rv" style="--d:4;left:930px;top:282px;width:840px;height:396px">
+  <div class="label">Gemini egress bound · counted, not estimated</div>
+  <div style="display:flex;align-items:flex-end;gap:26px;margin-top:14px">
+    <div class="big acc" style="font-size:76px">66.89<span style="font-size:40px;margin-left:10px">bits</span></div>
+    <div style="font-size:22px;line-height:1.3;color:var(--ink-2);padding-bottom:6px">The most a plan request to Google can carry: 8.36 bytes, whatever the sender tries.</div>
+  </div>
+  <div class="rowlab"><span>Task outline: every value the closed schema allows</span><span style="color:var(--ink)">= 56.35 bits</span></div>
+  <div class="chips"><div class="fc"><div class="v">5</div><div class="l">task kinds</div></div><div class="fc"><div class="v">21</div><div class="l">token buckets</div></div><div class="fc"><div class="v">4<sup>16</sup>−1</div><div class="l">count combos</div></div><div class="fc"><div class="v">3<sup>8</sup>−1</div><div class="l">flag combos</div></div><div class="fc"><div class="v">31</div><div class="l">tool sets</div></div></div>
+  <div class="rowlab"><span>Full request (one per plan) adds</span><span style="color:var(--ink)">= 66.89 bits</span></div>
+  <div class="chips"><div class="fc"><div class="v">×3</div><div class="l">thinking levels</div></div><div class="fc"><div class="v">×2</div><div class="l">background</div></div><div class="fc"><div class="v">×8</div><div class="l">output caps</div></div><div class="fc"><div class="v">×31</div><div class="l">tool lists</div></div></div>
+</div>
+
+<div class="card rv" style="--d:5;left:930px;top:694px;width:410px;height:296px">
+  <div class="label">Filter fingerprint on Arc</div>
+  <div class="big" style="font-size:48px;margin-top:12px">v1.0.5</div>
+  <div class="kv"><div class="k">Rule-set sha256</div><div class="v">0x6409906f…4e21a22d</div></div>
+  <div class="kv"><div class="k">Arc transaction</div><div class="v">0xfad634d2…a140eaa3</div></div>
+  <p style="margin-top:12px">Mismatch on page load blocks sending.</p>
+</div>
+
+<div class="card rv" style="--d:6;left:1360px;top:694px;width:410px;height:296px">
+  <div class="label">Hourly monitor + log</div>
+  <div style="display:flex;align-items:baseline;gap:14px;margin-top:12px"><div class="big" style="font-size:48px">6 / 6</div><div style="font-size:22px;color:var(--ink-2)">verified</div></div>
+  <div class="kv"><div class="k">Latest run, 0 failures</div><div class="v">25 Oct 2026 · 07:00 UTC</div></div>
+  <div class="kv"><div class="k">RFC 6962 log, 25 entries</div><div class="v">root a735fd76…3806a99e8</div></div>
+  <div class="kv"><div class="k">Root anchored on Arc</div><div class="v">tx 0xef3ed99c…215145f70</div></div>
+</div>
+
+<footer class="foot"><span class="src">Live values: /api/accountability, /api/transparency, 25 Oct 2026 · log restarted empty before launch, see docs/transparency-log-restart.md</span><span class="num">04 / 05</span></footer>
+</section>
+
+<section class="slide" id="s5" aria-label="Slide 5 of 5: why it matters and why it wins">
+<svg class="blots" viewBox="0 0 1920 1080" aria-hidden="true">
+<g filter="url(#ink)" fill="#151515" opacity="0.56">
+<circle cx="-10" cy="300" r="60"/>
+<circle cx="52" cy="344" r="26"/>
+<circle cx="22" cy="410" r="16"/>
+</g>
+<g filter="url(#ink)" fill="#151515" opacity="0.56">
+<circle cx="1900" cy="520" r="62"/>
+<circle cx="1842" cy="566" r="26"/>
+<circle cx="1876" cy="630" r="16"/>
+</g>
+<g filter="url(#ink)" fill="#151515" opacity="0.56">
+<circle cx="-4" cy="930" r="46"/>
+<circle cx="52" cy="968" r="16"/>
+</g>
+</svg>
+
+<header class="top">
+  <div class="brand"><svg viewBox="0 0 64 64" aria-hidden="true"><use href="#mark"/></svg><span>deRoute</span></div>
+  <span class="plate">Plate 05 · Why it wins</span>
+  <span class="right">drouter-demo.vercel.app</span>
+</header>
+<div class="head" style="width:1620px">
+  <div class="kicker rv" style="--d:0">Why it matters</div>
+  <h2 class="title rv" style="--d:1">Frontier AI for work that must not leak</h2>
+  <p class="sub rv" style="--d:2;max-width:1500px">Clinical notes, contracts and code with live keys can use frontier models, with no one in between to trust.</p>
+</div>
+
+<div class="track rv" style="--d:3;left:150px">
+  <div class="label" style="color:var(--ink)">Track · Google DeepMind Gemini 4 Argon</div>
+  <h3>Gemini plans. It never reads.</h3>
+  <ul>
+    <li><b>Content-free control plane.</b> <code>gemini-4-argon</code> gets a task outline: kind, <code>$INPUT</code> handle, token bucket, coarse counts, check flags. Never words.</li>
+    <li><b>Closed-schema gate</b> on every Google-bound message: exact keys, handle grammars, power-of-two buckets; at most 66.89 bits per request.</li>
+    <li><b>Official <code>@google/genai</code> Interactions API</b>, <code>store: false</code>, 5 tools over opaque handles, at most 5 steps.</li>
+    <li><b>Egress receipts.</b> Each request’s sha256 joins the RFC 6962 log, with a signed tree head and inclusion proof.</li>
+  </ul>
+  <div class="status"><b>LIVE</b>/api/gemini/plan returns a gemini-4-argon plan plus its egress receipt. If Google fails, it answers 503, never a simulated plan.</div>
+</div>
+
+<div class="track rv" style="--d:4;left:978px">
+  <div class="label" style="color:var(--ink)">Track · MongoDB Atlas</div>
+  <h3>Atlas searches. It never learns your lookups.</h3>
+  <ul>
+    <li><b>Native <code>$rankFusion</code></b> of <code>$vectorSearch</code> (768-dimension cosine index) and <code>$search</code> (Lucene text index) on Atlas 8.0.</li>
+    <li><b>Attested embeddings</b> from Tinfoil’s nomic-embed-text enclave. Public queries are filtered in the browser and again on the server.</li>
+    <li><b>Whole-library retrieval.</b> Private runs fetch all 16 documents as one identical file and rank locally. Query parameters get HTTP 400.</li>
+    <li><b>Zero-PII collections</b>: no prompts, no IP addresses, timestamps coarsened to the hour.</li>
+  </ul>
+  <div class="status"><b>LIVE</b>/api/atlas reports Atlas <code>$vectorSearch</code> + Atlas <code>$search</code>, fused by <code>$rankFusion</code>, 768 dimensions.</div>
+</div>
+
+<div class="next rv" style="--d:5">
+  <div class="label" style="color:var(--ink)">Live · Google Cloud Confidential Space</div>
+  <h4>The planner runs in sealed Google hardware</h4>
+  <p>Plans on an AMD SEV VM and signs every Gemini request with its hardware-attested key. 11 of 11 independent checks pass.</p>
+</div>
+<div class="cta rv" style="--d:6">
+  <div class="label">Try it, read it, verify it</div>
+  <a class="url" href="https://drouter-demo.vercel.app">drouter-demo.vercel.app</a>
+  <div class="row"><a href="https://github.com/thepigdestroyer/drouter">github.com/thepigdestroyer/drouter</a></div>
+  <div class="row"><span><span class="p">$ </span>node scripts/drouter-cli.mjs verify --submit</span></div>
+</div>
+
+<footer class="foot"><span class="src">deroute-core image sha256:220578e0…f03207, pinned in src/lib/attestation/expected-core-digests.json · /api/core/health live</span><span class="num">05 / 05</span></footer>
+</section>
+</main>
+<nav class="ctrl" aria-label="Slide navigation"><button class="prev" aria-label="Previous slide">&#8249;</button><span class="count">1 / 5</span><button class="next" aria-label="Next slide">&#8250;</button></nav>
+<div id="live" class="sr" aria-live="polite"></div>
+<script>
+(function(){
+  var root=document.documentElement, stage=document.querySelector('.stage');
+  var slides=[].slice.call(document.querySelectorAll('.slide'));
+  var N=slides.length, cur=-1;
+  var ctrl=document.querySelector('.ctrl'), count=ctrl.querySelector('.count'), live=document.getElementById('live');
+  function fit(){var s=Math.min(window.innerWidth/1920,window.innerHeight/1080);root.style.setProperty('--s',s);}
+  window.addEventListener('resize',fit);fit();
+  function fromHash(){var m=/^#(\d+)$/.exec(location.hash||'');var n=m?parseInt(m[1],10):1;return Math.min(N,Math.max(1,n))-1;}
+  function go(i,silent){
+    i=Math.max(0,Math.min(N-1,i)); if(i===cur) return;
+    slides.forEach(function(s,k){var on=k===i;s.classList.toggle('active',on);s.setAttribute('aria-hidden',on?'false':'true');if('inert' in s) s.inert=!on;});
+    cur=i; count.textContent=(i+1)+' / '+N;
+    live.textContent='Slide '+(i+1)+' of '+N+': '+slides[i].getAttribute('aria-label').replace(/^Slide \d+ of \d+: /,'');
+    if(!silent){var h='#'+(i+1); if(location.hash!==h) history.replaceState(null,'',h);}
+  }
+  window.addEventListener('hashchange',function(){go(fromHash(),true);});
+  document.addEventListener('keydown',function(e){
+    if(e.metaKey||e.ctrlKey||e.altKey) return;
+    var k=e.key;
+    if(k==='ArrowRight'||k==='ArrowDown'||k==='PageDown'||(k===' '&&!e.shiftKey)||k==='Enter'){e.preventDefault();go(cur+1);}
+    else if(k==='ArrowLeft'||k==='ArrowUp'||k==='PageUp'||(k===' '&&e.shiftKey)||k==='Backspace'){e.preventDefault();go(cur-1);}
+    else if(k==='Home'){e.preventDefault();go(0);}
+    else if(k==='End'){e.preventDefault();go(N-1);}
+    else if(k==='f'||k==='F'){if(!document.fullscreenElement&&root.requestFullscreen) root.requestFullscreen();else if(document.exitFullscreen) document.exitFullscreen();}
+    poke();
+  });
+  document.addEventListener('click',function(e){
+    if(e.target.closest('a,button,.ctrl')) return;
+    if(e.clientX<window.innerWidth*0.3) go(cur-1); else go(cur+1);
+  });
+  ctrl.querySelector('.prev').addEventListener('click',function(){go(cur-1);});
+  ctrl.querySelector('.next').addEventListener('click',function(){go(cur+1);});
+  var tx=null;
+  document.addEventListener('touchstart',function(e){tx=e.touches[0].clientX;},{passive:true});
+  document.addEventListener('touchend',function(e){if(tx===null) return;var dx=e.changedTouches[0].clientX-tx;if(Math.abs(dx)>50) go(cur+(dx<0?1:-1));tx=null;});
+  var t=null;
+  function poke(){ctrl.classList.add('show');clearTimeout(t);t=setTimeout(function(){ctrl.classList.remove('show');},2200);}
+  document.addEventListener('mousemove',poke);
+  go(fromHash(),true);
+})();
+</script>
+</body>
+</html>

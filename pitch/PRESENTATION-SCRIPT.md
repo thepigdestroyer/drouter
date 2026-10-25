@@ -49,7 +49,7 @@ Then your message is sealed for one machine only,
 and padded to four kilobytes, so size gives nothing away.
 Our relay passes it on blind.
 
-[CLICK 3: the bubble: seven checks light up, C1 to C7]
+[CLICK 3: the bubble: seven checks light up, C1 to C7 (they take about 2 seconds; keep talking)]
 This is the bubble: a sealed computer even its operator can't see into.
 Your browser runs seven checks first.
 Genuine hardware? Our released code? The pinned model?
@@ -165,6 +165,7 @@ Arc is testnet: the filter fingerprint, the registry stakes, the log anchors and
 
 - **Pace:** about 145 words per minute, one line per breath. Time checks: slide 2 by 0:40, slide 3 by 1:30, slide 4 by 2:05, closing strip by 2:50.
 - **If you run long:** drop "the same for everyone" and "fixed choices, never free text". That saves about 4 seconds.
+- **Rehearse a single build:** open `https://deroute-deck.vercel.app/#2.3` to start slide 2 at click 3 (`#n` alone shows slide n fully built).
 - **Click, then talk:** each cue sits just before the line about that visual. Press, let it fade in for half a second, then speak.
 - **Pause for one beat** after "the work they can't share", after your named user, after each "nothing is sent", and after "sixty-seven bits". Stop for two full seconds before "Private AI you can check, not just trust." Say nothing after "Thank you."
 - **Point at:** the open eyes, then the orange seal (slide 1); the placeholder chips, then the seven dots around the bubble (slide 2); the broken chain (slide 3); the sixty-seven-bit gate, then the sixteen documents moving to the device (slide 4); the QR code at the end.
