@@ -215,10 +215,11 @@ describe("E2: static check that mechanical.ts and its runtime imports define no 
 
 describe("E2: FilterFingerprintBadge states and send blocking", () => {
   it("handles State 1 (not yet published): renders plain message without orange alert and allows sending", async () => {
+    // The committed file is now published; this state is supplied explicitly.
     const published = getPublishedFilterFingerprint();
     expect(published.version).toBe(MECHANICAL_RULESET.version);
-    expect(published.fingerprint).toBeNull();
-    expect(published.anchorTx).toBeNull();
+    expect(published.fingerprint).toBe(rulesetFingerprint());
+    expect(published.anchorTx).toMatch(/^0x[0-9a-f]{64}$/);
 
     const status = await verifyFilterFingerprint({
       published: {
