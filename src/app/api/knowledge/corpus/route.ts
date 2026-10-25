@@ -8,6 +8,7 @@ import {
   CORPUS_RETRIEVED_AT_UTC,
   getAtlasDb,
 } from "@/lib/atlas";
+import { compareCorpusDocuments } from "@/lib/broker";
 import { canonicalJson } from "@/lib/transparency/log";
 
 export const CORPUS_CACHE_CONTROL =
@@ -109,19 +110,15 @@ function normalizePublicCorpusDocument(raw: unknown): PublicCorpusDocument | nul
 export function sortCorpusDocuments(
   docs: readonly PublicCorpusDocument[],
 ): PublicCorpusDocument[] {
-  return [...docs].sort((a, b) => {
-    const byTitle = a.title.localeCompare(b.title);
-    if (byTitle !== 0) return byTitle;
-    const byUrl = a.sourceUrl.localeCompare(b.sourceUrl);
-    if (byUrl !== 0) return byUrl;
-    return a.summary.localeCompare(b.summary);
-  });
+  return [...docs].sort(compareCorpusDocuments);
 }
 
 export function computeCorpusSha256Hex(
   documents: readonly PublicCorpusDocument[],
 ): string {
-  return bytesToHex(sha256(utf8ToBytes(canonicalJson(documents))));
+  return bytesToHex(
+    sha256(utf8ToBytes(canonicalJson(sortCorpusDocuments(documents)))),
+  );
 }
 
 async function readDocsFromCollection(
@@ -247,7 +244,7 @@ export async function GET(request: Request) {
     status: 200,
     headers: {
       "Cache-Control": CORPUS_CACHE_CONTROL,
-      ETag: payload.contentSha256,
+      ETag: `"${payload.contentSha256}"`,
     },
   });
 }

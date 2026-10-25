@@ -45,12 +45,58 @@ export interface RankedCorpusDocument extends CorpusDocument {
 }
 
 /**
- * Recomputes the hex SHA-256 of `canonicalJson(documents)` (browser-safe).
+ * Deterministic UTF-16 code-unit string comparison (locale-independent across all JS runtimes).
+ */
+export function compareCodeUnits(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * Total canonical ordering for public corpus documents using UTF-16 code-unit comparison
+ * over `title`, `sourceUrl`, `summary`, `retrievedAt`, and finally `canonicalJson` as a
+ * deterministic tie-breaker.
+ */
+export function compareCorpusDocuments(
+  a: CorpusDocument,
+  b: CorpusDocument,
+): number {
+  const byTitle = compareCodeUnits(a.title, b.title);
+  if (byTitle !== 0) return byTitle;
+  const byUrl = compareCodeUnits(a.sourceUrl, b.sourceUrl);
+  if (byUrl !== 0) return byUrl;
+  const bySummary = compareCodeUnits(a.summary, b.summary);
+  if (bySummary !== 0) return bySummary;
+  const byRetrievedAt = compareCodeUnits(a.retrievedAt, b.retrievedAt);
+  if (byRetrievedAt !== 0) return byRetrievedAt;
+  return compareCodeUnits(canonicalJson(a), canonicalJson(b));
+}
+
+/**
+ * Returns a new array of corpus documents sorted in canonical code-unit order.
+ */
+export function sortCorpusDocuments<T extends CorpusDocument>(
+  docs: readonly T[],
+): T[] {
+  return [...docs].sort(compareCorpusDocuments);
+}
+
+/**
+ * Recomputes the hex SHA-256 of `canonicalJson(sortCorpusDocuments(documents))` (browser-safe).
  */
 export function computeCorpusContentSha256(
   documents: readonly CorpusDocument[],
 ): string {
-  return bytesToHex(sha256(utf8ToBytes(canonicalJson(documents))));
+  const canonicalDocs = sortCorpusDocuments(
+    documents.map((d) => ({
+      title: d.title,
+      summary: d.summary,
+      tags: [...d.tags],
+      sourceUrl: d.sourceUrl,
+      retrievedAt: d.retrievedAt,
+      embedding: [...d.embedding],
+    })),
+  );
+  return bytesToHex(sha256(utf8ToBytes(canonicalJson(canonicalDocs))));
 }
 
 let cachedCorpusValue: CorpusResponse | null = null;
@@ -62,7 +108,17 @@ export function getCachedCorpus(): CorpusResponse | null {
 }
 
 export function seedCorpusCache(corpus: CorpusResponse): void {
-  const recomputed = computeCorpusContentSha256(corpus.documents);
+  const sortedDocs = sortCorpusDocuments(
+    corpus.documents.map((d) => ({
+      title: d.title,
+      summary: d.summary,
+      tags: [...d.tags],
+      sourceUrl: d.sourceUrl,
+      retrievedAt: d.retrievedAt,
+      embedding: [...d.embedding],
+    })),
+  );
+  const recomputed = computeCorpusContentSha256(sortedDocs);
   const expected = (corpus.contentSha256 || "").replace(/^0x/i, "").toLowerCase();
   if (!expected || expected !== recomputed.toLowerCase()) {
     throw new Error(
@@ -71,16 +127,9 @@ export function seedCorpusCache(corpus: CorpusResponse): void {
   }
   const normalized: CorpusResponse = {
     ...corpus,
-    documentCount: corpus.documents.length,
+    documentCount: sortedDocs.length,
     contentSha256: recomputed,
-    documents: corpus.documents.map((d) => ({
-      title: d.title,
-      summary: d.summary,
-      tags: [...d.tags],
-      sourceUrl: d.sourceUrl,
-      retrievedAt: d.retrievedAt,
-      embedding: [...d.embedding],
-    })),
+    documents: sortedDocs,
   };
   cachedCorpusValue = normalized;
   cachedCorpusPromise = Promise.resolve(normalized);
@@ -180,9 +229,10 @@ export async function fetchCorpus(
       );
     }
 
-    const documents = body.documents.map((doc, idx) =>
+    const normalizedDocuments = body.documents.map((doc, idx) =>
       validateAndNormalizeCorpusDoc(doc, idx),
     );
+    const documents = sortCorpusDocuments(normalizedDocuments);
 
     if (
       typeof body.documentCount === "number" &&
@@ -198,6 +248,21 @@ export async function fetchCorpus(
       throw new Error(
         `Corpus contentSha256 mismatch: header/body claimed ${rawSha}, recomputed ${recomputedSha}.`,
       );
+    }
+
+    const rawEtag = res.headers?.get?.("ETag") ?? res.headers?.get?.("etag");
+    if (rawEtag) {
+      const normalizedEtag = rawEtag
+        .trim()
+        .replace(/^W\//i, "")
+        .replace(/^"|"$/g, "")
+        .replace(/^0x/i, "")
+        .toLowerCase();
+      if (normalizedEtag && normalizedEtag !== recomputedSha) {
+        throw new Error(
+          `Corpus ETag mismatch: ETag claimed ${rawEtag}, recomputed ${recomputedSha}.`,
+        );
+      }
     }
 
     const verified: CorpusResponse = {
@@ -277,7 +342,7 @@ function stripPlaceholders(input: string): string {
     .trim();
 }
 
-function tokenizeForBm25(text: string, dropStopwords = false): string[] {
+export function tokenizeForBm25(text: string, dropStopwords = false): string[] {
   const cleaned = stripPlaceholders(text).toLowerCase();
   if (!cleaned) return [];
 
@@ -309,21 +374,34 @@ function tokenizeForBm25(text: string, dropStopwords = false): string[] {
   return filtered.length > 0 ? filtered : expanded;
 }
 
-function countTermOccurrences(tokens: readonly string[], queryTerm: string): number {
-  let count = 0;
+export function countTermOccurrences(
+  tokens: readonly string[],
+  queryTerm: string,
+): number {
+  let exactCount = 0;
   for (let i = 0; i < tokens.length; i++) {
-    const tok = tokens[i];
-    if (tok === queryTerm) {
-      count += 1;
-    } else if (
-      queryTerm.length >= 4 &&
-      (tok.includes(queryTerm) || queryTerm.includes(tok)) &&
-      tok.length >= 3
-    ) {
-      count += 0.5;
+    if (tokens[i] === queryTerm) {
+      exactCount += 1;
     }
   }
-  return count;
+  if (exactCount > 0) {
+    return exactCount;
+  }
+  if (queryTerm.length < 4 || /[._-]/.test(queryTerm)) {
+    return 0;
+  }
+  let partialCount = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (
+      tok.length >= 3 &&
+      !/[._-]/.test(tok) &&
+      (tok.includes(queryTerm) || queryTerm.includes(tok))
+    ) {
+      partialCount += 0.5;
+    }
+  }
+  return partialCount;
 }
 
 /**
@@ -476,9 +554,7 @@ export function rankLocally(
     if (b.score !== a.score) {
       return b.score - a.score;
     }
-    const byTitle = a.doc.title.localeCompare(b.doc.title);
-    if (byTitle !== 0) return byTitle;
-    return a.doc.sourceUrl.localeCompare(b.doc.sourceUrl);
+    return compareCorpusDocuments(a.doc, b.doc);
   });
 
   return scored.slice(0, limit).map((entry, idx) => ({

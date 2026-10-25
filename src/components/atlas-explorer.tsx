@@ -7,6 +7,7 @@ import {
   formatPlainAtlasResult,
   PLAIN_ATLAS_PRESET_QUERIES,
   resolveEffectiveAtlasQuery,
+  sanitizeJargonToPlainWords,
 } from "@/components/argon/argon-helpers";
 import { getActiveCustomScrubTerms } from "@/lib/auth/vault";
 import {
@@ -290,7 +291,7 @@ export function AtlasExplorer({
   initialDeviceOnly = false,
   fetchImpl,
   preloadedCorpus = null,
-}: AtlasExplorerProps = {}) {
+}: AtlasExplorerProps) {
   const [query, setQuery] = useState<string>(
     PLAIN_ATLAS_PRESET_QUERIES[0].label,
   );
@@ -323,9 +324,11 @@ export function AtlasExplorer({
         setData(result);
       } catch (err) {
         setError(
-          err instanceof Error
-            ? err.message
-            : "Network error while searching our knowledge base.",
+          sanitizeJargonToPlainWords(
+            err instanceof Error
+              ? err.message
+              : "Network error while searching our knowledge base.",
+          ),
         );
       } finally {
         setLoading(false);
@@ -349,9 +352,11 @@ export function AtlasExplorer({
         return;
       } catch (err) {
         setError(
-          err instanceof Error
-            ? err.message
-            : "Could not download the public reference library.",
+          sanitizeJargonToPlainWords(
+            err instanceof Error
+              ? err.message
+              : "Could not download the public reference library.",
+          ),
         );
         return;
       }
@@ -406,7 +411,7 @@ export function AtlasExplorer({
       <div className="space-y-1.5">
         <div className="ep-label">Knowledge search</div>
         <h3 className="font-serif text-xl sm:text-2xl text-ink">
-          Search what we know about private AI
+          Public reference library
         </h3>
         <p className="max-w-[70ch] text-sm text-ink-2">
           Look up how deRoute protects your messages, which sealed computers we
@@ -502,7 +507,7 @@ export function AtlasExplorer({
         >
           <div className="space-y-0.5">
             <div className="font-mono font-medium text-ink">Search error</div>
-            <p className="text-ink-2">{error}</p>
+            <p className="text-ink-2">{sanitizeJargonToPlainWords(error)}</p>
           </div>
           <InkButton
             type="button"
@@ -542,12 +547,12 @@ export function AtlasExplorer({
               </p>
 
               <TechDetails label="Show technical details">
-                <div className="space-y-2 font-mono text-xs text-ink-2">
+                <div className="space-y-2 font-mono text-xs text-ink-2 break-words">
                   <div>
                     <span className="text-ink font-medium">Record ID:</span>{" "}
                     {item.docId} ({rawTitleDeRoute})
                   </div>
-                  <p className="font-sans text-xs text-ink-2 leading-relaxed">
+                  <p className="font-sans text-xs text-ink-2 leading-relaxed break-words">
                     {rawSummaryDeRoute}
                   </p>
                   {sourceUrl && (

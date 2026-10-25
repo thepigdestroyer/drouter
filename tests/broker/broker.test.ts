@@ -22,13 +22,17 @@ import { findForbiddenPlainTerms } from "@/components/argon/argon-helpers";
 import { ATLAS_SEED_DOCS } from "@/lib/atlas";
 import {
   clearCorpusCacheForTests,
+  compareCorpusDocuments,
   computeCorpusContentSha256,
   type CorpusDocument,
+  countTermOccurrences,
   fetchCorpus,
   LOOKUP_TOPICS,
   LookupIntentValidationError,
   rankLocally,
   seedCorpusCache,
+  sortCorpusDocuments,
+  tokenizeForBm25,
   validateLookupIntent,
 } from "@/lib/broker";
 import { canonicalJson } from "@/lib/transparency/log";
@@ -139,12 +143,75 @@ describe("W6-B Step 1: GET /api/knowledge/corpus route", () => {
       ]);
     }
 
-    // contentSha256 is hex sha256 of canonicalJson(documents)
+    // contentSha256 is hex sha256 of canonicalJson(documents); ETag is RFC 9110 double-quoted
     const expectedHash = bytesToHex(
       sha256(utf8ToBytes(canonicalJson(body1.documents))),
     );
     expect(body1.contentSha256).toBe(expectedHash);
-    expect(res1.headers.get("ETag")).toBe(expectedHash);
+    expect(res1.headers.get("ETag")).toBe(`"${expectedHash}"`);
+  });
+
+  it("sorts deterministically by UTF-16 code units with retrievedAt and canonicalJson tie-breakers, and browser hash verification uses the same canonical order", async () => {
+    const tieDocs: CorpusDocument[] = [
+      {
+        title: "Same Title",
+        summary: "Same Summary",
+        tags: ["tag-b"],
+        sourceUrl: "https://example.org/same",
+        retrievedAt: "2026-10-25",
+        embedding: [0.2, 0.3],
+      },
+      {
+        title: "Same Title",
+        summary: "Same Summary",
+        tags: ["tag-z"],
+        sourceUrl: "https://example.org/same",
+        retrievedAt: "2026-10-24",
+        embedding: [0.9, 0.1],
+      },
+      {
+        title: "Same Title",
+        summary: "Same Summary",
+        tags: ["tag-a"],
+        sourceUrl: "https://example.org/same",
+        retrievedAt: "2026-10-24",
+        embedding: [0.1, 0.9],
+      },
+    ];
+
+    const sorted = sortCorpusDocuments(tieDocs);
+    expect(sorted[0].retrievedAt).toBe("2026-10-24");
+    expect(sorted[0].tags).toEqual(["tag-a"]);
+    expect(sorted[1].retrievedAt).toBe("2026-10-24");
+    expect(sorted[1].tags).toEqual(["tag-z"]);
+    expect(sorted[2].retrievedAt).toBe("2026-10-25");
+    expect(compareCorpusDocuments(sorted[0], sorted[1])).toBe(-1);
+    expect(compareCorpusDocuments(sorted[1], sorted[2])).toBe(-1);
+
+    // Browser hash check computes the exact same hash regardless of input array order
+    const canonicalSha = computeCorpusContentSha256(sorted);
+    const reversedSha = computeCorpusContentSha256([...tieDocs].reverse());
+    expect(reversedSha).toBe(canonicalSha);
+
+    const unsortedFetchMock = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          database: "drouter",
+          collection: "enclave_intelligence",
+          documentCount: tieDocs.length,
+          contentSha256: canonicalSha,
+          documents: [...tieDocs].reverse(),
+        }),
+        {
+          status: 200,
+          headers: { ETag: `"${canonicalSha}"` },
+        },
+      );
+    }) as unknown as typeof fetch;
+
+    const verified = await fetchCorpus(unsortedFetchMock);
+    expect(verified.contentSha256).toBe(canonicalSha);
+    expect(verified.documents).toEqual(sorted);
   });
 
   it("returns HTTP 400 if the request URL has any query parameter", async () => {
@@ -378,6 +445,46 @@ describe("W6-B Step 2: Broker validateLookupIntent, fetchCorpus, and rankLocally
     expect(repeatRanked).toEqual(blindRanked);
     expect(forbiddenFetch).not.toHaveBeenCalled();
   });
+
+  it("does not double-count hyphenated compound tokens in BM25 term frequency or rankLocally", () => {
+    const tokens = tokenizeForBm25("AMD SEV-SNP hardware node-alpha memory");
+    // Exact compound token and exact emitted sub-parts each count once (no +0.5 substring inflation)
+    expect(countTermOccurrences(tokens, "sev-snp")).toBe(1);
+    expect(countTermOccurrences(tokens, "sev")).toBe(1);
+    expect(countTermOccurrences(tokens, "snp")).toBe(1);
+    expect(countTermOccurrences(tokens, "node-alpha")).toBe(1);
+    expect(countTermOccurrences(tokens, "node")).toBe(1);
+    expect(countTermOccurrences(tokens, "alpha")).toBe(1);
+    // Unmatched compound term with a shared prefix does not get partial credit via sub-token
+    expect(countTermOccurrences(tokens, "sev-tio")).toBe(0);
+    // True non-compound substring fallback still works when exact match is absent
+    expect(
+      countTermOccurrences(tokenizeForBm25("confidentiality guarantees"), "confidential"),
+    ).toBe(0.5);
+
+    const syntheticCorpus: CorpusDocument[] = [
+      {
+        title: "Single Hyphen Doc",
+        summary: "Uses sev-snp memory protection in production.",
+        tags: ["memory"],
+        sourceUrl: "https://example.org/single",
+        retrievedAt: "2026-10-24",
+        embedding: [1, 0],
+      },
+      {
+        title: "Partial Subword Doc",
+        summary: "Uses sev legacy mode without snp.",
+        tags: ["memory"],
+        sourceUrl: "https://example.org/partial",
+        retrievedAt: "2026-10-24",
+        embedding: [0, 1],
+      },
+    ];
+
+    const ranked = rankLocally("sev-snp", syntheticCorpus, 2);
+    expect(ranked[0].title).toBe("Single Hyphen Doc");
+    expect(ranked[0].score).toBeGreaterThan(ranked[1].score);
+  });
 });
 
 describe("W6-B Step 3: AtlasExplorer browser redaction, device-only search, and plain copy", () => {
@@ -494,14 +601,30 @@ describe("W6-B Step 3: AtlasExplorer browser redaction, device-only search, and 
     );
     expect(ATLAS_DEVICE_ONLY_LABEL).toBe("Search on my device only");
 
-    const html = renderToStaticMarkup(React.createElement(AtlasExplorer));
+    const html = renderToStaticMarkup(
+      React.createElement(AtlasExplorer, {
+        preloadedCorpus: ATLAS_SEED_DOCS.map((d) => ({
+          title: d.title,
+          summary: d.summary,
+          tags: [...d.tags],
+          sourceUrl: d.sourceUrl,
+          retrievedAt: d.retrievedAt,
+          embedding: [...d.embedding],
+        })),
+      }),
+    );
     expect(html).toContain(ATLAS_PUBLIC_SEARCH_NOTICE);
     expect(html).toContain(ATLAS_DEVICE_ONLY_LABEL);
+    expect(html).toContain("Public reference library");
     expect(html).not.toMatch(/[\u2013\u2014]/);
 
     const explorerSource = readFileSync(
       resolve(ROOT, "src/components/atlas-explorer.tsx"),
       "utf8",
+    );
+    expect(explorerSource).toContain("sanitizeJargonToPlainWords(error)");
+    expect(explorerSource).toContain(
+      'className="font-sans text-xs text-ink-2 leading-relaxed break-words"',
     );
     const withoutTechDetails = explorerSource.replace(
       /<TechDetails[\s\S]*?<\/TechDetails>/g,
