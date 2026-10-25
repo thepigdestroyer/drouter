@@ -1,0 +1,43 @@
+%%{init: {"theme":"base","themeVariables":{"primaryColor":"#f3f1ec","primaryTextColor":"#151515","primaryBorderColor":"#151515","lineColor":"#595752","secondaryColor":"#ffffff","tertiaryColor":"#f3f1ec","fontFamily":"Georgia, serif"}}}%%
+flowchart TD
+  subgraph HourlyMonitor["Hourly Automated Monitor"]
+    GHA["GitHub Actions (.github/workflows/monitor.yml)<br/>Cron: 17, 47 * * * * (Bearer CRON_SECRET)"]
+    CronRoute["GET /api/cron/monitor<br/>Deduplicates per coarsened UTC hour (epochHourSec)"]
+    ExecMon["executeContinuousMonitorRun()<br/>(src/lib/accountability/monitor.ts)"]
+    GHA --> CronRoute --> ExecMon
+  end
+
+  subgraph SixEnclaves["Six Real Sealed Computers"]
+    RouterNode["Router Enclave: tinfoil-router<br/>AMD SEV-SNP + Sigstore Rekor + HPKE Key"]
+    ModelNodes["Five Confidential GPU Enclaves:<br/>kimi-k3, glm-5-3, deepseek-v4-1-flash,<br/>gpt-oss-120b, llama3-3-70b<br/>(TDX/SNP + dm-verity root + HF weight Merkle)"]
+  end
+
+  ExecMon --> RouterNode
+  ExecMon --> ModelNodes
+
+  subgraph IndVerifier["Independent CLI Verifiers"]
+    CliCmd["node scripts/drouter-cli.mjs verify --submit<br/>Loads/creates ~/.config/deroute/verifier-key (Ed25519)"]
+    SignClaim["signCliVerificationClaim()<br/>Domain: drouter/transparency/verification-claim/v1<br/>Checks C1 to C7 + router & model measurements"]
+    VerifyApi["POST /api/transparency/verifications<br/>submitIndependentVerification()<br/>Verifies Ed25519 sig & compareClaimAgainstLiveView()"]
+    SubStore[("MongoDB: verifier_submissions<br/>Stores verifierFingerprint + epochHourSec only")]
+    CliCmd --> SignClaim --> VerifyApi --> SubStore
+  end
+
+  CliCmd -.->|Direct Attestation Fetch| RouterNode
+  CliCmd -.->|Direct Attestation Fetch| ModelNodes
+
+  subgraph Transparency["RFC 6962 Merkle Transparency Log (src/lib/transparency)"]
+    AppendLog["appendVerificationEventToLog()<br/>Leaf: sha256(0x00 || canonicalJson(event))<br/>Node: sha256(0x01 || left || right)"]
+    LogCol[("MongoDB: transparency_log<br/>Leaves + Inclusion & Consistency Proofs")]
+    SignSTH["signTreeHead() (Ed25519)<br/>Domain: drouter/transparency/sth/v1<br/>{ treeSize, rootHash, timestampSec }"]
+    AppendLog --> LogCol --> SignSTH
+  end
+
+  RouterNode --> AppendLog
+  ModelNodes --> AppendLog
+  VerifyApi --> AppendLog
+
+  ArcAnchor["maybeAnchorTreeHead() -> anchorReceipt()<br/>Circle Arc Testnet (hourly rootHash anchorTx)"]
+  SignSTH --> ArcAnchor
+
+  style SignSTH stroke:#d9531e,stroke-width:2.5px,fill:#ffffff,color:#151515

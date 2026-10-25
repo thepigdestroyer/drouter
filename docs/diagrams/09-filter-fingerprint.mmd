@@ -1,0 +1,33 @@
+%%{init: {"theme":"base","themeVariables":{"primaryColor":"#f3f1ec","primaryTextColor":"#151515","primaryBorderColor":"#151515","lineColor":"#595752","secondaryColor":"#ffffff","tertiaryColor":"#f3f1ec","fontFamily":"Georgia, serif"}}}%%
+flowchart TD
+  subgraph Ruleset["Serializable Redaction Ruleset (mechanical-ruleset.ts)"]
+    Rules["MECHANICAL_RULESET (v1.0.1)<br/>placeholderPatterns, unicodeNormalization,<br/>entropyRules, patterns, thresholds, wordLists"]
+    Canonical["canonicalJson(MECHANICAL_RULESET)<br/>Deterministic sorted-key JSON serialization"]
+    FpHash["rulesetFingerprint()<br/>0x + sha256(utf8(canonicalJson))<br/>0x0928121dfa0558ab...bba20f28"]
+    Rules --> Canonical --> FpHash
+  end
+
+  subgraph Publish["Anchor & Publish (scripts/publish-filter-fingerprint.mjs --confirm)"]
+    ReceiptHash["computeFilterAnchorReceiptHash()<br/>keccak256('deroute-filter:' + version + ':' + fingerprint)"]
+    ArcAnchor["anchorReceipt(anchorReceiptHash)<br/>Circle Arc Testnet (chainId 5042002)<br/>anchorTx: 0x09055dc1b5d6a79d...db1fe730"]
+    PubJson["src/lib/privacy/published-fingerprint.json<br/>{ version, fingerprint, anchorTx, chainId, anchoredAt }"]
+    ReceiptHash --> ArcAnchor --> PubJson
+  end
+
+  FpHash --> ReceiptHash
+
+  subgraph BrowserVerify["Browser Verification (src/lib/privacy/fingerprint.ts)"]
+    EvalLocal["evaluateLocalFilterFingerprint()<br/>Recomputes rulesetFingerprint(MECHANICAL_RULESET)<br/>and compares version & fingerprint against published-fingerprint.json"]
+    CheckReceipt["checkArcTransactionReceipt(anchorTx)<br/>JSON-RPC eth_getTransactionReceipt on Arc RPC<br/>Verifies receipt.status === '0x1' & log topics contain anchorReceiptHash"]
+    AllowSend["state: 'match', arcReceiptVerified: true<br/>blockingSend: false (Prompt Scrubbing & Send Permitted)"]
+    BlockSend["state: 'mismatch', blockingSend: true<br/>Sending Blocked in Browser Before Any Network Call"]
+  end
+
+  FpHash --> EvalLocal
+  PubJson --> EvalLocal
+  EvalLocal -->|computed !== publishedFp or version mismatch| BlockSend
+  EvalLocal -->|Local Fingerprint Matches| CheckReceipt
+  ArcAnchor -.->|Receipt Logs| CheckReceipt
+  CheckReceipt -->|status 0x1 & topic matched| AllowSend
+
+  style BlockSend stroke:#d9531e,stroke-width:2.5px,fill:#ffffff,color:#151515

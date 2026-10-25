@@ -1,0 +1,36 @@
+%%{init: {"theme":"base","themeVariables":{"primaryColor":"#f3f1ec","primaryTextColor":"#151515","primaryBorderColor":"#151515","lineColor":"#595752","secondaryColor":"#ffffff","tertiaryColor":"#f3f1ec","fontFamily":"Georgia, serif"}}}%%
+flowchart LR
+  Start["Browser Opens Session<br/>(openTinfoilSession)<br/>Fetches Bundle & Matrix"]
+
+  subgraph RouterChecks["Hop 1: Router & Enclave Bundle Verification"]
+    C1["C1: Hardware signature chain<br/>Proves AMD SEV-SNP report<br/>signed by VCEK -> ASK -> ARK"]
+    C2["C2: Approved software<br/>Proves signed release digest<br/>in Sigstore Rekor log"]
+    C3["C3: HPKE key bound to enclave report<br/>Proves HPKE & TLS keys match<br/>REPORT_DATA[0..64] & SANs"]
+    C4["C4: Running code = released code<br/>Proves launch measurement<br/>equals signed release digest"]
+    C1 -->|Pass| C2 -->|Pass| C3 -->|Pass| C4
+  end
+
+  subgraph ModelChecks["Hop 2: Model Enclave & Registry Verification"]
+    C5["C5: Router-attested confidential GPU pool<br/>Proves TDX / SEV-SNP CVM +<br/>NVIDIA CC GPU pool health"]
+    C6["C6: Registry admission<br/>Proves enclave node & measurement<br/>admitted on Circle Arc registry"]
+    C7["C7: Manifest-pinned model & dm-verity root<br/>Proves Sigstore-pinned model<br/>weights, mpk & dm-verity rootfs"]
+    C5 -->|Pass| C6 -->|Pass| C7
+  end
+
+  Start --> C1
+  C4 -->|Pass| C5
+
+  BlockSend["Block Sending Immediately<br/>Throw Error Before HPKE Encryption<br/>Zero Prompt Bytes Leave Browser"]
+
+  C1 -->|Fail| BlockSend
+  C2 -->|Fail| BlockSend
+  C3 -->|Fail| BlockSend
+  C4 -->|Fail| BlockSend
+  C5 -->|Fail| BlockSend
+  C6 -->|Fail| BlockSend
+  C7 -->|Fail| BlockSend
+
+  AllowSend["All Seven Checks Pass<br/>Seal Redacted Prompt with Ephemeral<br/>RFC 9180 HPKE Key & Send via Relay"]
+  C7 -->|All Pass| AllowSend
+
+  style BlockSend stroke:#d9531e,stroke-width:2.5px,fill:#ffffff,color:#151515

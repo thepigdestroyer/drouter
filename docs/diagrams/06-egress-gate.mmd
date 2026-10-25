@@ -1,0 +1,45 @@
+%%{init: {"theme":"base","themeVariables":{"primaryColor":"#f3f1ec","primaryTextColor":"#151515","primaryBorderColor":"#151515","lineColor":"#595752","secondaryColor":"#ffffff","tertiaryColor":"#f3f1ec","fontFamily":"Georgia, serif"}}}%%
+flowchart TD
+  subgraph DigestMap["Pre-Flight Digest Replacement"]
+    RawResult["Tool Result with SHA-256 Digest<br/>(topDocSha256, receiptSha256, contentSha256)"]
+    Replace["replaceDigestsWithOpaqueHandles()<br/>Maps 0x... to $DOC_n, $RECEIPT_n, $DIGEST_n"]
+    RawResult --> Replace
+  end
+
+  Payload["Google-Bound Payload<br/>kind: taskDescriptor | createRequest |<br/>toolCall | toolResult | functionResult | followUpRequest"]
+  Replace --> Payload
+
+  subgraph Gate1["Gate 1: Closed-Schema Validator (egress-schemas.ts)"]
+    SchemaCheck["assertGoogleBoundMessage(kind, payload)"]
+    ExactKeys["assertStrictPlainObject + assertExactKeys<br/>No extra keys, symbols, getters, or custom toJSON"]
+    FieldBounds["Closed Enums, Handle Grammars ($INPUT, $RESULT_1..16),<br/>Power-of-Two Buckets, Redaction Count Bucket {0, 1, 2}"]
+    ConstMatch["assertDeepEqualConstant<br/>model, system_instruction, tools, store: false"]
+    SchemaCheck --> ExactKeys --> FieldBounds --> ConstMatch
+  end
+
+  Payload --> SchemaCheck
+
+  subgraph Gate2["Gate 2: Recursive Firewall (assertContentFree)"]
+    ContentFree["assertContentFree(payload, path)"]
+    JsonCheck["Canonical JSON-in-String Verification<br/>canonicalJson(parsed) === str"]
+    HexCheck["Hex Cap (<= 16 chars) &<br/>hasSmuggledAsciiInHex() Byte Inspection"]
+    ContentFree --> JsonCheck --> HexCheck
+  end
+
+  ConstMatch -->|Valid| ContentFree
+
+  CapacityNote["Information Capacity Bound<br/>TaskDescriptor: 56.35 bits (7.04 B)<br/>createRequest: 66.89 bits (~67 bits / 8.36 B)"]
+  ConstMatch -.-> CapacityNote
+
+  ThrowAbort["Throw ContentFreeEgressError<br/>Abort Before Network Socket Opens<br/>Zero Bytes Sent to Google"]
+
+  ExactKeys -->|Mismatch| ThrowAbort
+  FieldBounds -->|Mismatch| ThrowAbort
+  ConstMatch -->|Mismatch| ThrowAbort
+  JsonCheck -->|Mismatch| ThrowAbort
+  HexCheck -->|Mismatch| ThrowAbort
+
+  SignSend["signGeminiEgressReceipt() +<br/>client.interactions.create(createRequest)"]
+  HexCheck -->|All Checks Pass| SignSend
+
+  style SchemaCheck stroke:#d9531e,stroke-width:2.5px,fill:#ffffff,color:#151515

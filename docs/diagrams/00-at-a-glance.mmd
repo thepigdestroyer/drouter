@@ -1,0 +1,19 @@
+%%{init: {"theme":"base","themeVariables":{"primaryColor":"#f3f1ec","primaryTextColor":"#151515","primaryBorderColor":"#151515","lineColor":"#595752","secondaryColor":"#ffffff","tertiaryColor":"#f3f1ec","fontFamily":"Georgia, serif"}}}%%
+flowchart LR
+  U(["You type a question"]) --> B1
+
+  subgraph DEV["Your device"]
+    B1["1. On-device filter<br/>hides names, numbers and secrets<br/>rule fingerprint published on Arc"]
+    B5["5. Unlinkable credits<br/>one-time deposit addresses,<br/>blind-signed tokens"]
+  end
+
+  B1 --> B4["4. End-to-end encryption<br/>sealed to the enclave key;<br/>the relay only sees ciphertext"]
+  B5 -. pays without a name .-> B4
+  B4 --> B2["2. Sealed computers<br/>Tinfoil enclaves; your browser runs<br/>7 checks before every message"]
+  B3["3. Decentralized registry<br/>nodes admitted on Circle Arc<br/>with a USDC stake"] -. who may serve .-> B2
+  B1 --> B6["6. Content-free Gemini planner<br/>sees a task description, never your words;<br/>closed-schema gate, about 67 bits max"]
+  B6 -. plan .-> B2
+  B2 --> R(["Answer decrypted on your device;<br/>hidden details put back locally"])
+  B7["7. Public accountability<br/>hourly checks, RFC 6962 log anchored on Arc,<br/>anyone can verify"] -. watches .-> B2
+
+  style B2 stroke:#d9531e,stroke-width:2px

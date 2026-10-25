@@ -10,9 +10,124 @@
 - **Hackathon submission and demo script**: [docs/SUBMISSION.md](docs/SUBMISSION.md)
 - **Google Cloud Confidential Space workload**: [docs/confidential-space.md](docs/confidential-space.md) and [core/README.md](core/README.md)
 - **Transparency log restart note (25 October 2026)**: [docs/transparency-log-restart.md](docs/transparency-log-restart.md)
+- **Architecture in pictures**: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - **Security policy**: [SECURITY.md](SECURITY.md)
 
 *Naming note:* The product is called **deRoute**. Internal cryptographic domain labels (`drouter/v1/...`), HTTP headers (`X-DRouter-*`), environment variable names, the MongoDB `drouter` database, file and script names (`scripts/drouter-cli.mjs`, `DRouterRegistry.sol`), and the production URL (`https://drouter-demo.vercel.app`) stay unchanged for compatibility.
+
+---
+
+## How it works at a glance
+
+Seven building blocks work together. Your words are filtered on your device, sealed so only a verified sealed computer can read them, and paid for without a name. Gemini plans from a description that contains none of your words, and everything that can be checked is checked in public. The full visual guide, with ten detailed diagrams, is in **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"primaryColor":"#f3f1ec","primaryTextColor":"#151515","primaryBorderColor":"#151515","lineColor":"#595752","secondaryColor":"#ffffff","tertiaryColor":"#f3f1ec","fontFamily":"Georgia, serif"}}}%%
+flowchart LR
+  U(["You type a question"]) --> B1
+
+  subgraph DEV["Your device"]
+    B1["1. On-device filter<br/>hides names, numbers and secrets<br/>rule fingerprint published on Arc"]
+    B5["5. Unlinkable credits<br/>one-time deposit addresses,<br/>blind-signed tokens"]
+  end
+
+  B1 --> B4["4. End-to-end encryption<br/>sealed to the enclave key;<br/>the relay only sees ciphertext"]
+  B5 -. pays without a name .-> B4
+  B4 --> B2["2. Sealed computers<br/>Tinfoil enclaves; your browser runs<br/>7 checks before every message"]
+  B3["3. Decentralized registry<br/>nodes admitted on Circle Arc<br/>with a USDC stake"] -. who may serve .-> B2
+  B1 --> B6["6. Content-free Gemini planner<br/>sees a task description, never your words;<br/>closed-schema gate, about 67 bits max"]
+  B6 -. plan .-> B2
+  B2 --> R(["Answer decrypted on your device;<br/>hidden details put back locally"])
+  B7["7. Public accountability<br/>hourly checks, RFC 6962 log anchored on Arc,<br/>anyone can verify"] -. watches .-> B2
+
+  style B2 stroke:#d9531e,stroke-width:2px
+```
+
+### Who can see what
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"primaryColor":"#f3f1ec","primaryTextColor":"#151515","primaryBorderColor":"#151515","lineColor":"#595752","secondaryColor":"#ffffff","tertiaryColor":"#f3f1ec","fontFamily":"Georgia, serif"}}}%%
+flowchart LR
+  subgraph Device["Party 1: User Device (Browser)"]
+    RawText["Raw User Text & Hidden Personal Details<br/>(Device Only: Never Leaves Browser)"]
+    LocalRedacted["Redacted & Symmetry-Masked Text<br/>+ Local Restoration Map (placeholders)"]
+    LocalCrypto["Ephemeral HPKE Sender Key,<br/>Unblinded Credit Wallet, Vault Keys"]
+    RawText -->|"mechanicalRedact (D3) +<br/>Symmetry Transform"| LocalRedacted
+  end
+
+  subgraph Server["Party 2: Our Server (Vercel Next.js App & Oblivious Relay)"]
+    RelayView["RFC 9180 HPKE Ciphertext Only<br/>(Padded to 4096 B Power-of-Two Bucket)<br/>+ Blind Credit Token & Nullifier"]
+    ServerDescriptor["Content-Free TaskDescriptor (~56 bits)<br/>taskKind, inputTokenEstimate,<br/>redactionCounts {0,1,2}, allowedTools"]
+    PublicCorpusServe["Identical 16-Doc Public Library<br/>(GET /api/knowledge/corpus, zero query params)"]
+  end
+
+  subgraph Enclaves["Party 3: Sealed Computers (Tinfoil Enclaves)"]
+    EnclaveView["Redacted Text Only<br/>(Decrypted Inside Attested AMD SEV-SNP /<br/>Intel TDX + NVIDIA CC GPU Enclave RAM)"]
+    PiiFilterView["Second-Pass Redaction (pii-filter)<br/>Over Mechanically Scrubbed Text"]
+  end
+
+  subgraph GeminiParty["Party 4: Google Gemini Control Plane"]
+    GeminiView["Content-Free TaskDescriptor & createRequest<br/>(~67 bits total variable capacity,<br/>opaque handles $INPUT, $RESULT_1..16)"]
+  end
+
+  subgraph MongoParty["Party 5: MongoDB Atlas"]
+    AtlasView["Public Reference Library (enclave_intelligence),<br/>Public Search Queries After D3+D4 Filtering,<br/>Coarsened Verification Receipts & Nullifiers"]
+  end
+
+  subgraph ArcParty["Party 6: Circle Arc Testnet & Public Verifiers"]
+    ArcView["Public Proofs, Node Measurements,<br/>Merkle Roots, Filter Fingerprint Digest,<br/>& Transaction Receipt Anchors (chainId 5042002)"]
+  end
+
+  LocalRedacted -->|"HPKE Encrypted in Transit<br/>(ehbp-encapsulated-key)"| RelayView
+  RelayView -->|"Forwarded Ciphertext<br/>(Relay Cannot Decrypt)"| EnclaveView
+  RelayView -->|"Forwarded Ciphertext"| PiiFilterView
+  LocalRedacted -->|"Distilled to Counts & Buckets"| ServerDescriptor
+  ServerDescriptor -->|"Closed-Schema Gate<br/>(assertGoogleBoundMessage)"| GeminiView
+  PublicCorpusServe -->|"Fetched & Ranked Locally"| Device
+  Server -->|"D3+D4 Redacted Queries &<br/>Coarsened Non-PII Telemetry"| AtlasView
+  Server -->|"SHA-256 / Keccak-256 Digests"| ArcView
+
+  style RawText stroke:#d9531e,stroke-width:2.5px,fill:#ffffff,color:#151515
+```
+
+### The life of one chat message
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"primaryColor":"#f3f1ec","primaryTextColor":"#151515","primaryBorderColor":"#151515","lineColor":"#595752","secondaryColor":"#ffffff","tertiaryColor":"#f3f1ec","fontFamily":"Georgia, serif"}}}%%
+sequenceDiagram
+  autonumber
+  actor User as User
+  participant Browser as Browser (send-pipeline.ts & tinfoil/client.ts)
+  participant Arc as Circle Arc Testnet (chainId 5042002)
+  participant Relay as Vercel Oblivious Relay (/api/relay/v1/*)
+  participant Enclave as Tinfoil Enclave (Router + Model CVM)
+
+  User->>Browser: Types raw prompt with personal details
+  Browser->>Browser: Recompute SHA-256 of MECHANICAL_RULESET (verifyFilterFingerprint)
+  Browser->>Arc: Read-only eth_getTransactionReceipt(anchorTx) for published-fingerprint.json
+  Arc-->>Browser: Confirm on-chain filter fingerprint receipt (or block send on mismatch)
+  Note over Browser: assertFilterFingerprintAllowsSend() passes,<br/>preparePrompt() scrubs PII/secrets/vault terms,<br/>normalizes style, and pops 1 blind credit (takeCreditHeader)
+
+  Browser->>Relay: GET /api/relay/attestation & GET /api/relay/enclave-matrix
+  Relay->>Enclave: Fetch AMD SEV-SNP report, VCEK, Sigstore bundle & proxy table
+  Enclave-->>Relay: Attestation bundle + model enclave matrix
+  Relay-->>Browser: Return attestation bundle & deep inspection matrix
+
+  Note over Browser: Verify Seven Checks (checksFromDocument):<br/>C1: Hardware signature chain<br/>C2: Approved software<br/>C3: HPKE key bound to enclave report<br/>C4: Running code = released code<br/>C5: Router-attested confidential GPU pool<br/>C6: Registry admission<br/>C7: Manifest-pinned model & dm-verity root
+
+  Browser->>Browser: Pad JSON to 4096 B power-of-two bucket (padJsonPayloadToBucket)<br/>& seal with RFC 9180 HPKE to enclave hpkePublicKey
+
+  Browser->>Relay: POST /api/relay/v1/chat/completions<br/>(HPKE ciphertext + ehbp-encapsulated-key + x-drouter-credit)
+  Note over Relay: verifyAndSpendCreditHeader():<br/>Verify Chaumian RSA blind signature (e in 65537, 65539, 65543),<br/>atomically record nullifier in credit_nullifiers,<br/>refill rate bucket, and inject Authorization: Bearer TINFOIL_API_KEY
+
+  Relay->>Enclave: Forward HPKE ciphertext + ehbp-encapsulated-key + Bearer API key
+  Enclave->>Enclave: Decrypt inside enclave RAM, run model on redacted text, HPKE-encrypt stream
+  Enclave-->>Relay: Encrypted SSE stream + ehbp-response-nonce
+  Relay-->>Browser: Pace frames (pacedStream, 50 ms cadence) + X-DRouter-Credit-Nullifier
+
+  Browser->>Browser: Decrypt HPKE stream & restore placeholders via prepared.restore()
+  Browser-->>User: Render restored response with local privacy & attestation receipt
+```
 
 ---
 

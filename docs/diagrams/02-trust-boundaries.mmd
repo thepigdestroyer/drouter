@@ -1,0 +1,42 @@
+%%{init: {"theme":"base","themeVariables":{"primaryColor":"#f3f1ec","primaryTextColor":"#151515","primaryBorderColor":"#151515","lineColor":"#595752","secondaryColor":"#ffffff","tertiaryColor":"#f3f1ec","fontFamily":"Georgia, serif"}}}%%
+flowchart LR
+  subgraph Device["Party 1: User Device (Browser)"]
+    RawText["Raw User Text & Hidden Personal Details<br/>(Device Only: Never Leaves Browser)"]
+    LocalRedacted["Redacted & Symmetry-Masked Text<br/>+ Local Restoration Map (placeholders)"]
+    LocalCrypto["Ephemeral HPKE Sender Key,<br/>Unblinded Credit Wallet, Vault Keys"]
+    RawText -->|"mechanicalRedact (D3) +<br/>Symmetry Transform"| LocalRedacted
+  end
+
+  subgraph Server["Party 2: Our Server (Vercel Next.js App & Oblivious Relay)"]
+    RelayView["RFC 9180 HPKE Ciphertext Only<br/>(Padded to 4096 B Power-of-Two Bucket)<br/>+ Blind Credit Token & Nullifier"]
+    ServerDescriptor["Content-Free TaskDescriptor (~56 bits)<br/>taskKind, inputTokenEstimate,<br/>redactionCounts {0,1,2}, allowedTools"]
+    PublicCorpusServe["Identical 16-Doc Public Library<br/>(GET /api/knowledge/corpus, zero query params)"]
+  end
+
+  subgraph Enclaves["Party 3: Sealed Computers (Tinfoil Enclaves)"]
+    EnclaveView["Redacted Text Only<br/>(Decrypted Inside Attested AMD SEV-SNP /<br/>Intel TDX + NVIDIA CC GPU Enclave RAM)"]
+    PiiFilterView["Second-Pass Redaction (pii-filter)<br/>Over Mechanically Scrubbed Text"]
+  end
+
+  subgraph GeminiParty["Party 4: Google Gemini Control Plane"]
+    GeminiView["Content-Free TaskDescriptor & createRequest<br/>(~67 bits total variable capacity,<br/>opaque handles $INPUT, $RESULT_1..16)"]
+  end
+
+  subgraph MongoParty["Party 5: MongoDB Atlas"]
+    AtlasView["Public Reference Library (enclave_intelligence),<br/>Public Search Queries After D3+D4 Filtering,<br/>Coarsened Verification Receipts & Nullifiers"]
+  end
+
+  subgraph ArcParty["Party 6: Circle Arc Testnet & Public Verifiers"]
+    ArcView["Public Proofs, Node Measurements,<br/>Merkle Roots, Filter Fingerprint Digest,<br/>& Transaction Receipt Anchors (chainId 5042002)"]
+  end
+
+  LocalRedacted -->|"HPKE Encrypted in Transit<br/>(ehbp-encapsulated-key)"| RelayView
+  RelayView -->|"Forwarded Ciphertext<br/>(Relay Cannot Decrypt)"| EnclaveView
+  RelayView -->|"Forwarded Ciphertext"| PiiFilterView
+  LocalRedacted -->|"Distilled to Counts & Buckets"| ServerDescriptor
+  ServerDescriptor -->|"Closed-Schema Gate<br/>(assertGoogleBoundMessage)"| GeminiView
+  PublicCorpusServe -->|"Fetched & Ranked Locally"| Device
+  Server -->|"D3+D4 Redacted Queries &<br/>Coarsened Non-PII Telemetry"| AtlasView
+  Server -->|"SHA-256 / Keccak-256 Digests"| ArcView
+
+  style RawText stroke:#d9531e,stroke-width:2.5px,fill:#ffffff,color:#151515

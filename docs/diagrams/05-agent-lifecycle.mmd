@@ -1,0 +1,37 @@
+%%{init: {"theme":"base","themeVariables":{"primaryColor":"#f3f1ec","primaryTextColor":"#151515","primaryBorderColor":"#151515","lineColor":"#595752","secondaryColor":"#ffffff","tertiaryColor":"#f3f1ec","fontFamily":"Georgia, serif"}}}%%
+sequenceDiagram
+  autonumber
+  actor User as User
+  participant Browser as Browser (src/lib/agent-client/index.ts)
+  participant Relay as Vercel Relay & Routes (/api/relay/*, /api/knowledge/corpus)
+  participant PiiEnclave as Tinfoil pii-filter Enclave (D4)
+  participant PlanRoute as Planner Route (POST /api/gemini/plan)
+  participant Gemini as Google Gemini Control Plane (gemini-4-argon)
+  participant ModelEnclave as Tinfoil Model Enclave (gemma4-31b / kimi-k3)
+
+  User->>Browser: Submits private task + Always-Hide terms
+  Browser->>Browser: Stage 1 Pass 1: On-device mechanicalRedact (D3)
+  Browser->>Relay: HPKE-encrypted mechanically scrubbed text (useRelay: true)
+  Relay->>PiiEnclave: Forward HPKE ciphertext + Bearer TINFOIL_API_KEY
+  PiiEnclave-->>Relay: Attested second-pass spans ([ATTESTED_PII_n])
+  Relay-->>Browser: Return attestedPiiFilter result (verified: true)
+  Browser->>Browser: Apply createSymmetryTransform() + 4096 B bucket padding<br/>Build content-free TaskDescriptor (~56 bits) & run local egress gate
+
+  Browser->>PlanRoute: POST /api/gemini/plan (canonicalJson(taskDescriptor) only)
+  Note over PlanRoute: Closed-Schema Egress Gate:<br/>buildGeminiCreateRequestFromDescriptor(),<br/>assertGoogleBoundMessage("createRequest"),<br/>and assertContentFree() (~67 bits max capacity)
+  PlanRoute->>Gemini: client.interactions.create(createRequest) over opaque handles ($INPUT)
+  Gemini-->>PlanRoute: Function-call steps (scrub, verify_two_hop, search_kb, invoke_enclave, anchor_arc)
+  Note over PlanRoute: Validate each tool call (assertValidToolCall, assertClosedPlanSchema),<br/>append event to Merkle transparency log (appendVerificationEventToLog),<br/>and sign GeminiEgressReceipt with auditPath inclusion proof
+  PlanRoute-->>Browser: ClosedAgentPlan + GeminiEgressReceipt (with transparencyLog inclusion proof)
+
+  Browser->>Browser: Verify egressReceipt signature, sha256, canonicalRequest & inclusion proof
+  Browser->>Relay: Execute plan verification & knowledge steps:<br/>GET /api/relay/enclave-matrix, GET /api/registry, GET /api/knowledge/corpus
+  Relay-->>Browser: Live 2-hop attestation matrix, Arc registry nodes & whole 16-doc public corpus
+  Browser->>Browser: Verify 7 checks (automatic failover gemma4-31b <-> kimi-k3 if needed)<br/>& rank whole public corpus locally in browser memory (BM25)
+
+  Browser->>Relay: openTinfoilSession(): Send redacted task encrypted with RFC 9180 HPKE
+  Relay->>ModelEnclave: Forward HPKE ciphertext to attested model enclave
+  ModelEnclave-->>Relay: Stream HPKE-encrypted completion over placeholders
+  Relay-->>Browser: Stream encrypted response frames
+  Browser->>Browser: Decrypt response, restore names & shifted values on device (restoreAll),<br/>verify T^-1(f(T(x))) = f(x), and sign Ed25519 forensic digest
+  Browser-->>User: Restored answer + verified EgressReceipt & Merkle inclusion proof
