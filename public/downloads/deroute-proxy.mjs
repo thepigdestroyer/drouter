@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// deRoute Private Local Proxy (source commit: 6d4c368ff666)
+// deRoute Private Local Proxy (source commit: 157dae47bf11)
 import { createRequire as __derouteCreateRequire } from "node:module";
 const require = __derouteCreateRequire(import.meta.url);
 var __create = Object.create;
