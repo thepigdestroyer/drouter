@@ -8,8 +8,6 @@
 
 import { proxyCoreRequest } from "@/lib/core-proxy";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
 
 async function handle(
   request: Request,
