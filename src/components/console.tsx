@@ -34,10 +34,13 @@ import {
   type RegistryResponse,
 } from "@/components/session";
 import {
+  applyVaultSignOutReset,
   prepareHistoryForWire,
   prepareOutboundTurn,
   rebuildMechanicalSessionFromMessages,
+  reserveAssistantLiteralPlaceholders,
   restoreUnspentCreditHeader,
+  stripWireContentFromMessages,
   type MessagePrivacyReport,
 } from "@/components/console/send-pipeline";
 import {
@@ -193,6 +196,94 @@ function FlowingInkTypingIndicator() {
   );
 }
 
+export function ConsoleMessageItem({
+  message: m,
+  modelName,
+  isStreamingLast,
+}: {
+  message: ChatMessage;
+  modelName: string;
+  isStreamingLast: boolean;
+}) {
+  return (
+    <div
+      className={`flex flex-col ${
+        m.role === "user" ? "items-end" : "items-start"
+      }`}
+    >
+      <div
+        className={
+          m.role === "user"
+            ? "max-w-[85%] rounded-2xl rounded-br-sm border border-ink bg-paper-2 px-4 py-3 text-sm text-ink whitespace-pre-wrap"
+            : "max-w-[75ch] rounded-2xl rounded-bl-sm border border-ink bg-paper px-4 py-3 text-sm text-ink whitespace-pre-wrap"
+        }
+      >
+        <div className="ep-label mb-1">
+          {m.role === "user" ? "You" : modelName}
+        </div>
+        <div>
+          {m.content ? (
+            m.content
+          ) : isStreamingLast ? (
+            <FlowingInkTypingIndicator />
+          ) : (
+            ""
+          )}
+        </div>
+      </div>
+
+      {m.role === "user" &&
+        (m.privacyReport ||
+          (m.wireContent && m.wireContent !== m.content)) && (
+          <div
+            className="mt-1 flex flex-col items-end text-xs text-ink-3"
+            data-testid="message-privacy-badge"
+          >
+            {m.privacyReport && (
+              <span>
+                {formatHiddenDetailsSummary(
+                  m.privacyReport.redactions.length,
+                )}
+              </span>
+            )}
+            {m.wireContent && m.wireContent !== m.content && (
+              <details
+                className="mt-1 max-w-[85%] text-right"
+                data-testid="message-sent-text"
+              >
+                <summary className="cursor-pointer underline">
+                  Show exactly what was sent
+                </summary>
+                <div className="mt-1 whitespace-pre-wrap rounded border border-rule bg-paper px-3 py-2 text-left font-mono text-ink-2">
+                  {m.wireContent}
+                </div>
+              </details>
+            )}
+          </div>
+        )}
+
+      {m.role === "assistant" &&
+        m.wireContent &&
+        m.wireContent !== m.content &&
+        !isStreamingLast && (
+          <details
+            className="mt-1 max-w-[75ch] text-xs text-ink-3"
+            data-testid="message-restored-badge"
+          >
+            <summary className="cursor-pointer">
+              Your hidden details were put back on this device. The AI
+              only saw placeholders.{" "}
+              <span className="underline">Show what the AI wrote</span>
+            </summary>
+            <div className="mt-1 whitespace-pre-wrap rounded border border-rule bg-paper px-3 py-2 font-mono text-ink-2">
+              {m.wireContent}
+            </div>
+          </details>
+        )}
+    </div>
+  );
+}
+
 export function Console() {
   const [registry, setRegistry] = useState<RegistryResponse | null>(null);
   const [model, setModel] = useState<string>(TINFOIL_MODELS[0].id);
@@ -241,7 +332,12 @@ export function Console() {
   useEffect(() => {
     const unsub = subscribeVaultSession(() => {
       if (!getCurrentVaultSession()) {
-        mechanicalSessionRef.current?.clear();
+        applyVaultSignOutReset({
+          session: mechanicalSessionRef.current,
+          setMessages,
+          setLastScrubbed,
+          setLastPrivacyReport,
+        });
       }
       setCustomTermsCount(getActiveCustomScrubTerms().length);
       setCreditBalance(storedCreditBalance());
@@ -420,20 +516,25 @@ export function Console() {
     setInput("");
     setError(null);
 
+    const sessionSnapshot = mechanicalSessionRef.current?.clone() ?? null;
+
     let turnPrepared;
     let preparedHistoryMessages: ChatMessage[];
     try {
-      preparedHistoryMessages = prepareHistoryForWire(messages, {
-        normalizeStyle,
-        session: mechanicalSessionRef.current ?? undefined,
-      });
-
       turnPrepared = await prepareOutboundTurn(text, {
         scrubEnabled,
         normalizeStyle,
         session: mechanicalSessionRef.current ?? undefined,
       });
+
+      preparedHistoryMessages = prepareHistoryForWire(messages, {
+        normalizeStyle,
+        session: mechanicalSessionRef.current ?? undefined,
+      });
     } catch (e) {
+      if (sessionSnapshot) {
+        mechanicalSessionRef.current = sessionSnapshot;
+      }
       setError((e as Error).message || "Could not prepare your message right now.");
       setInput(text);
       return;
@@ -481,12 +582,19 @@ export function Console() {
           },
         ]);
       }
+      reserveAssistantLiteralPlaceholders(
+        wireReply,
+        mechanicalSessionRef.current ?? undefined,
+      );
       setPhase("ready");
     } catch (e) {
       const msg = (e as Error).message || "Could not get a reply right now.";
       setError(msg);
       if (!wireReply) {
-        // Recoverable error: restore user prompt to input and refund unspent credit token
+        // Recoverable error: restore user prompt to input, roll back mechanical session, and refund unspent credit token
+        if (sessionSnapshot) {
+          mechanicalSessionRef.current = sessionSnapshot;
+        }
         if (turnPrepared.creditHeader) {
           const refunded = restoreUnspentCreditHeader(
             turnPrepared.creditHeader,
@@ -495,6 +603,11 @@ export function Console() {
         }
         setMessages(messages);
         setInput(text);
+      } else {
+        reserveAssistantLiteralPlaceholders(
+          wireReply,
+          mechanicalSessionRef.current ?? undefined,
+        );
       }
       setPhase("ready");
     }
@@ -569,16 +682,17 @@ export function Console() {
 
   const handleFreeze = useCallback(async (): Promise<FreezeReceipt | null> => {
     if (!session) return null;
+    const messagesForFreeze = stripWireContentFromMessages(messages);
     const saved = await freezeAndUpload(window.location.origin, {
       modelId: model,
       nodeKind: "tinfoil",
-      messages,
-      simContextTokens: messages.reduce(
+      messages: messagesForFreeze,
+      simContextTokens: messagesForFreeze.reduce(
         (sum, m) => sum + Math.max(1, Math.ceil(m.content.length / 4)),
         0,
       ),
       createdAt: Date.now(),
-      turnCount: messages.filter((m) => m.role === "user").length,
+      turnCount: messagesForFreeze.filter((m) => m.role === "user").length,
     });
     await pop();
     return saved;
@@ -659,13 +773,14 @@ export function Console() {
           throw err;
         }
       }
+      const resumedMessages = stripWireContentFromMessages(restored.messages);
       if (mechanicalSessionRef.current) {
-        rebuildMechanicalSessionFromMessages(restored.messages, {
+        rebuildMechanicalSessionFromMessages(resumedMessages, {
           normalizeStyle,
           session: mechanicalSessionRef.current,
         });
       }
-      setMessages(restored.messages);
+      setMessages(resumedMessages);
     },
     [model, normalizeStyle, registry, session],
   );
@@ -810,78 +925,14 @@ export function Console() {
             </div>
           ) : (
             messages.map((m, i) => (
-              <div
+              <ConsoleMessageItem
                 key={i}
-                className={`flex flex-col ${
-                  m.role === "user" ? "items-end" : "items-start"
-                }`}
-              >
-                <div
-                  className={
-                    m.role === "user"
-                      ? "max-w-[85%] rounded-2xl rounded-br-sm border border-ink bg-paper-2 px-4 py-3 text-sm text-ink whitespace-pre-wrap"
-                      : "max-w-[75ch] rounded-2xl rounded-bl-sm border border-ink bg-paper px-4 py-3 text-sm text-ink whitespace-pre-wrap"
-                  }
-                >
-                  <div className="ep-label mb-1">
-                    {m.role === "user" ? "You" : currentModelInfo.name}
-                  </div>
-                  <div>
-                    {m.content ? (
-                      m.content
-                    ) : phase === "streaming" ? (
-                      <FlowingInkTypingIndicator />
-                    ) : (
-                      ""
-                    )}
-                  </div>
-                </div>
-
-                {m.role === "user" && m.privacyReport && (
-                  <div
-                    className="mt-1 flex flex-col items-end text-xs text-ink-3"
-                    data-testid="message-privacy-badge"
-                  >
-                    <span>
-                      {formatHiddenDetailsSummary(
-                        m.privacyReport.redactions.length,
-                      )}
-                    </span>
-                    {m.wireContent && m.wireContent !== m.content && (
-                      <details
-                        className="mt-1 max-w-[85%] text-right"
-                        data-testid="message-sent-text"
-                      >
-                        <summary className="cursor-pointer underline">
-                          Show exactly what was sent
-                        </summary>
-                        <div className="mt-1 whitespace-pre-wrap rounded border border-rule bg-paper px-3 py-2 text-left font-mono text-ink-2">
-                          {m.wireContent}
-                        </div>
-                      </details>
-                    )}
-                  </div>
-                )}
-
-                {m.role === "assistant" &&
-                  m.wireContent &&
-                  m.wireContent !== m.content &&
-                  !(phase === "streaming" && i === messages.length - 1) && (
-                    <details
-                      className="mt-1 max-w-[75ch] text-xs text-ink-3"
-                      data-testid="message-restored-badge"
-                    >
-                      <summary className="cursor-pointer">
-                        Your hidden details were put back on this device. The AI
-                        only saw placeholders.{" "}
-                        <span className="underline">Show what the AI wrote</span>
-                      </summary>
-                      <div className="mt-1 whitespace-pre-wrap rounded border border-rule bg-paper px-3 py-2 font-mono text-ink-2">
-                        {m.wireContent}
-                      </div>
-                    </details>
-                  )}
-              </div>
+                message={m}
+                modelName={currentModelInfo.name}
+                isStreamingLast={
+                  phase === "streaming" && i === messages.length - 1
+                }
+              />
             ))
           )}
         </div>

@@ -1,3 +1,4 @@
+import type { ScrubResult } from "@/lib/types";
 import { getActiveCustomScrubTerms } from "@/lib/auth/vault";
 import { nullifierFor, parseCreditHeader } from "@/lib/credits/blind";
 import {
@@ -14,9 +15,12 @@ import {
   createMechanicalSession,
   type MechanicalSession,
 } from "@/lib/privacy/mechanical";
-import type { MechanicalRuleset } from "@/lib/privacy/mechanical-ruleset";
+import {
+  MECHANICAL_RULESET,
+  type MechanicalRuleset,
+} from "@/lib/privacy/mechanical-ruleset";
 import type { SessionScrubber } from "@/lib/privacy/scrubber";
-import type { ChatMessage } from "@/components/session";
+import type { ActiveSession, ChatMessage } from "@/components/session";
 import { rehideKnownValues } from "@/lib/privacy/rehide-known";
 
 export interface MessagePrivacyReport {
@@ -127,16 +131,22 @@ export function prepareHistoricalTurnText(
 
 /**
  * Gives every earlier message the exact text to resend. Messages that kept
- * their original wire text reuse it; any other message, including AI replies
- * shown with hidden details put back, is filtered again with the session so
- * only placeholders leave the device.
+ * their original wire text pass it through `rehideKnownValues` so newly hidden
+ * session values never leak; any other message, including AI replies shown with
+ * hidden details put back or resumed messages without `wireContent`, is
+ * filtered again with the session so only placeholders leave the device.
  */
 export function prepareHistoryForWire(
   messages: readonly ChatMessage[],
   opts?: PrepareTurnOptions,
 ): ChatMessage[] {
   return messages.map((m) => {
-    if (m.wireContent) return m;
+    if (m.wireContent) {
+      return {
+        ...m,
+        wireContent: rehideKnownValues(m.wireContent, opts?.session),
+      };
+    }
     const wire = prepareHistoricalTurnText(m.content, {
       ...opts,
       normalizeStyle: m.role === "user" && Boolean(opts?.normalizeStyle),
@@ -148,8 +158,23 @@ export function prepareHistoryForWire(
 }
 
 /**
+ * Strips `wireContent` and `privacyReport` before freezing/saving or upon
+ * resuming a conversation so resumed chats are always re-filtered from scratch
+ * against the active ruleset, style settings, and vault custom terms.
+ */
+export function stripWireContentFromMessages(
+  messages: readonly ChatMessage[],
+): ChatMessage[] {
+  return messages.map(({ role, content }) => ({
+    role,
+    content,
+  }));
+}
+
+/**
  * Rebuilds a `MechanicalSession` in chronological order from restored conversation
- * messages so later turns keep consistent placeholders and can restore historical placeholders.
+ * messages (including assistant messages with `normalizeStyle: false`) so later
+ * turns keep consistent placeholders and can restore historical placeholders.
  */
 export function rebuildMechanicalSessionFromMessages(
   messages: ReadonlyArray<{ role: "user" | "assistant"; content: string }>,
@@ -158,14 +183,63 @@ export function rebuildMechanicalSessionFromMessages(
   const session = opts?.session ?? createMechanicalSession();
   session.clear();
   for (const m of messages) {
-    if (m.role === "user") {
-      prepareHistoricalTurnText(m.content, {
-        ...opts,
-        session,
-      });
-    }
+    prepareHistoricalTurnText(m.content, {
+      ...opts,
+      normalizeStyle: m.role === "user" && Boolean(opts?.normalizeStyle),
+      session,
+    });
   }
   return session;
+}
+
+/**
+ * Scans a completed assistant reply for literal `[KIND_N]` tokens that are not
+ * active placeholders in `session` and reserves them so subsequent user turns
+ * cannot allocate a colliding placeholder.
+ */
+export function reserveAssistantLiteralPlaceholders(
+  wireReply: string,
+  session?: MechanicalSession,
+  ruleset: MechanicalRuleset = MECHANICAL_RULESET,
+): string[] {
+  if (!wireReply || !session) return [];
+  const existingRe = new RegExp(
+    ruleset.placeholderPatterns.existingPlaceholder.source,
+    ruleset.placeholderPatterns.existingPlaceholder.flags,
+  );
+  const knownPlaceholders = new Set(
+    session.entries().map((e) => e.placeholder.toUpperCase()),
+  );
+  const literalsToReserve: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = existingRe.exec(wireReply)) !== null) {
+    const token = match[0].toUpperCase();
+    if (!knownPlaceholders.has(token) && !literalsToReserve.includes(token)) {
+      literalsToReserve.push(token);
+    }
+  }
+  if (literalsToReserve.length > 0) {
+    session.redact(literalsToReserve.join(" "), { ruleset });
+  }
+  return literalsToReserve;
+}
+
+/**
+ * Clears the chat messages, privacy badges, and mechanical session when the
+ * vault locks or the user signs out so private conversation state does not stay
+ * on screen or collide with a wiped session.
+ */
+export function applyVaultSignOutReset(state: {
+  session?: MechanicalSession | null;
+  setMessages?: (messages: ChatMessage[]) => void;
+  setLastScrubbed?: (scrubbed: ScrubResult | null) => void;
+  setLastPrivacyReport?: (report: MessagePrivacyReport | null) => void;
+}): ChatMessage[] {
+  state.session?.clear();
+  state.setMessages?.([]);
+  state.setLastScrubbed?.(null);
+  state.setLastPrivacyReport?.(null);
+  return [];
 }
 
 /**
@@ -254,4 +328,196 @@ export async function prepareOutboundTurn(
       return prepared.restore(modelText);
     },
   };
+}
+
+export interface ExecuteSendTurnParams {
+  text: string;
+  messages: readonly ChatMessage[];
+  model: string;
+  activeSession: Pick<ActiveSession, "send">;
+  mechanicalSession: MechanicalSession;
+  scrubEnabled?: boolean;
+  normalizeStyle?: boolean;
+  onPrepared?: (info: {
+    turnPrepared: PreparedTurn;
+    displayHistory: ChatMessage[];
+    wireHistory: ChatMessage[];
+  }) => void;
+  onStreamDelta?: (info: {
+    wireReply: string;
+    restoredReply: string;
+    messagesWithReply: ChatMessage[];
+  }) => void;
+}
+
+export type ExecuteSendTurnResult =
+  | {
+      ok: true;
+      messages: ChatMessage[];
+      wireHistory: ChatMessage[];
+      wireReply: string;
+      restoredReply: string;
+      turnPrepared: PreparedTurn;
+      mechanicalSession: MechanicalSession;
+      reservedLiterals: string[];
+    }
+  | {
+      ok: false;
+      error: Error;
+      failedBeforeFirstToken: boolean;
+      messages: ChatMessage[];
+      restoredInput: string;
+      creditBalanceAfterRollback: number | null;
+      mechanicalSession: MechanicalSession;
+    };
+
+/**
+ * Orchestrates a chat turn:
+ * 1. Clones `mechanicalSession` so it can be restored if sending fails before the first token (M2).
+ * 2. Runs `prepareOutboundTurn` BEFORE `prepareHistoryForWire` so new ££...££ markers or
+ *    custom terms are registered in the session before history is re-hidden (C5).
+ * 3. Streams from `activeSession.send(wireHistory, model, ...)` and restores placeholders live.
+ * 4. Reserves any literal `[KIND_N]` tokens in the completed assistant reply that are not
+ *    session placeholders (M3).
+ * 5. Rolls back `messages`, `mechanicalSession`, and unspent credits if the turn fails before
+ *    the first token (M2).
+ */
+export async function executeSendTurn(
+  params: ExecuteSendTurnParams,
+): Promise<ExecuteSendTurnResult> {
+  const {
+    text,
+    messages,
+    model,
+    activeSession,
+    mechanicalSession,
+    scrubEnabled,
+    normalizeStyle,
+    onPrepared,
+    onStreamDelta,
+  } = params;
+
+  const sessionSnapshot = mechanicalSession.clone();
+
+  let turnPrepared: PreparedTurn;
+  let preparedHistoryMessages: ChatMessage[];
+  try {
+    turnPrepared = await prepareOutboundTurn(text, {
+      scrubEnabled,
+      normalizeStyle,
+      session: mechanicalSession,
+    });
+
+    preparedHistoryMessages = prepareHistoryForWire(messages, {
+      normalizeStyle,
+      session: mechanicalSession,
+    });
+  } catch (e) {
+    const error =
+      e instanceof Error
+        ? e
+        : new Error("Could not prepare your message right now.");
+    return {
+      ok: false,
+      error,
+      failedBeforeFirstToken: true,
+      messages: [...messages],
+      restoredInput: text,
+      creditBalanceAfterRollback: null,
+      mechanicalSession: sessionSnapshot,
+    };
+  }
+
+  const userMsg: ChatMessage = {
+    role: "user",
+    content: text,
+    wireContent: turnPrepared.outboundText,
+    privacyReport: turnPrepared.report,
+  };
+
+  const displayHistory: ChatMessage[] = [...preparedHistoryMessages, userMsg];
+  const wireHistory: ChatMessage[] = displayHistory.map((m) => ({
+    role: m.role,
+    content: m.wireContent ?? m.content,
+    wireContent: m.wireContent ?? m.content,
+  }));
+
+  onPrepared?.({
+    turnPrepared,
+    displayHistory,
+    wireHistory,
+  });
+
+  let wireReply = "";
+  let restoredReply = "";
+  let messagesWithReply: ChatMessage[] = [
+    ...displayHistory,
+    { role: "assistant", content: "" },
+  ];
+
+  try {
+    for await (const delta of activeSession.send(wireHistory, model, {
+      creditHeader: turnPrepared.creditHeader,
+    })) {
+      wireReply += delta;
+      restoredReply = turnPrepared.restore(wireReply);
+      messagesWithReply = [
+        ...displayHistory,
+        {
+          role: "assistant",
+          content: restoredReply,
+          wireContent: wireReply,
+        },
+      ];
+      onStreamDelta?.({
+        wireReply,
+        restoredReply,
+        messagesWithReply,
+      });
+    }
+    const reservedLiterals = reserveAssistantLiteralPlaceholders(
+      wireReply,
+      mechanicalSession,
+    );
+    return {
+      ok: true,
+      messages: messagesWithReply,
+      wireHistory,
+      wireReply,
+      restoredReply,
+      turnPrepared,
+      mechanicalSession,
+      reservedLiterals,
+    };
+  } catch (e) {
+    const error =
+      e instanceof Error
+        ? e
+        : new Error("Could not get a reply right now.");
+    if (!wireReply) {
+      let refundedBalance: number | null = null;
+      if (turnPrepared.creditHeader) {
+        refundedBalance = restoreUnspentCreditHeader(turnPrepared.creditHeader);
+      }
+      return {
+        ok: false,
+        error,
+        failedBeforeFirstToken: true,
+        messages: [...messages],
+        restoredInput: text,
+        creditBalanceAfterRollback: refundedBalance,
+        mechanicalSession: sessionSnapshot,
+      };
+    }
+    reserveAssistantLiteralPlaceholders(wireReply, mechanicalSession);
+    return {
+      ok: false,
+      error,
+      failedBeforeFirstToken: false,
+      messages: messagesWithReply,
+      restoredInput: "",
+      creditBalanceAfterRollback: null,
+      mechanicalSession,
+    };
+  }
 }
