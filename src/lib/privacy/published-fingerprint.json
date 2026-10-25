@@ -1,5 +1,7 @@
 {
   "version": "1.0.1",
-  "fingerprint": null,
-  "anchorTx": null
+  "fingerprint": "0x0928121dfa0558ab8e59af0298aa76c5b9a3674012d2ff162b66df79bba20f28",
+  "anchorTx": "0x09055dc1b5d6a79de9d96824ee76213b2c238a8bfd744ab143405d30db1fe730",
+  "chainId": 5042002,
+  "anchoredAt": "2026-10-25T02:32:31.903Z"
 }
