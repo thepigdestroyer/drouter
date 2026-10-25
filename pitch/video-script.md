@@ -128,8 +128,9 @@ Navigation rule: the account session lives in memory. Typing a URL or reloading 
   2. Click the message box and paste the chat input from section 7.5.
   3. In the card below, "Live draft check: 2 personal details hidden" appears. Click its "Show technical details".
   4. Scroll back up and click "Send". Cut the wait (my test reply took about 10 s).
+  5. Under the reply, click "Show what the AI wrote": the raw reply only has placeholders such as `[EMAIL_1]`. Under your message, "Show exactly what was sent" shows the placeholder version that left your device.
 - **On screen**: "Padded size: 4,096 B"; "Replaced in browser: [EMAIL_1] (EMAIL) [SECRET_1] (SECRET)"; outbound line "Write a two-line note to [EMAIL_1] ... keep test key [SECRET_1] private."; under your bubble "2 personal details hidden"; the Kimi K3 reply shows `dana.reyes@example.org` restored. The token label drops to "4 left".
-- **Hold**: 2 s on the placeholder line, 2 s on the restored reply.
+- **Hold**: 2 s on the placeholder line, 2 s on the restored reply, 2 s on "Show what the AI wrote" open.
 - **VO**:
 > I add five free blind-signed tokens, then type a contact email and a test key. My browser swaps them for placeholders and pads the message. The reply comes back, details restored on my screen only.
 
