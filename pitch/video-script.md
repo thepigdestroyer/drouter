@@ -67,7 +67,7 @@ Short sentences, one breath each. Numbers are the signposts: hit "One", "Two", a
 **P1 0:03-0:12 · Block 1: The filter (22 words)**
 > One: the filter. Your browser hides emails, phone numbers and keys first. Its fingerprint lives on Circle Arc. No match, no send.
 
-Lower-third: `1 · On-device personal-detail filter v1.0.3 · fingerprint anchored on Circle Arc Testnet (tx 0xf97f080f...cf25265a) · second pass in Tinfoil's sealed pii-filter`
+Lower-third: `1 · On-device personal-detail filter v1.0.4 · fingerprint anchored on Circle Arc Testnet (tx 0xff43cfff...eaef5e7d) · second pass in Tinfoil's sealed pii-filter`
 
 **P1 0:12-0:19 · Block 2: Sealed computers (17 words)**
 > Two: sealed computers. Prompts open only inside sealed AMD, Intel and NVIDIA hardware, after seven browser checks.
@@ -137,7 +137,7 @@ Navigation rule: the account session lives in memory. Typing a URL or reloading 
 - **Page**: https://drouter-demo.vercel.app/argon (top nav "Agent"). Record as a separate clip because the expert settings reset when you leave the page.
 - **Before you hit record**: let the automatic first run finish. Open "For experts", set Thinking level **LOW** and Enclave model **kimi-k3**, close "For experts", and scroll to the top.
 - **Action**:
-  1. Point at the badge above the Run button: "Personal-detail filter v1.0.3: matches the published version" with "Verified".
+  1. Point at the badge above the Run button: "Personal-detail filter v1.0.4: matches the published version" with "Verified".
   2. Click "Run" (it changes to "Running..."). Cut the wait.
   3. Show the badge "Planned by Gemini 4 Argon" and the timeline: "2. Checking the seal: 7 of 7 safety checks passed" and "3. Thinking: Planned by Gemini 4 Argon. Gemini planned the steps without seeing your words. The sealed computer finished the work..."
   4. Scroll to the top card, which has three columns: "What Google can see", "What Google never sees", "What the sealed computer sees". Click its "Show technical details".
@@ -284,7 +284,7 @@ for p in api/health api/registry api/relay/enclave-matrix api/accountability api
 - [ ] Sign in (7.2), then open Chat and wait for "Sealed and private" and "7/7 checks passed".
 - [ ] Open Agent and let the automatic first run finish. Each Agent page load runs the default task, including a planner call.
 - [ ] Open Proof and check that "Latest hourly run" is from the last hour or two.
-- [ ] In a second tab, open https://explorer.testnet.arc.io/tx/0xf97f080fc9b6e7f1cb5fa311af3f41498aab81a9f228cde10fdfb8d9cf25265a (the filter anchor) as backup B-roll.
+- [ ] In a second tab, open https://explorer.testnet.arc.io/tx/0xff43cfff01759aed0c61eeef85d40235ea5c96c82f6b86f9c7f4e3b9eaef5e7d (the filter anchor) as backup B-roll.
 - [ ] Terminal: in a clone of the repo, run `npm install`, then do one dry run of `node scripts/drouter-cli.mjs verify` without `--submit`. I ran it on 25 Oct and C1 to C7 all passed. Use `--submit` only for the real take, because each submission adds a real signed entry to the public log. Afterwards, the Proof page counter rises by one (it showed 1 signed check on 25 Oct).
 
 ### 7.8 Final dry run
@@ -297,7 +297,7 @@ for p in api/health api/registry api/relay/enclave-matrix api/accountability api
 
 | Spoken claim | Evidence |
 | :- | :- |
-| Filter v1.0.3; fingerprint on Circle Arc; no match, no send | `src/lib/privacy/mechanical-ruleset.ts` (`version: "1.0.3"`), `src/lib/privacy/published-fingerprint.json`. Recomputed fingerprint `0x95f683a8...5d447857` matches. Arc RPC: tx `0xf97f080f...cf25265a` status success, `ReceiptAnchored` with hash `0x42d5dca8...22f538`. A mismatch blocks Chat (`canSend`, `assertFilterFingerprintAllowsSend`) and Agent Run (`filterBlocked`). |
+| Filter v1.0.4; fingerprint on Circle Arc; no match, no send | `src/lib/privacy/mechanical-ruleset.ts` (`version: "1.0.4"`), `src/lib/privacy/published-fingerprint.json`. Recomputed fingerprint `0x5bc6cc77...ec8d9e09` matches. Arc RPC: tx `0xff43cfff...eaef5e7d` status success, `ReceiptAnchored` with hash `0x81889241...d1aa27`. A mismatch blocks Chat (`canSend`, `assertFilterFingerprintAllowsSend`) and Agent Run (`filterBlocked`). |
 | Hides emails, phone numbers and keys first | Live test: `[EMAIL_1]`, `[SECRET_1]`; `[PHONE_1]` for `415-555-0199` (code test). Runs in the browser before encryption (`prepareOutboundTurn`, `runBrowserRedactionPipeline`). |
 | Sealed AMD, Intel and NVIDIA hardware; seven browser checks | `src/lib/tinfoil/client.ts` `checksFromDocument` (C1-C5, C7) and `src/components/session.ts` (C6). Live on `/app`: 7/7 PASS. C1 "VCEK -> SEV-Genoa -> ARK-Genoa", C5 "8× NVIDIA confidential GPUs ... TDX + CC mode". CLI `verify`: 7 PASS. |
 | Machines join on-chain by staking USDC; anyone can audit | `contracts/DRouterRegistry.sol` `registerNode` is payable with `minStake`. Live `/api/registry`: `source: arc`, 6 active nodes, 0.01 USDC stake each, contract `0xbc8085c2b6fe6e0db05f169925c0b841828f4481`. |
