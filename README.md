@@ -353,8 +353,8 @@ node scripts/drouter-cli.mjs verify --submit --upstream https://drouter-demo.ver
 # 3. Ask a question from the terminal with local PII scrubbing and streaming placeholder restoration
 node scripts/drouter-cli.mjs ask "Audit cohort COHORT-2026-08-14 for dana.reyes@example.org" --model kimi-k3 --upstream https://drouter-demo.vercel.app
 
-# 4. Start a local zero-trust OpenAI-compatible proxy on http://127.0.0.1:4141/v1
-node scripts/drouter-cli.mjs proxy --port 4141 --upstream https://drouter-demo.vercel.app
+# 4. Start the local private OpenAI-compatible proxy on http://127.0.0.1:4141/v1 (verifies public/downloads/deroute-proxy.mjs.sha256 and launches public/downloads/deroute-proxy.mjs)
+node scripts/drouter-cli.mjs proxy --port 4141 --key drk_YOUR_ACCESS_KEY
 
 # 5. Print OpenCode / OpenAI client configuration snippets
 node scripts/drouter-cli.mjs config --upstream https://drouter-demo.vercel.app

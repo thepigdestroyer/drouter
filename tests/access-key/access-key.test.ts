@@ -69,7 +69,6 @@ import {
   CHAT_GATEWAY_MODEL_IDS,
   HOSTED_GATEWAY_BASE_URL,
   LOCAL_PROXY_BASE_URL,
-  LOCAL_PROXY_FALLBACK_COMMAND,
   SUPPORTED_GATEWAY_MODEL_IDS,
   buildCodingToolSnippets,
   filterChatCapableModelIds,
@@ -80,6 +79,11 @@ import {
   DEFAULT_LIVE_MODEL_IDS,
   buildTerminalSnippets,
 } from "@/components/inspector/terminal-snippets";
+import {
+  parseDrouterCliArgs,
+  runProxySubcommand,
+  verifyProxyBundleSha256,
+} from "../../scripts/drouter-cli.mjs";
 import { lockVault, unlockVaultWithKeyMaterial } from "@/lib/auth/vault";
 import { resetRateLimitStateForTests } from "@/lib/ratelimit";
 import { canonicalJson } from "@/lib/transparency/log";
@@ -851,13 +855,60 @@ describe("Review Fixes (I1-I4, M1-M4)", () => {
     );
   });
 
-  it("I4: shows fallback command node scripts/drouter-cli.mjs proxy --port 4141 when proxyBundleAvailable is false", () => {
-    const fallbackSnippets = buildCodingToolSnippets({
+  it("I4: always advertises the single-file deroute-proxy.mjs download and drouter-cli.mjs proxy verifies sha256 before spawning public/downloads/deroute-proxy.mjs", () => {
+    const snippets = buildCodingToolSnippets({
       mode: "private",
-      proxyBundleAvailable: false,
     });
-    expect(fallbackSnippets.proxyStartCommand).toContain(LOCAL_PROXY_FALLBACK_COMMAND);
-    expect(fallbackSnippets.proxyStartCommand).not.toContain("/downloads/deroute-proxy.mjs");
+    expect(snippets.proxyStartCommand).toContain("/downloads/deroute-proxy.mjs");
+    expect(snippets.proxyStartCommand).toContain("deroute-proxy.mjs.sha256");
+    expect(snippets.proxyStartCommand).not.toContain("drouter-cli.mjs proxy");
+
+    // 1. Real bundle and sha256 verify cleanly and spawn deroute-proxy.mjs with passed arguments
+    const check = verifyProxyBundleSha256();
+    expect(check.ok).toBe(true);
+
+    const spawnedCalls: Array<{ cmd: string; args: string[] }> = [];
+    runProxySubcommand(["--port", "4141", "--key", "drk_test"], {
+      spawnImpl: ((cmd: string, args: string[]) => {
+        spawnedCalls.push({ cmd, args });
+        return {
+          on: () => {},
+        };
+      }) as unknown as typeof import("node:child_process").spawn,
+    });
+    expect(spawnedCalls).toHaveLength(1);
+    expect(spawnedCalls[0].args[0]).toContain(
+      path.join("public", "downloads", "deroute-proxy.mjs"),
+    );
+    expect(spawnedCalls[0].args.slice(1)).toEqual([
+      "--port",
+      "4141",
+      "--key",
+      "drk_test",
+    ]);
+
+    // 2. Missing bundle prints how to build with npm run build:proxy and exits non-zero
+    const stderrLines: string[] = [];
+    let exitCode: number | null = null;
+    runProxySubcommand(["--port", "4141"], {
+      bundlePath: "/nonexistent/deroute-proxy.mjs",
+      sha256Path: "/nonexistent/deroute-proxy.mjs.sha256",
+      stderr: (m: string) => {
+        stderrLines.push(m);
+      },
+      exit: (c: number) => {
+        exitCode = c;
+      },
+    });
+    expect(exitCode).toBe(1);
+    expect(stderrLines.join("\n")).toContain("npm run build:proxy");
+
+    // 3. --no-scrub is not a recognized flag on parseDrouterCliArgs
+    const parsedCli = parseDrouterCliArgs(["proxy", "--port", "4242", "--key", "drk_abc"]);
+    expect(parsedCli.command).toBe("proxy");
+    expect(parsedCli.port).toBe(4242);
+    expect(parsedCli.key).toBe("drk_abc");
+    expect("scrubPii" in parsedCli).toBe(false);
   });
 
   it("M1: adds 'unsafe-eval' to script-src only when NODE_ENV === 'development' in next.config.ts and src/proxy.ts", () => {

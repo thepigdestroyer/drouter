@@ -107,12 +107,7 @@ curl -fsSLO ${PRODUCTION_BASE_URL}/downloads/deroute-proxy.mjs.sha256
 shasum -a 256 -c deroute-proxy.mjs.sha256
 
 # Start the local proxy on http://127.0.0.1:4141/v1 (or set DEROUTE_ACCESS_KEY=drk_...):
-node deroute-proxy.mjs --key drk_YOUR_ACCESS_KEY
-
-# Or build and run from source:
-git clone ${REPO_CLONE_URL} && cd drouter && npm ci
-node scripts/drouter-cli.mjs verify${upstreamFlag}
-node scripts/drouter-cli.mjs proxy --port 4141${upstreamFlag}`;
+node deroute-proxy.mjs --key drk_YOUR_ACCESS_KEY`;
 
   const envSnippet = `# Private mode (recommended): run "node deroute-proxy.mjs --key drk_..." from /account
 export OPENAI_BASE_URL="http://127.0.0.1:4141/v1"

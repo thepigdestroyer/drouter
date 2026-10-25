@@ -99,7 +99,7 @@ npm run build:proxy
 shasum -a 256 public/downloads/deroute-proxy.mjs
 cat public/downloads/deroute-proxy.mjs.sha256
 ```
-`npm run build:proxy` bundles the TypeScript sources and the `tinfoil` verification SDK with `esbuild` into `public/downloads/deroute-proxy.mjs` and writes its digest to `public/downloads/deroute-proxy.mjs.sha256`.
+`npm run build:proxy` bundles the TypeScript sources and the `tinfoil` verification SDK with `esbuild` into `public/downloads/deroute-proxy.mjs` and writes its digest to `public/downloads/deroute-proxy.mjs.sha256`. Running `node scripts/drouter-cli.mjs proxy [--port 4141] [--key drk_...]` from a repository checkout verifies `public/downloads/deroute-proxy.mjs` against `public/downloads/deroute-proxy.mjs.sha256` and launches that bundle.
 
 ---
 

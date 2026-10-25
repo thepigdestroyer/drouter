@@ -399,7 +399,12 @@ export function buildHarnessConfigs(baseUrl: string): HarnessConfigs {
     `console.log(resp.choices[0]?.message?.content);`,
   ].join("\n");
 
-  const localProxyCommand = `node scripts/drouter-cli.mjs proxy --port 4141 --upstream ${cleanBase}`;
+  const localProxyCommand = [
+    `curl -fsSLO ${cleanBase}/downloads/deroute-proxy.mjs`,
+    `curl -fsSLO ${cleanBase}/downloads/deroute-proxy.mjs.sha256`,
+    `shasum -a 256 -c deroute-proxy.mjs.sha256`,
+    `node deroute-proxy.mjs --port 4141`,
+  ].join("\n");
 
   return {
     opencodeJson,
@@ -424,14 +429,12 @@ export type CodingToolMode = "private" | "hosted";
 
 export const LOCAL_PROXY_BASE_URL = "http://127.0.0.1:4141/v1";
 export const HOSTED_GATEWAY_BASE_URL = "https://drouter-demo.vercel.app/api/v1";
-export const LOCAL_PROXY_FALLBACK_COMMAND = "node scripts/drouter-cli.mjs proxy --port 4141";
 
 export interface CodingToolSnippets {
   mode: CodingToolMode;
   baseUrl: string;
   apiKeyPlaceholder: string;
   proxyStartCommand: string;
-  proxyFallbackCommand: string;
   byTool: Record<CodingToolId, string>;
 }
 
@@ -447,7 +450,6 @@ export function buildCodingToolSnippets(opts?: {
   modelIds?: readonly string[];
   defaultModel?: string;
   hostedOrigin?: string;
-  proxyBundleAvailable?: boolean;
 }): CodingToolSnippets {
   const mode: CodingToolMode = opts?.mode ?? "private";
   const cleanOrigin = (opts?.hostedOrigin || "https://drouter-demo.vercel.app").replace(/\/+$/, "");
@@ -493,21 +495,15 @@ export function buildCodingToolSnippets(opts?: {
     model: `deroute/${primaryModel}`,
   };
 
-  const proxyBundleAvailable = opts?.proxyBundleAvailable ?? true;
-  const proxyStartCommand = proxyBundleAvailable
-    ? [
-        `# 1. Download the single-file local proxy and its checksum:`,
-        `curl -fsSLO ${cleanOrigin}/downloads/deroute-proxy.mjs`,
-        `curl -fsSLO ${cleanOrigin}/downloads/deroute-proxy.mjs.sha256`,
-        `shasum -a 256 -c deroute-proxy.mjs.sha256`,
-        ``,
-        `# 2. Start the local proxy on http://127.0.0.1:4141/v1 (requires Node 20+):`,
-        `node deroute-proxy.mjs --key ${keyOrPlaceholder}`,
-      ].join("\n")
-    : [
-        `# Run the local proxy from your repository checkout on http://127.0.0.1:4141/v1:`,
-        LOCAL_PROXY_FALLBACK_COMMAND,
-      ].join("\n");
+  const proxyStartCommand = [
+    `# 1. Download the single-file local proxy and its checksum:`,
+    `curl -fsSLO ${cleanOrigin}/downloads/deroute-proxy.mjs`,
+    `curl -fsSLO ${cleanOrigin}/downloads/deroute-proxy.mjs.sha256`,
+    `shasum -a 256 -c deroute-proxy.mjs.sha256`,
+    ``,
+    `# 2. Start the local proxy on http://127.0.0.1:4141/v1 (requires Node 20+):`,
+    `node deroute-proxy.mjs --key ${keyOrPlaceholder}`,
+  ].join("\n");
 
   const opencodeSnippet = JSON.stringify(opencodeConfig, null, 2);
 
@@ -600,7 +596,6 @@ export function buildCodingToolSnippets(opts?: {
     baseUrl,
     apiKeyPlaceholder: apiKeyValue,
     proxyStartCommand,
-    proxyFallbackCommand: LOCAL_PROXY_FALLBACK_COMMAND,
     byTool: {
       opencode: opencodeSnippet,
       cursor: cursorSnippet,

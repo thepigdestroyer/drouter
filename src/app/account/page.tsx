@@ -35,7 +35,6 @@ import {
 } from "@/lib/credits/client";
 import {
   CHAT_GATEWAY_MODEL_IDS,
-  LOCAL_PROXY_FALLBACK_COMMAND,
   buildCodingToolSnippets,
   filterChatCapableModelIds,
   type CodingToolId,
@@ -97,7 +96,6 @@ export default function AccountPage() {
   const [liveModelIds, setLiveModelIds] = useState<readonly string[]>(
     CHAT_GATEWAY_MODEL_IDS,
   );
-  const [proxyBundleAvailable, setProxyBundleAvailable] = useState<boolean>(true);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const copyTimerRef = useRef<number | null>(null);
 
@@ -171,23 +169,6 @@ export default function AccountPage() {
         }
       })
       .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (typeof fetch !== "function") return;
-    let cancelled = false;
-    fetch("/downloads/deroute-proxy.mjs", { method: "HEAD" })
-      .then((res) => {
-        if (cancelled) return;
-        setProxyBundleAvailable(res.ok);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setProxyBundleAvailable(false);
-      });
     return () => {
       cancelled = true;
     };
@@ -324,9 +305,8 @@ export default function AccountPage() {
         mode: codingMode,
         accessKey: createdKeyInfo?.key ?? null,
         modelIds: liveModelIds,
-        proxyBundleAvailable,
       }),
-    [codingMode, createdKeyInfo?.key, liveModelIds, proxyBundleAvailable],
+    [codingMode, createdKeyInfo?.key, liveModelIds],
   );
 
   const activeCustomTerms = session?.payload.customScrubTerms ?? [];
@@ -1080,19 +1060,9 @@ export default function AccountPage() {
 
                 {codingMode === "private" ? (
                   <div className="ep-inset space-y-2 p-3.5">
-                    {!proxyBundleAvailable && (
-                      <div
-                        data-testid="proxy-bundle-fallback-note"
-                        className="rounded border border-rule bg-paper-2 px-3 py-2 text-xs text-ink-2"
-                      >
-                        The single-file download (<code className="font-mono text-ink">/downloads/deroute-proxy.mjs</code>) is not built on this server yet. Run the local proxy from a repository checkout with <code className="font-mono text-ink">{LOCAL_PROXY_FALLBACK_COMMAND}</code> instead.
-                      </div>
-                    )}
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <span className="font-mono text-xs text-ink">
-                        {proxyBundleAvailable
-                          ? "Start the single-file local proxy on your computer (Node 20 or later):"
-                          : "Start the local proxy from your repository checkout (Node 20 or later):"}
+                        Start the single-file local proxy on your computer (Node 20 or later):
                       </span>
                       <button
                         type="button"

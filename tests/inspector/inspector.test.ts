@@ -239,6 +239,12 @@ describe("Terminal modal verbatim commands & snippets", () => {
     expect(snippets.curlSnippet).toContain(
       `git clone ${REPO_CLONE_URL} && cd drouter && npm ci && node scripts/drouter-cli.mjs verify`,
     );
+    expect(snippets.proxySnippet).toContain(
+      `curl -fsSLO ${PRODUCTION_BASE_URL}/downloads/deroute-proxy.mjs`,
+    );
+    expect(snippets.proxySnippet).not.toContain(
+      "node scripts/drouter-cli.mjs proxy",
+    );
     expect(snippets.curlSnippet).toContain(
       `curl ${PRODUCTION_BASE_URL}/v1/models`,
     );

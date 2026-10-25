@@ -1,41 +1,45 @@
 #!/usr/bin/env node
 /**
- * deRoute Terminal CLI & Local Zero-Trust Harness Proxy
+ * deRoute Terminal CLI & Local Zero-Trust Harness Proxy Launcher
  *
  * Subcommands:
  *   node scripts/drouter-cli.mjs verify [--submit] [--key-path ~/.config/deroute/verifier-key] [--upstream https://drouter-demo.vercel.app]
  *   node scripts/drouter-cli.mjs ask "<prompt>" [--model kimi-k3] [--upstream https://drouter-demo.vercel.app]
- *   node scripts/drouter-cli.mjs proxy [--port 4141] [--upstream https://drouter-demo.vercel.app]
+ *   node scripts/drouter-cli.mjs proxy [--port 4141] [--key drk_...] [--upstream https://drouter-demo.vercel.app]
  *   node scripts/drouter-cli.mjs config [--upstream https://drouter-demo.vercel.app]
  */
 
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 import { TinfoilAI } from "tinfoil";
-import {
-  DEFAULT_MODEL,
-  DEFAULT_PORT,
-  DEFAULT_UPSTREAM,
-  PlaceholderVault,
-  TINFOIL_PROXY_WELL_KNOWN_URL,
-  createProxyServer,
-  createStreamRestorer,
-  createZeroTrustClient,
-} from "./drouter-proxy.mjs";
 
-export {
-  DEFAULT_MODEL,
-  DEFAULT_PORT,
-  DEFAULT_UPSTREAM,
-  createProxyServer as createZeroTrustProxyServer,
-  createStreamRestorer,
-  createZeroTrustClient,
-};
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(__dirname, "..");
+
+export const DEFAULT_PORT = 4141;
+export const DEFAULT_UPSTREAM = "https://drouter-demo.vercel.app";
+export const DEFAULT_MODEL = "kimi-k3";
+export const TINFOIL_PROXY_WELL_KNOWN_URL =
+  "https://inference.tinfoil.sh/.well-known/tinfoil-proxy";
+
+export const PROXY_BUNDLE_PATH = path.join(
+  REPO_ROOT,
+  "public",
+  "downloads",
+  "deroute-proxy.mjs",
+);
+export const PROXY_SHA256_PATH = path.join(
+  REPO_ROOT,
+  "public",
+  "downloads",
+  "deroute-proxy.mjs.sha256",
+);
 
 export const VERIFICATION_CLAIM_DOMAIN = "drouter/transparency/verification-claim/v1";
 export const VERIFIER_CHECK_IDS = ["C1", "C2", "C3", "C4", "C5", "C6", "C7"];
@@ -46,6 +50,195 @@ export const PRIMARY_MODEL_IDS = [
   "gpt-oss-120b",
   "llama3-3-70b",
 ];
+
+const httpRelayRewriteMap = new Map();
+let fetchInterceptorInstalled = false;
+
+function ensureHttpRelayInterceptor() {
+  if (fetchInterceptorInstalled) return;
+  fetchInterceptorInstalled = true;
+  const origFetch = globalThis.fetch.bind(globalThis);
+  globalThis.fetch = async (input, init) => {
+    const urlStr =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url;
+    for (const [virtualOrigin, realUpstream] of httpRelayRewriteMap.entries()) {
+      if (urlStr.startsWith(virtualOrigin)) {
+        const rewritten = `${realUpstream}${urlStr.slice(virtualOrigin.length)}`;
+        return origFetch(rewritten, init);
+      }
+    }
+    return origFetch(input, init);
+  };
+}
+
+export function createZeroTrustClient(upstream = DEFAULT_UPSTREAM) {
+  const cleanUpstream = upstream.replace(/\/+$/, "");
+  let attestationBundleURL = `${cleanUpstream}/api/relay`;
+
+  if (cleanUpstream.startsWith("http://")) {
+    ensureHttpRelayInterceptor();
+    const u = new URL(cleanUpstream);
+    const virtualOrigin = `https://local-relay-${u.hostname.replace(/[^a-zA-Z0-9-]/g, "-")}-${u.port || "80"}.drouter.internal`;
+    httpRelayRewriteMap.set(virtualOrigin, cleanUpstream);
+    attestationBundleURL = `${virtualOrigin}/api/relay`;
+  }
+
+  return new TinfoilAI({
+    bearerToken: "drouter-anonymous",
+    baseURL: `${cleanUpstream}/api/relay/v1/`,
+    attestationBundleURL,
+  });
+}
+
+export function createStreamRestorer(scrubber) {
+  let pending = "";
+  const candidatePrefixRe = /^\[+?[A-Za-z0-9_]*$/;
+  return {
+    push(chunk) {
+      if (!chunk) return "";
+      if (!scrubber) return chunk;
+      pending += chunk;
+
+      const doubleOpen = pending.lastIndexOf("[[");
+      if (doubleOpen !== -1) {
+        const doubleClose = pending.indexOf("]]", doubleOpen + 2);
+        if (doubleClose === -1 && pending.length - doubleOpen < 40) {
+          const ready = pending.slice(0, doubleOpen);
+          pending = pending.slice(doubleOpen);
+          return ready ? scrubber.restore(ready) : "";
+        }
+      }
+
+      const lastOpen = pending.lastIndexOf("[");
+      if (lastOpen !== -1) {
+        const closeAfter = pending.indexOf("]", lastOpen + 1);
+        if (closeAfter === -1) {
+          const tail = pending.slice(lastOpen);
+          if (tail.length <= 40 && candidatePrefixRe.test(tail)) {
+            const ready = pending.slice(0, lastOpen);
+            pending = tail;
+            return ready ? scrubber.restore(ready) : "";
+          }
+        }
+      }
+
+      const out = scrubber.restore(pending);
+      pending = "";
+      return out;
+    },
+    flush() {
+      if (!pending) return "";
+      const out = scrubber ? scrubber.restore(pending) : pending;
+      pending = "";
+      return out;
+    },
+  };
+}
+
+/**
+ * Verifies that `public/downloads/deroute-proxy.mjs` and its `.sha256` file exist
+ * and that the bundle's SHA-256 digest matches the expected checksum.
+ */
+export function verifyProxyBundleSha256({
+  bundlePath = PROXY_BUNDLE_PATH,
+  sha256Path = PROXY_SHA256_PATH,
+} = {}) {
+  if (!fs.existsSync(bundlePath) || !fs.existsSync(sha256Path)) {
+    return {
+      ok: false,
+      error: [
+        `Missing local proxy bundle at ${bundlePath} (or checksum at ${sha256Path}).`,
+        `Build it first with:`,
+        `  npm run build:proxy`,
+      ].join("\n"),
+    };
+  }
+
+  const rawSha = fs.readFileSync(sha256Path, "utf8").trim();
+  const match = rawSha.match(/^([0-9a-fA-F]{64})\b/);
+  if (!match) {
+    return {
+      ok: false,
+      error: [
+        `Malformed SHA-256 checksum file at ${sha256Path}.`,
+        `Rebuild the local proxy bundle with:`,
+        `  npm run build:proxy`,
+      ].join("\n"),
+    };
+  }
+
+  const expectedSha256 = match[1].toLowerCase();
+  const bundleBytes = fs.readFileSync(bundlePath);
+  const actualSha256 = bytesToHex(sha256(bundleBytes)).toLowerCase();
+
+  if (actualSha256 !== expectedSha256) {
+    return {
+      ok: false,
+      expectedSha256,
+      actualSha256,
+      error: [
+        `SHA-256 mismatch for ${bundlePath}: expected ${expectedSha256}, got ${actualSha256}.`,
+        `Rebuild the local proxy bundle with:`,
+        `  npm run build:proxy`,
+      ].join("\n"),
+    };
+  }
+
+  return {
+    ok: true,
+    bundlePath,
+    sha256Path,
+    sha256: actualSha256,
+  };
+}
+
+export function runProxySubcommand(
+  proxyArgv = [],
+  {
+    bundlePath = PROXY_BUNDLE_PATH,
+    sha256Path = PROXY_SHA256_PATH,
+    spawnImpl = spawn,
+    stderr = /** @type {(msg: string) => void} */ ((msg) => {
+      process.stderr.write(`${msg}\n`);
+    }),
+    exit = /** @type {(code: number) => void} */ ((code) => {
+      process.exit(code);
+    }),
+  } = {},
+) {
+  const check = verifyProxyBundleSha256({ bundlePath, sha256Path });
+  if (!check.ok) {
+    stderr(`[drouter-cli proxy] ${check.error}`);
+    exit(1);
+    return null;
+  }
+
+  const child = spawnImpl(process.execPath, [bundlePath, ...proxyArgv], {
+    stdio: "inherit",
+    env: process.env,
+  });
+
+  child.on("error", (err) => {
+    stderr(
+      `[drouter-cli proxy] Failed to start deroute-proxy.mjs: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    exit(1);
+  });
+
+  child.on("exit", (code, signal) => {
+    if (signal) {
+      process.kill(process.pid, signal);
+      return;
+    }
+    exit(code ?? 0);
+  });
+
+  return child;
+}
 
 export function defaultVerifierKeyPath() {
   return process.env.DEROUTE_VERIFIER_KEY_PATH || path.join(os.homedir(), ".config", "deroute", "verifier-key");
@@ -393,7 +586,12 @@ export function buildCliHarnessConfigs(baseUrl) {
       `export OPENAI_BASE_URL="${gatewayUrl}"`,
       `export OPENAI_API_KEY="drouter-anonymous"`,
     ].join("\n"),
-    localProxyCommand: `node scripts/drouter-cli.mjs proxy --port 4141 --upstream ${cleanBase}`,
+    localProxyCommand: [
+      `curl -fsSLO ${cleanBase}/downloads/deroute-proxy.mjs`,
+      `curl -fsSLO ${cleanBase}/downloads/deroute-proxy.mjs.sha256`,
+      `shasum -a 256 -c deroute-proxy.mjs.sha256`,
+      `node deroute-proxy.mjs --port 4141`,
+    ].join("\n"),
   };
 }
 
@@ -403,8 +601,8 @@ export function parseDrouterCliArgs(argv = process.argv.slice(2)) {
   let model = process.env.DROUTER_MODEL || DEFAULT_MODEL;
   let upstream = process.env.DROUTER_UPSTREAM || DEFAULT_UPSTREAM;
   let port = Number(process.env.DROUTER_PROXY_PORT || DEFAULT_PORT);
-  let scrubPii = true;
   let credit = process.env.DROUTER_CREDIT || "";
+  let key = process.env.DEROUTE_ACCESS_KEY || "";
   let submit = false;
   let keyPath = defaultVerifierKeyPath();
 
@@ -412,7 +610,7 @@ export function parseDrouterCliArgs(argv = process.argv.slice(2)) {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--help" || arg === "-h") {
-      return { command: "help", prompt, model, upstream, port, scrubPii, credit, submit, keyPath };
+      return { command: "help", prompt, model, upstream, port, credit, key, submit, keyPath };
     } else if (arg === "--model" && argv[i + 1]) {
       model = argv[i + 1];
       i += 1;
@@ -433,6 +631,11 @@ export function parseDrouterCliArgs(argv = process.argv.slice(2)) {
       i += 1;
     } else if (arg.startsWith("--credit=")) {
       credit = arg.slice("--credit=".length);
+    } else if (arg === "--key" && argv[i + 1]) {
+      key = argv[i + 1];
+      i += 1;
+    } else if (arg.startsWith("--key=")) {
+      key = arg.slice("--key=".length);
     } else if (arg === "--key-path" && argv[i + 1]) {
       keyPath = argv[i + 1];
       i += 1;
@@ -440,8 +643,6 @@ export function parseDrouterCliArgs(argv = process.argv.slice(2)) {
       keyPath = arg.slice("--key-path=".length);
     } else if (arg === "--submit") {
       submit = true;
-    } else if (arg === "--no-scrub") {
-      scrubPii = false;
     } else {
       positional.push(arg);
     }
@@ -453,7 +654,7 @@ export function parseDrouterCliArgs(argv = process.argv.slice(2)) {
   }
 
   upstream = upstream.replace(/\/+$/, "");
-  return { command, prompt, model, upstream, port, scrubPii, credit, submit, keyPath };
+  return { command, prompt, model, upstream, port, credit, key, submit, keyPath };
 }
 
 export function formatChecklistReport(doc, gpuModelInfo, registry) {
@@ -479,23 +680,39 @@ export function formatChecklistReport(doc, gpuModelInfo, registry) {
 }
 
 async function getRouterVerificationDocument(upstream) {
-  try {
-    const client = createZeroTrustClient(upstream);
-    await client.ready();
-    return await client.getVerificationDocument();
-  } catch {
-    const fallbackClient = new TinfoilAI({
-      bearerToken: "drouter-verify",
-      baseURL: "https://inference.tinfoil.sh/v1/",
-      attestationBundleURL: "https://atc.tinfoil.sh",
-    });
-    await fallbackClient.ready();
-    return await fallbackClient.getVerificationDocument();
+  const client = createZeroTrustClient(upstream);
+  await client.ready();
+  return await client.getVerificationDocument();
+}
+
+async function loadMechanicalSessionForCli() {
+  const check = verifyProxyBundleSha256();
+  if (check.ok) {
+    const mod = await import(pathToFileURL(PROXY_BUNDLE_PATH).href);
+    if (typeof mod.verifyProxyFilterFingerprint === "function") {
+      mod.verifyProxyFilterFingerprint();
+    }
   }
+  const mechMod = await import("../src/lib/privacy/mechanical.ts").catch(async () => {
+    const bundleUrl = pathToFileURL(PROXY_BUNDLE_PATH).href;
+    return import(bundleUrl);
+  });
+  if (typeof mechMod.createMechanicalSession === "function") {
+    return mechMod.createMechanicalSession();
+  }
+  throw new Error(
+    "Mechanical filter session unavailable. Build the proxy bundle first with: npm run build:proxy",
+  );
 }
 
 async function runCli() {
-  const args = parseDrouterCliArgs(process.argv.slice(2));
+  const rawArgv = process.argv.slice(2);
+  if (rawArgv[0] === "proxy") {
+    runProxySubcommand(rawArgv.slice(1));
+    return;
+  }
+
+  const args = parseDrouterCliArgs(rawArgv);
 
   if (args.command === "config") {
     const configs = buildCliHarnessConfigs(args.upstream);
@@ -505,7 +722,7 @@ async function runCli() {
     console.log(configs.openaiEnvExports);
     console.log("\n=== Direct cURL Command ===");
     console.log(configs.curlCommand);
-    console.log("\n=== Local Zero-Trust Proxy Command ===");
+    console.log("\n=== Local Private Proxy Command ===");
     console.log(configs.localProxyCommand);
     return;
   }
@@ -593,15 +810,18 @@ async function runCli() {
       console.error('Usage: node scripts/drouter-cli.mjs ask "<prompt>" [--model kimi-k3] [--upstream <url>]');
       process.exit(1);
     }
+    const session = await loadMechanicalSessionForCli();
     const client = createZeroTrustClient(args.upstream);
     await client.ready();
     const doc = await client.getVerificationDocument();
+    if (!doc || !doc.securityVerified) {
+      throw new Error("Enclave attestation verification failed");
+    }
     console.error(
       `[deRoute Attested] host=${doc.enclaveHost} release=${doc.releaseTag ?? doc.releaseDigest} code=${doc.codeFingerprint.slice(0, 16)}...`,
     );
 
-    const vault = args.scrubPii ? new PlaceholderVault() : null;
-    const scrubbedPrompt = vault ? vault.scrub(args.prompt) : args.prompt;
+    const scrubbedPrompt = session.redact(args.prompt).text;
 
     const stream = await client.chat.completions.create(
       {
@@ -617,7 +837,7 @@ async function runCli() {
       },
     );
 
-    const restorer = createStreamRestorer(vault);
+    const restorer = createStreamRestorer(session);
     for await (const chunk of stream) {
       const delta = chunk.choices?.[0]?.delta?.content;
       if (delta) {
@@ -631,16 +851,6 @@ async function runCli() {
     return;
   }
 
-  if (args.command === "proxy") {
-    const server = createProxyServer({ upstream: args.upstream });
-    server.listen(args.port, "127.0.0.1", () => {
-      console.log(
-        `[drouter-cli proxy] Zero-trust HPKE proxy listening on http://127.0.0.1:${args.port}/v1 (upstream: ${args.upstream})`,
-      );
-    });
-    return;
-  }
-
   console.log(
     [
       "deRoute CLI: terminal and coding-harness enclave helper",
@@ -648,7 +858,7 @@ async function runCli() {
       "Commands:",
       "  node scripts/drouter-cli.mjs verify [--submit] [--key-path ~/.config/deroute/verifier-key] [--upstream https://drouter-demo.vercel.app]",
       '  node scripts/drouter-cli.mjs ask "<prompt>" [--model kimi-k3] [--upstream https://drouter-demo.vercel.app]',
-      "  node scripts/drouter-cli.mjs proxy [--port 4141] [--upstream https://drouter-demo.vercel.app]",
+      "  node scripts/drouter-cli.mjs proxy [--port 4141] [--key drk_...] [--upstream https://drouter-demo.vercel.app]",
       "  node scripts/drouter-cli.mjs config [--upstream https://drouter-demo.vercel.app]",
     ].join("\n"),
   );

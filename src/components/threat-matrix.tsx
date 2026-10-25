@@ -220,12 +220,12 @@ export const THREAT_SCENARIOS: ThreatScenario[] = [
         codeUrl: githubBlobUrl("src/lib/tinfoil/deep-inspect.ts"),
       },
       {
-        filePath: "tests/monitor/monitor.test.ts",
+        filePath: "tests/proxy-cli/deroute-proxy.test.ts",
         testName:
-          "refuses to forward prompts when enclave attestation verification fails",
-        githubUrl: githubBlobUrl("tests/monitor/monitor.test.ts"),
-        codePath: "scripts/drouter-proxy.mjs",
-        codeUrl: githubBlobUrl("scripts/drouter-proxy.mjs"),
+          "refuses to start on filter fingerprint mismatch and refuses requests when any of the seven checks C1-C7 fail",
+        githubUrl: githubBlobUrl("tests/proxy-cli/deroute-proxy.test.ts"),
+        codePath: "src/proxy-cli/deroute-proxy.ts",
+        codeUrl: githubBlobUrl("src/proxy-cli/deroute-proxy.ts"),
       },
     ],
     telemetryProof: {
