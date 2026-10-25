@@ -22,6 +22,7 @@ import { MECHANICAL_RULESET } from "@/lib/privacy/mechanical-ruleset";
 import { createSessionScrubber } from "@/lib/privacy/scrubber";
 import {
   prepareHistoricalTurnText,
+  prepareHistoryForWire,
   prepareOutboundTurn,
   previewDraftPrivacy,
   rebuildMechanicalSessionFromMessages,
@@ -674,5 +675,37 @@ describe("forensics proof export action", () => {
     expect(exported.verification.originVerified).toBe(true);
     expect(exported.bundle.arcAnchorTx).toBe("0x" + "ab".repeat(32));
     expect(exported.filename).toMatch(/\.drouter-proof\.json$/);
+  });
+});
+
+describe("resending earlier messages", () => {
+  it("never resends an AI reply with hidden details put back; it is filtered again first", () => {
+    const session = createMechanicalSession();
+    const prompt =
+      "Write a polite reply to Dana Reyes at dana.reyes@example.com about rescheduling our call to 2026-10-30 and keeping my number 415-555-0199 and ££our merger offer££ private.";
+    const sent = prepareHistoricalTurnText(prompt, { session });
+    for (const original of ["Dana", "dana.reyes@example.com", "2026-10-30", "415-555-0199", "merger", "££"]) {
+      expect(sent).not.toContain(original);
+    }
+
+    const shownReply =
+      "**To:** dana.reyes@example.com\nDear Dana Reyes, can we move our call to 2026-10-30? Please keep 415-555-0199 and our merger offer private.";
+    const history = prepareHistoryForWire(
+      [
+        { role: "user", content: prompt, wireContent: sent },
+        // A resumed reply that lost its original wire text.
+        { role: "assistant", content: shownReply },
+      ],
+      { session },
+    );
+
+    expect(history[0].wireContent).toBe(sent);
+    const resent = history[1].wireContent ?? "";
+    for (const original of ["Dana", "dana.reyes@example.com", "2026-10-30", "415-555-0199", "merger"]) {
+      expect(resent).not.toContain(original);
+    }
+    expect(resent).toContain("[EMAIL_1]");
+    expect(resent).toContain("[MARKED_1]");
+    expect(session.restore(resent)).toContain("dana.reyes@example.com");
   });
 });

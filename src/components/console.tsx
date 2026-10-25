@@ -34,7 +34,7 @@ import {
   type RegistryResponse,
 } from "@/components/session";
 import {
-  prepareHistoricalTurnText,
+  prepareHistoryForWire,
   prepareOutboundTurn,
   rebuildMechanicalSessionFromMessages,
   restoreUnspentCreditHeader,
@@ -421,24 +421,9 @@ export function Console() {
     let turnPrepared;
     let preparedHistoryMessages: ChatMessage[];
     try {
-      preparedHistoryMessages = messages.map((m) => {
-        if (m.wireContent) {
-          return m;
-        }
-        if (m.role === "user") {
-          const preparedHistorical = prepareHistoricalTurnText(m.content, {
-            normalizeStyle,
-            session: mechanicalSessionRef.current ?? undefined,
-          });
-          return {
-            ...m,
-            wireContent: preparedHistorical,
-          };
-        }
-        return {
-          ...m,
-          wireContent: m.content,
-        };
+      preparedHistoryMessages = prepareHistoryForWire(messages, {
+        normalizeStyle,
+        session: mechanicalSessionRef.current ?? undefined,
       });
 
       turnPrepared = await prepareOutboundTurn(text, {
@@ -860,8 +845,40 @@ export function Console() {
                         m.privacyReport.redactions.length,
                       )}
                     </span>
+                    {m.wireContent && m.wireContent !== m.content && (
+                      <details
+                        className="mt-1 max-w-[85%] text-right"
+                        data-testid="message-sent-text"
+                      >
+                        <summary className="cursor-pointer underline">
+                          Show exactly what was sent
+                        </summary>
+                        <div className="mt-1 whitespace-pre-wrap rounded border border-rule bg-paper px-3 py-2 text-left font-mono text-ink-2">
+                          {m.wireContent}
+                        </div>
+                      </details>
+                    )}
                   </div>
                 )}
+
+                {m.role === "assistant" &&
+                  m.wireContent &&
+                  m.wireContent !== m.content &&
+                  !(phase === "streaming" && i === messages.length - 1) && (
+                    <details
+                      className="mt-1 max-w-[75ch] text-xs text-ink-3"
+                      data-testid="message-restored-badge"
+                    >
+                      <summary className="cursor-pointer">
+                        Your hidden details were put back on this device. The AI
+                        only saw placeholders.{" "}
+                        <span className="underline">Show what the AI wrote</span>
+                      </summary>
+                      <div className="mt-1 whitespace-pre-wrap rounded border border-rule bg-paper px-3 py-2 font-mono text-ink-2">
+                        {m.wireContent}
+                      </div>
+                    </details>
+                  )}
               </div>
             ))
           )}

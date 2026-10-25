@@ -16,6 +16,7 @@ import {
 } from "@/lib/privacy/mechanical";
 import type { MechanicalRuleset } from "@/lib/privacy/mechanical-ruleset";
 import type { SessionScrubber } from "@/lib/privacy/scrubber";
+import type { ChatMessage } from "@/components/session";
 
 export interface MessagePrivacyReport {
   redactions: Array<{ kind: string; placeholder: string }>;
@@ -121,6 +122,34 @@ export function prepareHistoricalTurnText(
     scrubber: opts?.scrubber,
     ruleset: opts?.rulesetOverride,
   }).outboundText;
+}
+
+/**
+ * Gives every earlier message the exact text to resend. Messages that kept
+ * their original wire text reuse it; any other message, including AI replies
+ * shown with hidden details put back, is filtered again with the session so
+ * only placeholders leave the device.
+ */
+export function prepareHistoryForWire(
+  messages: readonly ChatMessage[],
+  opts?: PrepareTurnOptions,
+): ChatMessage[] {
+  return messages.map((m) => {
+    if (m.wireContent) return m;
+    let wire = prepareHistoricalTurnText(m.content, {
+      ...opts,
+      normalizeStyle: m.role === "user" && Boolean(opts?.normalizeStyle),
+    });
+    // Values hidden earlier in this conversation (for example text you wrapped
+    // in ££) stay hidden even when a reply repeats them without markers.
+    const known = (opts?.session?.entries() ?? [])
+      .filter((e) => e.original.trim().length >= 3)
+      .sort((a, b) => b.original.length - a.original.length);
+    for (const e of known) {
+      wire = wire.split(e.original).join(e.placeholder);
+    }
+    return { ...m, wireContent: wire };
+  });
 }
 
 /**
