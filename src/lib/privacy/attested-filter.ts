@@ -142,21 +142,6 @@ function buildMechanicalFallback(
   };
 }
 
-function generateRandomHex32(): string {
-  const secretBytes = new Uint8Array(32);
-  if (
-    typeof globalThis.crypto !== "undefined" &&
-    typeof globalThis.crypto.getRandomValues === "function"
-  ) {
-    globalThis.crypto.getRandomValues(secretBytes);
-  } else {
-    for (let i = 0; i < 32; i++) {
-      secretBytes[i] = (i * 31 + 17) & 0xff;
-    }
-  }
-  return Array.from(secretBytes, (b) => b.toString(16).padStart(2, "0")).join("");
-}
-
 async function getVerifiedPiiSecureClient(opts?: {
   useRelay?: boolean;
   relayOrigin?: string;
@@ -185,7 +170,6 @@ async function getVerifiedPiiSecureClient(opts?: {
           (typeof window !== "undefined" && window.location?.origin
             ? window.location.origin
             : "https://localhost");
-        const userCacheSecret = generateRandomHex32();
         const baseURL = `${origin}/api/relay/v1/`;
         const attestationBundleURL = origin.startsWith("https://")
           ? `${origin}/api/relay`
@@ -196,7 +180,6 @@ async function getVerifiedPiiSecureClient(opts?: {
           enclaveURL: TINFOIL_PII_FILTER_ENCLAVE_URL,
           configRepo: TINFOIL_PII_FILTER_CONFIG_REPO,
           attestationBundleURL,
-          userCacheSecret,
         };
 
         const client = globalForAttestedPii.__drouterTestPiiSecureClientFactory
@@ -208,8 +191,9 @@ async function getVerifiedPiiSecureClient(opts?: {
         await client.ready();
         const doc = await client.getVerificationDocument();
 
-        // Wrap internal transport fetch to pad JSON payloads to 4096-byte power-of-two buckets
-        // and attach X-Tinfoil-Model: pii-filter before HPKE sealing (matching src/lib/tinfoil/client.ts).
+        // Wrap internal transport fetch to pad JSON payloads to 4096-byte power-of-two buckets,
+        // attach X-Tinfoil-Model: pii-filter before HPKE sealing, and strip any SDK-injected
+        // user_cache_secret (which pii-filter's strict /redact schema rejects with HTTP 422).
         const internalTransport = (
           client as unknown as {
             _transport?: {
@@ -231,16 +215,33 @@ async function getVerifiedPiiSecureClient(opts?: {
             if (!headers.has("X-Tinfoil-Model")) {
               headers.set("X-Tinfoil-Model", TINFOIL_PII_FILTER_MODEL_ID);
             }
+            const normalizedUrl =
+              typeof input === "string"
+                ? input === "chat/completions" ||
+                  input.endsWith("/chat/completions")
+                  ? input.replace(/chat\/completions$/, "redact")
+                  : input
+                : input;
             let nextBody = init?.body;
             if (typeof nextBody === "string") {
               try {
                 const parsed = JSON.parse(nextBody) as Record<string, unknown>;
                 if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-                  if (!parsed.user_cache_secret) {
-                    parsed.user_cache_secret = userCacheSecret;
-                  }
+                  const textField =
+                    typeof parsed.text === "string"
+                      ? parsed.text
+                      : Array.isArray(parsed.messages) &&
+                          typeof (
+                            parsed.messages[0] as
+                              | { content?: unknown }
+                              | undefined
+                          )?.content === "string"
+                        ? String(
+                            (parsed.messages[0] as { content: string }).content,
+                          )
+                        : "";
                   const { paddedJson } = padJsonPayloadToBucket(
-                    JSON.stringify(parsed),
+                    JSON.stringify({ text: textField }),
                     4096,
                   );
                   nextBody = paddedJson;
@@ -249,7 +250,11 @@ async function getVerifiedPiiSecureClient(opts?: {
                 // Non-JSON body; leave unchanged.
               }
             }
-            return origFetch(input, { ...init, headers, body: nextBody });
+            return origFetch(normalizedUrl, {
+              ...init,
+              headers,
+              body: nextBody,
+            });
           };
         }
 
@@ -422,6 +427,7 @@ export async function attestedPiiFilter(
           },
           body: padJsonPayloadToBucket(
             JSON.stringify({
+              text,
               model: TINFOIL_PII_FILTER_MODEL_ID,
               messages: [{ role: "user", content: text }],
               stream: false,

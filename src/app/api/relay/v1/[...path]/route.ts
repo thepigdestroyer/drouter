@@ -18,6 +18,7 @@ import {
   isAllowedRelayModel,
   pacedStream,
   pickHeaders,
+  resolveRelayUpstreamUrl,
   validateRelayPath,
 } from "@/lib/relay";
 
@@ -58,6 +59,15 @@ export async function POST(request: Request, ctx: { params: Promise<{ path: stri
   const enclaveUrl = request.headers.get("x-tinfoil-enclave-url");
   if (!isAllowedEnclave(enclaveUrl)) {
     return Response.json({ error: "Unapproved or missing enclave URL" }, { status: 400 });
+  }
+
+  const parsedEnclave = new URL(enclaveUrl);
+  const target = resolveRelayUpstreamUrl(parsedEnclave, validatedPath);
+  if (!target) {
+    return Response.json(
+      { error: "Disallowed upstream path for the specified enclave host" },
+      { status: 400 },
+    );
   }
 
   const modelHeader = request.headers.get("x-tinfoil-model");
@@ -138,8 +148,6 @@ export async function POST(request: Request, ctx: { params: Promise<{ path: stri
     );
   }
 
-  const parsedEnclave = new URL(enclaveUrl);
-  const target = `${parsedEnclave.origin}/v1/${validatedPath}`;
   const headers = pickHeaders(request.headers, FORWARD_REQUEST_HEADERS);
   headers.set("authorization", `Bearer ${apiKey}`);
 
@@ -166,15 +174,19 @@ export async function POST(request: Request, ctx: { params: Promise<{ path: stri
   const enclaveHost = parsedEnclave.host;
   let reportBytes: (bytes: number) => void = () => {};
   const bytesDown = new Promise<number>((resolve) => (reportBytes = resolve));
-  after(async () => {
-    await logRelay({
-      enclaveHost,
-      bytesUp: requestBody.byteLength,
-      bytesDown: await bytesDown,
-      status: upstream.status,
-      at: new Date(),
+  try {
+    after(async () => {
+      await logRelay({
+        enclaveHost,
+        bytesUp: requestBody.byteLength,
+        bytesDown: await bytesDown,
+        status: upstream.status,
+        at: new Date(),
+      });
     });
-  });
+  } catch {
+    // Allow direct invocation in unit tests outside Next.js request store.
+  }
 
   // Never echo plaintext upstream error bodies (4xx/5xx without EHBP response nonce)
   if (!upstream.ok && !upstream.headers.get("ehbp-response-nonce")) {

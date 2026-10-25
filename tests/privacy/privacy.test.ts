@@ -465,5 +465,95 @@ describe("Subsystem 5: Client-Side Privacy Guard", () => {
       expect(res.text).not.toContain("849201");
       expect(res.restore(res.text)).toBe(sample);
     });
+
+    it("routes attestedPiiFilter via the browser relay to https://pii-filter.tinfoil.sh/redact with 4096-byte padded { text } payload and strips user_cache_secret", async () => {
+      const {
+        attestedPiiFilter,
+        clearAttestedPiiFilterCacheForTests,
+        setAttestedPiiSecureClientFactoryForTests,
+        TINFOIL_PII_FILTER_CONFIG_REPO,
+        TINFOIL_PII_FILTER_ENCLAVE_URL,
+      } = await import("@/lib/privacy/attested-filter");
+
+      clearAttestedPiiFilterCacheForTests();
+      let capturedOptions: Record<string, unknown> = {};
+      let capturedTransportUrl = "";
+      let capturedTransportModelHeader: string | null = null;
+      let capturedTransportBody = "";
+
+      try {
+        setAttestedPiiSecureClientFactoryForTests((opts) => {
+          capturedOptions = opts;
+          const mockTransport = {
+            fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+              capturedTransportUrl = String(input);
+              capturedTransportModelHeader = new Headers(init?.headers).get(
+                "x-tinfoil-model",
+              );
+              capturedTransportBody = typeof init?.body === "string" ? init.body : "";
+              return new Response(
+                JSON.stringify({
+                  redacted_text: "Follow up with <PRIVATE_PERSON> regarding the trial.",
+                  summary: { span_count: 1 },
+                  detected_spans: [
+                    {
+                      label: "private_person",
+                      start: 15,
+                      end: 25,
+                      text: "Cousin Leo",
+                      placeholder: "<PRIVATE_PERSON>",
+                    },
+                  ],
+                }),
+                { status: 200, headers: { "content-type": "application/json" } },
+              );
+            },
+          };
+
+          const clientObj = {
+            _transport: mockTransport,
+            ready: async () => {},
+            getVerificationDocument: () => ({
+              securityVerified: true,
+              enclaveHost: "pii-filter.tinfoil.sh",
+              releaseTag: "v0.1.0",
+            }),
+            fetch: (input: RequestInfo | URL, init?: RequestInit) =>
+              clientObj._transport.fetch(input, init),
+          };
+          return clientObj;
+        });
+
+        const inputText = "Follow up with Cousin Leo regarding the trial.";
+        const out = await attestedPiiFilter(inputText, {
+          useRelay: true,
+          relayOrigin: "https://drouter.example",
+          includeSpans: true,
+        });
+
+        expect(out.verified).toBe(true);
+        expect(out.model).toBe("pii-filter");
+        expect(out.redactionCount).toBe(1);
+        expect(out.text).toBe("Follow up with <PRIVATE_PERSON> regarding the trial.");
+        expect(out.detectedSpans).toHaveLength(1);
+
+        expect(capturedOptions.baseURL).toBe("https://drouter.example/api/relay/v1/");
+        expect(capturedOptions.enclaveURL).toBe(TINFOIL_PII_FILTER_ENCLAVE_URL);
+        expect(capturedOptions.configRepo).toBe(TINFOIL_PII_FILTER_CONFIG_REPO);
+        expect(capturedOptions.attestationBundleURL).toBe("https://drouter.example/api/relay");
+
+        // _transport.fetch must rewrite chat/completions to redact and strip extra keys so pii-filter /redact accepts the payload
+        expect(capturedTransportUrl).toBe("redact");
+        expect(capturedTransportModelHeader).toBe("pii-filter");
+        expect(new TextEncoder().encode(capturedTransportBody).byteLength).toBe(4096);
+        const parsedInnerBody = JSON.parse(capturedTransportBody) as Record<string, unknown>;
+        expect(Object.keys(parsedInnerBody)).toEqual(["text"]);
+        expect(parsedInnerBody.text).toBe(inputText);
+        expect(parsedInnerBody.user_cache_secret).toBeUndefined();
+      } finally {
+        setAttestedPiiSecureClientFactoryForTests(null);
+        clearAttestedPiiFilterCacheForTests();
+      }
+    });
   });
 });

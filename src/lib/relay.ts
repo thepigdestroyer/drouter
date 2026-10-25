@@ -26,9 +26,37 @@ export const ALLOWED_RELAY_V1_PATHS = [
   "audio/transcriptions",
   "audio/speech",
   "responses",
+  "redact",
 ] as const;
 
 const ALLOWED_RELAY_V1_PATH_SET = new Set<string>(ALLOWED_RELAY_V1_PATHS);
+
+/** Hostname of Tinfoil's dedicated attested PII filter enclave, which serves POST /redact at root rather than under /v1. */
+export const TINFOIL_PII_FILTER_HOST = "pii-filter.tinfoil.sh";
+
+/**
+ * Resolves the upstream URL on a verified Tinfoil enclave for a validated relay path.
+ * Returns null if the (enclaveHost, validatedPath) combination is not allowed:
+ * - For `pii-filter.tinfoil.sh`, both `redact` and `chat/completions` resolve to `https://pii-filter.tinfoil.sh/redact`
+ *   (any other path on `pii-filter.tinfoil.sh`, or `redact` on any other host, is rejected).
+ * - Standard OpenAI-compatible v1 paths are forwarded to `${origin}/v1/${validatedPath}` on router/model enclaves.
+ */
+export function resolveRelayUpstreamUrl(
+  parsedEnclave: URL,
+  validatedPath: string,
+): string | null {
+  const host = parsedEnclave.hostname.toLowerCase();
+  if (host === TINFOIL_PII_FILTER_HOST) {
+    if (validatedPath === "redact" || validatedPath === "chat/completions") {
+      return `${parsedEnclave.origin}/redact`;
+    }
+    return null;
+  }
+  if (validatedPath === "redact") {
+    return null;
+  }
+  return `${parsedEnclave.origin}/v1/${validatedPath}`;
+}
 
 /**Allowed models that can be specified in `x-tinfoil-model`. */
 export const ALLOWED_TINFOIL_MODELS = new Set<string>([
