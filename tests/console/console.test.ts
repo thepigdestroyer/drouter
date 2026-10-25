@@ -1060,4 +1060,231 @@ describe("resending earlier messages", () => {
     );
     expect(extraReserved).toEqual(["[IP_4]"]);
   });
+
+  it("hides a custom term added mid-conversation in resent Turn 1 history even when Turn 2 does not mention it, and updates wireContent for 'Show exactly what was sent' (R2-M1 #1)", async () => {
+    unlockVaultWithPassphrase("abandon ability able about above absent", false);
+    updateVaultPayload({
+      customScrubTerms: [],
+      createdAt: 1700000000000,
+    });
+
+    const session = createMechanicalSession();
+
+    // Turn 1: live chat, user mentions "codename zephyr" before adding it as a custom scrub term
+    const turn1 = await executeSendTurn({
+      text: "We are reviewing codename zephyr with Dana Reyes today.",
+      messages: [],
+      model: "kimi-k3",
+      mechanicalSession: session,
+      scrubEnabled: true,
+      activeSession: {
+        async *send(wireHistory) {
+          expect(wireHistory[0].content).toBe(
+            "We are reviewing codename zephyr with [NAME_1] today.",
+          );
+          yield "Here are notes on codename zephyr for [NAME_1].";
+        },
+      },
+    });
+    expect(turn1.ok).toBe(true);
+    if (!turn1.ok) return;
+    expect(turn1.messages[0].wireContent).toBe(
+      "We are reviewing codename zephyr with [NAME_1] today.",
+    );
+
+    // Mid-conversation: user adds "codename zephyr" to their vault custom scrub terms without freezing/resuming
+    updateVaultPayload({
+      customScrubTerms: ["codename zephyr"],
+      createdAt: 1700000000000,
+    });
+
+    // Turn 2: user prompt does NOT mention "codename zephyr"
+    const streamedSnapshots: string[] = [];
+    const turn2 = await executeSendTurn({
+      text: "What are the next steps for Dana Reyes?",
+      messages: turn1.messages,
+      model: "kimi-k3",
+      mechanicalSession: session,
+      scrubEnabled: true,
+      onStreamDelta: ({ restoredReply }) => {
+        streamedSnapshots.push(restoredReply);
+      },
+      activeSession: {
+        async *send(wireHistory) {
+          expect(JSON.stringify(wireHistory).toLowerCase()).not.toContain(
+            "codename zephyr",
+          );
+          yield "Next steps for [NAME_1] on ";
+          yield "[ENTITY_1] are ready.";
+        },
+      },
+    });
+    expect(turn2.ok).toBe(true);
+    if (!turn2.ok) return;
+
+    // Resent Turn 1 user message and assistant reply both have "codename zephyr" hidden as [ENTITY_1]
+    expect(turn2.wireHistory[0].content).toBe(
+      "We are reviewing [ENTITY_1] with [NAME_1] today.",
+    );
+    expect(turn2.wireHistory[1].content).toBe(
+      "Here are notes on [ENTITY_1] for [NAME_1].",
+    );
+    expect(turn2.wireHistory[2].content).toBe(
+      "What are the next steps for [NAME_1]?",
+    );
+
+    // Earlier message's wireContent is updated so "Show exactly what was sent" stays accurate
+    expect(turn2.messages[0].wireContent).toBe(
+      "We are reviewing [ENTITY_1] with [NAME_1] today.",
+    );
+    const turn1Html = renderToStaticMarkup(
+      React.createElement(ConsoleMessageItem, {
+        message: turn2.messages[0],
+        modelName: "Kimi K3",
+        isStreamingLast: false,
+      }),
+    );
+    expect(turn1Html).toContain("Show exactly what was sent");
+    expect(turn1Html).toContain(
+      "We are reviewing [ENTITY_1] with [NAME_1] today.",
+    );
+    expect(turn1Html).not.toContain(
+      "We are reviewing codename zephyr with [NAME_1] today.",
+    );
+
+    // Streaming display and final restored reply are unaffected and restore [ENTITY_1]
+    expect(streamedSnapshots).toEqual([
+      "Next steps for Dana Reyes on ",
+      "Next steps for Dana Reyes on codename zephyr are ready.",
+    ]);
+    expect(turn2.restoredReply).toBe(
+      "Next steps for Dana Reyes on codename zephyr are ready.",
+    );
+  });
+
+  it("hides a new email invented by the AI in its Turn 1 reply when resending in Turn 2, and restores it in Turn 2's reply (R2-M1 #2)", async () => {
+    const session = createMechanicalSession();
+
+    // Turn 1: user sends an email; AI reply invents a brand-new email (support@acme-internal.org) on the wire
+    const turn1 = await executeSendTurn({
+      text: "Write to dana.reyes@example.com about the schedule.",
+      messages: [],
+      model: "kimi-k3",
+      mechanicalSession: session,
+      scrubEnabled: true,
+      activeSession: {
+        async *send() {
+          yield "Reply to [EMAIL_1] or escalate to support@acme-internal.org.";
+        },
+      },
+    });
+    expect(turn1.ok).toBe(true);
+    if (!turn1.ok) return;
+    expect(turn1.restoredReply).toBe(
+      "Reply to dana.reyes@example.com or escalate to support@acme-internal.org.",
+    );
+
+    // Turn 2: user asks a follow-up without typing the email; resending Turn 1's AI reply hides support@acme-internal.org as [EMAIL_2]
+    const turn2 = await executeSendTurn({
+      text: "Should I copy that escalation address too?",
+      messages: turn1.messages,
+      model: "kimi-k3",
+      mechanicalSession: session,
+      scrubEnabled: true,
+      activeSession: {
+        async *send(wireHistory) {
+          expect(JSON.stringify(wireHistory)).not.toContain(
+            "dana.reyes@example.com",
+          );
+          expect(JSON.stringify(wireHistory)).not.toContain(
+            "support@acme-internal.org",
+          );
+          yield "Yes, copy [EMAIL_2] along with [EMAIL_1].";
+        },
+      },
+    });
+    expect(turn2.ok).toBe(true);
+    if (!turn2.ok) return;
+
+    expect(turn2.wireHistory[0].content).toBe(
+      "Write to [EMAIL_1] about the schedule.",
+    );
+    expect(turn2.wireHistory[1].content).toBe(
+      "Reply to [EMAIL_1] or escalate to [EMAIL_2].",
+    );
+    expect(turn2.messages[1].wireContent).toBe(
+      "Reply to [EMAIL_1] or escalate to [EMAIL_2].",
+    );
+    expect(turn2.restoredReply).toBe(
+      "Yes, copy support@acme-internal.org along with dana.reyes@example.com.",
+    );
+  });
+
+  it("keeps placeholders for earlier values identical across multiple live turns when rebuilding wire history from content (R2-M1 #3)", async () => {
+    const session = createMechanicalSession();
+
+    const turn1 = await executeSendTurn({
+      text: "Contact Elena Rostova at elena@example.com about ££Project Horizon££ on 2026-10-25.",
+      messages: [],
+      model: "kimi-k3",
+      mechanicalSession: session,
+      scrubEnabled: true,
+      activeSession: {
+        async *send() {
+          yield "Noted [NAME_1] ([EMAIL_1]) for [MARKED_1] on [DATE_1].";
+        },
+      },
+    });
+    expect(turn1.ok).toBe(true);
+    if (!turn1.ok) return;
+    const turn1UserWire = turn1.wireHistory[0].content;
+    expect(turn1UserWire).toBe(
+      "Contact [NAME_1] at [EMAIL_1] about [MARKED_1] on [DATE_1].",
+    );
+
+    const turn2 = await executeSendTurn({
+      text: "Add Marcus Vance at marcus@example.com to ££Backup Plan££.",
+      messages: turn1.messages,
+      model: "kimi-k3",
+      mechanicalSession: session,
+      scrubEnabled: true,
+      activeSession: {
+        async *send() {
+          yield "Added [NAME_2] ([EMAIL_2]) to [MARKED_2] alongside [NAME_1] on [MARKED_1].";
+        },
+      },
+    });
+    expect(turn2.ok).toBe(true);
+    if (!turn2.ok) return;
+
+    const turn3 = await executeSendTurn({
+      text: "Confirm both with Elena Rostova and Marcus Vance.",
+      messages: turn2.messages,
+      model: "kimi-k3",
+      mechanicalSession: session,
+      scrubEnabled: true,
+      activeSession: {
+        async *send() {
+          yield "Confirmed with [NAME_1] and [NAME_2] for [MARKED_1] and [MARKED_2].";
+        },
+      },
+    });
+    expect(turn3.ok).toBe(true);
+    if (!turn3.ok) return;
+
+    // Turn 1 and Turn 2 placeholders in Turn 3's wireHistory are identical to when they were first sent
+    expect(turn3.wireHistory[0].content).toBe(turn1UserWire);
+    expect(turn3.wireHistory[1].content).toBe(
+      "Noted [NAME_1] ([EMAIL_1]) for [MARKED_1] on [DATE_1].",
+    );
+    expect(turn3.wireHistory[2].content).toBe(
+      "Add [NAME_2] at [EMAIL_2] to [MARKED_2].",
+    );
+    expect(turn3.wireHistory[3].content).toBe(
+      "Added [NAME_2] ([EMAIL_2]) to [MARKED_2] alongside [NAME_1] on [MARKED_1].",
+    );
+    expect(turn3.wireHistory[4].content).toBe(
+      "Confirm both with [NAME_1] and [NAME_2].",
+    );
+  });
 });

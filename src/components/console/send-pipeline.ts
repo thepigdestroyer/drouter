@@ -130,23 +130,18 @@ export function prepareHistoricalTurnText(
 }
 
 /**
- * Gives every earlier message the exact text to resend. Messages that kept
- * their original wire text pass it through `rehideKnownValues` so newly hidden
- * session values never leak; any other message, including AI replies shown with
- * hidden details put back or resumed messages without `wireContent`, is
- * filtered again with the session so only placeholders leave the device.
+ * Rebuilds every earlier message's wire text from its displayed `content`
+ * through `prepareHistoricalTurnText` (applying active custom terms, regex
+ * rules, session-known values, and user-only style normalization) followed by
+ * `rehideKnownValues` so mid-conversation custom terms, newly marked ££...££
+ * spans, and new details introduced in AI replies are always hidden on the wire
+ * while preserving existing session placeholders.
  */
 export function prepareHistoryForWire(
   messages: readonly ChatMessage[],
   opts?: PrepareTurnOptions,
 ): ChatMessage[] {
   return messages.map((m) => {
-    if (m.wireContent) {
-      return {
-        ...m,
-        wireContent: rehideKnownValues(m.wireContent, opts?.session),
-      };
-    }
     const wire = prepareHistoricalTurnText(m.content, {
       ...opts,
       normalizeStyle: m.role === "user" && Boolean(opts?.normalizeStyle),
