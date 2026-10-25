@@ -2,7 +2,11 @@ import {
   createSessionScrubber,
   type SessionScrubber,
 } from "../privacy/scrubber";
-import { mechanicalRedact } from "../privacy/mechanical";
+import {
+  mechanicalRedact,
+  type MechanicalSession,
+} from "../privacy/mechanical";
+import type { MechanicalRuleset } from "../privacy/mechanical-ruleset";
 import { padPayloadToBucket } from "../privacy/padding";
 import { scorePromptPrivacyRisk } from "../risk/analyzer";
 import { normalizeStylometry } from "../stylometry/normalizer";
@@ -26,6 +30,8 @@ export interface PreparePromptOptions {
   customTerms?: string[];
   normalizeStyle?: boolean;
   scrubber?: SessionScrubber;
+  session?: MechanicalSession;
+  ruleset?: MechanicalRuleset;
   decoyCount?: number;
   mechanical?: boolean;
 }
@@ -67,6 +73,8 @@ export function preparePrompt(
     const mechResult = mechanicalRedact(inputText, {
       customTerms,
       scrubber: opts.scrubber,
+      session: opts.session,
+      ruleset: opts.ruleset,
     });
     scrubbedText = mechResult.text;
     redactions = mechResult.redactions.map((r) => ({

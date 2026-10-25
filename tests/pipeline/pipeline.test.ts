@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { preparePrompt, type PreparedPrompt } from "@/lib/pipeline";
+import { createMechanicalSession } from "@/lib/privacy/mechanical";
 
 function synthKey(prefix: string, body: string): string {
   return `${prefix}${body}`;
@@ -133,5 +134,39 @@ describe("Interface I1: Browser-Safe Prompt Pipeline (preparePrompt)", () => {
     expect(prepared.report.redactions.length).toBeGreaterThanOrEqual(5);
     expect(prepared.report.riskBefore).toBeGreaterThan(prepared.report.riskAfter);
     expect(prepared.restore(prepared.outboundText)).toBe(rawPrompt);
+  });
+
+  it("supports session-stable placeholders when mechanical: true and a MechanicalSession is supplied across turns", () => {
+    const session = createMechanicalSession();
+
+    const turn1 = preparePrompt(
+      "Draft a contract for Elena Rostova on 2026-10-25 for $45,000 under Project Nightfall.",
+      {
+        mechanical: true,
+        session,
+        customTerms: ["Project Nightfall"],
+      },
+    );
+    expect(turn1.outboundText).toBe(
+      "Draft a contract for [NAME_1] on [DATE_1] for [DIGITS_1] under [ENTITY_1].",
+    );
+
+    const turn2 = preparePrompt(
+      "Please contact Marcus Vance alongside Elena Rostova for the $45,000 milestone under Project Nightfall.",
+      {
+        mechanical: true,
+        session,
+        customTerms: ["Project Nightfall"],
+      },
+    );
+    expect(turn2.outboundText).toBe(
+      "Please contact [NAME_2] alongside [NAME_1] for the [DIGITS_1] milestone under [ENTITY_1].",
+    );
+
+    const modelReply =
+      "Updated [ENTITY_1]: [NAME_2] and [NAME_1] will both sign for [DIGITS_1] on [DATE_1] (cc: [NAME_2], [NAME_1]).";
+    expect(turn2.restore(modelReply)).toBe(
+      "Updated Project Nightfall: Marcus Vance and Elena Rostova will both sign for $45,000 on 2026-10-25 (cc: Marcus Vance, Elena Rostova).",
+    );
   });
 });

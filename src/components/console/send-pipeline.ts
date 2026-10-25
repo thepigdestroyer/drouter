@@ -10,6 +10,7 @@ import {
   evaluateLocalFilterFingerprint,
   type PublishedFilterFingerprint,
 } from "@/lib/privacy/fingerprint";
+import type { MechanicalSession } from "@/lib/privacy/mechanical";
 import type { MechanicalRuleset } from "@/lib/privacy/mechanical-ruleset";
 import type { SessionScrubber } from "@/lib/privacy/scrubber";
 
@@ -29,6 +30,7 @@ export interface PrepareTurnOptions {
   scrubEnabled?: boolean;
   normalizeStyle?: boolean;
   scrubber?: SessionScrubber;
+  session?: MechanicalSession;
   customTermsOverride?: string[];
   rulesetOverride?: MechanicalRuleset;
   publishedFingerprintOverride?: PublishedFilterFingerprint;
@@ -91,7 +93,10 @@ export function previewDraftPrivacy(
   const prepared = preparePrompt(draftText, {
     customTerms,
     normalizeStyle: Boolean(opts?.normalizeStyle),
+    mechanical: true,
+    session: opts?.session,
     scrubber: opts?.scrubber,
+    ruleset: opts?.rulesetOverride,
   });
   return { prepared, customTerms };
 }
@@ -108,7 +113,10 @@ export function prepareHistoricalTurnText(
   return preparePrompt(rawText, {
     customTerms,
     normalizeStyle: Boolean(opts?.normalizeStyle),
+    mechanical: true,
+    session: opts?.session,
     scrubber: opts?.scrubber,
+    ruleset: opts?.rulesetOverride,
   }).outboundText;
 }
 
@@ -152,7 +160,10 @@ export async function prepareOutboundTurn(
   const prepared = preparePrompt(rawText, {
     customTerms,
     normalizeStyle: Boolean(opts?.normalizeStyle),
+    mechanical: true,
+    session: opts?.session,
     scrubber: opts?.scrubber,
+    ruleset: opts?.rulesetOverride,
   });
 
   const outboundText = prepared.outboundText;

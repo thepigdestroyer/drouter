@@ -18,7 +18,7 @@ import {
   storedCreditBalance,
 } from "@/lib/credits/client";
 import { downloadAndResume, freezeAndUpload } from "@/lib/freeze/client";
-import { createSessionScrubber } from "@/lib/privacy/scrubber";
+import { createMechanicalSession } from "@/lib/privacy/mechanical";
 import {
   hashHex,
   openSession,
@@ -171,7 +171,7 @@ export function Console() {
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("overview");
   const [terminalModalOpen, setTerminalModalOpen] = useState(false);
   const filterFingerprintStatus = useFilterFingerprintStatus();
-  const scrubberRef = useRef(createSessionScrubber());
+  const mechanicalSessionRef = useRef(createMechanicalSession());
   const scrollRef = useRef<HTMLDivElement>(null);
   const didAutoConnectRef = useRef(false);
 
@@ -274,7 +274,7 @@ export function Console() {
       setLastPrivacyReport(null);
       setExportedProof(null);
       setError(null);
-      scrubberRef.current.clear();
+      mechanicalSessionRef.current.clear();
       const seen = new Map<string, CheckResult>();
       try {
         const active = await openSession(
@@ -361,7 +361,7 @@ export function Console() {
       turnPrepared = await prepareOutboundTurn(text, {
         scrubEnabled,
         normalizeStyle,
-        scrubber: scrubberRef.current,
+        session: mechanicalSessionRef.current,
       });
     } catch (e) {
       setError((e as Error).message || "Could not prepare your message right now.");
@@ -398,7 +398,7 @@ export function Console() {
       if (m.role === "user") {
         const preparedHistorical = prepareHistoricalTurnText(m.content, {
           normalizeStyle,
-          scrubber: scrubberRef.current,
+          session: mechanicalSessionRef.current,
         });
         return {
           role: m.role,
@@ -473,7 +473,7 @@ export function Console() {
         });
       }
     }
-    scrubberRef.current.clear();
+    mechanicalSessionRef.current.clear();
     setSession(null);
     setPhase("closed");
   }, [session, zeroTelemetry]);

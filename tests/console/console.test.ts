@@ -9,6 +9,7 @@ import {
   storeCreditTokens,
   storedCreditBalance,
 } from "@/lib/credits/client";
+import { createMechanicalSession } from "@/lib/privacy/mechanical";
 import { createSessionScrubber } from "@/lib/privacy/scrubber";
 import {
   prepareHistoricalTurnText,
@@ -205,6 +206,56 @@ describe("console send pipeline (I1 + I2 + I3)", () => {
     const refundedBalance = restoreUnspentCreditHeader(turn.creditHeader);
     expect(refundedBalance).toBe(1);
     expect(storedCreditBalance()).toBe(1);
+  });
+
+  it("uses the fingerprinted mechanical filter across all three chat send-pipeline call sites with session-stable placeholders and restores repeated/reordered placeholders", async () => {
+    unlockVaultWithPassphrase("abandon ability able about above absent", false);
+    updateVaultPayload({
+      customScrubTerms: ["Project Helios"],
+      createdAt: 1700000000000,
+    });
+
+    const session = createMechanicalSession();
+
+    // 1. Live draft preview uses mechanical filter (hides names, dates, money amounts, custom words)
+    const draft = previewDraftPrivacy(
+      "Send $125,000.00 to Elena Rostova on 2026-10-25 for Project Helios.",
+      { session },
+    );
+    expect(draft.prepared.outboundText).not.toContain("Elena Rostova");
+    expect(draft.prepared.outboundText).not.toContain("2026-10-25");
+    expect(draft.prepared.outboundText).not.toContain("$125,000.00");
+    expect(draft.prepared.outboundText).not.toContain("Project Helios");
+    expect(draft.prepared.outboundText).toBe(
+      "Send [DIGITS_1] to [NAME_1] on [DATE_1] for [ENTITY_1].",
+    );
+
+    // 2. Turn 1 outbound preparation reuses the same session placeholders
+    const turn1Raw =
+      "Send $125,000.00 to Elena Rostova on 2026-10-25 for Project Helios.";
+    const turn1 = await prepareOutboundTurn(turn1Raw, { session });
+    expect(turn1.outboundText).toBe(
+      "Send [DIGITS_1] to [NAME_1] on [DATE_1] for [ENTITY_1].",
+    );
+
+    // 3. Turn 2 introduces a second name and a second amount alongside Elena Rostova
+    const turn2Raw =
+      "Ask Marcus Vance and Elena Rostova whether the $125,000.00 wire or the $50,000.00 hold applies on 2026-10-25.";
+    const turn2 = await prepareOutboundTurn(turn2Raw, { session });
+    expect(turn2.outboundText).toBe(
+      "Ask [NAME_2] and [NAME_1] whether the [DIGITS_1] wire or the [DIGITS_2] hold applies on [DATE_1].",
+    );
+
+    // 4. Re-preparing historical Turn 1 produces identical placeholders ([NAME_1], not [NAME_3])
+    const historicalTurn1 = prepareHistoricalTurnText(turn1Raw, { session });
+    expect(historicalTurn1).toBe(turn1.outboundText);
+
+    // 5. Restoring model output with repeated and reordered placeholders puts every original back
+    const modelReply =
+      "Confirmed for [ENTITY_1]: [NAME_2] notified [NAME_1] on [DATE_1] that [DIGITS_2] and [DIGITS_1] were cleared by [NAME_2] and [NAME_1].";
+    expect(turn2.restore(modelReply)).toBe(
+      "Confirmed for Project Helios: Marcus Vance notified Elena Rostova on 2026-10-25 that $50,000.00 and $125,000.00 were cleared by Marcus Vance and Elena Rostova.",
+    );
   });
 });
 

@@ -24,9 +24,27 @@ export interface MechanicalRedaction {
   placeholder: string;
 }
 
+export interface MechanicalSessionEntry {
+  placeholder: string;
+  kind: MechanicalRedactionKind;
+  original: string;
+}
+
+export interface MechanicalSession {
+  redact(
+    text: string,
+    opts?: Omit<MechanicalRedactOptions, "session">,
+  ): MechanicalRedactResult;
+  restore(text: string): string;
+  addCustomTerm(term: string): void;
+  entries(): MechanicalSessionEntry[];
+  clear(): void;
+}
+
 export interface MechanicalRedactOptions {
   customTerms?: string[];
   scrubber?: SessionScrubber;
+  session?: MechanicalSession;
   ruleset?: MechanicalRuleset;
 }
 
@@ -43,6 +61,50 @@ interface CandidateSpan {
   raw: string;
   canonicalKey: string;
 }
+
+interface MechanicalSessionState {
+  readonly customTerms: Map<string, string>;
+  readonly byKey: Map<string, MechanicalSessionEntry>;
+  readonly byPlaceholder: Map<string, MechanicalSessionEntry>;
+  readonly reservedLiterals: Set<string>;
+  readonly counters: Record<MechanicalRedactionKind, number>;
+}
+
+function createEmptyCounters(): Record<MechanicalRedactionKind, number> {
+  return {
+    SECRET: 0,
+    EMAIL: 0,
+    PHONE: 0,
+    IP: 0,
+    ACCT: 0,
+    ENTITY: 0,
+    URL: 0,
+    ADDRESS: 0,
+    DATE: 0,
+    NAME: 0,
+    DIGITS: 0,
+    ENTROPY: 0,
+  };
+}
+
+function createSessionState(): MechanicalSessionState {
+  return {
+    customTerms: new Map<string, string>(),
+    byKey: new Map<string, MechanicalSessionEntry>(),
+    byPlaceholder: new Map<string, MechanicalSessionEntry>(),
+    reservedLiterals: new Set<string>(),
+    counters: createEmptyCounters(),
+  };
+}
+
+const sessionStateMap = new WeakMap<
+  MechanicalSession,
+  MechanicalSessionState
+>();
+const scrubberStateMap = new WeakMap<
+  SessionScrubber,
+  MechanicalSessionState
+>();
 
 function compileRuleSpec(spec: RegexRuleSpec): RegExp {
   return new RegExp(spec.source, spec.flags);
@@ -471,6 +533,108 @@ function trimTrailingPunctuation(
   return trimCount;
 }
 
+function addCustomTermToState(
+  state: MechanicalSessionState,
+  term: string,
+  ruleset: MechanicalRuleset,
+): void {
+  const cleaned = term.trim();
+  if (!cleaned) return;
+  const { normalized: normTerm } = normalizeWithIndexMap(cleaned, ruleset);
+  if (normTerm) {
+    state.customTerms.set(normTerm.toLowerCase(), cleaned);
+  }
+}
+
+function resolveSessionState(
+  opts?: MechanicalRedactOptions,
+): MechanicalSessionState {
+  if (opts?.session) {
+    let existing = sessionStateMap.get(opts.session);
+    if (!existing) {
+      existing = createSessionState();
+      sessionStateMap.set(opts.session, existing);
+    }
+    return existing;
+  }
+  if (opts?.scrubber) {
+    let existing = scrubberStateMap.get(opts.scrubber);
+    if (!existing) {
+      existing = createSessionState();
+      scrubberStateMap.set(opts.scrubber, existing);
+    }
+    return existing;
+  }
+  return createSessionState();
+}
+
+/**
+ * Creates a multi-turn mechanical redaction session whose original-to-placeholder
+ * map persists across calls in one chat so the same original always maps to the
+ * same placeholder and different originals never collide.
+ */
+export function createMechanicalSession(
+  initialCustomTerms: string[] = [],
+  ruleset: MechanicalRuleset = MECHANICAL_RULESET,
+): MechanicalSession {
+  const state = createSessionState();
+  for (const term of initialCustomTerms) {
+    addCustomTermToState(state, term, ruleset);
+  }
+
+  const restorePlaceholderRe = compileRuleSpec(
+    ruleset.placeholderPatterns.restorePlaceholder,
+  );
+
+  const session: MechanicalSession = {
+    redact(
+      text: string,
+      opts?: Omit<MechanicalRedactOptions, "session">,
+    ): MechanicalRedactResult {
+      return mechanicalRedact(text, {
+        ...opts,
+        ruleset: opts?.ruleset ?? ruleset,
+        session,
+      });
+    },
+    restore(text: string): string {
+      if (!text || state.byPlaceholder.size === 0) return text;
+      return text.replace(restorePlaceholderRe, (token) => {
+        const entry = state.byPlaceholder.get(token.toUpperCase());
+        return entry ? entry.original : token;
+      });
+    },
+    addCustomTerm(term: string): void {
+      addCustomTermToState(state, term, ruleset);
+    },
+    entries(): MechanicalSessionEntry[] {
+      return [...state.byPlaceholder.values()].map(
+        ({ placeholder, kind, original }) => ({
+          placeholder,
+          kind,
+          original,
+        }),
+      );
+    },
+    clear(): void {
+      state.customTerms.clear();
+      state.byKey.clear();
+      state.byPlaceholder.clear();
+      state.reservedLiterals.clear();
+      const emptyCounters = createEmptyCounters();
+      for (const k of Object.keys(emptyCounters) as MechanicalRedactionKind[]) {
+        state.counters[k] = 0;
+      }
+      for (const term of initialCustomTerms) {
+        addCustomTermToState(state, term, ruleset);
+      }
+    },
+  };
+
+  sessionStateMap.set(session, state);
+  return session;
+}
+
 /**
  * Deterministic, browser-safe, fail-closed mechanical redaction filter (D3).
  *
@@ -482,19 +646,31 @@ export function mechanicalRedact(
   opts?: MechanicalRedactOptions,
 ): MechanicalRedactResult {
   const ruleset = opts?.ruleset ?? MECHANICAL_RULESET;
-
-  if (!text) {
-    return {
-      text: text ?? "",
-      redactions: [],
-      restore: (s: string) => s,
-    };
-  }
+  const state = resolveSessionState(opts);
 
   if (opts?.scrubber && opts.customTerms) {
     for (const term of opts.customTerms) {
       opts.scrubber.addCustomTerm(term);
     }
+  }
+
+  const restorePlaceholderRe = compileRuleSpec(
+    ruleset.placeholderPatterns.restorePlaceholder,
+  );
+  const restore = (s: string): string => {
+    if (!s || state.byPlaceholder.size === 0) return s;
+    return s.replace(restorePlaceholderRe, (token) => {
+      const entry = state.byPlaceholder.get(token.toUpperCase());
+      return entry ? entry.original : token;
+    });
+  };
+
+  if (!text) {
+    return {
+      text: text ?? "",
+      redactions: [],
+      restore,
+    };
   }
 
   const { normalized, mapToOriginal, mapToOriginalEnd } = normalizeWithIndexMap(
@@ -515,11 +691,11 @@ export function mechanicalRedact(
           placeholder: fallbackPlaceholder,
         },
       ],
-      restore: (s: string) => s.replace(fallbackRestoreRe, text),
+      restore: (s: string) => restore(s).replace(fallbackRestoreRe, text),
     };
   }
 
-  const customTerms = new Map<string, string>();
+  const customTerms = new Map<string, string>(state.customTerms);
   for (const term of opts?.customTerms ?? []) {
     const cleaned = term.trim();
     if (!cleaned) continue;
@@ -533,29 +709,7 @@ export function mechanicalRedact(
   const overlaps = (start: number, end: number): boolean =>
     occupied.some((s) => start < s.end && end > s.start);
 
-  const reservedLiterals = new Set<string>();
-  const byKey = new Map<
-    string,
-    { placeholder: string; kind: MechanicalRedactionKind; original: string }
-  >();
-  const byPlaceholder = new Map<
-    string,
-    { placeholder: string; kind: MechanicalRedactionKind; original: string }
-  >();
-  const counters: Record<MechanicalRedactionKind, number> = {
-    SECRET: 0,
-    EMAIL: 0,
-    PHONE: 0,
-    IP: 0,
-    ACCT: 0,
-    ENTITY: 0,
-    URL: 0,
-    ADDRESS: 0,
-    DATE: 0,
-    NAME: 0,
-    DIGITS: 0,
-    ENTROPY: 0,
-  };
+  const { reservedLiterals, byKey, byPlaceholder, counters } = state;
 
   const candidates: CandidateSpan[] = [];
 
@@ -606,6 +760,7 @@ export function mechanicalRedact(
     kind: MechanicalRedactionKind,
     options?: {
       trimTrailingPunct?: boolean;
+      keySuffix?: string;
       validate?: (
         normRaw: string,
         normStart: number,
@@ -652,7 +807,7 @@ export function mechanicalRedact(
         continue;
       }
 
-      addSpanFromNormalizedRange(normStart, normEnd, kind);
+      addSpanFromNormalizedRange(normStart, normEnd, kind, options?.keySuffix);
     }
   };
 
@@ -670,7 +825,9 @@ export function mechanicalRedact(
       const startsWithWord = startsWithWordRe.test(normTerm);
       const endsWithWord = endsWithWordRe.test(normTerm);
       const source = `${startsWithWord ? "\\b" : ""}${escaped}${endsWithWord ? "\\b" : ""}`;
-      addMatches({ source, flags: "gi" }, "ENTITY");
+      addMatches({ source, flags: "gi" }, "ENTITY", {
+        keySuffix: normTerm,
+      });
     }
   }
 
@@ -895,7 +1052,7 @@ export function mechanicalRedact(
     return {
       text,
       redactions: [],
-      restore: (s: string) => s,
+      restore,
     };
   }
 
@@ -917,10 +1074,14 @@ export function mechanicalRedact(
       reservedLiterals.has(placeholder.toUpperCase())
     );
 
+    const original =
+      span.kind === "ENTITY"
+        ? (customTerms.get(span.canonicalKey.slice(7)) ?? span.raw)
+        : span.raw;
     const mapping = {
       placeholder,
       kind: span.kind,
-      original: span.raw,
+      original,
     };
     byKey.set(span.canonicalKey, mapping);
     byPlaceholder.set(placeholder.toUpperCase(), mapping);
@@ -942,17 +1103,6 @@ export function mechanicalRedact(
     cursor = span.end;
   }
   out += text.slice(cursor);
-
-  const restorePlaceholderRe = compileRuleSpec(
-    ruleset.placeholderPatterns.restorePlaceholder,
-  );
-  const restore = (s: string): string => {
-    if (!s || byPlaceholder.size === 0) return s;
-    return s.replace(restorePlaceholderRe, (token) => {
-      const entry = byPlaceholder.get(token.toUpperCase());
-      return entry ? entry.original : token;
-    });
-  };
 
   return {
     text: out,

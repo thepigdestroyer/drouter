@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   computeShannonEntropy,
+  createMechanicalSession,
   isHighEntropyToken,
   mechanicalRedact,
 } from "@/lib/privacy/mechanical";
@@ -333,6 +334,54 @@ describe("D3: Deterministic Fail-Closed Mechanical Redaction Filter (mechanicalR
       expect(res.redactions.map((r) => r.kind)).toEqual(item.expectedKinds);
       expect(res.restore(res.text)).toBe(item.sentence);
     }
+  });
+
+  it("maintains session-stable placeholders across multi-turn chats via createMechanicalSession and restores repeated/reordered placeholders", () => {
+    const session = createMechanicalSession(["Project Helios"]);
+
+    const turn1Input =
+      "Meet Elena Rostova on 2026-10-25 about the $185,400.00 grant for Project Helios.";
+    const turn1 = mechanicalRedact(turn1Input, { session });
+
+    expect(turn1.text).toBe(
+      "Meet [NAME_1] on [DATE_1] about the [DIGITS_1] grant for [ENTITY_1].",
+    );
+
+    const turn2Input =
+      "Ask Marcus Vance and Elena Rostova if the $185,400.00 transfer or the $92,000.00 reserve is ready for Project Helios.";
+    const turn2 = mechanicalRedact(turn2Input, {
+      session,
+      customTerms: ["Northvale Vault"],
+    });
+
+    // Elena Rostova keeps [NAME_1]; Marcus Vance gets [NAME_2] and never collides with [NAME_1]
+    expect(turn2.text).toBe(
+      "Ask [NAME_2] and [NAME_1] if the [DIGITS_1] transfer or the [DIGITS_2] reserve is ready for [ENTITY_1].",
+    );
+
+    // Re-preparing historical turn 1 produces the exact same placeholders
+    const turn1Reprepared = mechanicalRedact(turn1Input, { session });
+    expect(turn1Reprepared.text).toBe(turn1.text);
+
+    // Turn 3 has no new redactions in the user message, but model reply repeats and reorders placeholders from turns 1 & 2
+    const turn3 = mechanicalRedact("Who approved the transfer first?", {
+      session,
+    });
+    expect(turn3.redactions).toEqual([]);
+
+    const modelReply =
+      "On [DATE_1], [NAME_2] told [NAME_1] that [NAME_2] and [NAME_1] approved [DIGITS_2] and [DIGITS_1] for [ENTITY_1].";
+    expect(turn3.restore(modelReply)).toBe(
+      "On 2026-10-25, Marcus Vance told Elena Rostova that Marcus Vance and Elena Rostova approved $92,000.00 and $185,400.00 for Project Helios.",
+    );
+
+    // Clearing the session resets counters while keeping initial custom terms
+    session.clear();
+    expect(session.entries()).toEqual([]);
+    const afterClear = session.redact(
+      "Follow up with Marcus Vance on Project Helios.",
+    );
+    expect(afterClear.text).toBe("Follow up with [NAME_1] on [ENTITY_1].");
   });
 });
 
