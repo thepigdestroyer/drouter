@@ -3,6 +3,7 @@ import { resolveDbName } from "@/lib/mongo/db-name";
 import { coarsenEpochSecToHour } from "./crypto";
 
 export interface StoredFrozenBlob {
+  version?: number;
   blobId: string;
   sessionIdHex: string;
   nonceHex: string;
@@ -16,6 +17,7 @@ export interface StoredFrozenBlob {
 }
 
 export interface FrozenBlobSummary {
+  version?: number;
   blobId: string;
   sessionIdHex: string;
   byteLength: number;
@@ -25,6 +27,7 @@ export interface FrozenBlobSummary {
 }
 
 export interface SaveFrozenBlobInput {
+  version?: number;
   blobId: string;
   sessionIdHex: string;
   nonceHex: string;
@@ -228,6 +231,7 @@ function pruneExpiredMemoryBlobs(nowSec = Math.floor(Date.now() / 1000)): void {
 
 function stripInternalMongoFields(doc: StoredFrozenBlob): StoredFrozenBlob {
   return {
+    ...(typeof doc.version === "number" ? { version: doc.version } : {}),
     blobId: doc.blobId,
     sessionIdHex: doc.sessionIdHex,
     nonceHex: doc.nonceHex,
@@ -312,8 +316,13 @@ export async function saveFrozenBlob(input: SaveFrozenBlobInput): Promise<Stored
   }
 
   const expiresAtDate = new Date(requestedExpiresAt * 1000);
+  const version =
+    typeof raw.version === "number" && (raw.version === 1 || raw.version === 2)
+      ? raw.version
+      : undefined;
 
   const record: StoredFrozenBlob = {
+    ...(version !== undefined ? { version } : {}),
     blobId,
     sessionIdHex,
     nonceHex,

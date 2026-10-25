@@ -6,8 +6,15 @@ import type { FrozenSessionState } from "@/lib/types";
 
 export const COARSE_TIME_WINDOW_SECONDS = 3600;
 export const RESUME_CODE_PREFIX = "drouter-freeze-v1";
+export const MIN_FREEZE_BUCKET_BYTES = 4096;
+export const FREEZE_BLOB_VERSION_LEGACY = 1;
+export const FREEZE_BLOB_VERSION_PADDED = 2;
+
+const PADDED_FRAME_MAGIC = new Uint8Array([0x44, 0x52, 0x46, 0x32]); // "DRF2"
+const PADDED_FRAME_HEADER_BYTES = 8; // 4-byte magic + 4-byte big-endian uint32 length
 
 export interface EncryptedFrozenBundle {
+  version: number;
   blobId: string;
   freezeSecretHex: string;
   sessionIdHex: string;
@@ -163,7 +170,94 @@ export function deriveFreezeKey(freezeSecretHex: string, sessionIdHex: string): 
 }
 
 /**
- * Encrypts a FrozenSessionState locally using AES-256-GCM under K_freeze.
+ * Computes the smallest power-of-two bucket size (>= minBucketBytes) that can hold `totalRequiredBytes`.
+ */
+export function computeFreezeBucketSize(
+  totalRequiredBytes: number,
+  minBucketBytes: number = MIN_FREEZE_BUCKET_BYTES,
+): number {
+  let bucket = Math.max(MIN_FREEZE_BUCKET_BYTES, Math.floor(minBucketBytes));
+  // Ensure starting bucket is a power of two
+  if ((bucket & (bucket - 1)) !== 0) {
+    let p = MIN_FREEZE_BUCKET_BYTES;
+    while (p < bucket) p *= 2;
+    bucket = p;
+  }
+  const target = Math.max(0, Math.floor(totalRequiredBytes));
+  while (bucket < target) {
+    bucket *= 2;
+  }
+  return bucket;
+}
+
+/**
+ * Pads serialized UTF-8 plaintext bytes into a power-of-two bucket (minimum 4096 bytes)
+ * with an unambiguous 8-byte header: 4-byte magic ("DRF2") + 4-byte big-endian uint32 byte length.
+ */
+export function padFreezePlaintext(
+  payloadBytes: Uint8Array,
+  minBucketBytes: number = MIN_FREEZE_BUCKET_BYTES,
+): Uint8Array {
+  const payloadLen = payloadBytes.byteLength;
+  const totalNeeded = PADDED_FRAME_HEADER_BYTES + payloadLen;
+  const bucketSize = computeFreezeBucketSize(totalNeeded, minBucketBytes);
+  const frame = new Uint8Array(bucketSize);
+  frame.set(PADDED_FRAME_MAGIC, 0);
+  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+  view.setUint32(4, payloadLen, false);
+  frame.set(payloadBytes, PADDED_FRAME_HEADER_BYTES);
+  return frame;
+}
+
+/**
+ * Unpads a decrypted freeze payload, stripping the length prefix and trailing zero padding.
+ * Supports legacy v1 unpadded UTF-8 JSON blobs when `version === 1` or when no "DRF2" magic is present.
+ */
+export function unpadFreezePlaintext(
+  decryptedBytes: Uint8Array,
+  version?: number,
+): Uint8Array {
+  if (version === FREEZE_BLOB_VERSION_LEGACY) {
+    return decryptedBytes;
+  }
+
+  const hasMagic =
+    decryptedBytes.byteLength >= PADDED_FRAME_HEADER_BYTES &&
+    decryptedBytes[0] === PADDED_FRAME_MAGIC[0] &&
+    decryptedBytes[1] === PADDED_FRAME_MAGIC[1] &&
+    decryptedBytes[2] === PADDED_FRAME_MAGIC[2] &&
+    decryptedBytes[3] === PADDED_FRAME_MAGIC[3];
+
+  if (version === FREEZE_BLOB_VERSION_PADDED && !hasMagic) {
+    throw new Error("Invalid padded freeze blob header");
+  }
+
+  if (hasMagic) {
+    const view = new DataView(
+      decryptedBytes.buffer,
+      decryptedBytes.byteOffset,
+      decryptedBytes.byteLength,
+    );
+    const payloadLen = view.getUint32(4, false);
+    const endOffset = PADDED_FRAME_HEADER_BYTES + payloadLen;
+    if (endOffset > decryptedBytes.byteLength) {
+      throw new Error("Corrupted padded freeze blob length prefix");
+    }
+    for (let i = endOffset; i < decryptedBytes.byteLength; i++) {
+      if (decryptedBytes[i] !== 0) {
+        throw new Error("Non-zero padding byte in padded freeze blob");
+      }
+    }
+    return decryptedBytes.subarray(PADDED_FRAME_HEADER_BYTES, endOffset);
+  }
+
+  // Fallback for legacy unpadded v1 blobs when version was omitted
+  return decryptedBytes;
+}
+
+/**
+ * Encrypts a FrozenSessionState locally using AES-256-GCM under K_freeze after padding
+ * the serialized session to a power-of-two bucket (minimum 4096 bytes).
  * The server only ever receives the resulting ciphertext bundle (without freezeSecretHex).
  */
 export function encryptFrozenState(
@@ -182,13 +276,16 @@ export function encryptFrozenState(
   try {
     const nonce = randomBytes(12);
     const aad = utf8ToBytes("drouter/v1/freeze-blob:" + sidHex);
-    const plaintext = utf8ToBytes(JSON.stringify(state));
+    const rawPlaintext = utf8ToBytes(JSON.stringify(state));
+    const paddedPlaintext = padFreezePlaintext(rawPlaintext, MIN_FREEZE_BUCKET_BYTES);
+    rawPlaintext.fill(0);
 
-    const ciphertext = gcm(key, nonce, aad).encrypt(plaintext);
-    plaintext.fill(0);
+    const ciphertext = gcm(key, nonce, aad).encrypt(paddedPlaintext);
+    paddedPlaintext.fill(0);
     const blobId = bytesToHex(sha256(ciphertext)).slice(0, 32);
 
     return {
+      version: FREEZE_BLOB_VERSION_PADDED,
       blobId,
       freezeSecretHex: secretHex,
       sessionIdHex: sidHex,
@@ -205,10 +302,12 @@ export function encryptFrozenState(
 
 /**
  * Decrypts an encrypted session bundle using the client-held freezeSecretHex.
+ * Supports both v2 padded blobs and legacy v1 unpadded blobs.
  * Throws if the key is wrong, zeroed (crypto-shredded), or if ciphertext/AAD was tampered with.
  */
 export function decryptFrozenState(
   bundle: {
+    version?: number;
     ciphertextHex: string;
     nonceHex: string;
     aadHex: string;
@@ -239,7 +338,8 @@ export function decryptFrozenState(
       throw new Error("Ciphertext too short");
     }
     const plaintextBytes = gcm(key, nonce, aad).decrypt(ciphertext);
-    const decoded = new TextDecoder().decode(plaintextBytes);
+    const unpaddedBytes = unpadFreezePlaintext(plaintextBytes, bundle.version);
+    const decoded = new TextDecoder().decode(unpaddedBytes);
     plaintextBytes.fill(0);
     return JSON.parse(decoded) as FrozenSessionState;
   } catch {

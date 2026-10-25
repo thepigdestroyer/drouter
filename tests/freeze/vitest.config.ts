@@ -1,16 +1,15 @@
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import { defineConfig } from "vitest/config";
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const root = resolve(__dirname, "../..");
 
 export default defineConfig({
-  root: repoRoot,
+  root,
   resolve: {
-    alias: [{ find: /^@\//, replacement: path.join(repoRoot, "src") + "/" }],
+    alias: { "@": resolve(root, "src") },
   },
   test: {
-    environment: "node",
     include: ["tests/freeze/**/*.test.ts"],
+    environment: "node",
   },
 });

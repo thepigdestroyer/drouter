@@ -1,12 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { gcm } from "@noble/ciphers/aes.js";
+import { sha256 } from "@noble/hashes/sha2.js";
+import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 import {
   COARSE_TIME_WINDOW_SECONDS,
   coarsenEpochSecToHour,
+  computeFreezeBucketSize,
   decryptFrozenState,
   deriveFreezeKey,
   encryptFrozenState,
   formatResumeCode,
+  FREEZE_BLOB_VERSION_LEGACY,
+  FREEZE_BLOB_VERSION_PADDED,
+  MIN_FREEZE_BUCKET_BYTES,
+  padFreezePlaintext,
   parseResumeCode,
+  unpadFreezePlaintext,
 } from "@/lib/freeze/crypto";
 import {
   deleteFrozenBlob,
@@ -28,10 +37,14 @@ import {
   destroyFrozenSession,
   downloadAndResume,
   downloadAndResumeFromCode,
+  ensureIndexedDbDeviceKey,
   FREEZE_DEVICE_KEY_STORAGE,
   FREEZE_STORAGE_KEY,
   freezeAndUpload,
+  getIndexedDbDeviceCryptoKey,
   listLocalFreezeReceipts,
+  resetFreezeClientStateForTests,
+  saveLocalFreezeReceipt,
   shredLocalFreezeSecret,
 } from "@/lib/freeze/client";
 import { GET as listRouteGet, POST as freezeRoutePost } from "@/lib/../../src/app/api/freeze/route";
@@ -103,11 +116,13 @@ function createMockMongoCollection() {
 describe("Subsystem 2: Encrypted Session Freeze, Resume & Crypto-Shredding", () => {
   beforeEach(() => {
     resetFreezeStoreForTests();
+    resetFreezeClientStateForTests();
     resetRateLimitStateForTests();
   });
 
   afterEach(() => {
     resetFreezeStoreForTests();
+    resetFreezeClientStateForTests();
     resetRateLimitStateForTests();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
@@ -527,5 +542,194 @@ describe("Subsystem 2: Encrypted Session Freeze, Resume & Crypto-Shredding", () 
     const res = await destroyFrozenBlobVerified(encrypted.blobId);
     expect(res).toEqual({ deleted: true, verifiedAbsent: true });
     expect(shredLocalFreezeSecret(encrypted.blobId).shredded).toBe(false);
+  });
+
+  it("pads serialized session plaintext to power-of-two buckets (min 4096 bytes) before AES-GCM encryption", () => {
+    expect(computeFreezeBucketSize(0)).toBe(4096);
+    expect(computeFreezeBucketSize(100)).toBe(4096);
+    expect(computeFreezeBucketSize(4096)).toBe(4096);
+    expect(computeFreezeBucketSize(4097)).toBe(8192);
+    expect(computeFreezeBucketSize(8192)).toBe(8192);
+    expect(computeFreezeBucketSize(8193)).toBe(16384);
+
+    // Small payload (< 4088 bytes) -> 4096-byte plaintext + 16-byte GCM tag = 4112-byte ciphertext
+    const smallEncrypted = encryptFrozenState(sampleState);
+    expect(smallEncrypted.version).toBe(FREEZE_BLOB_VERSION_PADDED);
+    expect(smallEncrypted.ciphertextHex.length / 2).toBe(MIN_FREEZE_BUCKET_BYTES + 16);
+    expect(decryptFrozenState(smallEncrypted, smallEncrypted.freezeSecretHex)).toEqual(sampleState);
+
+    // Medium payload (~5000 bytes) -> 8192-byte plaintext + 16-byte GCM tag = 8208-byte ciphertext
+    const mediumState: FrozenSessionState = {
+      ...sampleState,
+      messages: [{ role: "user", content: "M".repeat(5000) }],
+    };
+    const mediumEncrypted = encryptFrozenState(mediumState);
+    expect(mediumEncrypted.ciphertextHex.length / 2).toBe(8192 + 16);
+    expect(decryptFrozenState(mediumEncrypted, mediumEncrypted.freezeSecretHex)).toEqual(mediumState);
+
+    // Larger payload (~10000 bytes) -> 16384-byte plaintext + 16-byte GCM tag = 16400-byte ciphertext
+    const largerState: FrozenSessionState = {
+      ...sampleState,
+      messages: [{ role: "user", content: "L".repeat(10000) }],
+    };
+    const largerEncrypted = encryptFrozenState(largerState);
+    expect(largerEncrypted.ciphertextHex.length / 2).toBe(16384 + 16);
+    expect(decryptFrozenState(largerEncrypted, largerEncrypted.freezeSecretHex)).toEqual(largerState);
+
+    // Direct pad / unpad unit verification
+    const raw = utf8ToBytes('{"hello":"world"}');
+    const padded = padFreezePlaintext(raw);
+    expect(padded.byteLength).toBe(4096);
+    const unpadded = unpadFreezePlaintext(padded, FREEZE_BLOB_VERSION_PADDED);
+    expect(new TextDecoder().decode(unpadded)).toBe('{"hello":"world"}');
+  });
+
+  it("keeps decrypting legacy unpadded v1 blobs (with or without explicit version field)", () => {
+    const secretHex = "11".repeat(32);
+    const sidHex = "22".repeat(16);
+    const key = deriveFreezeKey(secretHex, sidHex);
+    const nonce = new Uint8Array(12).fill(7);
+    const aad = utf8ToBytes("drouter/v1/freeze-blob:" + sidHex);
+    // Construct an old unpadded ciphertext directly (exact JSON UTF-8 bytes without DRF2 prefix)
+    const unpaddedPlaintext = utf8ToBytes(JSON.stringify(sampleState));
+    const legacyCiphertext = gcm(key, nonce, aad).encrypt(unpaddedPlaintext);
+    const legacyBlobId = bytesToHex(sha256(legacyCiphertext)).slice(0, 32);
+
+    const legacyBundleWithoutVersion = {
+      blobId: legacyBlobId,
+      sessionIdHex: sidHex,
+      nonceHex: bytesToHex(nonce),
+      aadHex: bytesToHex(aad),
+      ciphertextHex: bytesToHex(legacyCiphertext),
+    };
+
+    // Decrypts when version field is absent (pre-F-09 stored MongoDB document)
+    expect(decryptFrozenState(legacyBundleWithoutVersion, secretHex)).toEqual(sampleState);
+
+    // Decrypts when version is explicitly 1 (FREEZE_BLOB_VERSION_LEGACY)
+    expect(
+      decryptFrozenState(
+        { ...legacyBundleWithoutVersion, version: FREEZE_BLOB_VERSION_LEGACY },
+        secretHex,
+      ),
+    ).toEqual(sampleState);
+  });
+
+  it("migrates legacy localStorage device key into IndexedDB as a non-extractable CryptoKey and deletes it from localStorage", async () => {
+    const storeMap = new Map<string, string>();
+    const fakeLocalStorage = {
+      getItem: (k: string) => storeMap.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        storeMap.set(k, v);
+      },
+      removeItem: (k: string) => {
+        storeMap.delete(k);
+      },
+    };
+
+    // Minimal spec-compliant in-memory IndexedDB mock supporting structured clone of CryptoKey
+    const idbDatabases = new Map<string, Map<string, Map<string, unknown>>>();
+    const fakeIndexedDB = {
+      open: (dbName: string) => {
+        let dbStores = idbDatabases.get(dbName);
+        const isNew = !dbStores;
+        if (!dbStores) {
+          dbStores = new Map();
+          idbDatabases.set(dbName, dbStores);
+        }
+        const storesRef = dbStores;
+        const dbObj = {
+          objectStoreNames: {
+            contains: (name: string) => storesRef.has(name),
+          },
+          createObjectStore: (name: string) => {
+            if (!storesRef.has(name)) {
+              storesRef.set(name, new Map());
+            }
+            return {};
+          },
+          transaction: (storeName: string) => ({
+            objectStore: (name: string) => {
+              const target = storesRef.get(name) ?? storesRef.get(storeName)!;
+              return {
+                get: (key: string) => {
+                  const req: { result?: unknown; onsuccess?: () => void; onerror?: () => void } = {};
+                  queueMicrotask(() => {
+                    req.result = target.get(key) ?? null;
+                    req.onsuccess?.();
+                  });
+                  return req;
+                },
+                put: (val: unknown, key: string) => {
+                  const req: { result?: unknown; onsuccess?: () => void; onerror?: () => void } = {};
+                  queueMicrotask(() => {
+                    target.set(key, val);
+                    req.onsuccess?.();
+                  });
+                  return req;
+                },
+              };
+            },
+          }),
+          close: () => {},
+        };
+        const openReq: {
+          result?: unknown;
+          onupgradeneeded?: () => void;
+          onsuccess?: () => void;
+          onerror?: () => void;
+        } = { result: dbObj };
+        queueMicrotask(() => {
+          if (isNew) openReq.onupgradeneeded?.();
+          openReq.onsuccess?.();
+        });
+        return openReq;
+      },
+    };
+
+    // Step 1: Simulate existing pre-migration state where IndexedDB was not yet used
+    // and localStorage has both `drouter.freeze.device-key.v1` and `drouter.freeze.v1`.
+    vi.stubGlobal("window", { localStorage: fakeLocalStorage });
+    vi.stubGlobal("localStorage", fakeLocalStorage);
+
+    const legacyReceipt = {
+      blobId: "ab".repeat(16),
+      freezeSecretHex: "cd".repeat(32),
+      sessionIdHex: "ef".repeat(16),
+      createdAt: 1760000400,
+      byteLength: 4112,
+      resumeCode: `drouter-freeze-v1:${"ab".repeat(16)}:${"cd".repeat(32)}:${"ef".repeat(16)}`,
+    };
+    saveLocalFreezeReceipt(legacyReceipt);
+    expect(storeMap.get(FREEZE_DEVICE_KEY_STORAGE)).toMatch(/^[0-9a-f]{64}$/);
+    const ciphertextBeforeMigration = storeMap.get(FREEZE_STORAGE_KEY);
+    expect(ciphertextBeforeMigration).toBeTruthy();
+
+    // Step 2: Enable IndexedDB and run migration
+    resetFreezeClientStateForTests();
+    vi.stubGlobal("window", { localStorage: fakeLocalStorage, indexedDB: fakeIndexedDB });
+    vi.stubGlobal("indexedDB", fakeIndexedDB);
+
+    const derivedKey = await ensureIndexedDbDeviceKey();
+    expect(derivedKey).toBeInstanceOf(Uint8Array);
+    expect(derivedKey!.byteLength).toBe(32);
+
+    // Verify legacy plaintext key is deleted from localStorage after migration
+    expect(storeMap.has(FREEZE_DEVICE_KEY_STORAGE)).toBe(false);
+
+    // Verify IndexedDB holds a non-extractable WebCrypto CryptoKey
+    const idbCryptoKey = await getIndexedDbDeviceCryptoKey();
+    expect(idbCryptoKey).not.toBeNull();
+    expect(idbCryptoKey!.extractable).toBe(false);
+    expect(idbCryptoKey!.type).toBe("secret");
+    await expect(
+      globalThis.crypto.subtle.exportKey("raw", idbCryptoKey!),
+    ).rejects.toThrow();
+
+    // Verify existing receipts in localStorage were re-encrypted and still decrypt cleanly
+    const migratedReceipts = listLocalFreezeReceipts();
+    expect(migratedReceipts).toHaveLength(1);
+    expect(migratedReceipts[0].blobId).toBe(legacyReceipt.blobId);
+    expect(migratedReceipts[0].freezeSecretHex).toBe(legacyReceipt.freezeSecretHex);
   });
 });
