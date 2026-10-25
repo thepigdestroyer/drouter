@@ -61,7 +61,7 @@ What changes for them: they type normally; names, dates, numbers and secrets are
 - Human approval: before recording anything on chain, before any payment, and the user can see exactly what Google received.
 
 ## Tech stack
-Next.js 16 on Vercel, TypeScript, Tinfoil (SecureClient, EHBP/HPKE, attested enclaves), Google Gemini 4 Argon (`@google/genai` Interactions API), Google Cloud Confidential Space (AMD SEV), MongoDB Atlas 8.0 (Vector Search, Atlas Search, `$rankFusion`), Circle Arc testnet (registry, receipts, USDC), WebAuthn passkeys, RSA blind signatures, RFC 6962 Merkle log, GitHub Actions (hourly monitor), Vitest (51 suites, 493 tests).
+Next.js 16 on Vercel, TypeScript, Tinfoil (SecureClient, EHBP/HPKE, attested enclaves), Google Gemini 4 Argon (`@google/genai` Interactions API), Google Cloud Confidential Space (AMD SEV), MongoDB Atlas 8.0 (Vector Search, Atlas Search, `$rankFusion`), Circle Arc testnet (registry, receipts, USDC), WebAuthn passkeys, RSA blind signatures, RFC 6962 Merkle log, GitHub Actions (hourly monitor), Vitest (51 suites, 498 tests).
 
 ## Built during the hackathon
 First commit 24 October 2026 14:41 BST; every commit since is in the public repo history.
