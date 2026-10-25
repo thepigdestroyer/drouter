@@ -55,7 +55,7 @@ const PINNED_ROOT_SHA256 = "148B293821BB0C6A317F413C8BA475814091CB22D49B9E3C9419
 const EXPECTED_ISSUER = "https://confidentialcomputing.googleapis.com";
 const DEFAULT_AUDIENCE = "https://drouter-demo.vercel.app/deroute-core";
 const ALLOWED_HWMODELS = new Set(["GCP_AMD_SEV", "GCP_AMD_SEV_ES", "GCP_INTEL_TDX"]);
-const ALLOWED_ENV_OVERRIDES = new Set(["CORE_KEY_SOURCE", "CORE_PUBLIC_ORIGIN"]);
+const ALLOWED_ENV_OVERRIDES = new Set(["CORE_KEY_SOURCE", "CORE_PUBLIC_ORIGIN", "CORE_SECRETS_SOURCE"]);
 
 function ensureReflectMetadata() {
   if (

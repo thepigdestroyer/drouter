@@ -191,7 +191,7 @@ fi
 
 # 6. Create or update the Confidential Space VM
 # Non-secret metadata only; tee-container-log-redirect is omitted (defaults to false, enforced by launch_policy.log_redirect=never).
-METADATA="^~^tee-image-reference=${IMAGE_REF}~tee-restart-policy=Always~tee-env-CORE_KEY_SOURCE=boot~tee-env-CORE_PUBLIC_ORIGIN=${CORE_PUBLIC_ORIGIN}"
+METADATA="^~^tee-image-reference=${IMAGE_REF}~tee-restart-policy=Always~tee-env-CORE_KEY_SOURCE=boot~tee-env-CORE_PUBLIC_ORIGIN=${CORE_PUBLIC_ORIGIN}~tee-env-CORE_SECRETS_SOURCE=gcp-secret-manager"
 
 if gcloud compute instances describe "${INSTANCE_NAME}" --zone="${ZONE}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
   INSTANCE_STATUS="$(gcloud compute instances describe "${INSTANCE_NAME}" \

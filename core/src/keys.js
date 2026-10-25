@@ -4,6 +4,9 @@ import path from "node:path";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { canonicalJson, sha256Hex } from "./canonical.js";
+import { tlsCertPem, tlsSpkiSha256 } from "./tls.js";
+
+export { tlsCertPem, tlsSpkiSha256 };
 
 export const DEFAULT_TINFOIL_KEYS_DIR = "/run/tinfoil/keys";
 
@@ -281,6 +284,7 @@ export function computePublicKeysBindingSha256(ring = getKeyRing()) {
 export function getPublicKeysResponse(ring = getKeyRing()) {
   const egress = serializePublicKeyEntry(ring["egress-signing"]);
   const tree = serializePublicKeyEntry(ring["tree-signing"]);
+  const keySource = ring.keySource ?? ring["egress-signing"].keySource;
   const keysDigest = sha256Hex(
     canonicalJson({
       egress: egress.publicKeyHex,
@@ -289,11 +293,12 @@ export function getPublicKeysResponse(ring = getKeyRing()) {
   );
   return {
     ok: true,
-    keySource: ring.keySource ?? ring["egress-signing"].keySource,
+    keySource,
     keysDigest,
     publicKeysSha256: keysDigest,
     bindingSha256: keysDigest,
     rawPublicKeysSha256: keysDigest,
+    ...(keySource === "boot" ? { tlsSpkiSha256 } : {}),
     keys: {
       "egress-signing": egress,
       "tree-signing": tree,

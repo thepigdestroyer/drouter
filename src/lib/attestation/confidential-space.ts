@@ -57,6 +57,7 @@ export type AllowedConfidentialSpaceHwModel =
 export const DEFAULT_ALLOWED_ENV_OVERRIDES = [
   "CORE_KEY_SOURCE",
   "CORE_PUBLIC_ORIGIN",
+  "CORE_SECRETS_SOURCE",
 ] as const;
 
 export const CLOCK_SKEW_SECONDS = 60;

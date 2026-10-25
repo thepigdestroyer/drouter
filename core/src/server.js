@@ -1,7 +1,10 @@
 import crypto from "node:crypto";
 import http from "node:http";
+import https from "node:https";
 import { pathToFileURL } from "node:url";
-import { getWholeKnowledgeCorpus } from "./corpus.js";
+import { MongoClient } from "mongodb";
+import { configureAttestation, getAttestation } from "./attestation-gcp.js";
+import { ATLAS_DATABASE_NAME, getWholeKnowledgeCorpus } from "./corpus.js";
 import {
   ContentFreeEgressError,
   PlannerBudgetExceededError,
@@ -15,6 +18,17 @@ import {
   TreeHeadStateVerificationError,
   verifyAndSignTreeHead,
 } from "./receipts.js";
+import {
+  getLoadedSecret,
+  loadSecrets,
+  resolveSecretsSource,
+} from "./secrets-gcp.js";
+import {
+  getBootTlsMaterial,
+  privateKey as bootTlsPrivateKey,
+  tlsCertPem as bootTlsCertPem,
+  tlsSpkiSha256 as bootTlsSpkiSha256,
+} from "./tls.js";
 
 export const ALLOWED_CORS_ORIGINS = new Set([
   "https://drouter-demo.vercel.app",
@@ -22,13 +36,29 @@ export const ALLOWED_CORS_ORIGINS = new Set([
 ]);
 
 export const MAX_BODY_BYTES = 16_384;
+export const DEFAULT_BOOT_HTTPS_PORT = 8443;
+export const DEFAULT_TINFOIL_HTTP_PORT = 8080;
+
+function isAllowedCorsOrigin(cleanOrigin) {
+  if (ALLOWED_CORS_ORIGINS.has(cleanOrigin)) {
+    return true;
+  }
+  const configuredOrigin =
+    typeof process.env.CORE_PUBLIC_ORIGIN === "string"
+      ? process.env.CORE_PUBLIC_ORIGIN.trim()
+      : "";
+  if (configuredOrigin && cleanOrigin === configuredOrigin) {
+    return true;
+  }
+  return false;
+}
 
 function buildCorsHeaders(originHeader) {
   if (!originHeader) {
     return { allowed: true, headers: {} };
   }
   const cleanOrigin = String(originHeader).trim();
-  if (!ALLOWED_CORS_ORIGINS.has(cleanOrigin)) {
+  if (!isAllowedCorsOrigin(cleanOrigin)) {
     return { allowed: false, headers: { Vary: "Origin" } };
   }
   return {
@@ -191,7 +221,7 @@ function readBoundedJsonBody(req, maxBytes = MAX_BODY_BYTES) {
  */
 export function verifyOperatorBearer(
   req,
-  expectedSecret = process.env.CORE_OPERATOR_TOKEN,
+  expectedSecret = getLoadedSecret("CORE_OPERATOR_TOKEN") ?? process.env.CORE_OPERATOR_TOKEN,
 ) {
   if (typeof expectedSecret !== "string" || expectedSecret.length === 0) {
     return false;
@@ -214,12 +244,42 @@ export function verifyOperatorBearer(
 }
 
 const ALLOWED_PATHS = new Set([
+  "/attestation",
   "/health",
   "/knowledge/corpus",
   "/agent/plan",
   "/transparency/sign-tree-head",
   "/keys",
 ]);
+
+let inMemoryMongoClientPromise = null;
+let inMemoryMongoUri = null;
+
+async function resolveDatabaseDep(explicitDb) {
+  if (explicitDb !== undefined) {
+    return explicitDb;
+  }
+  const secretUri = getLoadedSecret("MONGODB_URI");
+  if (!secretUri) {
+    return undefined;
+  }
+  try {
+    if (!inMemoryMongoClientPromise || inMemoryMongoUri !== secretUri) {
+      inMemoryMongoUri = secretUri;
+      const client = new MongoClient(secretUri, {
+        appName: "deroute-core-enclave",
+        maxPoolSize: 4,
+        serverSelectionTimeoutMS: 4500,
+      });
+      inMemoryMongoClientPromise = client.connect();
+    }
+    const connected = await inMemoryMongoClientPromise;
+    return connected.db(process.env.MONGODB_DB || ATLAS_DATABASE_NAME);
+  } catch {
+    inMemoryMongoClientPromise = null;
+    return null;
+  }
+}
 
 /**
  * Stateless request handler for `deroute-core`.
@@ -278,6 +338,100 @@ export async function handleCoreRequest(req, res, deps = {}) {
       keySource: deps.keySource,
       keysDir: deps.keysDir,
     });
+
+  if (pathname === "/attestation") {
+    if (method !== "GET") {
+      sendJson(res, 405, { ok: false, error: "method_not_allowed" }, cors.headers);
+      return;
+    }
+    if (parsedUrl.search.length > 0) {
+      sendJson(res, 400, { ok: false, error: "query_parameters_forbidden" }, cors.headers);
+      return;
+    }
+
+    const nowSec =
+      typeof deps.nowSec === "function" ? deps.nowSec() : Math.floor(Date.now() / 1000);
+
+    try {
+      const att = await (typeof deps.getAttestation === "function"
+        ? deps.getAttestation()
+        : getAttestation());
+
+      const token = typeof att?.token === "string" ? att.token.trim() : "";
+      const egress = typeof att?.keys?.egress === "string" ? att.keys.egress.trim() : "";
+      const tree = typeof att?.keys?.tree === "string" ? att.keys.tree.trim() : "";
+      const keysDigest = typeof att?.keysDigest === "string" ? att.keysDigest.trim() : "";
+      const tlsSpkiSha256 =
+        typeof att?.tlsSpkiSha256 === "string" ? att.tlsSpkiSha256.trim() : "";
+      const tlsCertPem = typeof att?.tlsCertPem === "string" ? att.tlsCertPem.trim() : "";
+      const refreshedAtSec =
+        typeof att?.refreshedAtSec === "number" && Number.isFinite(att.refreshedAtSec)
+          ? Math.floor(att.refreshedAtSec)
+          : null;
+      const expiresAtSec =
+        typeof att?.expiresAtSec === "number" && Number.isFinite(att.expiresAtSec)
+          ? Math.floor(att.expiresAtSec)
+          : null;
+
+      if (
+        !token ||
+        token.split(".").length !== 3 ||
+        !egress ||
+        !tree ||
+        !keysDigest ||
+        !tlsSpkiSha256 ||
+        !tlsCertPem ||
+        refreshedAtSec === null ||
+        expiresAtSec === null ||
+        expiresAtSec <= nowSec
+      ) {
+        sendJson(
+          res,
+          503,
+          {
+            ok: false,
+            error: "attestation_unavailable",
+            message:
+              "Confidential Space attestation token is missing, expired, or unavailable.",
+          },
+          cors.headers,
+        );
+        return;
+      }
+
+      sendJson(
+        res,
+        200,
+        {
+          token,
+          keys: {
+            egress,
+            tree,
+          },
+          keysDigest,
+          tlsSpkiSha256,
+          tlsCertPem,
+          refreshedAtSec,
+          expiresAtSec,
+        },
+        cors.headers,
+      );
+      return;
+    } catch {
+      sendJson(
+        res,
+        503,
+        {
+          ok: false,
+          error: "attestation_unavailable",
+          message:
+            "Confidential Space attestation token is missing, expired, or unavailable.",
+        },
+        cors.headers,
+      );
+      return;
+    }
+  }
 
   if (pathname === "/health") {
     if (method !== "GET") {
@@ -338,7 +492,8 @@ export async function handleCoreRequest(req, res, deps = {}) {
       );
       return;
     }
-    const corpus = await getWholeKnowledgeCorpus({ db: deps.db });
+    const db = await resolveDatabaseDep(deps.db);
+    const corpus = await getWholeKnowledgeCorpus({ db });
     sendJson(res, 200, corpus, {
       ...cors.headers,
       "Cache-Control": "public, max-age=300, stale-while-revalidate=3600",
@@ -378,10 +533,13 @@ export async function handleCoreRequest(req, res, deps = {}) {
       return;
     }
 
+    const effectiveGeminiKey =
+      deps.geminiApiKey !== undefined ? deps.geminiApiKey : getLoadedSecret("GEMINI_API_KEY");
+
     try {
       const result = await planWithGemini({
         descriptor: body,
-        apiKey: deps.geminiApiKey,
+        apiKey: effectiveGeminiKey,
         genaiClient: deps.genaiClient,
         egressKeyPair: keyRing["egress-signing"],
         timestampSec: deps.timestampSec,
@@ -475,7 +633,7 @@ export async function handleCoreRequest(req, res, deps = {}) {
     const expectedToken =
       deps.operatorToken !== undefined
         ? deps.operatorToken
-        : process.env.CORE_OPERATOR_TOKEN;
+        : getLoadedSecret("CORE_OPERATOR_TOKEN") ?? process.env.CORE_OPERATOR_TOKEN;
     if (!verifyOperatorBearer(req, expectedToken)) {
       sendJson(
         res,
@@ -514,9 +672,10 @@ export async function handleCoreRequest(req, res, deps = {}) {
     }
 
     try {
+      const db = await resolveDatabaseDep(deps.db);
       const signed = await verifyAndSignTreeHead(body, {
         keyPair: keyRing["tree-signing"],
-        db: deps.db,
+        db,
       });
       sendJson(
         res,
@@ -580,20 +739,41 @@ export async function handleCoreRequest(req, res, deps = {}) {
   }
 }
 
+function applyServerHardeningTimeouts(srv) {
+  srv.headersTimeout = 10_000;
+  srv.requestTimeout = 25_000;
+  srv.keepAliveTimeout = 5_000;
+  srv.timeout = 30_000;
+}
+
+export function resolveServerPort(keySource, explicitPort = process.env.PORT) {
+  if (explicitPort !== undefined && String(explicitPort).trim() !== "") {
+    const parsed = Number(explicitPort);
+    if (Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535) {
+      return parsed;
+    }
+  }
+  return keySource === "boot" ? DEFAULT_BOOT_HTTPS_PORT : DEFAULT_TINFOIL_HTTP_PORT;
+}
+
 export function createCoreServer(deps = {}) {
-  // Eagerly resolve keyRing at boot/creation so missing or unknown CORE_KEY_SOURCE refuses to start.
+  // Eagerly validate CORE_SECRETS_SOURCE and CORE_KEY_SOURCE at creation so unknown values refuse to start.
+  resolveSecretsSource(
+    deps.secretsSource !== undefined ? deps.secretsSource : process.env.CORE_SECRETS_SOURCE,
+  );
   const resolvedKeyRing =
     deps.keyRing ??
     getKeyRing({
       keySource: deps.keySource,
       keysDir: deps.keysDir,
     });
+
   const serverDeps = {
     ...deps,
     keyRing: resolvedKeyRing,
   };
 
-  const server = http.createServer((req, res) => {
+  const requestHandler = (req, res) => {
     handleCoreRequest(req, res, serverDeps).catch(() => {
       if (!res.headersSent) {
         sendJson(res, 500, { ok: false, error: "internal_error" });
@@ -601,36 +781,189 @@ export function createCoreServer(deps = {}) {
         res.end();
       }
     });
+  };
+
+  if (resolvedKeyRing.keySource === "boot") {
+    const tlsMaterial = deps.tlsMaterial ?? getBootTlsMaterial();
+    const certPem = deps.tlsCertPem ?? tlsMaterial.tlsCertPem ?? bootTlsCertPem;
+    const keyPem = deps.tlsPrivateKey ?? tlsMaterial.privateKey ?? bootTlsPrivateKey;
+    const spkiSha256 = deps.tlsSpkiSha256 ?? tlsMaterial.tlsSpkiSha256 ?? bootTlsSpkiSha256;
+
+    configureAttestation({
+      keyRing: resolvedKeyRing,
+      tlsCertPem: certPem,
+      tlsSpkiSha256: spkiSha256,
+      ...(deps.socketPath ? { socketPath: deps.socketPath } : {}),
+      ...(deps.audience ? { audience: deps.audience } : {}),
+      ...(deps.refreshIntervalMs !== undefined
+        ? { refreshIntervalMs: deps.refreshIntervalMs }
+        : {}),
+      ...(deps.nowSec ? { nowSec: deps.nowSec } : {}),
+    });
+
+    const httpsServer = https.createServer(
+      {
+        key: keyPem,
+        cert: certPem,
+      },
+      requestHandler,
+    );
+    applyServerHardeningTimeouts(httpsServer);
+    httpsServer.tlsSpkiSha256 = spkiSha256;
+    httpsServer.tlsCertPem = certPem;
+    httpsServer.keySource = "boot";
+    httpsServer.defaultPort = DEFAULT_BOOT_HTTPS_PORT;
+
+    if (!deps.tlsOnly) {
+      const httpFallback = http.createServer(requestHandler);
+      applyServerHardeningTimeouts(httpFallback);
+      const fallbackSockets = new Set();
+      const origClose = httpsServer.close.bind(httpsServer);
+      httpsServer.close = (cb) => {
+        for (const s of fallbackSockets) {
+          s.destroy();
+        }
+        fallbackSockets.clear();
+        httpFallback.close();
+        return origClose(cb);
+      };
+      const tlsListeners = httpsServer.listeners("connection");
+      httpsServer.removeAllListeners("connection");
+      httpsServer.on("connection", (socket) => {
+        const preHandshakeTimer = setTimeout(() => {
+          socket.destroy();
+        }, httpsServer.headersTimeout);
+
+        const cleanup = () => {
+          clearTimeout(preHandshakeTimer);
+          socket.removeListener("readable", onReadable);
+          socket.removeListener("error", cleanup);
+          socket.removeListener("close", cleanup);
+        };
+
+        const onReadable = () => {
+          const firstByte = socket.read(1);
+          if (firstByte === null) {
+            return;
+          }
+          cleanup();
+          socket.unshift(firstByte);
+          // 0x16 is the TLS Record ContentType for Handshake (ClientHello)
+          if (firstByte[0] === 0x16) {
+            for (const fn of tlsListeners) {
+              fn.call(httpsServer, socket);
+            }
+          } else {
+            fallbackSockets.add(socket);
+            socket.once("close", () => fallbackSockets.delete(socket));
+            httpFallback.emit("connection", socket);
+          }
+        };
+
+        socket.on("readable", onReadable);
+        socket.once("error", cleanup);
+        socket.once("close", cleanup);
+      });
+    }
+
+    return httpsServer;
+  }
+
+  // CORE_KEY_SOURCE=tinfoil: plain HTTP server on 8080 behind Tinfoil enclave proxy shim
+  const httpServer = http.createServer(requestHandler);
+  applyServerHardeningTimeouts(httpServer);
+  httpServer.keySource = "tinfoil";
+  httpServer.defaultPort = DEFAULT_TINFOIL_HTTP_PORT;
+
+  return httpServer;
+}
+
+/**
+ * Loads secrets through `secrets-gcp.js` before creating and starting the server.
+ * With `CORE_KEY_SOURCE=boot`, serves HTTPS on `0.0.0.0:8443` using the boot certificate.
+ * With `CORE_KEY_SOURCE=tinfoil`, serves HTTP on `0.0.0.0:8080`.
+ */
+export async function startCoreServer(options = {}) {
+  const secretsSource = resolveSecretsSource(
+    options.secretsSource !== undefined ? options.secretsSource : process.env.CORE_SECRETS_SOURCE,
+  );
+  const loadedSecrets = await loadSecrets({
+    source: secretsSource,
+    allowPartialEnv: options.allowPartialEnv ?? false,
+    ...(options.secretsOptions ?? {}),
   });
 
-  server.headersTimeout = 10_000;
-  server.requestTimeout = 25_000;
-  server.keepAliveTimeout = 5_000;
-  server.timeout = 30_000;
+  const resolvedKeyRing =
+    options.keyRing ??
+    getKeyRing({
+      keySource: options.keySource,
+      keysDir: options.keysDir,
+    });
+
+  const host = options.host || process.env.HOST || "0.0.0.0";
+  const port = resolveServerPort(
+    resolvedKeyRing.keySource,
+    options.port !== undefined ? options.port : process.env.PORT,
+  );
+
+  const server = createCoreServer({
+    ...options,
+    keyRing: resolvedKeyRing,
+    secretsSource,
+    tlsOnly: options.tlsOnly ?? resolvedKeyRing.keySource === "boot",
+    geminiApiKey: options.geminiApiKey ?? loadedSecrets.GEMINI_API_KEY,
+    operatorToken: options.operatorToken ?? loadedSecrets.CORE_OPERATOR_TOKEN,
+  });
+
+  await new Promise((resolve, reject) => {
+    const onError = (err) => {
+      server.removeListener("listening", onListening);
+      reject(err);
+    };
+    const onListening = () => {
+      server.removeListener("error", onError);
+      resolve();
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(port, host);
+  });
 
   return server;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const port = Number(process.env.PORT || 8080);
-  const host = process.env.HOST || "0.0.0.0";
-  const server = createCoreServer();
-  server.listen(port, host, () => {
-    process.stdout.write(
-      JSON.stringify({
-        service: "deroute-core",
-        status: "listening",
-        host,
-        port,
-      }) + "\n",
-    );
-  });
+  startCoreServer()
+    .then((server) => {
+      const addr = server.address();
+      const boundPort = typeof addr === "object" && addr ? addr.port : server.defaultPort;
+      const host = process.env.HOST || "0.0.0.0";
+      process.stdout.write(
+        JSON.stringify({
+          service: "deroute-core",
+          status: "listening",
+          protocol: server.keySource === "boot" ? "https" : "http",
+          host,
+          port: boundPort,
+        }) + "\n",
+      );
 
-  const shutdown = () => {
-    server.close(() => {
-      process.exit(0);
+      const shutdown = () => {
+        server.close(() => {
+          process.exit(0);
+        });
+      };
+      process.on("SIGTERM", shutdown);
+      process.on("SIGINT", shutdown);
+    })
+    .catch((err) => {
+      process.stderr.write(
+        JSON.stringify({
+          service: "deroute-core",
+          status: "fatal",
+          error: err instanceof Error ? err.message : "Failed to start deroute-core",
+        }) + "\n",
+      );
+      process.exit(1);
     });
-  };
-  process.on("SIGTERM", shutdown);
-  process.on("SIGINT", shutdown);
 }

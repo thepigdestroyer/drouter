@@ -16,6 +16,8 @@
     "@google/genai": "2.31.0",
     "@noble/curves": "2.4.0",
     "@noble/hashes": "2.4.0",
-    "mongodb": "7.7.0"
+    "@peculiar/x509": "2.2.0",
+    "mongodb": "7.7.0",
+    "reflect-metadata": "0.2.2"
   }
 }
