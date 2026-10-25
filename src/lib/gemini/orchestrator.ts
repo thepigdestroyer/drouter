@@ -115,7 +115,7 @@ export const HONEST_DATA_HANDLING_STATEMENT: DataHandlingStatement = {
   dataSentToGoogle: DATA_SENT_TO_GOOGLE,
   googleCanSee: [
     "content-free TaskDescriptor (taskKind, $INPUT handle, inputTokenEstimate, redactionCounts, verification booleans, allowedTools)",
-    "content-free tool arguments and results (opaque handles, status enums, integer counts, booleans, 0x SHA-256 hashes)",
+    "content-free tool arguments and results (opaque handles, status enums, integer counts, booleans)",
     "server or single-use user Gemini API key and server egress IP",
   ],
   googleCannotSee: [
@@ -136,7 +136,8 @@ export const MAX_ALWAYS_HIDE_TERMS = 64;
 export const MAX_ALWAYS_HIDE_TERM_CHARS = 128;
 
 /**
- * Validates and length-caps user-configured `alwaysHide` terms from account settings.
+ * Validates, NFKC-normalises, trims, drops empty/single-char strings, deduplicates
+ * case-insensitively, and caps count and length of user-configured `alwaysHide` terms.
  */
 export function sanitizeAlwaysHideTerms(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
@@ -145,12 +146,16 @@ export function sanitizeAlwaysHideTerms(raw: unknown): string[] {
   for (const item of raw) {
     if (out.length >= MAX_ALWAYS_HIDE_TERMS) break;
     if (typeof item !== "string") continue;
-    const trimmed = item.trim().slice(0, MAX_ALWAYS_HIDE_TERM_CHARS);
-    if (trimmed.length < 2) continue;
-    const key = trimmed.toLowerCase();
+    const normalized = item
+      .normalize("NFKC")
+      .trim()
+      .slice(0, MAX_ALWAYS_HIDE_TERM_CHARS)
+      .trim();
+    if (normalized.length < 2) continue;
+    const key = normalized.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push(trimmed);
+    out.push(normalized);
   }
   return out;
 }
@@ -360,11 +365,14 @@ export interface SandboxAttemptRecord {
   candidateNodeId: string;
   candidateModelId?: "gemma4-31b" | "kimi-k3";
   enclaveAttestationVerified: boolean;
+  verifiedHosts: number;
+  configuredHosts: number;
+  unverifiedHosts: number;
+  measurementRegisterCount: number;
+  dmVerityRootHashPresent: boolean;
+  releaseDigestMatched: boolean;
   failedInvariants: string[];
-  entropyBitsPerByte: number;
-  repeated16ByteBlocks: number;
   plaintextLeakMatches: number;
-  postPopAllZero: boolean;
   passed: boolean;
   remediationApplied?: string;
 }
@@ -380,15 +388,17 @@ export interface Stage3SandboxVerificationResult {
     sandboxId: string;
     imageMeasurementHex: string;
     rtmr3Hex: string;
-    zeroizedOnDestroy: boolean;
   };
   verificationSignal: {
     enclaveAttestationVerified: boolean;
-    entropyBitsPerByte: number;
-    repeated16ByteBlocks: number;
-    postPopAllZero: boolean;
+    verifiedHosts: number;
+    configuredHosts: number;
+    unverifiedHosts: number;
+    measurementRegisterCount: number;
+    dmVerityRootHashPresent: boolean;
+    releaseDigestMatched: boolean;
     formula:
-      "enclaveAttestationVerified === true && entropyBitsPerByte > 7.5 && repeated16ByteBlocks === 0";
+      "enclaveAttestationVerified === true && verifiedHosts > 0 && unverifiedHosts === 0 && measurementRegisterCount > 0 && dmVerityRootHashPresent === true && releaseDigestMatched === true";
   };
 }
 
@@ -539,6 +549,11 @@ export interface ArgonOrchestratorOptions {
   wallClockBudgetMs?: number;
   mechanicalRedactor?: MechanicalRedactFn;
   attestedFilterRunner?: AttestedPiiFilterFn;
+  symmetryOptions?: {
+    dateShiftDays?: number;
+    numericScaleFactor?: number;
+    customEntities?: Record<string, string>;
+  };
   attestationFetcher?: (
     enclaveModel: "gemma4-31b" | "kimi-k3",
   ) => Promise<LiveTinfoilAttestationResult>;
@@ -921,63 +936,18 @@ function countRemainingSensitiveLeaks(
   originals: string[],
 ): number {
   let leaks = 0;
-  const lowerText = scrubbedAndMasked.toLowerCase();
+  const normText = scrubbedAndMasked.normalize("NFKC");
+  const lowerText = normText.toLowerCase();
   for (const orig of originals) {
-    const cleaned = orig.trim();
+    const cleaned = orig.normalize("NFKC").trim();
     if (
       cleaned.length >= 4 &&
-      (scrubbedAndMasked.includes(cleaned) || lowerText.includes(cleaned.toLowerCase()))
+      (normText.includes(cleaned) || lowerText.includes(cleaned.toLowerCase()))
     ) {
       leaks += 1;
     }
   }
   return leaks;
-}
-
-function computeBytesShannonEntropy(bytes: Uint8Array): number {
-  if (bytes.length === 0) return 0;
-  const freq = new Uint32Array(256);
-  for (let i = 0; i < bytes.length; i++) {
-    freq[bytes[i]] += 1;
-  }
-  let entropy = 0;
-  const n = bytes.length;
-  for (let i = 0; i < 256; i++) {
-    if (freq[i] > 0) {
-      const p = freq[i] / n;
-      entropy -= p * Math.log2(p);
-    }
-  }
-  return Math.round(entropy * 1000) / 1000;
-}
-
-function countRepeated16ByteBlocks(bytes: Uint8Array): number {
-  const seen = new Set<string>();
-  let repeated = 0;
-  const totalBlocks = Math.floor(bytes.length / 16);
-  for (let b = 0; b < totalBlocks; b++) {
-    const blockHex = bytesToHex(bytes.subarray(b * 16, (b + 1) * 16));
-    if (seen.has(blockHex)) {
-      repeated += 1;
-    } else {
-      seen.add(blockHex);
-    }
-  }
-  return repeated;
-}
-
-function buildHighEntropyMeasurementStream(seedText: string, byteLength = 4096): Uint8Array {
-  const out = new Uint8Array(byteLength);
-  let offset = 0;
-  let counter = 0;
-  while (offset < byteLength) {
-    const block = sha256(utf8ToBytes(`${seedText}:ctr:${counter}`));
-    const copyLen = Math.min(block.length, byteLength - offset);
-    out.set(block.subarray(0, copyLen), offset);
-    offset += copyLen;
-    counter += 1;
-  }
-  return out;
 }
 
 function hashToContentFree32Hex(input: string): string {
@@ -988,6 +958,153 @@ function hashToContentFree32Hex(input: string): string {
 
 const UNRESTORED_PLACEHOLDER_RE =
   /\[(?:SECRET|EMAIL|PHONE|IP|ACCT|ENTITY|URL|ADDRESS|DATE|NAME|DIGITS|ENTROPY)_\d+\]|<PRIVATE_[A-Z0-9_]+>/i;
+
+function escapeRegExpLiteral(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function countCaseInsensitiveOccurrences(haystack: string, needle: string): number {
+  if (!haystack || !needle) return 0;
+  const re = new RegExp(escapeRegExpLiteral(needle), "gi");
+  let count = 0;
+  while (re.exec(haystack) !== null) {
+    count += 1;
+  }
+  return count;
+}
+
+/**
+ * Verifies that a restored output string:
+ * 1. Contains no leftover mechanical placeholders (`[KIND_N]`, case-insensitive) or symmetry surrogates.
+ * 2. Restores every occurrence of repeated placeholders and symmetry masks present in `maskedText`.
+ * 3. Evaluates overlapping restored originals longest-first (consuming matched spans so a longer
+ *    term like "Halden & Moss LLP" cannot falsely satisfy a shorter overlapping term like "Moss").
+ * 4. Handles case differences and NFKC Unicode normalization cleanly.
+ */
+export function verifyRedactionAndSymmetryRestore(params: {
+  rawPrompt: string;
+  maskedText: string;
+  restoredText: string;
+  placeholders: Record<string, string>;
+  appliedSymmetryMasks?: readonly AppliedMask[];
+}): boolean {
+  const {
+    rawPrompt,
+    maskedText,
+    restoredText,
+    placeholders,
+    appliedSymmetryMasks = [],
+  } = params;
+  if (!maskedText || !restoredText) return false;
+
+  const normRawPrompt = rawPrompt.normalize("NFKC");
+  const normMasked = maskedText.normalize("NFKC");
+  const normRestored = restoredText.normalize("NFKC");
+  const lowerRawPrompt = normRawPrompt.toLowerCase();
+  const lowerRestored = normRestored.toLowerCase();
+
+  if (UNRESTORED_PLACEHOLDER_RE.test(normRestored)) {
+    return false;
+  }
+
+  for (const placeholder of Object.keys(placeholders)) {
+    const normPlaceholder = placeholder.normalize("NFKC");
+    if (
+      normPlaceholder &&
+      lowerRestored.includes(normPlaceholder.toLowerCase())
+    ) {
+      return false;
+    }
+  }
+
+  for (const mask of appliedSymmetryMasks) {
+    const normMask = mask.masked.normalize("NFKC");
+    const normOrig = mask.original.normalize("NFKC");
+    if (
+      normMask &&
+      normMask.toLowerCase() !== normOrig.toLowerCase() &&
+      !lowerRawPrompt.includes(normMask.toLowerCase()) &&
+      lowerRestored.includes(normMask.toLowerCase())
+    ) {
+      return false;
+    }
+  }
+
+  const expectedCounts = new Map<string, number>();
+  const addExpected = (orig: string, count: number) => {
+    if (count <= 0) return;
+    const key = orig.normalize("NFKC").toLowerCase();
+    if (!key) return;
+    expectedCounts.set(key, (expectedCounts.get(key) ?? 0) + count);
+  };
+
+  for (const [placeholder, original] of Object.entries(placeholders)) {
+    const normPlaceholder = placeholder.normalize("NFKC");
+    const occ = countCaseInsensitiveOccurrences(normMasked, normPlaceholder);
+    if (occ > 0) {
+      addExpected(original, occ);
+    }
+  }
+
+  const masksByLowerMasked = new Map<
+    string,
+    { masked: string; originals: string[] }
+  >();
+  for (const mask of appliedSymmetryMasks) {
+    const normMask = mask.masked.normalize("NFKC");
+    const normOrig = mask.original.normalize("NFKC");
+    if (!normMask || !normOrig) continue;
+    const lowerMask = normMask.toLowerCase();
+    const existing = masksByLowerMasked.get(lowerMask);
+    if (existing) {
+      existing.originals.push(normOrig);
+    } else {
+      masksByLowerMasked.set(lowerMask, {
+        masked: normMask,
+        originals: [normOrig],
+      });
+    }
+  }
+
+  let workingMaskedLower = normMasked.toLowerCase();
+  const sortedMaskGroups = Array.from(masksByLowerMasked.values()).sort(
+    (a, b) => b.masked.length - a.masked.length,
+  );
+  for (const group of sortedMaskGroups) {
+    const re = new RegExp(escapeRegExpLiteral(group.masked.toLowerCase()), "gi");
+    let matchIdx = 0;
+    workingMaskedLower = workingMaskedLower.replace(re, (m) => {
+      const origForOccurrence =
+        group.originals[Math.min(matchIdx, group.originals.length - 1)];
+      matchIdx += 1;
+      addExpected(origForOccurrence, 1);
+      return "\u0000".repeat(m.length);
+    });
+  }
+
+  let workingRestoredLower = lowerRestored;
+  const sortedExpected = Array.from(expectedCounts.entries()).sort(
+    (a, b) => b[0].length - a[0].length,
+  );
+
+  for (const [lowerOrig, requiredCount] of sortedExpected) {
+    if (requiredCount <= 0) continue;
+    const re = new RegExp(escapeRegExpLiteral(lowerOrig), "g");
+    let foundCount = 0;
+    workingRestoredLower = workingRestoredLower.replace(re, (m) => {
+      if (foundCount < requiredCount) {
+        foundCount += 1;
+        return "\u0000".repeat(m.length);
+      }
+      return m;
+    });
+    if (foundCount < requiredCount) {
+      return false;
+    }
+  }
+
+  return true;
+}
 
 function sanitizeFailureReason(
   rawReason: string | undefined,
@@ -1045,9 +1162,9 @@ export async function runArgonAutonomousWorkflow(
   });
 
   const symmetry = createSymmetryTransform({
-    dateShiftDays: 42,
-    numericScaleFactor: 4,
-    customEntities: {},
+    dateShiftDays: options.symmetryOptions?.dateShiftDays,
+    numericScaleFactor: options.symmetryOptions?.numericScaleFactor,
+    customEntities: options.symmetryOptions?.customEntities ?? {},
   });
 
   const symmetryOut = symmetry.transform(redactionPass.mechanicalText);
@@ -1100,49 +1217,73 @@ export async function runArgonAutonomousWorkflow(
   const bucketAligned4096 =
     bucketBytes > 0 && bucketBytes % 4096 === 0 && tokenBucketInfo.bucketTokens >= 1024;
 
+  const entityMasksByLowerAlias = new Map<
+    string,
+    { alias: string; originals: string[] }
+  >();
+  for (const m of symmetryOut.applied) {
+    if (m.kind !== "entity") continue;
+    const key = m.masked.toLowerCase();
+    const existing = entityMasksByLowerAlias.get(key);
+    if (existing) {
+      existing.originals.push(m.original);
+    } else {
+      entityMasksByLowerAlias.set(key, {
+        alias: m.masked,
+        originals: [m.original],
+      });
+    }
+  }
+  const sortedEntityMaskGroups = Array.from(
+    entityMasksByLowerAlias.values(),
+  ).sort((a, b) => b.alias.length - a.alias.length);
+
+  const sortedPlaceholderEntries = Object.entries(placeholders).sort(
+    (a, b) => b[0].length - a[0].length,
+  );
+
   const restoreAll = (maskedText: string): string => {
-    const unmaskedSymmetry = symmetry.untransform(maskedText);
-    return redactionPass.restore(unmaskedSymmetry);
+    let stepText = maskedText;
+    for (const group of sortedEntityMaskGroups) {
+      const startsWord = /^\w/.test(group.alias);
+      const endsWord = /\w$/.test(group.alias);
+      const re = new RegExp(
+        `${startsWord ? "\\b" : ""}${escapeRegExpLiteral(group.alias)}${endsWord ? "\\b" : ""}`,
+        "gi",
+      );
+      let occIdx = 0;
+      stepText = stepText.replace(re, () => {
+        const orig =
+          group.originals[Math.min(occIdx, group.originals.length - 1)];
+        occIdx += 1;
+        return orig;
+      });
+    }
+    const unmaskedSymmetry = symmetry.untransform(stepText);
+    let restored = redactionPass.restore(unmaskedSymmetry);
+    for (const [ph, orig] of sortedPlaceholderEntries) {
+      const re = new RegExp(escapeRegExpLiteral(ph), "gi");
+      restored = restored.replace(re, () => orig);
+    }
+    return restored;
   };
 
   const verifyGenericRestore = (
     maskedText: string,
     restoredText: string,
-  ): boolean => {
-    if (!maskedText || !restoredText) return false;
-    if (UNRESTORED_PLACEHOLDER_RE.test(restoredText)) {
-      return false;
-    }
-    for (const placeholder of Object.keys(placeholders)) {
-      if (restoredText.includes(placeholder)) {
-        return false;
-      }
-    }
-    for (const mask of symmetryOut.applied) {
-      if (
-        mask.masked !== mask.original &&
-        !rawPrompt.includes(mask.masked) &&
-        restoredText.includes(mask.masked)
-      ) {
-        return false;
-      }
-    }
-    for (const [placeholder, original] of Object.entries(placeholders)) {
-      if (maskedText.includes(placeholder) && !restoredText.includes(original)) {
-        return false;
-      }
-    }
-    for (const mask of symmetryOut.applied) {
-      if (maskedText.includes(mask.masked) && !restoredText.includes(mask.original)) {
-        return false;
-      }
-    }
-    return true;
-  };
+  ): boolean =>
+    verifyRedactionAndSymmetryRestore({
+      rawPrompt,
+      maskedText,
+      restoredText,
+      placeholders,
+      appliedSymmetryMasks: symmetryOut.applied,
+    });
 
   const roundTripRestored = restoreAll(papillonGeneralizedPrompt);
   const symmetryHomomorphismVerified =
-    roundTripRestored === rawPrompt &&
+    roundTripRestored.normalize("NFKC").toLowerCase() ===
+      rawPrompt.normalize("NFKC").toLowerCase() &&
     verifyGenericRestore(papillonGeneralizedPrompt, roundTripRestored);
 
   const stage1Passed =
@@ -1219,11 +1360,20 @@ export async function runArgonAutonomousWorkflow(
       }
     }
 
+    const verifiedHosts = att.modelAttestation.verifiedHosts;
+    const configuredHosts = att.modelAttestation.configuredHosts;
+    const unverifiedHosts = att.modelAttestation.unverifiedHosts;
+    const measurementRegisterCount =
+      att.modelAttestation.measurementRegisters.length;
+    const dmVerityRootHashPresent = Boolean(
+      att.modelAttestation.dmVerityRootHash,
+    );
     const releaseMatch =
       Boolean(att.routerReleaseDigest) &&
-      Boolean(att.modelAttestation.dmVerityRootHash) &&
-      att.modelAttestation.unverifiedHosts === 0 &&
-      att.modelAttestation.verifiedHosts > 0;
+      dmVerityRootHashPresent &&
+      unverifiedHosts === 0 &&
+      verifiedHosts > 0 &&
+      measurementRegisterCount > 0;
 
     const enclaveAttestationVerified =
       verdict.c5Pass &&
@@ -1244,28 +1394,17 @@ export async function runArgonAutonomousWorkflow(
     if (!att.routerReleaseDigest) {
       failedInvariants.push("RouterReleaseDigestMissing");
     }
-    if (
-      att.modelAttestation.unverifiedHosts > 0 ||
-      att.modelAttestation.verifiedHosts === 0
-    ) {
+    if (unverifiedHosts > 0 || verifiedHosts === 0) {
       failedInvariants.push("UnverifiedEnclaveHosts");
+    }
+    if (measurementRegisterCount === 0) {
+      failedInvariants.push("MeasurementRegistersMissing");
     }
     if (plaintextLeakCount > 0) {
       failedInvariants.push("I1_NoPlaintextEgress");
     }
 
-    const stream = buildHighEntropyMeasurementStream(
-      `${primaryHost}:${att.modelAttestation.dmVerityRootHash}:${att.routerReleaseDigest}:${paddedFrame.bucketBytes}`,
-      4096,
-    );
-    const entropyBitsPerByte = computeBytesShannonEntropy(stream);
-    const repeated16ByteBlocks = countRepeated16ByteBlocks(stream);
-
-    const passed =
-      enclaveAttestationVerified &&
-      entropyBitsPerByte > 7.5 &&
-      repeated16ByteBlocks === 0 &&
-      plaintextLeakCount === 0;
+    const passed = enclaveAttestationVerified && plaintextLeakCount === 0;
 
     return {
       candidateModel,
@@ -1273,11 +1412,14 @@ export async function runArgonAutonomousWorkflow(
       verdict,
       primaryHost,
       docChecksPassed,
+      verifiedHosts,
+      configuredHosts,
+      unverifiedHosts,
+      measurementRegisterCount,
+      dmVerityRootHashPresent,
       releaseMatch,
       enclaveAttestationVerified,
       failedInvariants,
-      entropyBitsPerByte,
-      repeated16ByteBlocks,
       passed,
     };
   };
@@ -1296,11 +1438,14 @@ export async function runArgonAutonomousWorkflow(
       candidateNodeId: initialEval.primaryHost,
       candidateModelId: initialEnclaveModel,
       enclaveAttestationVerified: initialEval.enclaveAttestationVerified,
+      verifiedHosts: initialEval.verifiedHosts,
+      configuredHosts: initialEval.configuredHosts,
+      unverifiedHosts: initialEval.unverifiedHosts,
+      measurementRegisterCount: initialEval.measurementRegisterCount,
+      dmVerityRootHashPresent: initialEval.dmVerityRootHashPresent,
+      releaseDigestMatched: initialEval.releaseMatch,
       failedInvariants: initialEval.failedInvariants,
-      entropyBitsPerByte: initialEval.entropyBitsPerByte,
-      repeated16ByteBlocks: initialEval.repeated16ByteBlocks,
       plaintextLeakMatches: plaintextLeakCount,
-      postPopAllZero: true,
       passed: true,
     });
   } else {
@@ -1324,11 +1469,14 @@ export async function runArgonAutonomousWorkflow(
       candidateNodeId: initialEval.primaryHost,
       candidateModelId: initialEnclaveModel,
       enclaveAttestationVerified: initialEval.enclaveAttestationVerified,
+      verifiedHosts: initialEval.verifiedHosts,
+      configuredHosts: initialEval.configuredHosts,
+      unverifiedHosts: initialEval.unverifiedHosts,
+      measurementRegisterCount: initialEval.measurementRegisterCount,
+      dmVerityRootHashPresent: initialEval.dmVerityRootHashPresent,
+      releaseDigestMatched: initialEval.releaseMatch,
       failedInvariants: initialEval.failedInvariants,
-      entropyBitsPerByte: initialEval.entropyBitsPerByte,
-      repeated16ByteBlocks: initialEval.repeated16ByteBlocks,
       plaintextLeakMatches: plaintextLeakCount,
-      postPopAllZero: false,
       passed: false,
       remediationApplied:
         `Real verification of ${initialEnclaveModel} (${initialEval.primaryHost}) failed (${failureReasons.join("; ") || "measurement verification failed"}). ` +
@@ -1340,11 +1488,14 @@ export async function runArgonAutonomousWorkflow(
       candidateNodeId: reroutedEval.primaryHost,
       candidateModelId: alternateEnclaveModel,
       enclaveAttestationVerified: reroutedEval.enclaveAttestationVerified,
+      verifiedHosts: reroutedEval.verifiedHosts,
+      configuredHosts: reroutedEval.configuredHosts,
+      unverifiedHosts: reroutedEval.unverifiedHosts,
+      measurementRegisterCount: reroutedEval.measurementRegisterCount,
+      dmVerityRootHashPresent: reroutedEval.dmVerityRootHashPresent,
+      releaseDigestMatched: reroutedEval.releaseMatch,
       failedInvariants: reroutedEval.failedInvariants,
-      entropyBitsPerByte: reroutedEval.entropyBitsPerByte,
-      repeated16ByteBlocks: reroutedEval.repeated16ByteBlocks,
       plaintextLeakMatches: plaintextLeakCount,
-      postPopAllZero: reroutedEval.passed,
       passed: reroutedEval.passed,
     });
 
@@ -1495,8 +1646,7 @@ export async function runArgonAutonomousWorkflow(
   };
 
   const realDmVerityHex =
-    activeAttestation.modelAttestation.dmVerityRootHash ||
-    bytesToHex(sha256(utf8ToBytes(activePrimaryHost)));
+    activeAttestation.modelAttestation.dmVerityRootHash || "";
   const realRtmrHex =
     activeAttestation.modelAttestation.measurementRegisters[0] ||
     activeAttestation.routerReleaseDigest ||
@@ -1517,15 +1667,17 @@ export async function runArgonAutonomousWorkflow(
       sandboxId: activePrimaryHost,
       imageMeasurementHex: realDmVerityHex,
       rtmr3Hex: realRtmrHex,
-      zeroizedOnDestroy: activeEval.passed,
     },
     verificationSignal: {
       enclaveAttestationVerified: activeEval.enclaveAttestationVerified,
-      entropyBitsPerByte: activeEval.entropyBitsPerByte,
-      repeated16ByteBlocks: activeEval.repeated16ByteBlocks,
-      postPopAllZero: activeEval.passed,
+      verifiedHosts: activeEval.verifiedHosts,
+      configuredHosts: activeEval.configuredHosts,
+      unverifiedHosts: activeEval.unverifiedHosts,
+      measurementRegisterCount: activeEval.measurementRegisterCount,
+      dmVerityRootHashPresent: activeEval.dmVerityRootHashPresent,
+      releaseDigestMatched: activeEval.releaseMatch,
       formula:
-        "enclaveAttestationVerified === true && entropyBitsPerByte > 7.5 && repeated16ByteBlocks === 0",
+        "enclaveAttestationVerified === true && verifiedHosts > 0 && unverifiedHosts === 0 && measurementRegisterCount > 0 && dmVerityRootHashPresent === true && releaseDigestMatched === true",
     },
   };
 
@@ -1597,6 +1749,7 @@ export async function runArgonAutonomousWorkflow(
         const inHandle = String(args.inputHandle ?? "$INPUT");
         const resolvedInput = handleStore.get(inHandle) ?? papillonGeneralizedPrompt;
         const outHandle = registerHandle(1, resolvedInput);
+        handleStore.set("$DIGEST_1", hashToContentFree32Hex(resolvedInput));
         const result = {
           status: stage1.passed ? "ok" : "failed",
           passed: stage1.passed,
@@ -1606,12 +1759,19 @@ export async function runArgonAutonomousWorkflow(
           attestedRedactionCount: stage1.attestedFilter.redactionCount,
           bucketBytes: stage1.verificationSignal.bucketBytes,
           plaintextLeakCount: stage1.verificationSignal.plaintextLeakCount,
-          contentSha256: hashToContentFree32Hex(resolvedInput),
+          contentHandle: "$DIGEST_1",
         };
         assertContentFree(result, "$.toolExecutor.result(scrub_and_symmetry_mask)");
         return result;
       }
       case "verify_two_hop_enclave_and_quorum": {
+        handleStore.set(
+          "$ROUTER_1",
+          hashToContentFree32Hex(
+            activeAttestation.routerReleaseDigest || activeAttestation.routerHost,
+          ),
+        );
+        handleStore.set("$MEASUREMENT_1", hashToContentFree32Hex(realDmVerityHex));
         const result = {
           status: stage2.passed && stage3.passed ? "verified" : "failed",
           passed: stage2.passed && stage3.passed,
@@ -1619,10 +1779,8 @@ export async function runArgonAutonomousWorkflow(
           enclaveModel: activeEnclaveModel,
           checksPassed: stage2.verificationSignal.checksPassed,
           checksTotal: stage2.verificationSignal.checksTotal,
-          routerDigestHex: hashToContentFree32Hex(
-            activeAttestation.routerReleaseDigest || activeAttestation.routerHost,
-          ),
-          enclaveMeasurementHex: hashToContentFree32Hex(realDmVerityHex),
+          routerHandle: "$ROUTER_1",
+          enclaveMeasurementHandle: "$MEASUREMENT_1",
         };
         assertContentFree(result, "$.toolExecutor.result(verify_two_hop_enclave_and_quorum)");
         return result;
@@ -1646,6 +1804,7 @@ export async function runArgonAutonomousWorkflow(
           2,
           `${searchRes.topDocId}: ${searchRes.topTitle}`,
         );
+        handleStore.set("$DOC_1", hashToContentFree32Hex(searchRes.topDocId));
         const result = {
           status: "ok",
           outputHandle: outHandle,
@@ -1654,7 +1813,7 @@ export async function runArgonAutonomousWorkflow(
           fusionEngine: searchRes.engines.fusion,
           totalDocs: searchRes.totalDocs,
           matchingReceiptsCount: searchRes.matchingReceiptsCount,
-          topDocSha256: hashToContentFree32Hex(searchRes.topDocId),
+          topDocHandle: "$DOC_1",
         };
         assertContentFree(result, "$.toolExecutor.result(search_atlas_hybrid_kb)");
         return result;
@@ -1663,12 +1822,13 @@ export async function runArgonAutonomousWorkflow(
         const inHandle = String(args.inputHandle ?? "$INPUT");
         const resolvedPrompt = handleStore.get(inHandle) ?? papillonGeneralizedPrompt;
         const outHandle = registerHandle(3, resolvedPrompt);
+        handleStore.set("$DIGEST_2", hashToContentFree32Hex(resolvedPrompt));
         const result = {
           status: "completed",
           outputHandle: outHandle,
           enclaveModel: activeEnclaveModel,
           outputTokenEstimate: estimateTokens(resolvedPrompt),
-          outputSha256: hashToContentFree32Hex(resolvedPrompt),
+          outputDigestHandle: "$DIGEST_2",
           attested: stage3.passed,
         };
         assertContentFree(result, "$.toolExecutor.result(invoke_attested_enclave)");
@@ -1676,14 +1836,18 @@ export async function runArgonAutonomousWorkflow(
       }
       case "anchor_arc_settlement_with_human_gate": {
         // Server enforces actual human approval; never trusts model's humanApproved argument
+        handleStore.set(
+          "$RECEIPT_1",
+          hashToContentFree32Hex(
+            `${activePrimaryHost}:${realDmVerityHex}:${String(humanApproved)}`,
+          ),
+        );
         const result = {
           status: humanApproved ? "executed" : "blocked_pending_human",
           requiresHumanApproval: true,
           humanApproved,
           stateChangedOnChain: humanApproved,
-          receiptSha256: hashToContentFree32Hex(
-            `${activePrimaryHost}:${realDmVerityHex}:${String(humanApproved)}`,
-          ),
+          receiptHandle: "$RECEIPT_1",
         };
         assertContentFree(result, "$.toolExecutor.result(anchor_arc_settlement_with_human_gate)");
         return result;
@@ -1709,7 +1873,7 @@ export async function runArgonAutonomousWorkflow(
 
   const enclavePlannerPrompt =
     `Task (redacted): ${papillonGeneralizedPrompt}\n\n` +
-    `Use the handle-based verification tools if needed, then provide a concise response (no em dashes) completing the ${taskDescriptor.taskKind} task using the redacted placeholders as written.`;
+    `Use the handle-based verification tools if needed, then provide a concise response (no em dashes) completing the ${taskDescriptor.taskKind} task using the redacted placeholders as written. Write plain sentences for the person who asked: do not mention tools, handles such as \$INPUT or \$RESULT_1, or add a verification summary.`;
   assertOutboundPrivacyInvariant(enclavePlannerPrompt, originalSensitiveTokens);
 
   let planner: ArgonPlannerDescriptor;
@@ -1931,9 +2095,11 @@ export async function runArgonAutonomousWorkflow(
     modeHeader,
     `Stage 1 mechanical redaction and symmetry filter redacted ${stage1.redactionCount} sensitive items and padded the enclave payload to ${stage1.verificationSignal.bucketBytes} bytes with zero plaintext leaks.`,
     `Stage 2 verified ${stage2.verificationSignal.checksPassed} of ${stage2.verificationSignal.checksTotal} hardware, Sigstore, Atlas Hybrid Search, and Circle Arc registry checks across router ${stage2.routerHost} (AMD SEV-SNP) and model enclave ${stage2.selectedEnclaveHost}.`,
-    failedOver
-      ? `Stage 3 enclave verifier detected a real verification failure on ${initialEnclaveModel} (${initialEval.primaryHost}), failed over to ${activeEnclaveModel} (${activePrimaryHost}), and verified its live hardware measurement registers.`
-      : `Stage 3 enclave verifier confirmed live hardware measurement registers on ${activePrimaryHost} with ${stage3.verificationSignal.entropyBitsPerByte} bits per byte of stream entropy and zero repeated 16-byte blocks.`,
+    !stage3.passed
+      ? `Stage 3 enclave verifier rejected ${activeEnclaveModel} (${activePrimaryHost}) because live hardware attestation or release digest verification did not pass.`
+      : failedOver
+        ? `Stage 3 enclave verifier detected a real verification failure on ${initialEnclaveModel} (${initialEval.primaryHost}), failed over to ${activeEnclaveModel} (${activePrimaryHost}), and verified ${stage3.verificationSignal.verifiedHosts} of ${stage3.verificationSignal.configuredHosts} host(s) and ${stage3.verificationSignal.measurementRegisterCount} hardware measurement register(s).`
+        : `Stage 3 enclave verifier confirmed live attestation on ${activePrimaryHost} (${stage3.verificationSignal.verifiedHosts} of ${stage3.verificationSignal.configuredHosts} verified host(s), ${stage3.verificationSignal.measurementRegisterCount} hardware measurement register(s), dm-verity root and release digest matched).`,
     enclaveModelProducedOutput
       ? `Stage 4 ran planner ${planner.provider}:${planner.model} over a content-free TaskDescriptor ($INPUT handle, dataSentToGoogle="${DATA_SENT_TO_GOOGLE}") and restored the ${activeEnclaveModel} enclave results locally.`
       : `Stage 4 failed because the sealed computer did not return an answer.`,

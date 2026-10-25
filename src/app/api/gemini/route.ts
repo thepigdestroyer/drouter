@@ -174,7 +174,8 @@ export async function POST(request: NextRequest) {
       body.alwaysHide.length > MAX_ALWAYS_HIDE_TERMS ||
       body.alwaysHide.some(
         (item) =>
-          typeof item !== "string" || item.length > MAX_ALWAYS_HIDE_TERM_CHARS,
+          typeof item !== "string" ||
+          item.normalize("NFKC").trim().length > MAX_ALWAYS_HIDE_TERM_CHARS,
       )
     ) {
       return NextResponse.json(

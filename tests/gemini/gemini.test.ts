@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   ALLOWED_PLANNER_TOOLS,
+  ALLOW_LEGACY_ORCHESTRATOR_SHA256_UNTIL_MIGRATED,
   ARGON_COMPANION_MODELS,
   ARGON_TOOLKIT_MANIFEST,
   assertContentFree,
@@ -18,14 +19,18 @@ import {
   GEMINI_4_ARGON_MODEL_ID,
   generateInteractionsSdkSnippets,
   HONEST_DATA_HANDLING_STATEMENT,
+  MAX_ALWAYS_HIDE_TERM_CHARS,
+  MAX_ALWAYS_HIDE_TERMS,
   PlannerBudgetExceededError,
   PrivacyInvariantViolationError,
   redactForNonEnclaveBoundary,
   runArgonAutonomousWorkflow,
+  sanitizeAlwaysHideTerms,
   sanitizeToArgonConfig,
   ToolPolicyViolationError,
   validateArgonRequestConfig,
   validateToolCallArguments,
+  verifyRedactionAndSymmetryRestore,
   type GenAIInteractionsClientLike,
   type TinfoilPlannerClientLike,
 } from "@/lib/gemini";
@@ -149,7 +154,11 @@ describe("Gemini 4 Argon Config Contract, TaskDescriptor & Content-Free Egress F
   });
 
   it("proves assertContentFree rejects free text, names, numbers-in-strings, and smuggled content", () => {
-    // 1. Valid handles, enums, numbers, booleans, and real SHA-256 hex hashes pass
+    // 1. Valid handles, enums, numbers, and booleans pass (and legacy 64-char SHA-256 is disabled)
+    expect(ALLOW_LEGACY_ORCHESTRATOR_SHA256_UNTIL_MIGRATED).toBe(false);
+    expect(HONEST_DATA_HANDLING_STATEMENT.googleCanSee.join(" ")).not.toContain(
+      "SHA-256",
+    );
     expect(() =>
       assertContentFree({
         taskKind: "analyze",
@@ -159,8 +168,7 @@ describe("Gemini 4 Argon Config Contract, TaskDescriptor & Content-Free Egress F
         inputTokenEstimate: 256,
         passed: true,
         status: "verified",
-        contentSha256:
-          "0x9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        contentHandle: "$DIGEST_1",
       }),
     ).not.toThrow();
 
@@ -1458,6 +1466,158 @@ describe("Autonomous 6-Stage Split-Knowledge Orchestrator (orchestrator.ts)", ()
       for (const banned of BANNED_SCRIPTED_STRINGS) {
         expect(combinedText.toLowerCase()).not.toContain(banned.toLowerCase());
       }
+      expect(combinedText).not.toContain("entropyBitsPerByte");
+      expect(combinedText).not.toContain("repeated16ByteBlocks");
+      expect(combinedText).not.toContain("postPopAllZero");
+      expect(combinedText).not.toContain("zeroizedOnDestroy");
+      expect(combinedText).not.toContain("stream entropy");
     }
+  });
+
+  it("normalises (NFKC), trims, drops empty/1-char, deduplicates case-insensitively, and caps count and length of alwaysHide terms", () => {
+    const rawTerms = [
+      "",
+      "   ",
+      "\t\n",
+      "x",
+      "  Halden & Moss LLP  ",
+      "halden & moss llp",
+      "HALDEN & MOSS LLP",
+      "\uFF28\uFF41\uFF4C\uFF44\uFF45\uFF4E & \uFF2D\uFF4F\uFF53\uFF53 LLP", // Fullwidth NFKC -> "Halden & Moss LLP"
+      "Caf\u0065\u0301 Noir", // NFD -> NFKC "Café Noir"
+      "caf\u00e9 noir", // NFC duplicate in lowercase
+      "A".repeat(MAX_ALWAYS_HIDE_TERM_CHARS + 50),
+    ];
+
+    const sanitized = sanitizeAlwaysHideTerms(rawTerms);
+    expect(sanitized).toEqual([
+      "Halden & Moss LLP",
+      "Caf\u00e9 Noir",
+      "A".repeat(MAX_ALWAYS_HIDE_TERM_CHARS),
+    ]);
+
+    const overCountInput = Array.from(
+      { length: MAX_ALWAYS_HIDE_TERMS + 20 },
+      (_, i) => `CustomTerm_${i + 1}`,
+    );
+    const capped = sanitizeAlwaysHideTerms(overCountInput);
+    expect(capped).toHaveLength(MAX_ALWAYS_HIDE_TERMS);
+    expect(capped[0]).toBe("CustomTerm_1");
+    expect(capped[MAX_ALWAYS_HIDE_TERMS - 1]).toBe(
+      `CustomTerm_${MAX_ALWAYS_HIDE_TERMS}`,
+    );
+  });
+
+  it("verifies restore check for repeated placeholders, overlapping terms (longest first), case differences, and per-run CSPRNG symmetry parameters", async () => {
+    // 1. Direct unit tests on verifyRedactionAndSymmetryRestore
+    const overlappingPlaceholders = {
+      "[ENTITY_1]": "Halden & Moss LLP",
+      "[ENTITY_2]": "Halden & Moss",
+      "[ENTITY_3]": "Moss",
+    };
+
+    // Repeated placeholder [ENTITY_1] x2 + overlapping [ENTITY_2] + [ENTITY_3]: passes when all are restored
+    expect(
+      verifyRedactionAndSymmetryRestore({
+        rawPrompt:
+          "Review Halden & Moss LLP, Halden & Moss, and Moss for Halden & Moss LLP.",
+        maskedText:
+          "Summary for [ENTITY_1], [ENTITY_2], and [ENTITY_3] with [entity_1].",
+        restoredText:
+          "Summary for Halden & Moss LLP, Halden & Moss, and Moss with HALDEN & MOSS LLP.",
+        placeholders: overlappingPlaceholders,
+      }),
+    ).toBe(true);
+
+    // Fails when repeated placeholder [ENTITY_1] appears twice in maskedText but only once in restoredText
+    expect(
+      verifyRedactionAndSymmetryRestore({
+        rawPrompt: "Review Halden & Moss LLP and Halden & Moss LLP.",
+        maskedText: "Summary for [ENTITY_1] and [ENTITY_1].",
+        restoredText: "Summary for Halden & Moss LLP and another firm.",
+        placeholders: { "[ENTITY_1]": "Halden & Moss LLP" },
+      }),
+    ).toBe(false);
+
+    // Fails when shorter overlapping term [ENTITY_3] ("Moss") was NOT restored even though "Halden & Moss LLP" contains "Moss"
+    expect(
+      verifyRedactionAndSymmetryRestore({
+        rawPrompt: "Review Halden & Moss LLP, Halden & Moss, and Moss.",
+        maskedText: "Summary for [ENTITY_1], [ENTITY_2], and [ENTITY_3].",
+        restoredText:
+          "Summary for Halden & Moss LLP, Halden & Moss, and missing.",
+        placeholders: overlappingPlaceholders,
+      }),
+    ).toBe(false);
+
+    // 2. End-to-end orchestrator run with overlapping alwaysHide terms, repeated placeholders, case differences, and CSPRNG symmetry
+    const overlappingPrompt =
+      "Compare PROJECT HYPERION and Project Hyperion for Halden & Moss LLP, Halden & Moss, and Moss (fee $80.00, contact priya.natarajan@haldenmoss.example).";
+
+    const run = await runArgonAutonomousWorkflow({
+      taskPrompt: overlappingPrompt,
+      // Intentionally passed shortest-first with case duplicates and unnormalized fullwidth characters
+      alwaysHide: [
+        "   ",
+        "Moss",
+        "Halden & Moss",
+        "Halden & Moss LLP",
+        "\uFF2D\uFF4F\uFF53\uFF53",
+      ],
+      attestationFetcher: async (m) => buildMockHealthyAttestation(m),
+      tinfoilClient: {
+        ready: vi.fn(async () => {}),
+        chat: {
+          completions: {
+            create: vi.fn(async () => ({
+              id: "chatcmpl-overlap-case",
+              choices: [
+                {
+                  finish_reason: "stop",
+                  message: {
+                    role: "assistant",
+                    // Emit repeated placeholders, lowercase placeholder [entity_1], and lowercase symmetry alias "project halcyon"
+                    content:
+                      "Reviewed [ENTITY_1], [entity_1], [ENTITY_2], and [ENTITY_3] for project halcyon and Project Halcyon ([EMAIL_1]).",
+                  },
+                },
+              ],
+              usage: { prompt_tokens: 100, completion_tokens: 30 },
+            })),
+          },
+        },
+      },
+    });
+
+    expect(run.stages.stage1.passed).toBe(true);
+    expect(
+      run.stages.stage1.verificationSignal.symmetryHomomorphismVerified,
+    ).toBe(true);
+    expect(run.stages.stage3.passed).toBe(true);
+    expect(run.stages.stage3.verificationSignal).toEqual({
+      enclaveAttestationVerified: true,
+      verifiedHosts: 1,
+      configuredHosts: 1,
+      unverifiedHosts: 0,
+      measurementRegisterCount: 1,
+      dmVerityRootHashPresent: true,
+      releaseDigestMatched: true,
+      formula:
+        "enclaveAttestationVerified === true && verifiedHosts > 0 && unverifiedHosts === 0 && measurementRegisterCount > 0 && dmVerityRootHashPresent === true && releaseDigestMatched === true",
+    });
+    expect(run.stages.stage4.passed).toBe(true);
+    expect(
+      run.stages.stage4.verificationSignal.homomorphicRestoreVerified,
+    ).toBe(true);
+    expect(run.stages.stage4.restoredClientOutput).toContain(
+      "Halden & Moss LLP",
+    );
+    expect(
+      run.stages.stage4.restoredClientOutput.toLowerCase(),
+    ).toContain("project hyperion");
+    expect(run.stages.stage4.restoredClientOutput).toContain(
+      "priya.natarajan@haldenmoss.example",
+    );
+    expect(run.overallPassed).toBe(true);
   });
 });

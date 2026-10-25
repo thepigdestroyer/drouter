@@ -304,7 +304,7 @@ export const MAX_GOOGLE_BOUND_HEX_LENGTH = 16;
  * `payload`, `interactionsPayload`, `outboundGeminiRequest`, `canonicalRequest`, `taskDescriptor`,
  * and all JSON-encoded strings `insideJsonString === true`) unconditionally reject any hex > 16 chars.
  */
-export const ALLOW_LEGACY_ORCHESTRATOR_SHA256_UNTIL_MIGRATED = true;
+export const ALLOW_LEGACY_ORCHESTRATOR_SHA256_UNTIL_MIGRATED = false;
 
 export const SAFE_CALL_ID_REGEX =
   /^(?:call|tc|inter)-(?:[1-9]\d{0,2}|turn-[1-9]\d{0,1}|argon-turn-[1-9]|(?:[1-9]-)?(?:scrub_and_symmetry_mask|verify_two_hop_enclave_and_quorum|search_atlas_hybrid_kb|invoke_attested_enclave|anchor_arc_settlement_with_human_gate)|[1-9]-[1-9]\d{0,1})$/;

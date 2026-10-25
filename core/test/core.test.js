@@ -164,13 +164,13 @@ test("TaskDescriptor validator accepts valid bucketed descriptor, canonicalizes 
 });
 
 test("assertContentFree blocks all 5 CRITICAL-2 bypasses as well as free text and unallowlisted keys", () => {
-  // Valid payload with handles, enums, numbers under allowlisted numeric keys, and SHA-256 digest under allowlisted hash key
+  // Valid payload with handles, enums, and numbers under allowlisted numeric keys
   assert.doesNotThrow(() => {
     assertContentFree({
       taskDescriptor: makeValidDescriptor(),
       topic: LOOKUP_TOPICS[0],
       resultHandle: "$RESULT_1",
-      contentSha256: "0x9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      contentHandle: "$DIGEST_1",
       status: "allowed",
       id: "call-1",
       call_id: "call-1-scrub_and_symmetry_mask",
@@ -582,9 +582,13 @@ test("assertContentFree blocks all 5 CRITICAL-2 bypasses as well as free text an
   let idx = 0;
   for (const [toolName, rawRes] of Object.entries(rawToolResults)) {
     idx += 1;
-    assert.doesNotThrow(() => assertContentFree(rawRes, `$.toolExecutor.result(${toolName})`));
+    assert.throws(
+      () => assertContentFree(rawRes, `$.toolExecutor.result(${toolName})`),
+      ContentFreeEgressError,
+    );
     const googleSafe = replaceDigestsWithOpaqueHandles(rawRes, digestState);
     assert.equal(/0x[0-9a-f]{16,}/i.test(JSON.stringify(googleSafe)), false);
+    assert.doesNotThrow(() => assertContentFree(googleSafe, `$.toolExecutor.result(${toolName})`));
     assert.doesNotThrow(() => assertContentFree(googleSafe, `$.toolResult(${toolName})`));
     const resultStep = {
       type: "function_result",

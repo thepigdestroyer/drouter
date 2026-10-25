@@ -365,6 +365,10 @@ describe("deRoute wave 4/5 Argon & Atlas plain-language helpers", () => {
       expect(cleanJson).not.toContain("faultInjected");
       expect(cleanJson).not.toContain("selfHealed");
       expect(cleanJson).not.toContain("selfHealingTriggeredAndResolved");
+      expect(cleanJson).not.toContain("entropyBitsPerByte");
+      expect(cleanJson).not.toContain("repeated16ByteBlocks");
+      expect(cleanJson).not.toContain("postPopAllZero");
+      expect(cleanJson).not.toContain("zeroizedOnDestroy");
 
       for (const banned of BANNED_SCRIPTED_STRINGS) {
         expect(cleanJson.toLowerCase()).not.toContain(banned.toLowerCase());

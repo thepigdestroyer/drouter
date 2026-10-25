@@ -778,9 +778,11 @@ function ArgonAuthenticatedView() {
                                 <div>
                                   Enclave attestation verified:{" "}
                                   {String(att.enclaveAttestationVerified)} |
-                                  Stream entropy: {att.entropyBitsPerByte}{" "}
-                                  bits/byte | Repeated 16B blocks:{" "}
-                                  {att.repeated16ByteBlocks}
+                                  Verified hosts: {att.verifiedHosts}/
+                                  {att.configuredHosts} | Measurement
+                                  registers: {att.measurementRegisterCount} |
+                                  Release digest matched:{" "}
+                                  {String(att.releaseDigestMatched)}
                                 </div>
                                 {att.remediationApplied && (
                                   <div className="text-ink">

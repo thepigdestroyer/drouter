@@ -588,14 +588,17 @@ describe("Shared Content-Free Egress Firewall: Round 1 & Round 2 Adversarial Sui
     };
 
     for (const [toolName, rawRes] of Object.entries(rawToolResults)) {
-      // Current orchestrator local assertion passes
+      // Unmigrated 64-char SHA-256 digests are rejected now that ALLOW_LEGACY_ORCHESTRATOR_SHA256_UNTIL_MIGRATED is false
       expect(() =>
         assertContentFree(rawRes, `$.toolExecutor.result(${toolName})`),
-      ).not.toThrow();
+      ).toThrow(ContentFreeEgressError);
 
       // Google-bound replacement strips all 0x digests and substitutes opaque handles
       const googleSafe = replaceDigestsWithOpaqueHandles(rawRes, digestState);
       expect(JSON.stringify(googleSafe)).not.toMatch(/0x[0-9a-f]{16,}/);
+      expect(() =>
+        assertContentFree(googleSafe, `$.toolExecutor.result(${toolName})`),
+      ).not.toThrow();
       expect(() =>
         assertContentFree(googleSafe, `$.toolResult(${toolName})`),
       ).not.toThrow();

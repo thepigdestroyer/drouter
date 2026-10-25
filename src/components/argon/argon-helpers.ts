@@ -353,6 +353,7 @@ export function formatPlainRestoredOutput(
     /\bover\s+server-resolved\s+handle\s+\$INPUT\s*/gi,
     "",
   );
+  cleaned = cleaned.replace(/\s*\bVerification Summary\b[\s\S]*$/i, "");
 
   return sanitizeJargonToPlainWords(cleaned);
 }
@@ -425,9 +426,7 @@ export function buildPlainTimelineSteps(params: {
   const noAnswerReturned =
     stage4.restoredClientOutput === "The sealed computer did not return an answer" ||
     stage4.enclaveCompletionMasked === "The sealed computer did not return an answer";
-  const runKindNote = isLiveRun
-    ? `${plannerPrivacyNote} The sealed computer finished the work and your device put your real names, dates, and numbers back in place.`
-    : `${plannerPrivacyNote} The sealed computer finished the work and your device put your real names, dates, and numbers back in place.`;
+  const runKindNote = `${plannerPrivacyNote} The sealed computer finished the work and your device put your real names, dates, and numbers back in place.`;
   const step3Result = step3Passed
     ? `${plannerBadgeText}. ${runKindNote}`
     : noAnswerReturned
@@ -571,9 +570,13 @@ export function formatCleanRunJsonForDisplay(
           candidateNodeId: att.candidateNodeId,
           candidateModelId: att.candidateModelId,
           enclaveAttestationVerified: att.enclaveAttestationVerified,
+          verifiedHosts: att.verifiedHosts,
+          configuredHosts: att.configuredHosts,
+          unverifiedHosts: att.unverifiedHosts,
+          measurementRegisterCount: att.measurementRegisterCount,
+          dmVerityRootHashPresent: att.dmVerityRootHashPresent,
+          releaseDigestMatched: att.releaseDigestMatched,
           failedInvariants: att.failedInvariants,
-          entropyBitsPerByte: att.entropyBitsPerByte,
-          repeated16ByteBlocks: att.repeated16ByteBlocks,
           plaintextLeakMatches: att.plaintextLeakMatches,
           passed: att.passed,
           remediationApplied: att.remediationApplied,
@@ -585,8 +588,13 @@ export function formatCleanRunJsonForDisplay(
         },
         verificationSignal: {
           enclaveAttestationVerified: stage3.verificationSignal.enclaveAttestationVerified,
-          entropyBitsPerByte: stage3.verificationSignal.entropyBitsPerByte,
-          repeated16ByteBlocks: stage3.verificationSignal.repeated16ByteBlocks,
+          verifiedHosts: stage3.verificationSignal.verifiedHosts,
+          configuredHosts: stage3.verificationSignal.configuredHosts,
+          unverifiedHosts: stage3.verificationSignal.unverifiedHosts,
+          measurementRegisterCount: stage3.verificationSignal.measurementRegisterCount,
+          dmVerityRootHashPresent: stage3.verificationSignal.dmVerityRootHashPresent,
+          releaseDigestMatched: stage3.verificationSignal.releaseDigestMatched,
+          formula: stage3.verificationSignal.formula,
         },
       },
       stage4,
