@@ -392,7 +392,7 @@ export default function ExplainPage() {
             Curious how Google Gemini and MongoDB Atlas fit in without ever
             seeing your words?{" "}
             <Link
-              href="/about#backend-partners"
+              href="/partners"
               className="ep-link font-medium text-ink"
             >
               Read about our backend partners -&gt;

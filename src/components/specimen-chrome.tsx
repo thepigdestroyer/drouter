@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useId, useState } from "react";
+import React, { useEffect, useId, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { AuthPill } from "@/components/auth-pill";
@@ -9,7 +9,6 @@ import {
   getCurrentVaultSession,
   lockVault,
   subscribeVaultSession,
-  type VaultSession,
 } from "@/lib/auth/vault";
 
 export type SpecimenRoutePath =
@@ -19,6 +18,7 @@ export type SpecimenRoutePath =
   | "/argon"
   | "/audit"
   | "/about"
+  | "/partners"
   | "/network"
   | "/login"
   | "/account"
@@ -43,16 +43,17 @@ export interface ExhibitSectionProps {
 
 export type SectionProps = ExhibitSectionProps;
 
-const SIGNED_OUT_NAV_ITEMS: ReadonlyArray<{
+export const SIGNED_OUT_NAV_ITEMS: ReadonlyArray<{
   label: string;
   href: SpecimenRoutePath;
 }> = [
   { label: "Home", href: "/" },
   { label: "How it works", href: "/explain" },
   { label: "About", href: "/about" },
+  { label: "Backend partners", href: "/partners" },
 ];
 
-const SIGNED_IN_NAV_ITEMS: ReadonlyArray<{
+export const SIGNED_IN_NAV_ITEMS: ReadonlyArray<{
   label: string;
   href: SpecimenRoutePath;
 }> = [
@@ -60,6 +61,7 @@ const SIGNED_IN_NAV_ITEMS: ReadonlyArray<{
   { label: "Agent", href: "/argon" },
   { label: "Proof", href: "/audit" },
   { label: "How it works", href: "/explain" },
+  { label: "Backend partners", href: "/partners" },
 ];
 
 export function SpecimenGrainOverlay() {
@@ -133,34 +135,34 @@ function DeRouteMarkIcon() {
   );
 }
 
+const getServerVaultSession = () => null;
+
 export function SpecimenHeader({
   activePath,
   rightSlot,
   onOpenTerminalModal,
   onOpenInspector,
 }: SpecimenHeaderProps) {
-  const [mobileOpen, setMobileOpen] = useState(false);
-  const [session, setSession] = useState<VaultSession | null>(null);
+  const [openForPath, setOpenForPath] = useState<string | null>(null);
+  const session = useSyncExternalStore(
+    subscribeVaultSession,
+    getCurrentVaultSession,
+    getServerVaultSession,
+  );
   const mobileMenuId = useId();
   const pathname = usePathname();
   const currentPath = activePath ?? (pathname as SpecimenRoutePath) ?? "/";
-
-  useEffect(() => {
-    setSession(getCurrentVaultSession());
-    return subscribeVaultSession(() => {
-      setSession(getCurrentVaultSession());
-    });
-  }, []);
-
-  useEffect(() => {
-    setMobileOpen(false);
-  }, [pathname]);
+  const mobileOpen = openForPath !== null && openForPath === (pathname ?? "");
+  const setMobileOpen = (next: boolean | ((prev: boolean) => boolean)) => {
+    const resolved = typeof next === "function" ? next(mobileOpen) : next;
+    setOpenForPath(resolved ? (pathname ?? "") : null);
+  };
 
   useEffect(() => {
     if (!mobileOpen) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        setMobileOpen(false);
+        setOpenForPath(null);
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -393,7 +395,7 @@ export function SpecimenFooter() {
           <Link href="/about" className="ep-link text-xs">
             About
           </Link>
-          <Link href="/about#backend-partners" className="ep-link text-xs">
+          <Link href="/partners" className="ep-link text-xs">
             Backend partners
           </Link>
           <a

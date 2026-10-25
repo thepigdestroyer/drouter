@@ -9,7 +9,13 @@ import {
   CONFIDENTIAL_SPACE_DOCS_GITHUB_URL,
   GOOGLE_EGRESS_CAPACITY_TABLE,
   SPLIT_KNOWLEDGE_EXPLAINER,
-} from "@/app/about/page";
+  metadata as partnersMetadata,
+} from "@/app/partners/page";
+import sitemap from "@/app/sitemap";
+import {
+  SIGNED_IN_NAV_ITEMS,
+  SIGNED_OUT_NAV_ITEMS,
+} from "@/components/specimen-chrome";
 import {
   ATLAS_COLLECTION_NAME,
   ATLAS_TEXT_INDEX_NAME,
@@ -114,15 +120,24 @@ function expectNoBannedJargonOrEmDash(text: string, contextLabel: string) {
   }
 }
 
-describe("Backend partners section (/about#backend-partners) and cross-links", () => {
-  it("renders #backend-partners section on /about with Gemini 4 Argon, MongoDB Atlas, and split-knowledge explainer", () => {
+describe("Backend partners page (/partners), navigation, and cross-links", () => {
+  it("renders #backend-partners section on /partners with Gemini 4 Argon, MongoDB Atlas, and split-knowledge explainer, and links from /about", () => {
+    const partnersSource = fs.readFileSync(
+      path.join(REPO_ROOT, "src/app/partners/page.tsx"),
+      "utf8",
+    );
+
+    expect(partnersMetadata.title).toBe("Backend partners · deRoute");
+    expect(partnersSource).toContain('activePath="/partners"');
+    expect(partnersSource).toContain('id="backend-partners"');
+    expect(partnersSource).toContain('aria-label="Backend partners"');
+
     const aboutSource = fs.readFileSync(
       path.join(REPO_ROOT, "src/app/about/page.tsx"),
       "utf8",
     );
-
-    expect(aboutSource).toContain('id="backend-partners"');
-    expect(aboutSource).toContain('aria-label="Backend partners"');
+    expect(aboutSource).not.toContain('id="backend-partners"');
+    expect(aboutSource).toContain('href="/partners"');
 
     expect(BACKEND_PARTNERS).toHaveLength(2);
     const [gemini, atlas] = BACKEND_PARTNERS;
@@ -193,6 +208,7 @@ describe("Backend partners section (/about#backend-partners) and cross-links", (
     );
 
     const filesToCheck = [
+      "src/app/partners/page.tsx",
       "src/app/about/page.tsx",
       "src/app/about/backend-partners-data.ts",
       "src/app/about/provider-catalog-client.tsx",
@@ -209,6 +225,7 @@ describe("Backend partners section (/about#backend-partners) and cross-links", (
     }
 
     for (const relPath of [
+      "src/app/partners/page.tsx",
       "src/app/about/page.tsx",
       "src/app/explain/page.tsx",
       "src/components/specimen-chrome.tsx",
@@ -280,13 +297,42 @@ describe("Backend partners section (/about#backend-partners) and cross-links", (
       path.join(REPO_ROOT, "src/app/explain/page.tsx"),
       "utf8",
     );
-    expect(explainSource).toContain('href="/about#backend-partners"');
+    expect(explainSource).toContain('href="/partners"');
+    expect(explainSource).not.toContain('href="/about#backend-partners"');
 
     const footerSource = fs.readFileSync(
       path.join(REPO_ROOT, "src/components/specimen-chrome.tsx"),
       "utf8",
     );
-    expect(footerSource).toContain('href="/about#backend-partners"');
+    expect(footerSource).toContain('href="/partners"');
+    expect(footerSource).not.toContain('href="/about#backend-partners"');
     expect(footerSource).toContain("Backend partners");
+  });
+
+  it("includes Backend partners (/partners) in signed-out nav, signed-in nav, and sitemap", () => {
+    const aboutIdx = SIGNED_OUT_NAV_ITEMS.findIndex(
+      (item) => item.href === "/about",
+    );
+    const signedOutPartnersIdx = SIGNED_OUT_NAV_ITEMS.findIndex(
+      (item) => item.href === "/partners" && item.label === "Backend partners",
+    );
+    expect(aboutIdx).toBeGreaterThanOrEqual(0);
+    expect(signedOutPartnersIdx).toBe(aboutIdx + 1);
+
+    const explainIdx = SIGNED_IN_NAV_ITEMS.findIndex(
+      (item) => item.href === "/explain",
+    );
+    const signedInPartnersIdx = SIGNED_IN_NAV_ITEMS.findIndex(
+      (item) => item.href === "/partners" && item.label === "Backend partners",
+    );
+    expect(explainIdx).toBeGreaterThanOrEqual(0);
+    expect(signedInPartnersIdx).toBe(explainIdx + 1);
+
+    const entries = sitemap();
+    expect(
+      entries.some(
+        (entry) => entry.url === "https://drouter-demo.vercel.app/partners",
+      ),
+    ).toBe(true);
   });
 });
