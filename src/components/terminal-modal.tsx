@@ -127,23 +127,32 @@ export function TerminalModal({
       <div className="ep-inset space-y-2 p-3.5 text-xs text-ink-2 sm:p-4">
         <div>
           <strong className="font-medium text-ink">
-            API key &amp; anonymous tokens:
+            Access keys &amp; Account page setup:
           </strong>{" "}
-          OpenAI SDKs require a non-empty{" "}
-          <code className="font-mono text-ink">apiKey</code> string, and deRoute
-          accepts any value (for example{" "}
-          <code className="font-mono text-ink">&quot;any-value&quot;</code>).
-          Requests without an{" "}
-          <code className="font-mono text-ink">x-drouter-credit</code> header
-          use the per-IP free tier; attaching an optional{" "}
-          <code className="font-mono text-ink">x-drouter-credit</code>{" "}
-          blind-signed token spends an anonymous token instead.
+          Open your{" "}
+          <a href="/account" className="ep-link font-medium text-ink">
+            Account page (/account)
+          </a>{" "}
+          to create a portable <code className="font-mono text-ink">drk_...</code>{" "}
+          access key from your anonymous tokens and copy ready-made setup for
+          OpenCode, Cursor, Continue, Aider, TypeScript, Python, or curl.
+          OpenAI SDKs also accept any non-empty{" "}
+          <code className="font-mono text-ink">apiKey</code> string (such as{" "}
+          <code className="font-mono text-ink">&quot;any-value&quot;</code>) for
+          the per-network free tier, or an optional{" "}
+          <code className="font-mono text-ink">x-drouter-credit</code> header.
         </div>
         <div>
           <strong className="font-medium text-ink">
-            No npm CLI package:
+            Private local proxy vs. hosted mode:
           </strong>{" "}
-          The zero-trust CLI runs directly from the repository (
+          Run{" "}
+          <code className="font-mono text-ink">
+            node deroute-proxy.mjs --key drk_...
+          </code>{" "}
+          on your machine to listen on{" "}
+          <code className="font-mono text-ink">http://127.0.0.1:4141/v1</code>{" "}
+          (or build from source with{" "}
           <code className="font-mono text-ink">
             git clone https://github.com/thepigdestroyer/drouter &amp;&amp; cd
             drouter &amp;&amp; npm ci &amp;&amp; node scripts/drouter-cli.mjs

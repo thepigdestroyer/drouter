@@ -1,4 +1,6 @@
 import { TinfoilAI } from "tinfoil";
+import { ACCESS_KEY_PREFIX, decodeAccessKey } from "@/lib/credits/access-key";
+import { formatCreditHeader } from "@/lib/credits/blind";
 import { verifyAndSpendCreditHeader } from "@/lib/credits/ledger";
 import {
   fetchLiveGatewayModels,
@@ -33,7 +35,7 @@ const CORS_HEADERS: Record<string, string> = {
     "Authorization, Content-Type, Accept, X-DRouter-Credit, X-DRouter-Credit-Token, X-DRouter-Scrub-PII, OpenAI-Organization, OpenAI-Project, X-Stainless-Lang, X-Stainless-Package-Version, X-Stainless-OS, X-Stainless-Arch, X-Stainless-Runtime, X-Stainless-Runtime-Version, X-Stainless-Async, X-Stainless-Retry-Count, X-Stainless-Timeout",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Expose-Headers":
-    "X-DRouter-Attested, X-DRouter-Node, X-DRouter-Enclave-Host, X-DRouter-Release, X-DRouter-Code-Fingerprint, X-DRouter-Enclave-Fingerprint, X-DRouter-Redactions, X-DRouter-Credit-Verified, X-DRouter-Credit-Nullifier, X-DRouter-Credit-Denomination",
+    "X-DRouter-Attested, X-DRouter-Node, X-DRouter-Enclave-Host, X-DRouter-Release, X-DRouter-Code-Fingerprint, X-DRouter-Enclave-Fingerprint, X-DRouter-Redactions, X-DRouter-Credit-Verified, X-DRouter-Credit-Nullifier, X-DRouter-Credit-Denomination, X-DRouter-Credits-Remaining",
 };
 
 function createChunkRestorer(scrubber: SessionScrubber | null) {
@@ -116,11 +118,18 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
-  // Interface I2: Verify blind-signed credit header (`x-drouter-credit` or `x-drouter-credit-token`)
+  // Interface I2 & K3: Verify blind-signed credit header (`x-drouter-credit` or `x-drouter-credit-token`)
+  // or `Authorization: Bearer drk_...` access key.
   // Requests with a valid credit token record the nullifier and bypass the per-IP free-tier limiter;
-  // requests without the header fall back to the per-IP free tier. Global caps always apply.
+  // requests without the header or with any other bearer value fall back to the per-IP free tier.
+  // Global caps always apply. Never log request bodies or keys.
   const rawCreditHeader =
     req.headers.get("x-drouter-credit") ?? req.headers.get("x-drouter-credit-token");
+  const authHeader = req.headers.get("authorization")?.trim() ?? "";
+  const bearerMatch = /^Bearer\s+(\S+)$/i.exec(authHeader);
+  const bearerToken = bearerMatch ? bearerMatch[1] : "";
+  const hasDrkBearer = bearerToken.startsWith(ACCESS_KEY_PREFIX);
+
   const creditResponseHeaders: Record<string, string> = {};
 
   if (rawCreditHeader !== null && rawCreditHeader.trim() !== "") {
@@ -139,6 +148,100 @@ export async function POST(req: Request): Promise<Response> {
     creditResponseHeaders["X-DRouter-Credit-Verified"] = "true";
     creditResponseHeaders["X-DRouter-Credit-Nullifier"] = creditSpend.nullifier;
     creditResponseHeaders["X-DRouter-Credit-Denomination"] = String(creditSpend.denomination);
+
+    const globalCheck = realTinfoilGlobalLimiter.consume(1);
+    if (!globalCheck.allowed) {
+      return Response.json(
+        {
+          error: {
+            message: "Hourly enclave gateway quota reached. Please retry later.",
+            type: "rate_limit_error",
+          },
+        },
+        {
+          status: 429,
+          headers: {
+            ...CORS_HEADERS,
+            ...creditResponseHeaders,
+            "Retry-After": String(globalCheck.retryAfterSec),
+          },
+        },
+      );
+    }
+  } else if (hasDrkBearer) {
+    const decoded = decodeAccessKey(bearerToken);
+    if (!decoded.ok) {
+      return Response.json(
+        {
+          error: {
+            message: "Malformed deRoute access key.",
+            type: "invalid_request_error",
+          },
+        },
+        { status: 400, headers: CORS_HEADERS },
+      );
+    }
+
+    let spentIndex = -1;
+    let spentResult: {
+      nullifier: string;
+      denomination: number;
+    } | null = null;
+    let hadInvalidSignature = false;
+
+    for (let i = 0; i < decoded.tokens.length; i++) {
+      const candidateHeader = formatCreditHeader(decoded.tokens[i]);
+      const spendAttempt = await verifyAndSpendCreditHeader(candidateHeader, parsed.model);
+      if (spendAttempt.ok) {
+        spentIndex = i;
+        spentResult = {
+          nullifier: spendAttempt.nullifier,
+          denomination: spendAttempt.denomination,
+        };
+        break;
+      }
+      if (spendAttempt.status === 400) {
+        hadInvalidSignature = true;
+        break;
+      }
+    }
+
+    if (hadInvalidSignature) {
+      return Response.json(
+        {
+          error: {
+            message: "Invalid credit token signature in access key.",
+            type: "credit_error",
+          },
+        },
+        { status: 400, headers: CORS_HEADERS },
+      );
+    }
+
+    if (!spentResult || spentIndex === -1) {
+      return Response.json(
+        {
+          error: {
+            message:
+              "All credits in this access key have been spent. Create a new access key on your deRoute Account page (/account).",
+            type: "credit_error",
+          },
+        },
+        {
+          status: 402,
+          headers: {
+            ...CORS_HEADERS,
+            "X-DRouter-Credits-Remaining": "0",
+          },
+        },
+      );
+    }
+
+    const remainingTokens = decoded.tokens.length - (spentIndex + 1);
+    creditResponseHeaders["X-DRouter-Credit-Verified"] = "true";
+    creditResponseHeaders["X-DRouter-Credit-Nullifier"] = spentResult.nullifier;
+    creditResponseHeaders["X-DRouter-Credit-Denomination"] = String(spentResult.denomination);
+    creditResponseHeaders["X-DRouter-Credits-Remaining"] = String(remainingTokens);
 
     const globalCheck = realTinfoilGlobalLimiter.consume(1);
     if (!globalCheck.allowed) {

@@ -103,37 +103,41 @@ export function buildTerminalSnippets(
   "model": "drouter-confidential/${resolvedModel}"
 }`;
 
-  const opencodeRemoteComment = `// Or point at your local zero-trust HPKE proxy (after running scripts/drouter-cli.mjs proxy):
-// "baseURL": "http://127.0.0.1:4141/v1"`;
+  const opencodeRemoteComment = `// Recommended: create an access key (drk_...) on your Account page (${PRODUCTION_BASE_URL}/account)
+// and run the local proxy: node deroute-proxy.mjs --key drk_...
+// Then set "baseURL": "http://127.0.0.1:4141/v1" (or use "apiKey": "drk_..." in hosted mode).`;
 
-  const proxySnippet = `# There is no npm package for the CLI. Clone the repo and run from source:
+  const proxySnippet = `# Recommended: create an access key (drk_...) on your Account page (${PRODUCTION_BASE_URL}/account)
+# Download the single-file local proxy and verify its checksum:
+curl -fsSLO ${PRODUCTION_BASE_URL}/downloads/deroute-proxy.mjs
+curl -fsSLO ${PRODUCTION_BASE_URL}/downloads/deroute-proxy.mjs.sha256
+shasum -a 256 -c deroute-proxy.mjs.sha256
+
+# Start the local proxy on http://127.0.0.1:4141/v1 (or set DEROUTE_ACCESS_KEY=drk_...):
+node deroute-proxy.mjs --key drk_YOUR_ACCESS_KEY
+
+# Or build and run from source:
 git clone ${REPO_CLONE_URL} && cd drouter && npm ci
-
-# 1. Verify all 7 hardware & cryptographic checks (C1-C7):
 node scripts/drouter-cli.mjs verify${upstreamFlag}
+node scripts/drouter-cli.mjs proxy --port 4141${upstreamFlag}`;
 
-# 2. Start the local zero-trust HPKE proxy on port 4141:
-node scripts/drouter-cli.mjs proxy --port 4141${upstreamFlag}
-
-# Point any OpenAI-compatible client at http://127.0.0.1:4141/v1`;
-
-  const envSnippet = `# Hosted OpenAI-compatible gateway (works immediately; any non-empty apiKey string is accepted)
-export OPENAI_BASE_URL="${prodV1}"
-export OPENAI_API_KEY="any-value"
-
-# Or via the local zero-trust CLI proxy (verifies hardware quote & seals with HPKE on your machine)
+  const envSnippet = `# Private mode (recommended): run "node deroute-proxy.mjs --key drk_..." from /account
 export OPENAI_BASE_URL="http://127.0.0.1:4141/v1"
-export OPENAI_API_KEY="any-value"
+export OPENAI_API_KEY="deroute-local"
+
+# Hosted mode (convenient, our server filters your words before forwarding):
+export OPENAI_BASE_URL="${prodV1}"
+export OPENAI_API_KEY="drk_YOUR_ACCESS_KEY" # or "any-value" for the per-network free tier
 
 # Live Models (/v1/models): ${modelList.join(" | ")}`;
 
   const curlSnippet = `# 1. List attested enclave models:
 curl ${prodV1}/models
 
-# 2. Direct OpenAI-compatible chat completion (any API key string works; x-drouter-credit is optional):
+# 2. Hosted mode with an access key from /account (Authorization: Bearer drk_...):
 curl -sS -X POST "${prodV1}/chat/completions" \\
   -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer any-value" \\
+  -H "Authorization: Bearer drk_YOUR_ACCESS_KEY" \\
   -d '{
     "model": "${resolvedModel}",
     "messages": [
@@ -149,8 +153,8 @@ node scripts/drouter-cli.mjs ask "Explain AMD SEV-SNP in one sentence." --model 
 import OpenAI from "openai";
 
 const client = new OpenAI({
-  baseURL: "${prodV1}", // or "${gatewayV1}" or "http://127.0.0.1:4141/v1"
-  apiKey: "any-value", // OpenAI SDK requires a non-empty string; deRoute accepts any value (x-drouter-credit header optional)
+  baseURL: "${prodV1}", // or "${gatewayV1}" or "http://127.0.0.1:4141/v1" with node deroute-proxy.mjs --key drk_...
+  apiKey: "drk_YOUR_ACCESS_KEY", // Create a drk_... key on /account; deRoute accepts any value for the free tier (x-drouter-credit header also supported)
 });
 
 const response = await client.chat.completions.create({
@@ -165,7 +169,7 @@ from openai import OpenAI
 
 client = OpenAI(
     base_url="${prodV1}",  # or "http://127.0.0.1:4141/v1"
-    api_key="any-value",  # Any non-empty string works; x-drouter-credit header is optional
+    api_key="drk_YOUR_ACCESS_KEY",  # Create a drk_... key on /account; any non-empty string uses the free tier (x-drouter-credit header also supported)
 )
 
 res = client.chat.completions.create(

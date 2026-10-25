@@ -9,8 +9,10 @@ import {
   unblindSignature,
   verifyTokenSignature,
 } from "./blind";
+import { encodeAccessKey } from "./access-key";
 
 const STORAGE_KEY = "drouter.credits.v1";
+const PENDING_ACCESS_KEY_STORAGE_KEY = "drouter.credits.pending-access-key.v1";
 const CREDITS_STORAGE_AAD = utf8ToBytes("drouter/v1/credits-wallet");
 
 let memoryStore: BlindCreditToken[] = [];
@@ -159,6 +161,167 @@ export async function takeCreditHeader(): Promise<string | null> {
   const [token, ...rest] = wallet;
   writeStorage(rest);
   return formatCreditHeader(token);
+}
+
+export interface MoveTokensToAccessKeyResult {
+  key: string;
+  tokens: BlindCreditToken[];
+  creditsMoved: number;
+  remainingBalance: number;
+}
+
+export interface SelectCreditsFromWalletResult {
+  selected: BlindCreditToken[];
+  remaining: BlindCreditToken[];
+  creditsMoved: number;
+}
+
+function selectTokensForTargetCredits(
+  wallet: readonly BlindCreditToken[],
+  targetCredits: number,
+): SelectCreditsFromWalletResult | null {
+  if (!Number.isInteger(targetCredits) || targetCredits < 1) {
+    return null;
+  }
+  const selected: BlindCreditToken[] = [];
+  const remaining: BlindCreditToken[] = [];
+  let sum = 0;
+
+  for (let i = 0; i < wallet.length; i++) {
+    const tok = wallet[i];
+    const denom = tok.denomination || 1;
+    if (sum < targetCredits && selected.length < 50) {
+      selected.push(tok);
+      sum += denom;
+    } else {
+      remaining.push(tok);
+    }
+  }
+
+  if (sum < targetCredits) {
+    return null;
+  }
+  return { selected, remaining, creditsMoved: sum };
+}
+
+function writePendingAccessKey(key: string): void {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return;
+  }
+  const aesKey = getWalletStorageKey();
+  const nonce = new Uint8Array(12);
+  globalThis.crypto.getRandomValues(nonce);
+  const plaintext = utf8ToBytes(JSON.stringify({ key }));
+  const ciphertext = gcm(aesKey, nonce, CREDITS_STORAGE_AAD).encrypt(plaintext);
+  window.localStorage.setItem(
+    PENDING_ACCESS_KEY_STORAGE_KEY,
+    JSON.stringify({
+      format: "drouter-pending-access-key-v1-gcm",
+      nonceHex: bytesToHex(nonce),
+      ciphertextHex: bytesToHex(ciphertext),
+    })
+  );
+}
+
+export function clearPendingAccessKey(): void {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return;
+  }
+  try {
+    window.localStorage.removeItem(PENDING_ACCESS_KEY_STORAGE_KEY);
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+/**
+ * Moves `tokenCount` (1..50) tokens out of the browser wallet into a `drk_...` access key.
+ * Crash-safe ordering: encodes and writes the pending key first, then removes the tokens from the wallet,
+ * so an interrupted creation never loses tokens.
+ */
+export function moveTokensToAccessKey(
+  tokenCount: number,
+  opts?: { onAfterKeyWritten?: (key: string) => void }
+): MoveTokensToAccessKeyResult {
+  if (!Number.isInteger(tokenCount) || tokenCount < 1 || tokenCount > 50) {
+    throw new Error("tokenCount must be an integer between 1 and 50");
+  }
+  const wallet = readStorage();
+  if (wallet.length < tokenCount) {
+    throw new Error(
+      `Not enough tokens in wallet: need ${tokenCount}, have ${wallet.length}`
+    );
+  }
+
+  const selected = wallet.slice(0, tokenCount);
+  const remaining = wallet.slice(tokenCount);
+
+  // 1. Encode and write the access key BEFORE mutating the wallet
+  const key = encodeAccessKey(selected);
+  writePendingAccessKey(key);
+
+  if (opts?.onAfterKeyWritten) {
+    opts.onAfterKeyWritten(key);
+  }
+
+  // 2. Remove the moved tokens from the wallet
+  writeStorage(remaining);
+
+  // 3. Clear staging record once wallet update succeeds
+  clearPendingAccessKey();
+
+  const creditsMoved = selected.reduce((sum, t) => sum + (t.denomination || 0), 0);
+  const remainingBalance = remaining.reduce((sum, t) => sum + (t.denomination || 0), 0);
+
+  return {
+    key,
+    tokens: selected,
+    creditsMoved,
+    remainingBalance,
+  };
+}
+
+/**
+ * Moves enough tokens from the browser wallet to cover `targetCredits` (e.g. 5, 10, or 20)
+ * into a `drk_...` access key. Crash-safe: writes the key first, then updates the wallet.
+ */
+export function moveCreditsToAccessKey(
+  targetCredits: number,
+  opts?: { onAfterKeyWritten?: (key: string) => void }
+): MoveTokensToAccessKeyResult {
+  if (!Number.isInteger(targetCredits) || targetCredits < 1 || targetCredits > 1000) {
+    throw new Error("targetCredits must be a positive integer");
+  }
+  const wallet = readStorage();
+  const selection = selectTokensForTargetCredits(wallet, targetCredits);
+  if (!selection) {
+    const current = wallet.reduce((s, t) => s + (t.denomination || 0), 0);
+    throw new Error(
+      `Not enough credits in wallet: need ${targetCredits}, have ${current}`
+    );
+  }
+
+  const key = encodeAccessKey(selection.selected);
+  writePendingAccessKey(key);
+
+  if (opts?.onAfterKeyWritten) {
+    opts.onAfterKeyWritten(key);
+  }
+
+  writeStorage(selection.remaining);
+  clearPendingAccessKey();
+
+  const remainingBalance = selection.remaining.reduce(
+    (sum, t) => sum + (t.denomination || 0),
+    0
+  );
+
+  return {
+    key,
+    tokens: selection.selected,
+    creditsMoved: selection.creditsMoved,
+    remainingBalance,
+  };
 }
 
 export interface CreditInvoiceClientHandle {

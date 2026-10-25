@@ -20,12 +20,39 @@ import {
   wipeLocalVault,
   type VaultSession,
 } from "@/lib/auth/vault";
+import {
+  claimPaidCredits,
+  getStoredCredits,
+  mintCredits,
+  moveCreditsToAccessKey,
+  requestCreditInvoice,
+  storedCreditBalance,
+  type CreditInvoiceClientHandle,
+} from "@/lib/credits/client";
+import {
+  SUPPORTED_GATEWAY_MODEL_IDS,
+  buildCodingToolSnippets,
+  type CodingToolId,
+  type CodingToolMode,
+} from "@/lib/gateway/harness-config";
 import { preparePrompt } from "@/lib/pipeline";
 
 function shortHex(hex: string, lead = 12, tail = 8): string {
   if (!hex || hex.length <= lead + tail + 2) return hex;
   return `${hex.slice(0, lead)}...${hex.slice(-tail)}`;
 }
+
+const CODING_TOOL_TABS: ReadonlyArray<{ id: CodingToolId; label: string }> = [
+  { id: "opencode", label: "OpenCode" },
+  { id: "cursor", label: "Cursor" },
+  { id: "continue", label: "Continue" },
+  { id: "aider", label: "Aider" },
+  { id: "typescript", label: "TypeScript SDK" },
+  { id: "python", label: "Python SDK" },
+  { id: "curl", label: "curl" },
+];
+
+const KEY_SIZE_OPTIONS = [5, 10, 20] as const;
 
 export default function AccountPage() {
   const [session, setSession] = useState<VaultSession | null>(null);
@@ -44,7 +71,33 @@ export default function AccountPage() {
   } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Coding tool access key & snippet state (all storage/network reads in effects or click handlers)
+  const [walletBalance, setWalletBalance] = useState<number>(0);
+  const [walletTokenCount, setWalletTokenCount] = useState<number>(0);
+  const [selectedCreditsCount, setSelectedCreditsCount] = useState<5 | 10 | 20>(5);
+  const [createdKeyInfo, setCreatedKeyInfo] = useState<{
+    key: string;
+    creditsMoved: number;
+    tokenCount: number;
+  } | null>(null);
+  const [mintingFree, setMintingFree] = useState<boolean>(false);
+  const [showBuyPanel, setShowBuyPanel] = useState<boolean>(false);
+  const [buyDenom, setBuyDenom] = useState<5 | 20>(5);
+  const [activeInvoice, setActiveInvoice] = useState<CreditInvoiceClientHandle | null>(null);
+  const [invoiceBusy, setInvoiceBusy] = useState<boolean>(false);
+  const [codingMode, setCodingMode] = useState<CodingToolMode>("private");
+  const [activeToolTab, setActiveToolTab] = useState<CodingToolId>("opencode");
+  const [liveModelIds, setLiveModelIds] = useState<readonly string[]>(
+    SUPPORTED_GATEWAY_MODEL_IDS,
+  );
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const copyTimerRef = useRef<number | null>(null);
+
   useEffect(() => {
+    const syncWallet = () => {
+      setWalletBalance(storedCreditBalance());
+      setWalletTokenCount(getStoredCredits().length);
+    };
     const sync = () => {
       const current = getCurrentVaultSession();
       setSession(current);
@@ -52,10 +105,172 @@ export default function AccountPage() {
         setPersistEncrypted(current.persistEncrypted);
         setVaultNotes(current.payload.notes ?? "");
       }
+      syncWallet();
     };
     sync();
     return subscribeVaultSession(sync);
   }, []);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof fetch !== "function") return;
+    let cancelled = false;
+    fetch("/api/v1/models")
+      .then(async (res) =>
+        res.ok
+          ? ((await res.json()) as { data?: Array<{ id?: string }> })
+          : null,
+      )
+      .then((payload) => {
+        if (cancelled) return;
+        const ids = (payload?.data ?? [])
+          .map((m) => (typeof m?.id === "string" ? m.id.trim() : ""))
+          .filter((id) => id.length > 0 && !id.toLowerCase().startsWith("sim-"));
+        if (ids.length > 0) {
+          setLiveModelIds(ids);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const refreshWalletState = () => {
+    setWalletBalance(storedCreditBalance());
+    setWalletTokenCount(getStoredCredits().length);
+  };
+
+  const triggerCopyFeedback = (id: string, text: string) => {
+    if (typeof navigator !== "undefined" && navigator.clipboard) {
+      navigator.clipboard.writeText(text).catch(() => {});
+    }
+    setCopiedId(id);
+    if (copyTimerRef.current !== null) {
+      window.clearTimeout(copyTimerRef.current);
+    }
+    copyTimerRef.current = window.setTimeout(() => {
+      setCopiedId(null);
+      copyTimerRef.current = null;
+    }, 1800);
+  };
+
+  const handleMintFreeCredits = async () => {
+    if (mintingFree) return;
+    setMintingFree(true);
+    try {
+      await mintCredits("", 5, 1);
+      refreshWalletState();
+      setStatusBanner({
+        kind: "ok",
+        text: "Added 5 free anonymous tokens to your browser wallet.",
+      });
+    } catch (err) {
+      setStatusBanner({
+        kind: "err",
+        text:
+          err instanceof Error
+            ? err.message
+            : "Could not add free credits right now. You can also buy credits below.",
+      });
+    } finally {
+      setMintingFree(false);
+    }
+  };
+
+  const handleRequestInvoice = async (denom: 5 | 20) => {
+    if (invoiceBusy) return;
+    setInvoiceBusy(true);
+    try {
+      const inv = await requestCreditInvoice("", denom);
+      setActiveInvoice(inv);
+      setStatusBanner({
+        kind: "info",
+        text: `Created one-time deposit address for ${inv.denomination} credits (${inv.amountUsdc} USDC).`,
+      });
+    } catch (err) {
+      setStatusBanner({
+        kind: "err",
+        text:
+          err instanceof Error
+            ? err.message
+            : "Could not create a deposit address right now.",
+      });
+    } finally {
+      setInvoiceBusy(false);
+    }
+  };
+
+  const handleClaimInvoice = async () => {
+    if (!activeInvoice || invoiceBusy) return;
+    setInvoiceBusy(true);
+    try {
+      const minted = await claimPaidCredits("", {
+        invoiceId: activeInvoice.invoiceId,
+        claimSecret: activeInvoice.claimSecret,
+        count: activeInvoice.denomination,
+        denomination: 1,
+      });
+      setActiveInvoice(null);
+      setShowBuyPanel(false);
+      refreshWalletState();
+      setStatusBanner({
+        kind: "ok",
+        text: `Added ${minted.length} paid anonymous tokens to your browser wallet.`,
+      });
+    } catch (err) {
+      setStatusBanner({
+        kind: "err",
+        text:
+          err instanceof Error
+            ? err.message
+            : "Payment not confirmed yet. Wait a moment and try again.",
+      });
+    } finally {
+      setInvoiceBusy(false);
+    }
+  };
+
+  const handleCreateAccessKey = () => {
+    try {
+      const moved = moveCreditsToAccessKey(selectedCreditsCount);
+      setCreatedKeyInfo({
+        key: moved.key,
+        creditsMoved: moved.creditsMoved,
+        tokenCount: moved.tokens.length,
+      });
+      refreshWalletState();
+      setStatusBanner({
+        kind: "ok",
+        text: `Created access key with ${moved.creditsMoved} credits and moved those tokens out of your browser wallet.`,
+      });
+    } catch (err) {
+      setStatusBanner({
+        kind: "err",
+        text:
+          err instanceof Error
+            ? err.message
+            : "Not enough anonymous tokens in your wallet to create this key.",
+      });
+    }
+  };
+
+  const codingSnippets = useMemo(
+    () =>
+      buildCodingToolSnippets({
+        mode: codingMode,
+        accessKey: createdKeyInfo?.key ?? null,
+        modelIds: liveModelIds,
+      }),
+    [codingMode, createdKeyInfo?.key, liveModelIds],
+  );
 
   const activeCustomTerms = session?.payload.customScrubTerms ?? [];
 
@@ -255,6 +470,8 @@ export default function AccountPage() {
     });
   };
 
+  const walletIsShort = walletBalance < selectedCreditsCount;
+
   return (
     <div className="min-h-screen flex flex-col overflow-x-hidden bg-paper text-ink">
       <SpecimenHeader activePath="/account" />
@@ -277,7 +494,7 @@ export default function AccountPage() {
                   Your deRoute account
                 </h1>
                 <p className="max-w-[65ch] text-base leading-relaxed text-ink-2">
-                  Choose words you always want hidden before anything leaves your device, save a backup file, or sign out.
+                  Choose words you always want hidden before anything leaves your device, get setup for your coding tool, save a backup file, or sign out.
                 </p>
 
                 {statusBanner && (
@@ -499,6 +716,422 @@ export default function AccountPage() {
                   </div>
                 </div>
               </section>
+
+            {/* K4: Use deRoute from your coding tool */}
+            <section
+              aria-labelledby="coding-tool-heading"
+              data-testid="coding-tool-section"
+              className="ep-card space-y-6 p-5 sm:p-6"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-3 border-b border-rule pb-4">
+                <div className="space-y-1">
+                  <div className="ep-label">Developer access</div>
+                  <h2 id="coding-tool-heading" className="ep-display text-2xl">
+                    Use deRoute from your coding tool
+                  </h2>
+                  <p className="max-w-[68ch] text-xs leading-relaxed text-ink-2">
+                    Connect OpenCode, Cursor, Continue, Aider, or your own scripts to deRoute in three quick steps. Your browser packs anonymous tokens from your wallet into a key that our server never stores.
+                  </p>
+                </div>
+                <span className="ep-pass" data-testid="wallet-balance-badge">
+                  {walletBalance} credit{walletBalance === 1 ? "" : "s"} in wallet
+                </span>
+              </div>
+
+              {/* Step 1: Create an access key */}
+              <div className="space-y-3 border-b border-rule pb-5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="ep-label">Step 1</div>
+                    <h3 className="font-serif text-lg text-ink">
+                      Create an access key
+                    </h3>
+                  </div>
+                  <span className="font-mono text-xs text-ink-2">
+                    {walletTokenCount} anonymous token{walletTokenCount === 1 ? "" : "s"} ready
+                  </span>
+                </div>
+
+                <p className="text-xs text-ink-2">
+                  Choose how many credits to move out of your browser wallet into a portable key. Moving tokens out of your wallet means this browser cannot spend the same token twice.
+                </p>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <div
+                    className="flex flex-wrap items-center gap-1.5"
+                    role="group"
+                    aria-label="Credits to include in access key"
+                  >
+                    {KEY_SIZE_OPTIONS.map((count) => (
+                      <button
+                        key={count}
+                        type="button"
+                        aria-pressed={selectedCreditsCount === count}
+                        onClick={() => setSelectedCreditsCount(count)}
+                        data-testid={`select-credits-${count}`}
+                        className={
+                          selectedCreditsCount === count
+                            ? "ep-btn text-xs py-1.5 px-3"
+                            : "ep-btn-ghost text-xs py-1.5 px-3"
+                        }
+                      >
+                        {count} credits
+                      </button>
+                    ))}
+                  </div>
+
+                  <InkButton
+                    type="button"
+                    variant="primary"
+                    disabled={walletIsShort}
+                    onClick={handleCreateAccessKey}
+                    data-testid="create-access-key-button"
+                    className="text-xs"
+                  >
+                    Create access key ({selectedCreditsCount} credits)
+                  </InkButton>
+                </div>
+
+                {walletIsShort && (
+                  <div
+                    data-testid="wallet-short-callout"
+                    className="ep-inset flex flex-wrap items-center justify-between gap-3 p-3.5 text-xs"
+                  >
+                    <div className="space-y-0.5 text-ink-2">
+                      <strong className="text-ink">
+                        Your wallet has {walletBalance} credit{walletBalance === 1 ? "" : "s"}, and you selected {selectedCreditsCount}.
+                      </strong>{" "}
+                      Add 5 free credits from the daily allowance or buy more anonymous tokens.
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={handleMintFreeCredits}
+                        disabled={mintingFree}
+                        data-testid="add-5-free-button"
+                        className="ep-btn text-xs py-1.5 px-3"
+                      >
+                        {mintingFree ? "Adding 5 free..." : "Add 5 free"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowBuyPanel((prev) => !prev)}
+                        data-testid="toggle-buy-credits-button"
+                        className="ep-btn-ghost text-xs py-1.5 px-3"
+                      >
+                        {showBuyPanel ? "Hide buy options" : "Buy credits"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {!walletIsShort && (
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-ink-3">
+                    <span>Need more tokens in your wallet first?</span>
+                    <button
+                      type="button"
+                      onClick={handleMintFreeCredits}
+                      disabled={mintingFree}
+                      data-testid="add-5-free-inline-button"
+                      className="ep-btn-ghost text-xs py-1 px-2.5"
+                    >
+                      {mintingFree ? "Adding 5 free..." : "Add 5 free"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowBuyPanel((prev) => !prev)}
+                      className="ep-btn-ghost text-xs py-1 px-2.5"
+                    >
+                      {showBuyPanel ? "Hide buy options" : "Buy credits"}
+                    </button>
+                  </div>
+                )}
+
+                {showBuyPanel && (
+                  <div className="ep-inset space-y-3 p-3.5 text-xs">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <strong className="text-ink">
+                        Buy prepaid anonymous tokens (one-time deposit address)
+                      </strong>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setBuyDenom(5)}
+                          className={
+                            buyDenom === 5
+                              ? "ep-btn text-xs py-1 px-2.5"
+                              : "ep-btn-ghost text-xs py-1 px-2.5"
+                          }
+                        >
+                          5 credits (0.0005 USDC)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setBuyDenom(20)}
+                          className={
+                            buyDenom === 20
+                              ? "ep-btn text-xs py-1 px-2.5"
+                              : "ep-btn-ghost text-xs py-1 px-2.5"
+                          }
+                        >
+                          20 credits (0.002 USDC)
+                        </button>
+                        <button
+                          type="button"
+                          disabled={invoiceBusy}
+                          onClick={() => handleRequestInvoice(buyDenom)}
+                          className="ep-btn text-xs py-1 px-2.5"
+                        >
+                          {invoiceBusy ? "Preparing..." : "Get deposit address"}
+                        </button>
+                      </div>
+                    </div>
+
+                    {activeInvoice && (
+                      <div className="space-y-2 border-t border-rule pt-2 font-mono text-[11px] text-ink-2">
+                        <div>
+                          Send <strong className="text-ink">{activeInvoice.amountUsdc} USDC</strong> to{" "}
+                          <code className="break-all text-ink">{activeInvoice.depositAddress}</code>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            disabled={invoiceBusy}
+                            onClick={handleClaimInvoice}
+                            className="ep-btn text-xs py-1 px-2.5"
+                          >
+                            {invoiceBusy ? "Checking payment..." : "Claim paid credits"}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {createdKeyInfo && (
+                  <div
+                    data-testid="created-access-key-box"
+                    className="ep-inset space-y-2.5 border-ink p-4"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-mono text-xs font-medium text-ink">
+                        Your new access key ({createdKeyInfo.creditsMoved} credits, shown once)
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          triggerCopyFeedback("access-key", createdKeyInfo.key)
+                        }
+                        data-testid="copy-access-key-button"
+                        className="ep-btn text-xs py-1 px-3"
+                      >
+                        {copiedId === "access-key" ? "Copied key" : "Copy access key"}
+                      </button>
+                    </div>
+                    <pre
+                      data-testid="access-key-value"
+                      className="overflow-x-auto rounded border border-rule bg-paper p-2.5 font-mono text-xs text-ink select-all"
+                    >
+                      {createdKeyInfo.key}
+                    </pre>
+                    <p className="text-xs text-accent font-medium">
+                      Save this key now. It is shown once and is never stored on our server. Whoever holds this key can spend its credits.
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              {/* Step 2: Choose private (recommended) or hosted */}
+              <div className="space-y-3 border-b border-rule pb-5">
+                <div>
+                  <div className="ep-label">Step 2</div>
+                  <h3 className="font-serif text-lg text-ink">
+                    Choose how your tool connects
+                  </h3>
+                </div>
+
+                <div
+                  className="grid grid-cols-1 gap-3 sm:grid-cols-2"
+                  role="group"
+                  aria-label="Connection privacy mode"
+                >
+                  <button
+                    type="button"
+                    aria-pressed={codingMode === "private"}
+                    onClick={() => setCodingMode("private")}
+                    data-testid="mode-private-button"
+                    className={`text-left rounded border p-4 transition-colors ${
+                      codingMode === "private"
+                        ? "border-ink bg-paper-2"
+                        : "border-rule bg-paper hover:bg-paper-2"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-serif text-base font-medium text-ink">
+                        Private mode (recommended)
+                      </span>
+                      <span className="ep-pass">Local proxy</span>
+                    </div>
+                    <p className="mt-1.5 text-xs leading-relaxed text-ink-2">
+                      Runs on your computer at{" "}
+                      <code className="font-mono text-ink">http://127.0.0.1:4141/v1</code>.
+                      Your computer hides personal details, checks the seal on the sealed computer, and locks every message before it leaves your machine.
+                    </p>
+                  </button>
+
+                  <button
+                    type="button"
+                    aria-pressed={codingMode === "hosted"}
+                    onClick={() => setCodingMode("hosted")}
+                    data-testid="mode-hosted-button"
+                    className={`text-left rounded border p-4 transition-colors ${
+                      codingMode === "hosted"
+                        ? "border-ink bg-paper-2"
+                        : "border-rule bg-paper hover:bg-paper-2"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-serif text-base font-medium text-ink">
+                        Hosted mode (convenient)
+                      </span>
+                      <span className="ep-muted-chip">Direct URL</span>
+                    </div>
+                    <p className="mt-1.5 text-xs leading-relaxed text-ink-2">
+                      Connects straight to our server with no local download. In hosted mode our server filters your words before forwarding them to the sealed computer, so our server sees them. Use the local proxy if you do not want that.
+                    </p>
+                  </button>
+                </div>
+
+                {codingMode === "private" ? (
+                  <div className="ep-inset space-y-2 p-3.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-mono text-xs text-ink">
+                        Start the single-file local proxy on your computer (Node 20 or later):
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          triggerCopyFeedback(
+                            "proxy-cmd",
+                            codingSnippets.proxyStartCommand,
+                          )
+                        }
+                        className="ep-btn-ghost text-xs py-1 px-2.5"
+                      >
+                        {copiedId === "proxy-cmd" ? "Copied" : "Copy command"}
+                      </button>
+                    </div>
+                    <pre className="overflow-x-auto rounded border border-rule bg-paper p-3 font-mono text-xs leading-relaxed text-ink">
+                      <code>{codingSnippets.proxyStartCommand}</code>
+                    </pre>
+                  </div>
+                ) : (
+                  <div
+                    data-testid="hosted-privacy-notice"
+                    className="ep-inset border-accent bg-accent-soft p-3.5 text-xs text-ink"
+                  >
+                    <strong>Privacy note:</strong> In hosted mode our server filters your words before forwarding them to the sealed computer, so our server sees them. Use the local proxy if you do not want that.
+                  </div>
+                )}
+              </div>
+
+              {/* Step 3: Copy setup for the chosen tool */}
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="ep-label">Step 3</div>
+                    <h3 className="font-serif text-lg text-ink">
+                      Copy setup for your tool
+                    </h3>
+                  </div>
+                  <span className="font-mono text-[11px] text-ink-3">
+                    Live models: {liveModelIds.join(" · ")}
+                  </span>
+                </div>
+
+                <div
+                  role="tablist"
+                  aria-label="Coding tools"
+                  className="flex flex-wrap gap-1.5"
+                >
+                  {CODING_TOOL_TABS.map((tab) => {
+                    const selected = activeToolTab === tab.id;
+                    return (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        role="tab"
+                        aria-selected={selected}
+                        onClick={() => setActiveToolTab(tab.id)}
+                        data-testid={`tool-tab-${tab.id}`}
+                        className={
+                          selected
+                            ? "ep-btn text-xs py-1.5 px-3"
+                            : "ep-btn-ghost text-xs py-1.5 px-3"
+                        }
+                      >
+                        {tab.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="ep-inset overflow-hidden">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-rule bg-paper px-3.5 py-2">
+                    <span className="font-mono text-xs text-ink-2">
+                      Endpoint: <strong className="text-ink">{codingSnippets.baseUrl}</strong>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        triggerCopyFeedback(
+                          `snippet-${activeToolTab}`,
+                          codingSnippets.byTool[activeToolTab],
+                        )
+                      }
+                      data-testid="copy-tool-snippet-button"
+                      className="ep-btn-ghost text-xs py-1 px-2.5"
+                    >
+                      {copiedId === `snippet-${activeToolTab}`
+                        ? "Copied snippet"
+                        : "Copy snippet"}
+                    </button>
+                  </div>
+                  <pre
+                    data-testid="coding-tool-snippet-code"
+                    className="overflow-x-auto p-3.5 font-mono text-xs leading-relaxed text-ink"
+                  >
+                    <code>{codingSnippets.byTool[activeToolTab]}</code>
+                  </pre>
+                </div>
+
+                <TechDetails label="Show technical details for coding tool keys and proxy">
+                  <div className="space-y-2 text-xs text-ink-2">
+                    <p>
+                      <strong className="text-ink">Key format (K1):</strong>{" "}
+                      An access key is <code className="font-mono text-ink">drk_</code> followed by unpadded base64url of{" "}
+                      <code className="font-mono text-ink">
+                        canonicalJson(&#123; v: 1, origin: &quot;https://drouter-demo.vercel.app&quot;, tokens: [&#123; t, s, d &#125;, ...] &#125;)
+                      </code>{" "}
+                      containing 1 to 50 blind-signed RSA credit tokens.
+                    </p>
+                    <p>
+                      <strong className="text-ink">Local proxy (K2):</strong>{" "}
+                      <code className="font-mono text-ink">deroute-proxy.mjs</code> runs the mechanical PII filter with session-stable placeholders, verifies all seven attestation checks (AMD SEV-SNP / Intel TDX quote, VCEK certificate chain, Sigstore Rekor transparency log, and runtime measurement), seals each request with RFC 9180 HPKE through{" "}
+                      <code className="font-mono text-ink">/api/relay/v1/</code>, attaches one{" "}
+                      <code className="font-mono text-ink">x-drouter-credit</code> header per request, and records spent nullifiers in{" "}
+                      <code className="font-mono text-ink">~/.config/deroute/spent.json</code>.
+                    </p>
+                    <p>
+                      <strong className="text-ink">Hosted gateway (K3):</strong>{" "}
+                      <code className="font-mono text-ink">POST /api/v1/chat/completions</code> accepts{" "}
+                      <code className="font-mono text-ink">Authorization: Bearer drk_...</code>, spends the first token whose nullifier is unspent, and returns{" "}
+                      <code className="font-mono text-ink">X-DRouter-Credits-Remaining</code>.
+                    </p>
+                  </div>
+                </TechDetails>
+              </div>
+            </section>
 
             {/* Export & Import Backup */}
               <section

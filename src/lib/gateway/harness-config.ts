@@ -393,6 +393,202 @@ export function buildHarnessConfigs(baseUrl: string): HarnessConfigs {
   };
 }
 
+export type CodingToolId =
+  | "opencode"
+  | "cursor"
+  | "continue"
+  | "aider"
+  | "typescript"
+  | "python"
+  | "curl";
+
+export type CodingToolMode = "private" | "hosted";
+
+export const LOCAL_PROXY_BASE_URL = "http://127.0.0.1:4141/v1";
+export const HOSTED_GATEWAY_BASE_URL = "https://drouter-demo.vercel.app/api/v1";
+
+export interface CodingToolSnippets {
+  mode: CodingToolMode;
+  baseUrl: string;
+  apiKeyPlaceholder: string;
+  proxyStartCommand: string;
+  byTool: Record<CodingToolId, string>;
+}
+
+/**
+ * Builds copy-paste setup snippets for every supported coding tool (OpenCode, Cursor,
+ * Continue, Aider, TypeScript OpenAI SDK, Python OpenAI SDK, curl) in either
+ * Private mode (local proxy at http://127.0.0.1:4141/v1) or Hosted mode
+ * (https://drouter-demo.vercel.app/api/v1 with Authorization: Bearer drk_...).
+ */
+export function buildCodingToolSnippets(opts?: {
+  mode?: CodingToolMode;
+  accessKey?: string | null;
+  modelIds?: readonly string[];
+  defaultModel?: string;
+  hostedOrigin?: string;
+}): CodingToolSnippets {
+  const mode: CodingToolMode = opts?.mode ?? "private";
+  const cleanOrigin = (opts?.hostedOrigin || "https://drouter-demo.vercel.app").replace(/\/+$/, "");
+  const hostedBaseUrl = `${cleanOrigin}/api/v1`;
+  const baseUrl = mode === "private" ? LOCAL_PROXY_BASE_URL : hostedBaseUrl;
+
+  const keyOrPlaceholder =
+    opts?.accessKey && opts.accessKey.trim().startsWith("drk_")
+      ? opts.accessKey.trim()
+      : "drk_YOUR_ACCESS_KEY";
+
+  const apiKeyValue = mode === "private" ? "deroute-local" : keyOrPlaceholder;
+
+  const rawModels =
+    opts?.modelIds && opts.modelIds.length > 0
+      ? opts.modelIds
+      : SUPPORTED_GATEWAY_MODEL_IDS;
+  const models = rawModels.filter((id) => id && !id.toLowerCase().startsWith("sim-"));
+  const primaryModel =
+    opts?.defaultModel && models.includes(opts.defaultModel)
+      ? opts.defaultModel
+      : models[0] ?? "kimi-k3";
+
+  const opencodeModelsObj: Record<string, { name: string }> = {};
+  for (const id of models) {
+    opencodeModelsObj[id] = {
+      name: `${KNOWN_MODEL_LABELS[id] ?? id} (deRoute)`,
+    };
+  }
+
+  const opencodeConfig = {
+    $schema: "https://opencode.ai/config.json",
+    provider: {
+      deroute: {
+        npm: "@ai-sdk/openai-compatible",
+        name:
+          mode === "private"
+            ? "deRoute (Local Private Proxy)"
+            : "deRoute (Hosted Gateway)",
+        options: {
+          baseURL: baseUrl,
+          apiKey: apiKeyValue,
+        },
+        models: opencodeModelsObj,
+      },
+    },
+    model: `deroute/${primaryModel}`,
+  };
+
+  const proxyStartCommand = [
+    `# 1. Download the single-file local proxy and its checksum:`,
+    `curl -fsSLO ${cleanOrigin}/downloads/deroute-proxy.mjs`,
+    `curl -fsSLO ${cleanOrigin}/downloads/deroute-proxy.mjs.sha256`,
+    `shasum -a 256 -c deroute-proxy.mjs.sha256`,
+    ``,
+    `# 2. Start the local proxy on http://127.0.0.1:4141/v1 (requires Node 20+):`,
+    `node deroute-proxy.mjs --key ${keyOrPlaceholder}`,
+  ].join("\n");
+
+  const opencodeSnippet = JSON.stringify(opencodeConfig, null, 2);
+
+  const cursorSnippet = [
+    `# Cursor -> Settings -> Models -> OpenAI API Key:`,
+    `1. Turn on "Override OpenAI Base URL" and set it to:`,
+    `   ${baseUrl}`,
+    `2. Set "OpenAI API Key" to:`,
+    `   ${apiKeyValue}`,
+    `3. Add custom model IDs from GET /api/v1/models:`,
+    `   ${models.join(", ")}`,
+  ].join("\n");
+
+  const continueModelsYaml = models
+    .map(
+      (id) =>
+        `  - name: deRoute ${KNOWN_MODEL_LABELS[id] ?? id}\n    provider: openai\n    model: ${id}\n    apiBase: ${baseUrl}\n    apiKey: ${apiKeyValue}\n    roles:\n      - chat\n      - edit\n      - apply`,
+    )
+    .join("\n");
+
+  const continueSnippet = [
+    `# ~/.continue/config.yaml`,
+    `name: deRoute Config`,
+    `version: 1.0.0`,
+    `schema: v1`,
+    `models:`,
+    continueModelsYaml,
+  ].join("\n");
+
+  const aiderSnippet = [
+    `# Run Aider with --openai-api-base and --openai-api-key:`,
+    `aider \\`,
+    `  --openai-api-base "${baseUrl}" \\`,
+    `  --openai-api-key "${apiKeyValue}" \\`,
+    `  --model "openai/${primaryModel}"`,
+    ``,
+    `# Available models: ${models.map((m) => `openai/${m}`).join(", ")}`,
+  ].join("\n");
+
+  const typescriptSnippet = [
+    `import OpenAI from "openai";`,
+    ``,
+    `const client = new OpenAI({`,
+    `  baseURL: "${baseUrl}",`,
+    `  apiKey: "${apiKeyValue}",`,
+    `});`,
+    ``,
+    `const completion = await client.chat.completions.create({`,
+    `  model: "${primaryModel}",`,
+    `  messages: [{ role: "user", content: "Write a short unit test in TypeScript." }],`,
+    `});`,
+    ``,
+    `console.log(completion.choices[0]?.message?.content);`,
+  ].join("\n");
+
+  const pythonSnippet = [
+    `from openai import OpenAI`,
+    ``,
+    `client = OpenAI(`,
+    `    base_url="${baseUrl}",`,
+    `    api_key="${apiKeyValue}",`,
+    `)`,
+    ``,
+    `completion = client.chat.completions.create(`,
+    `    model="${primaryModel}",`,
+    `    messages=[{"role": "user", "content": "Write a short unit test in Python."}],`,
+    `)`,
+    ``,
+    `print(completion.choices[0].message.content)`,
+  ].join("\n");
+
+  const curlSnippet = [
+    `# List live models:`,
+    `curl -sS "${baseUrl}/models"`,
+    ``,
+    `# Send a chat completion request:`,
+    `curl -sS -X POST "${baseUrl}/chat/completions" \\`,
+    `  -H "Content-Type: application/json" \\`,
+    `  -H "Authorization: Bearer ${apiKeyValue}" \\`,
+    `  -d '{`,
+    `    "model": "${primaryModel}",`,
+    `    "messages": [`,
+    `      { "role": "user", "content": "Reply with one short sentence." }`,
+    `    ]`,
+    `  }'`,
+  ].join("\n");
+
+  return {
+    mode,
+    baseUrl,
+    apiKeyPlaceholder: apiKeyValue,
+    proxyStartCommand,
+    byTool: {
+      opencode: opencodeSnippet,
+      cursor: cursorSnippet,
+      continue: continueSnippet,
+      aider: aiderSnippet,
+      typescript: typescriptSnippet,
+      python: pythonSnippet,
+      curl: curlSnippet,
+    },
+  };
+}
+
 export type NormalizedChatRole = "system" | "user" | "assistant" | "tool";
 
 export interface NormalizedToolCall {
