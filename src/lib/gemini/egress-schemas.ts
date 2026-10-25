@@ -74,43 +74,66 @@ export const HANDLE_KEY_TO_REGEX: Readonly<Record<string, RegExp>> = {
 export const CLOSED_CALL_ID_REGEX =
   /^(?:call|tc|inter)-(?:[1-9]|1[0-6]|turn-(?:[1-9]|1[0-6])|argon-turn-(?:[1-9]|1[0-6])|(?:(?:[1-9]|1[0-6])-)?(?:scrub_and_symmetry_mask|verify_two_hop_enclave_and_quorum|search_atlas_hybrid_kb|invoke_attested_enclave|anchor_arc_settlement_with_human_gate)|(?:[1-9]|1[0-6])-(?:[1-9]|1[0-6]))$/;
 
-const EXPECTED_SUBAGENT_ROUTING: Readonly<Record<string, string>> = {
-  sandbox_verifier: ARGON_COMPANION_MODELS.sandboxAgent,
-  fast_swarm: ARGON_COMPANION_MODELS.parallelSubagentFast,
-  quorum_checker: ARGON_COMPANION_MODELS.parallelSubagentLite,
-  deep_research: ARGON_COMPANION_MODELS.deepResearch,
-  on_device_filter: ARGON_COMPANION_MODELS.confidentialOnDevice,
-  attested_enclave_model: ARGON_COMPANION_MODELS.confidentialOpenCloud,
-  tinfoil_enclave_target: ARGON_COMPANION_MODELS.tinfoilEnclaveGemma,
-  voice_briefing: ARGON_COMPANION_MODELS.voiceTts,
-  live_voice_gate: ARGON_COMPANION_MODELS.realtimeVoice,
-};
+// Evaluated on first use: this module and ./interactions import each other.
+let EXPECTED_SUBAGENT_ROUTING_CACHE:
+  Readonly<Record<string, string>> | undefined;
+function getExpectedSubagentRouting(): Readonly<Record<string, string>> {
+  return (EXPECTED_SUBAGENT_ROUTING_CACHE ??= {
+    sandbox_verifier: ARGON_COMPANION_MODELS.sandboxAgent,
+    fast_swarm: ARGON_COMPANION_MODELS.parallelSubagentFast,
+    quorum_checker: ARGON_COMPANION_MODELS.parallelSubagentLite,
+    deep_research: ARGON_COMPANION_MODELS.deepResearch,
+    on_device_filter: ARGON_COMPANION_MODELS.confidentialOnDevice,
+    attested_enclave_model: ARGON_COMPANION_MODELS.confidentialOpenCloud,
+    tinfoil_enclave_target: ARGON_COMPANION_MODELS.tinfoilEnclaveGemma,
+    voice_briefing: ARGON_COMPANION_MODELS.voiceTts,
+    live_voice_gate: ARGON_COMPANION_MODELS.realtimeVoice,
+  });
+}
 
-const EXPECTED_METADATA: Readonly<Record<string, string>> = {
-  sdk_target: "@google/genai>=2.31.0",
-  api_surface: "client.interactions.create",
-  persona: "redacted_clinical_scientist_persona",
-  enclave_protocol:
-    "RFC 9180 HPKE EHBP + AMD SEV-SNP Router + Intel TDX / NVIDIA CC GPU Enclaves",
-  data_sent_to_google: DATA_SENT_TO_GOOGLE,
-};
+// Evaluated on first use: this module and ./interactions import each other.
+let EXPECTED_METADATA_CACHE: Readonly<Record<string, string>> | undefined;
+function getExpectedMetadata(): Readonly<Record<string, string>> {
+  return (EXPECTED_METADATA_CACHE ??= {
+    sdk_target: "@google/genai>=2.31.0",
+    api_surface: "client.interactions.create",
+    persona: "redacted_clinical_scientist_persona",
+    enclave_protocol:
+      "RFC 9180 HPKE EHBP + AMD SEV-SNP Router + Intel TDX / NVIDIA CC GPU Enclaves",
+    data_sent_to_google: DATA_SENT_TO_GOOGLE,
+  });
+}
 
-const ALLOWED_SEARCH_TOPICS_SET: ReadonlySet<string> = new Set<string>([
-  ...ALLOWED_ATLAS_TOPICS,
-  ...LOOKUP_TOPICS,
-]);
+// Evaluated on first use: this module and ./interactions import each other.
+let ALLOWED_SEARCH_TOPICS_SET_CACHE: ReadonlySet<string> | undefined;
+function getAllowedSearchTopicsSet(): ReadonlySet<string> {
+  return (ALLOWED_SEARCH_TOPICS_SET_CACHE ??= new Set<string>([
+    ...ALLOWED_ATLAS_TOPICS,
+    ...LOOKUP_TOPICS,
+  ]));
+}
 
-const ALLOWED_ATLAS_CATEGORIES_SET: ReadonlySet<string> = new Set<string>(
-  ALLOWED_ATLAS_CATEGORIES,
-);
+// Evaluated on first use: this module and ./interactions import each other.
+let ALLOWED_ATLAS_CATEGORIES_SET_CACHE: ReadonlySet<string> | undefined;
+function getAllowedAtlasCategoriesSet(): ReadonlySet<string> {
+  return (ALLOWED_ATLAS_CATEGORIES_SET_CACHE ??= new Set<string>(
+    ALLOWED_ATLAS_CATEGORIES,
+  ));
+}
 
-const VALID_TASK_KINDS_SET: ReadonlySet<string> = new Set<string>(
-  VALID_TASK_KINDS,
-);
+// Evaluated on first use: this module and ./interactions import each other.
+let VALID_TASK_KINDS_SET_CACHE: ReadonlySet<string> | undefined;
+function getValidTaskKindsSet(): ReadonlySet<string> {
+  return (VALID_TASK_KINDS_SET_CACHE ??= new Set<string>(VALID_TASK_KINDS));
+}
 
-const VALID_THINKING_LEVELS_SET: ReadonlySet<string> = new Set<string>(
-  VALID_THINKING_LEVELS,
-);
+// Evaluated on first use: this module and ./interactions import each other.
+let VALID_THINKING_LEVELS_SET_CACHE: ReadonlySet<string> | undefined;
+function getValidThinkingLevelsSet(): ReadonlySet<string> {
+  return (VALID_THINKING_LEVELS_SET_CACHE ??= new Set<string>(
+    VALID_THINKING_LEVELS,
+  ));
+}
 
 export function isPowerOfTwoInRange(
   value: unknown,
@@ -264,7 +287,7 @@ function assertGenerationConfig(
   const thinkingLevel = obj.thinking_level;
   if (
     typeof thinkingLevel !== "string" ||
-    !VALID_THINKING_LEVELS_SET.has(thinkingLevel)
+    !getValidThinkingLevelsSet().has(thinkingLevel)
   ) {
     throw new ContentFreeEgressError(
       String(thinkingLevel),
@@ -308,7 +331,7 @@ export function assertTaskDescriptorSchema(
 
   if (
     typeof obj.taskKind !== "string" ||
-    !VALID_TASK_KINDS_SET.has(obj.taskKind)
+    !getValidTaskKindsSet().has(obj.taskKind)
   ) {
     throw new ContentFreeEgressError(String(obj.taskKind), `${path}.taskKind`);
   }
@@ -392,13 +415,16 @@ export function assertTaskDescriptorSchema(
   for (let i = 0; i < tools.length; i++) {
     const t = tools[i];
     if (typeof t !== "string") {
-      throw new ContentFreeEgressError(
-        String(t),
-        `${path}.allowedTools[${i}]`,
-      );
+      throw new ContentFreeEgressError(String(t), `${path}.allowedTools[${i}]`);
     }
-    const canonicalIdx = (ALLOWED_PLANNER_TOOLS as readonly string[]).indexOf(t);
-    if (canonicalIdx === -1 || seenTools.has(t) || canonicalIdx <= lastCanonicalIdx) {
+    const canonicalIdx = (ALLOWED_PLANNER_TOOLS as readonly string[]).indexOf(
+      t,
+    );
+    if (
+      canonicalIdx === -1 ||
+      seenTools.has(t) ||
+      canonicalIdx <= lastCanonicalIdx
+    ) {
       throw new ContentFreeEgressError(t, `${path}.allowedTools[${i}]`);
     }
     seenTools.add(t);
@@ -442,7 +468,7 @@ export function assertInteractionsCreatePayloadSchema(
   }
   if (
     typeof obj.thinking_level !== "string" ||
-    !VALID_THINKING_LEVELS_SET.has(obj.thinking_level)
+    !getValidThinkingLevelsSet().has(obj.thinking_level)
   ) {
     throw new ContentFreeEgressError(
       String(obj.thinking_level),
@@ -522,12 +548,12 @@ export function assertInteractionsCreatePayloadSchema(
   assertValidToolsArray(obj.tools, ALLOWED_PLANNER_TOOLS, `${path}.tools`);
   assertDeepEqualConstant(
     obj.subagent_routing,
-    EXPECTED_SUBAGENT_ROUTING,
+    getExpectedSubagentRouting(),
     `${path}.subagent_routing`,
   );
   assertDeepEqualConstant(
     obj.metadata,
-    EXPECTED_METADATA,
+    getExpectedMetadata(),
     `${path}.metadata`,
   );
 
@@ -636,12 +662,7 @@ export function assertToolCallArgumentsSchema(
 
   switch (toolName as PlannerToolName) {
     case "scrub_and_symmetry_mask": {
-      assertExactKeys(
-        obj,
-        ["inputHandle", "bucketQuantumBytes"],
-        [],
-        path,
-      );
+      assertExactKeys(obj, ["inputHandle", "bucketQuantumBytes"], [], path);
       if (
         typeof obj.inputHandle !== "string" ||
         !INPUT_OR_RESULT_HANDLE_REGEX.test(obj.inputHandle)
@@ -684,15 +705,10 @@ export function assertToolCallArgumentsSchema(
     }
 
     case "search_atlas_hybrid_kb": {
-      assertExactKeys(
-        obj,
-        ["topic"],
-        ["inputHandle", "category"],
-        path,
-      );
+      assertExactKeys(obj, ["topic"], ["inputHandle", "category"], path);
       if (
         typeof obj.topic !== "string" ||
-        !ALLOWED_SEARCH_TOPICS_SET.has(obj.topic)
+        !getAllowedSearchTopicsSet().has(obj.topic)
       ) {
         throw new ContentFreeEgressError(String(obj.topic), `${path}.topic`);
       }
@@ -712,7 +728,7 @@ export function assertToolCallArgumentsSchema(
       if (Object.prototype.hasOwnProperty.call(obj, "category")) {
         if (
           typeof obj.category !== "string" ||
-          !ALLOWED_ATLAS_CATEGORIES_SET.has(obj.category)
+          !getAllowedAtlasCategoriesSet().has(obj.category)
         ) {
           throw new ContentFreeEgressError(
             String(obj.category),
@@ -725,12 +741,7 @@ export function assertToolCallArgumentsSchema(
     }
 
     case "invoke_attested_enclave": {
-      assertExactKeys(
-        obj,
-        ["inputHandle", "enclaveModel"],
-        ["taskKind"],
-        path,
-      );
+      assertExactKeys(obj, ["inputHandle", "enclaveModel"], ["taskKind"], path);
       if (
         typeof obj.inputHandle !== "string" ||
         !INPUT_OR_RESULT_HANDLE_REGEX.test(obj.inputHandle)
@@ -753,7 +764,7 @@ export function assertToolCallArgumentsSchema(
       if (Object.prototype.hasOwnProperty.call(obj, "taskKind")) {
         if (
           typeof obj.taskKind !== "string" ||
-          !VALID_TASK_KINDS_SET.has(obj.taskKind)
+          !getValidTaskKindsSet().has(obj.taskKind)
         ) {
           throw new ContentFreeEgressError(
             String(obj.taskKind),
@@ -970,7 +981,9 @@ export function assertToolResultSchema(
           `${path}.bucketBytes`,
         );
       }
-      if (!boundedInteger(obj.plaintextLeakCount, 0, MAX_REDACTION_COUNT_PER_KIND)) {
+      if (
+        !boundedInteger(obj.plaintextLeakCount, 0, MAX_REDACTION_COUNT_PER_KIND)
+      ) {
         throw new ContentFreeEgressError(
           String(obj.plaintextLeakCount),
           `${path}.plaintextLeakCount`,
@@ -1287,7 +1300,10 @@ export function assertFunctionResultStepSchema(
   if (obj.type !== "function_result") {
     throw new ContentFreeEgressError(String(obj.type), `${path}.type`);
   }
-  if (typeof obj.call_id !== "string" || !CLOSED_CALL_ID_REGEX.test(obj.call_id)) {
+  if (
+    typeof obj.call_id !== "string" ||
+    !CLOSED_CALL_ID_REGEX.test(obj.call_id)
+  ) {
     throw new ContentFreeEgressError(String(obj.call_id), `${path}.call_id`);
   }
   if (
@@ -1367,7 +1383,10 @@ export function assertGeminiFollowUpRequestSchema(
     obj.input.length === 0 ||
     obj.input.length > MAX_PLANNER_STEPS
   ) {
-    throw new ContentFreeEgressError("<invalid_followup_input>", `${path}.input`);
+    throw new ContentFreeEgressError(
+      "<invalid_followup_input>",
+      `${path}.input`,
+    );
   }
   const seenCallIds = new Set<string>();
   for (let i = 0; i < obj.input.length; i++) {
@@ -1393,7 +1412,9 @@ export function assertGeminiFollowUpRequestSchema(
     throw new ContentFreeEgressError("<invalid_tools>", `${path}.tools`);
   }
   const toolNames = toolsList.map((t) =>
-    t && typeof t === "object" ? String((t as { name?: unknown }).name ?? "") : "",
+    t && typeof t === "object"
+      ? String((t as { name?: unknown }).name ?? "")
+      : "",
   );
   const canonicalExpectedNames = ALLOWED_PLANNER_TOOLS.filter((name) =>
     toolNames.includes(name),
