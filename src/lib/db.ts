@@ -1,4 +1,5 @@
 import { MongoClient, type Db } from "mongodb";
+import { resolveDbName } from "@/lib/mongo/db-name";
 
 /**
  * Public transparency log. It stores only non-sensitive facts: which node was verified, the
@@ -74,7 +75,7 @@ async function db(): Promise<Db | null> {
     serverSelectionTimeoutMS: 5000,
   }).connect();
   const client = await globalForMongo.__drouterMongo;
-  const database = client.db(process.env.MONGODB_DB ?? "drouter");
+  const database = client.db(resolveDbName());
   globalForMongo.__drouterTtlIndexed ??= ensureTtlIndexes(database);
   await globalForMongo.__drouterTtlIndexed;
   return database;

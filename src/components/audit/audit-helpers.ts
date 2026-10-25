@@ -47,17 +47,23 @@ export interface VerifierSubmissionSummaryView {
   leafHash: string;
 }
 
+export const EMPTY_TRANSPARENCY_LOG_MESSAGE =
+  "No checks recorded yet. The first one appears within the hour.";
+
 export interface TransparencyResponse {
   operatorPublicKey?: string;
   signedTreeHead?: SignedTreeHead;
   anchorExplorerUrl?: string | null;
   persisted?: boolean;
+  isEmpty?: boolean;
+  statusMessage?: string;
   verificationLog?: {
     root: string;
     treeSize: number;
     events: VerificationLogEvent[];
     inclusionProofs: InclusionProof[];
     consistencyProof: ConsistencyProof;
+    statusMessage?: string;
   };
   consistencyProof?: ConsistencyProof;
   distinctVerifierCount?: number;
@@ -67,6 +73,32 @@ export interface TransparencyResponse {
     distinctVerifierCount: number;
     totalSubmissions: number;
     recentSubmissions: VerifierSubmissionSummaryView[];
+  };
+}
+
+export function describeTransparencyLogState(
+  transparency: TransparencyResponse | null | undefined,
+): {
+  isEmpty: boolean;
+  treeSize: number;
+  message: string;
+} {
+  const events = transparency?.verificationLog?.events ?? [];
+  const treeSize =
+    transparency?.signedTreeHead?.treeSize ??
+    transparency?.verificationLog?.treeSize ??
+    events.length;
+  if (events.length === 0 || treeSize === 0) {
+    return {
+      isEmpty: true,
+      treeSize: 0,
+      message: EMPTY_TRANSPARENCY_LOG_MESSAGE,
+    };
+  }
+  return {
+    isEmpty: false,
+    treeSize,
+    message: `${treeSize} ${treeSize === 1 ? "check" : "checks"} recorded in the public receipt book.`,
   };
 }
 

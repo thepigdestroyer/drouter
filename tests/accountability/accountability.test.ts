@@ -31,8 +31,11 @@ import { TINFOIL_MODELS } from "@/lib/tinfoil/client";
 import {
   resetAnchorRateLimitState,
   setAnchorReceiptOverride,
+  setLiveVerificationViewOverride,
   setTransparencyCollectionOverride,
+  setVerifierSubmissionsCollectionOverride,
 } from "@/lib/transparency/store";
+import { resolveDbName } from "@/lib/mongo/db-name";
 import { OPEN_MODEL_CATALOG } from "@/lib/weights/open-shards";
 
 vi.mock("next/server", async (importOriginal) => {
@@ -355,16 +358,27 @@ beforeEach(() => {
   resetAnchorRateLimitState();
   setMonitorCollectionOverride(null);
   setTransparencyCollectionOverride(createInMemoryTransparencyCollection());
+  setVerifierSubmissionsCollectionOverride(null);
+  setLiveVerificationViewOverride(null);
   setAnchorReceiptOverride(null);
   setCronMonitorTestOptions(null);
 });
 
 afterEach(() => {
   setArcClientDepsForTests(null);
-  setMonitorCollectionOverride(undefined);
+  setMonitorCollectionOverride(null);
   setTransparencyCollectionOverride(null);
+  setVerifierSubmissionsCollectionOverride(null);
+  setLiveVerificationViewOverride(null);
   setAnchorReceiptOverride(null);
   setCronMonitorTestOptions(null);
+  clearMemoryMonitorRuns();
+  clearMemoryAuditorRuns();
+  clearKdsCertChainCacheForTests();
+  resetRouterRttCacheForTests();
+  resetMonitorArcTxCountForTests();
+  resetAnchorRateLimitState();
+  resetRateLimitStateForTests();
   vi.unstubAllEnvs();
 });
 
@@ -732,15 +746,20 @@ describe("D7 Continuous Enclave Monitoring & Real Accountability", () => {
   });
 
   describe("Live Tinfoil Enclave Continuous Monitor Integration", () => {
+    it("resolves database name to drouter_test under vitest", () => {
+      const prevDb = process.env.MONGODB_DB;
+      delete process.env.MONGODB_DB;
+      try {
+        expect(resolveDbName()).toBe("drouter_test");
+      } finally {
+        if (prevDb !== undefined) process.env.MONGODB_DB = prevDb;
+      }
+    });
+
     it(
       "verifies live Tinfoil router and all real model enclaves end-to-end",
       async () => {
         if (process.env.DROUTER_STUB_UPSTREAM === "1") return;
-
-        if (process.env.MONGODB_URI) {
-          setMonitorCollectionOverride(undefined);
-          setTransparencyCollectionOverride(null);
-        }
 
         const result = await executeContinuousMonitorRun({
           anchorTreeHead: false,
@@ -763,9 +782,7 @@ describe("D7 Continuous Enclave Monitoring & Real Accountability", () => {
         expect(kimi.modelProvenanceOk).toBe(true);
         expect(kimi.ok).toBe(true);
 
-        if (process.env.MONGODB_URI) {
-          expect(result.storedInMongo).toBe(true);
-        }
+        expect(result.storedInMongo).toBe(false);
 
         const history = await getMonitorRunsHistory(5);
         expect(history.hasRun).toBe(true);

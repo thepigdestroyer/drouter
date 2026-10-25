@@ -644,7 +644,7 @@ describe("Autonomous 6-Stage Split-Knowledge Orchestrator (orchestrator.ts)", ()
       enableLiveEnclaveInference: false,
     });
 
-    expect(result.mode).toBe("simulated");
+    expect(result.mode).toBe("tinfoil-planner");
     expect(result.dataSentToGoogle).toBe("content-free task descriptor only");
     expect(result.dataHandling).toEqual(HONEST_DATA_HANDLING_STATEMENT);
     expect(() => assertContentFree(result.taskDescriptor)).not.toThrow();
@@ -823,7 +823,7 @@ describe("Autonomous 6-Stage Split-Knowledge Orchestrator (orchestrator.ts)", ()
       tinfoilClient: mockTinfoilClient,
     });
 
-    expect(run.mode).toBe("simulated");
+    expect(run.mode).toBe("tinfoil-planner");
     expect(run.planner).toEqual({
       provider: "tinfoil",
       model: "gemma4-31b",

@@ -1,9 +1,9 @@
-import { sha384 } from "@noble/hashes/sha2.js";
-import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
+import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { MongoClient, type Collection, type Db } from "mongodb";
 import { TinfoilAI, type VerificationDocument } from "tinfoil";
 import { GET as getEnclaveMatrix } from "@/app/api/relay/enclave-matrix/route";
 import { anchorReceipt, explorerTx, listNodes, type ListNodesResult } from "@/lib/arc/registry";
+import { resolveDbName } from "@/lib/mongo/db-name";
 import type { DeepAttestationBundle } from "@/lib/tinfoil/deep-inspect";
 import type { Hex } from "@/lib/types";
 import {
@@ -118,6 +118,9 @@ export function resetAnchorRateLimitState(): void {
   globalForTransparencyMongo.__drouterLastAnchorTx = undefined;
   globalForTransparencyMongo.__drouterLastAnchoredRoot = undefined;
   globalForTransparencyMongo.__drouterCachedLiveView = null;
+  memoryLeaves = [];
+  memoryLatestSth = null;
+  memorySubmissions = [];
 }
 
 async function getMongoDb(): Promise<Db | null> {
@@ -129,7 +132,7 @@ async function getMongoDb(): Promise<Db | null> {
     serverSelectionTimeoutMS: 5000,
   }).connect();
   const client = await globalForTransparencyMongo.__drouterMongo;
-  return client.db(process.env.MONGODB_DB ?? "drouter");
+  return client.db(resolveDbName());
 }
 
 async function getTransparencyCollection(): Promise<TransparencyCollectionLike | null> {
@@ -160,54 +163,12 @@ async function getVerifierSubmissionsCollection(): Promise<TransparencyCollectio
   }
 }
 
-/** Initial genesis verification events for real Tinfoil enclaves (no PII, no simulated nodes, coarse hour timestamps). */
-export function buildGenesisVerificationEvents(): VerificationLogEvent[] {
-  return [
-    createVerificationLogEvent({
-      index: 0,
-      kind: "verification_event",
-      nodeId: "tinfoil-router",
-      nodeKind: "tinfoil",
-      ok: true,
-      measurement: "9134838da8aa4e1792566b2988820340356517c4db0c94261eb8154843e0357554ba72fcf185f950d9301fbede574c90",
-      evidenceHash: bytesToHex(sha384(utf8ToBytes("genesis/tinfoil-router/v0.0.167")).slice(0, 32)),
-      releaseDigest: "5233a27f1468f474d27c103e06c1a7a607e6a722ff4f9299ddf4e32fa87f201e",
-      enclaveHost: "router-0.tinfoil.sh",
-      timestampSec: 1735689600, // 2025-01-01T00:00:00Z
-    }),
-    createVerificationLogEvent({
-      index: 1,
-      kind: "verification_event",
-      nodeId: "kimi-k3",
-      nodeKind: "tinfoil",
-      ok: true,
-      measurement: "69c029108ac795b767e972858e926186c0e7b6a61f6c7fa9ce70ce1a6ee87f2c980bb51973cdf396404412ebb7c1a7b7",
-      evidenceHash: bytesToHex(sha384(utf8ToBytes("genesis/kimi-k3/v0.0.15")).slice(0, 32)),
-      releaseDigest: "41068e0738e14ee74d5b987586bdfc261d7bdd59e156dd6818154fd188b8ee7b",
-      enclaveHost: "kimi-k3-inf14.tinfoil.containers.tinfoil.dev",
-      timestampSec: 1738368000, // 2025-02-01T00:00:00Z
-    }),
-    createVerificationLogEvent({
-      index: 2,
-      kind: "verification_event",
-      nodeId: "glm-5-3",
-      nodeKind: "tinfoil",
-      ok: true,
-      measurement: "b64eb23f1441a8f25e29d901782fbb82f894f434db70cb1658dd37c398715bfff070f3b732f2e623bf151e56d2699188",
-      evidenceHash: bytesToHex(sha384(utf8ToBytes("genesis/glm-5-3/v0.0.7")).slice(0, 32)),
-      enclaveHost: "glm-5-3-inf1.tinfoil.containers.tinfoil.dev",
-      timestampSec: 1740787200, // 2025-03-01T00:00:00Z
-    }),
-  ];
-}
-
-// In-memory fallback when MongoDB is not configured (lazily initialized)
-let memoryLeaves: VerificationLogEvent[] | null = null;
+// In-memory fallback when MongoDB is not configured (starts empty; first entry is the first real verification)
+let memoryLeaves: VerificationLogEvent[] = [];
 let memoryLatestSth: SignedTreeHead | null = null;
 let memorySubmissions: VerifierSubmissionRecord[] = [];
 
 function getMemoryLeaves(): VerificationLogEvent[] {
-  memoryLeaves ??= buildGenesisVerificationEvents();
   return memoryLeaves;
 }
 
@@ -217,12 +178,18 @@ function isSimulatedLeafRecord(raw: Record<string, unknown>): boolean {
   return false;
 }
 
-function sanitizeLeafRecord(raw: Record<string, unknown>, fallbackIndex: number): VerificationLogEvent {
+export function sanitizeLeafRecord(raw: Record<string, unknown>, fallbackIndex: number): VerificationLogEvent | null {
+  const rawTimestamp =
+    typeof raw.epochHourSec === "number" && Number.isFinite(raw.epochHourSec) && raw.epochHourSec > 0
+      ? raw.epochHourSec
+      : typeof raw.timestampSec === "number" && Number.isFinite(raw.timestampSec) && raw.timestampSec > 0
+        ? raw.timestampSec
+        : null;
+  if (rawTimestamp === null) {
+    return null;
+  }
   const index = typeof raw.index === "number" && Number.isInteger(raw.index) ? raw.index : fallbackIndex;
-  const epochHourSec =
-    typeof raw.epochHourSec === "number" && Number.isFinite(raw.epochHourSec)
-      ? coarsenEpochSecToHour(raw.epochHourSec)
-      : coarsenEpochSecToHour(1735689600);
+  const epochHourSec = coarsenEpochSecToHour(rawTimestamp);
   const kind =
     raw.kind === "release_approval"
       ? "release_approval"
@@ -244,51 +211,47 @@ function sanitizeLeafRecord(raw: Record<string, unknown>, fallbackIndex: number)
   });
 }
 
+function sanitizeAndReindexLeafDocs(rawDocs: Record<string, unknown>[]): VerificationLogEvent[] {
+  const out: VerificationLogEvent[] = [];
+  for (const d of rawDocs) {
+    if (isSimulatedLeafRecord(d)) continue;
+    const sanitized = sanitizeLeafRecord({ ...d, index: out.length }, out.length);
+    if (sanitized) {
+      out.push(sanitized);
+    }
+  }
+  return out;
+}
+
 async function loadOrSeedLeaves(col: TransparencyCollectionLike | null): Promise<{
   leaves: VerificationLogEvent[];
   persisted: boolean;
 }> {
   if (!col) {
-    memoryLeaves = getMemoryLeaves()
-      .filter((l) => !isSimulatedLeafRecord(l as unknown as Record<string, unknown>))
-      .map((l, idx) => sanitizeLeafRecord({ ...l, index: idx }, idx));
-    if (memoryLeaves.length === 0) {
-      memoryLeaves = buildGenesisVerificationEvents();
-    }
+    memoryLeaves = sanitizeAndReindexLeafDocs(
+      getMemoryLeaves() as unknown as Record<string, unknown>[],
+    );
     return { leaves: [...memoryLeaves], persisted: false };
   }
   try {
     const rawDocs = await col.find({ docType: "leaf" }, { projection: { _id: 0 } }).sort({ index: 1 }).toArray();
     const realRawDocs = rawDocs.filter((d) => !isSimulatedLeafRecord(d));
     const hadSimulatedDocs = realRawDocs.length !== rawDocs.length;
-
-    if (realRawDocs.length === 0 || (hadSimulatedDocs && realRawDocs.length < 3)) {
-      if (col.deleteMany) {
-        await col.deleteMany({ docType: "leaf" });
-      }
-      const genesis = buildGenesisVerificationEvents();
-      await col.insertMany(
-        genesis.map((g) => ({
-          ...g,
-          docType: "leaf",
-        })),
-      );
-      return { leaves: genesis, persisted: true };
-    }
+    const leaves = sanitizeAndReindexLeafDocs(realRawDocs);
 
     if (hadSimulatedDocs && col.deleteMany) {
       await col.deleteMany({ docType: "leaf" });
-      const reindexed = realRawDocs.map((d, idx) => sanitizeLeafRecord({ ...d, index: idx }, idx));
-      await col.insertMany(
-        reindexed.map((g) => ({
-          ...g,
-          docType: "leaf",
-        })),
-      );
-      return { leaves: reindexed, persisted: true };
+      if (leaves.length > 0) {
+        await col.insertMany(
+          leaves.map((g) => ({
+            ...g,
+            docType: "leaf",
+          })),
+        );
+      }
+      return { leaves, persisted: true };
     }
 
-    const leaves = realRawDocs.map((d, idx) => sanitizeLeafRecord({ ...d, index: idx }, idx));
     return { leaves, persisted: true };
   } catch {
     return { leaves: [...getMemoryLeaves()], persisted: false };
@@ -936,17 +899,17 @@ export function compareClaimAgainstLiveView(
   };
 }
 
-function sanitizeSubmissionRecord(raw: Record<string, unknown>): VerifierSubmissionRecord {
+function sanitizeSubmissionRecord(raw: Record<string, unknown>): VerifierSubmissionRecord | null {
+  if (typeof raw.epochHourSec !== "number" || !Number.isFinite(raw.epochHourSec) || raw.epochHourSec <= 0) {
+    return null;
+  }
   const routerRaw = (raw.router && typeof raw.router === "object" ? raw.router : {}) as Record<string, unknown>;
   const modelsRaw = Array.isArray(raw.models) ? (raw.models as Record<string, unknown>[]) : [];
   const checksRaw = Array.isArray(raw.checks) ? (raw.checks as Record<string, unknown>[]) : [];
 
   return {
     verifierFingerprint: typeof raw.verifierFingerprint === "string" ? raw.verifierFingerprint.toLowerCase() : "",
-    epochHourSec:
-      typeof raw.epochHourSec === "number" && Number.isFinite(raw.epochHourSec)
-        ? coarsenEpochSecToHour(raw.epochHourSec)
-        : coarsenEpochSecToHour(1735689600),
+    epochHourSec: coarsenEpochSecToHour(raw.epochHourSec),
     overallOk: raw.overallOk === true,
     checks: VERIFIER_CHECK_IDS.map((id) => {
       const found = checksRaw.find((c) => c && c.id === id);
@@ -1009,7 +972,9 @@ export async function getVerifierSubmissionsSummary(opts?: { limit?: number }): 
       .find({}, { projection: { _id: 0 } })
       .sort({ leafIndex: -1 })
       .toArray();
-    const records = rawDocs.map(sanitizeSubmissionRecord).filter((r) => Boolean(r.verifierFingerprint));
+    const records = rawDocs
+      .map(sanitizeSubmissionRecord)
+      .filter((r): r is VerifierSubmissionRecord => r !== null && Boolean(r.verifierFingerprint));
     const distinctVerifierCount = new Set(records.map((r) => r.verifierFingerprint)).size;
     return {
       persisted: true,

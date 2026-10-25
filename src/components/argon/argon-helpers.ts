@@ -191,6 +191,9 @@ export function resolvePlannerModeBadgeText(params: {
   }
 
   const fallbackModel = enclaveModel?.trim() || "gemma4-31b";
+  if (mode === "tinfoil-planner") {
+    return `Planned by ${fallbackModel} because no Gemini key is set`;
+  }
   return `Planned by ${fallbackModel} because no Gemini key is set`;
 }
 
@@ -496,6 +499,7 @@ export function formatCleanRunJsonForDisplay(
   return {
     runId: run.runId,
     timestampIso: run.timestampIso,
+    mode: run.mode,
     planner: run.planner,
     dataSentToGoogle: run.dataSentToGoogle,
     dataHandling: run.dataHandling,

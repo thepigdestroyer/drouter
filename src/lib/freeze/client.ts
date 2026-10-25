@@ -22,7 +22,7 @@ export interface StoredFreezeReceipt extends FreezeReceipt {
   byteLength?: number;
   expiresAt?: number;
   modelId?: string;
-  storageMode?: "mongodb" | "simulated-memory";
+  storageMode?: "mongodb" | "memory";
   persisted?: boolean;
   resumeCode?: string;
 }
@@ -40,7 +40,7 @@ export interface FrozenBlobStatusCheck {
   expiresAt?: number;
   byteLength?: number;
   modelId?: string;
-  storageMode?: "mongodb" | "simulated-memory";
+  storageMode?: "mongodb" | "memory";
   persisted?: boolean;
 }
 
@@ -203,7 +203,7 @@ export async function freezeAndUpload(
     byteLength: number;
     expiresAt: number;
     resumeCode: string;
-    storageMode: "mongodb" | "simulated-memory";
+    storageMode: "mongodb" | "memory";
     persisted: boolean;
   }
 > {
@@ -245,7 +245,7 @@ export async function freezeAndUpload(
     byteLength: number;
     createdAt?: number;
     expiresAt?: number;
-    storageMode?: "mongodb" | "simulated-memory";
+    storageMode?: "mongodb" | "memory";
     persisted?: boolean;
   };
 
@@ -380,7 +380,7 @@ export async function checkFrozenBlobStatus(
       byteLength?: number;
       modelId?: string;
       expiresAt?: number;
-      storageMode?: "mongodb" | "simulated-memory";
+      storageMode?: "mongodb" | "memory";
       persisted?: boolean;
     };
     if (typeof data.expiresAt === "number" && data.expiresAt <= nowSec) {

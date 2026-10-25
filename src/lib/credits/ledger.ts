@@ -3,6 +3,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 import { HDKey, HARDENED_OFFSET } from "@scure/bip32";
 import { MongoClient, type Collection, type Db } from "mongodb";
+import { resolveDbName } from "@/lib/mongo/db-name";
 import {
   createPublicClient,
   defineChain,
@@ -270,7 +271,7 @@ async function getMongoDb(): Promise<Db | null> {
       });
       mongoDbPromise = client
         .connect()
-        .then((c) => c.db(process.env.MONGODB_DB || "drouter"))
+        .then((c) => c.db(resolveDbName()))
         .catch(() => null);
     }
     const db = await mongoDbPromise;

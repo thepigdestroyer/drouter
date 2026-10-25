@@ -1,4 +1,5 @@
 import { MongoClient, type Collection, type Db } from "mongodb";
+import { PRODUCTION_DB_NAME, resolveDbName } from "@/lib/mongo/db-name";
 import {
   cosineSimilarity,
   embedDocumentText,
@@ -23,6 +24,7 @@ import {
   type AtlasQueryRedactionReport,
 } from "./privacy-filter";
 
+export const ATLAS_CORPUS_DB_NAME = PRODUCTION_DB_NAME;
 export const ATLAS_COLLECTION_NAME = "enclave_intelligence";
 export const ATLAS_RECEIPTS_COLLECTION_NAME = "agent_verification_receipts";
 export const ATLAS_TEXT_INDEX_NAME = "drouter_text_search";
@@ -47,7 +49,7 @@ export interface AtlasSearchEngines {
 export interface AgentVerificationReceiptDoc {
   receiptId: string;
   coarsenedAt: string;
-  mode: "live";
+  mode: "live" | "tinfoil-planner";
   primaryModel: string;
   enclaveModel: string;
   routerHost: string;
@@ -230,7 +232,27 @@ export async function getAtlasDb(): Promise<Db | null> {
       serverSelectionTimeoutMS: 4500,
     }).connect();
     const client = await globalForAtlas.__drouterAtlasClient;
-    return client.db(process.env.MONGODB_DB ?? "drouter");
+    return client.db(process.env.MONGODB_DB?.trim() || ATLAS_CORPUS_DB_NAME);
+  } catch {
+    globalForAtlas.__drouterAtlasClient = undefined;
+    return null;
+  }
+}
+
+export async function getAtlasWriteDb(): Promise<Db | null> {
+  if (globalForAtlas.__drouterTestAtlasDb !== undefined) {
+    return globalForAtlas.__drouterTestAtlasDb;
+  }
+  const uri = resolveMongoUri();
+  if (!uri) return null;
+  try {
+    globalForAtlas.__drouterAtlasClient ??= new MongoClient(uri, {
+      appName: "drouter-atlas-showcase",
+      maxPoolSize: 5,
+      serverSelectionTimeoutMS: 4500,
+    }).connect();
+    const client = await globalForAtlas.__drouterAtlasClient;
+    return client.db(resolveDbName());
   } catch {
     globalForAtlas.__drouterAtlasClient = undefined;
     return null;
@@ -246,7 +268,7 @@ export async function ensureAtlasSeededAndIndexed(db?: Db | null): Promise<{
   seededCount: number;
   indexesCreated: string[];
 }> {
-  const database = db !== undefined ? db : await getAtlasDb();
+  const database = db !== undefined ? db : await getAtlasWriteDb();
   if (!database) {
     return { seededCount: ATLAS_SEED_DOCS.length, indexesCreated: [] };
   }
@@ -520,7 +542,7 @@ function sanitizeSourceUrl(rawUrl: string | undefined): string {
 export async function recordAgentVerificationReceipt(input: {
   receiptId: string;
   timestampIso?: string;
-  mode?: "live" | "simulated";
+  mode?: "live" | "tinfoil-planner" | "simulated";
   primaryModel: string;
   enclaveModel: string;
   routerHost: string;
@@ -546,13 +568,15 @@ export async function recordAgentVerificationReceipt(input: {
       "Simulated agent verification receipts must not be stored in MongoDB Atlas.",
     );
   }
+  const receiptMode: "live" | "tinfoil-planner" =
+    input.mode === "tinfoil-planner" ? "tinfoil-planner" : "live";
 
   // Receipt summary is constructed purely from system identifiers, booleans, and a 64-bit hash prefix;
   // pass through mechanicalRedact (D3) + attestedPiiFilter (D4) before leaving the enclave boundary.
   const idRedacted = await redactForAtlasBoundary(input.receiptId || "receipt");
   const safeReceiptId = idRedacted.text;
   const rawSummary =
-    `Agent verification receipt ${safeReceiptId} (mode=live, orchestrator=${input.primaryModel}): ` +
+    `Agent verification receipt ${safeReceiptId} (mode=${receiptMode}, orchestrator=${input.primaryModel}): ` +
     `router=${input.routerHost} -> enclave=${input.enclaveHost} (${input.enclaveModel}), ` +
     `overallPassed=${Boolean(input.overallPassed)}, faultInjected=${Boolean(input.faultInjected)}, selfHealed=${Boolean(input.selfHealed)}, ` +
     `humanGate=${input.humanGateState}, digest=0x${(input.forensicProofDigestHex || "").slice(0, 16)}.`;
@@ -566,7 +590,7 @@ export async function recordAgentVerificationReceipt(input: {
   const receipt: AgentVerificationReceiptDoc = {
     receiptId: safeReceiptId,
     coarsenedAt,
-    mode: "live",
+    mode: receiptMode,
     primaryModel: input.primaryModel,
     enclaveModel: input.enclaveModel,
     routerHost: input.routerHost,
@@ -588,7 +612,7 @@ export async function recordAgentVerificationReceipt(input: {
   getRuntimeReceiptsMap().set(receipt.receiptId, receipt);
 
   let storedInAtlas = false;
-  const database = await getAtlasDb();
+  const database = await getAtlasWriteDb();
   if (database) {
     try {
       const col = database.collection<AgentVerificationReceiptDoc>(ATLAS_RECEIPTS_COLLECTION_NAME);
@@ -622,12 +646,12 @@ export async function searchAgentVerificationReceipts(
   alreadyRedacted = false,
 ): Promise<AgentVerificationReceiptDoc[]> {
   const runtimeReceipts = getRuntimeReceiptsMap();
-  const database = await getAtlasDb();
+  const database = await getAtlasWriteDb();
   if (database) {
     try {
       const col = database.collection<AgentVerificationReceiptDoc>(ATLAS_RECEIPTS_COLLECTION_NAME);
       const docs = await col
-        .find({ mode: "live" }, { projection: { _id: 0 } })
+        .find({ mode: { $in: ["live", "tinfoil-planner"] } }, { projection: { _id: 0 } })
         .sort({ coarsenedAt: -1 })
         .limit(25)
         .toArray();
@@ -789,7 +813,9 @@ export async function runAtlasHybridSearch(
   let candidateDocs: EnclaveIntelligenceDoc[] = Array.from(runtimeMap.values());
 
   if (database) {
-    await ensureAtlasSeededAndIndexed(database);
+    if (!process.env.VITEST || globalForAtlas.__drouterTestAtlasDb !== undefined) {
+      await ensureAtlasSeededAndIndexed(database);
+    }
     const col = database.collection<EnclaveIntelligenceDoc>(ATLAS_COLLECTION_NAME);
 
     try {
@@ -1255,7 +1281,7 @@ export async function ingestAtlasDocument(input: {
   runtimeMap.set(embeddedDoc.docId, embeddedDoc);
 
   let storedInAtlas = false;
-  const database = await getAtlasDb();
+  const database = await getAtlasWriteDb();
   if (database) {
     try {
       const col = database.collection<EnclaveIntelligenceDoc>(ATLAS_COLLECTION_NAME);
@@ -1285,6 +1311,7 @@ export async function ingestAtlasDocument(input: {
  */
 export async function runAtlasStreamAnalytics(): Promise<AtlasStreamAnalyticsResponse> {
   const database = await getAtlasDb();
+  const writeDatabase = (await getAtlasWriteDb()) ?? database;
   const runtimeDocs = Array.from(getRuntimeDocsMap().values());
 
   const fallbackCategoryCounts = new Map<string, number>();
@@ -1326,9 +1353,11 @@ export async function runAtlasStreamAnalytics(): Promise<AtlasStreamAnalyticsRes
     },
   ];
 
-  if (database) {
+  if (database && writeDatabase) {
     try {
-      await ensureAtlasSeededAndIndexed(database);
+      if (!process.env.VITEST || globalForAtlas.__drouterTestAtlasDb !== undefined) {
+        await ensureAtlasSeededAndIndexed(database);
+      }
       const intelCol = database.collection(ATLAS_COLLECTION_NAME);
 
       const [
@@ -1360,7 +1389,7 @@ export async function runAtlasStreamAnalytics(): Promise<AtlasStreamAnalyticsRes
             },
           ])
           .toArray(),
-        database
+        writeDatabase
           .collection("verifications")
           .aggregate([
             {
@@ -1374,23 +1403,23 @@ export async function runAtlasStreamAnalytics(): Promise<AtlasStreamAnalyticsRes
           ])
           .toArray()
           .catch(() => []),
-        database
+        writeDatabase
           .collection("receipts")
           .countDocuments()
           .catch(() => 0),
-        database
+        writeDatabase
           .collection(ATLAS_RECEIPTS_COLLECTION_NAME)
-          .countDocuments({ mode: "live" })
+          .countDocuments({ mode: { $in: ["live", "tinfoil-planner"] } })
           .catch(() => 0),
-        database
+        writeDatabase
           .collection("relay_totals")
           .findOne({ _id: "global" as unknown as never })
           .catch(() => null),
-        database
+        writeDatabase
           .collection("credit_nullifiers")
           .countDocuments()
           .catch(() => 0),
-        database
+        writeDatabase
           .collection("frozen_blobs")
           .countDocuments()
           .catch(() => 0),
@@ -1492,7 +1521,7 @@ export async function runAtlasStreamAnalytics(): Promise<AtlasStreamAnalyticsRes
 
   return {
     connected,
-    database: process.env.MONGODB_DB ?? "drouter",
+    database: resolveDbName(),
     collection: ATLAS_COLLECTION_NAME,
     totalIntelligenceDocs,
     totalKnowledgeDocs: totalIntelligenceDocs,

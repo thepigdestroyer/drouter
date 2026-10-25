@@ -81,6 +81,7 @@ describe("deRoute wave 4/5 Argon & Atlas plain-language helpers", () => {
     expect(
       resolvePlannerModeBadgeText({
         planner: { provider: "tinfoil", model: "kimi-k3" },
+        mode: "tinfoil-planner",
       }),
     ).toBe("Planned by kimi-k3 because no Gemini key is set");
 
@@ -161,6 +162,7 @@ describe("deRoute wave 4/5 Argon & Atlas plain-language helpers", () => {
         enableLiveEnclaveInference: false,
       });
 
+      expect(run.mode).toBe("tinfoil-planner");
       expect(run.overallPassed).toBe(true);
       expect(run.stages.stage1.redactionCount).toBeGreaterThanOrEqual(5);
       expect(

@@ -1,5 +1,6 @@
 import { MongoClient, type Db } from "mongodb";
 import { coarsenToHour } from "@/lib/db";
+import { resolveDbName } from "@/lib/mongo/db-name";
 import type { AuditorRunRecord } from "./canary";
 
 const globalForAuditor = globalThis as unknown as {
@@ -22,7 +23,7 @@ async function getAuditorDb(): Promise<Db | null> {
       serverSelectionTimeoutMS: 3000,
     }).connect();
     const client = await globalForAuditor.__drouterAuditorMongo;
-    return client.db(process.env.MONGODB_DB ?? "drouter");
+    return client.db(resolveDbName());
   } catch {
     return null;
   }

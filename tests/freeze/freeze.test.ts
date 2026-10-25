@@ -395,15 +395,15 @@ describe("Subsystem 2: Encrypted Session Freeze, Resume & Crypto-Shredding", () 
     expect(getBody.storageMode).toBe("mongodb");
     expect(getBody.persisted).toBe(true);
 
-    // Verify simulated-memory label when MONGODB_URI is unset and no collection override is present
+    // Verify memory label when MONGODB_URI is unset and no collection override is present
     setFreezeCollectionOverrideForTests(undefined);
     const origUri = process.env.MONGODB_URI;
     delete process.env.MONGODB_URI;
     try {
       const modeInfo = getFreezeStorageMode();
-      expect(modeInfo.mode).toBe("simulated-memory");
+      expect(modeInfo.mode).toBe("memory");
       expect(modeInfo.persisted).toBe(false);
-      expect(modeInfo.label).toContain("Simulated");
+      expect(modeInfo.label).toBe("Temporary memory (database not configured)");
     } finally {
       if (origUri !== undefined) process.env.MONGODB_URI = origUri;
     }

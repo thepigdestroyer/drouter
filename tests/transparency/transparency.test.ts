@@ -39,6 +39,7 @@ import {
   appendVerificationEventToLog,
   getPersistedTransparencyLog,
   resetAnchorRateLimitState,
+  sanitizeLeafRecord,
   setAnchorReceiptOverride,
   setLiveVerificationViewOverride,
   setTransparencyCollectionOverride,
@@ -46,6 +47,7 @@ import {
   type LiveVerificationView,
   type TransparencyCollectionLike,
 } from "@/lib/transparency/store";
+import { resolveDbName } from "@/lib/mongo/db-name";
 import {
   buildCanonicalVerificationClaim,
   loadOrCreateVerifierKey,
@@ -277,9 +279,26 @@ describe("RFC 6962 Standard Test Vectors & Client Proof Verifiers", () => {
 });
 
 describe("MongoDB Persistence (`transparency_log`), Real Tinfoil Leaves & Hourly Arc Anchoring", () => {
-  it("seeds only real Tinfoil enclave leaves (no sim nodes), rate-limits Arc anchoring to hourly, and rejects simulated nodes", async () => {
+  it("resolves database name to drouter_test under vitest", () => {
+    const prevDb = process.env.MONGODB_DB;
+    delete process.env.MONGODB_DB;
+    try {
+      expect(resolveDbName()).toBe("drouter_test");
+      process.env.MONGODB_DB = "custom_db";
+      expect(resolveDbName()).toBe("custom_db");
+    } finally {
+      if (prevDb === undefined) delete process.env.MONGODB_DB;
+      else process.env.MONGODB_DB = prevDb;
+    }
+  });
+
+  it("starts with an empty log (treeSize 0, RFC 6962 empty root), skips leaf records without a valid timestamp, rate-limits Arc anchoring to hourly, and rejects simulated nodes", async () => {
     const { col, docs } = createMockCollection();
     setTransparencyCollectionOverride(col);
+
+    // Records without a valid timestamp are skipped instead of defaulting to 1735689600
+    expect(sanitizeLeafRecord({ nodeId: "tinfoil-router", ok: true }, 0)).toBeNull();
+    expect(sanitizeLeafRecord({ nodeId: "tinfoil-router", ok: true, epochHourSec: Number.NaN }, 0)).toBeNull();
 
     const anchorCalls: string[] = [];
     setAnchorReceiptOverride(async (receiptHash) => {
@@ -288,15 +307,14 @@ describe("MongoDB Persistence (`transparency_log`), Real Tinfoil Leaves & Hourly
     });
 
     const t0 = 1760000123;
-    const initial = await getPersistedTransparencyLog({ nowSec: t0, anchorIfDue: true });
+    const emptyRoot = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    const initial = await getPersistedTransparencyLog({ nowSec: t0, anchorIfDue: false });
     expect(initial.persisted).toBe(true);
-    expect(initial.events).toHaveLength(3);
-    expect(initial.events.map((e) => e.nodeId)).toEqual(["tinfoil-router", "kimi-k3", "glm-5-3"]);
-    expect(initial.events.every((e) => e.nodeKind === "tinfoil")).toBe(true);
-    expect(initial.signedTreeHead.treeSize).toBe(3);
+    expect(initial.events).toEqual([]);
+    expect(initial.signedTreeHead.treeSize).toBe(0);
+    expect(initial.signedTreeHead.rootHash).toBe(emptyRoot);
     expect(initial.signedTreeHead.timestampSec % 3600).toBe(0);
-    expect(initial.signedTreeHead.anchorTx).toBe(`0x${"ab".repeat(32)}`);
-    expect(anchorCalls).toHaveLength(1);
+    expect(anchorCalls).toHaveLength(0);
 
     const appended1 = await appendVerificationEventToLog({
       nodeId: "tinfoil-router",
@@ -310,9 +328,10 @@ describe("MongoDB Persistence (`transparency_log`), Real Tinfoil Leaves & Hourly
     });
 
     expect(appended1.persisted).toBe(true);
-    expect(appended1.event.index).toBe(3);
+    expect(appended1.event.index).toBe(0);
     expect(appended1.event.epochHourSec % 3600).toBe(0);
-    expect(appended1.signedTreeHead.treeSize).toBe(4);
+    expect(appended1.signedTreeHead.treeSize).toBe(1);
+    expect(appended1.signedTreeHead.anchorTx).toBe(`0x${"ab".repeat(32)}`);
     expect(anchorCalls).toHaveLength(1);
 
     const bundleVerdict = verifyTransparencyProofBundleClient({
@@ -323,18 +342,34 @@ describe("MongoDB Persistence (`transparency_log`), Real Tinfoil Leaves & Hourly
     });
     expect(bundleVerdict.ok).toBe(true);
 
+    // Within the same hour window: rate-limited (no second Arc tx)
+    const appendedSameHour = await appendVerificationEventToLog({
+      nodeId: "glm-5-3",
+      nodeKind: "tinfoil",
+      ok: true,
+      measurement: "ee".repeat(48),
+      evidenceHash: "ff".repeat(32),
+      timestampSec: t0 + 1200,
+      anchorOnArc: true,
+    });
+    expect(appendedSameHour.event.index).toBe(1);
+    expect(appendedSameHour.signedTreeHead.treeSize).toBe(2);
+    expect(anchorCalls).toHaveLength(1);
+
+    // Next hour window: anchors again
     const appended2 = await appendVerificationEventToLog({
       nodeId: "kimi-k3",
       nodeKind: "tinfoil",
       ok: true,
       measurement: "cc".repeat(48),
       evidenceHash: "dd".repeat(32),
-      timestampSec: t0 + 3700,
+      timestampSec: t0 + 4400,
       anchorOnArc: true,
     });
-    expect(appended2.signedTreeHead.treeSize).toBe(5);
+    expect(appended2.event.index).toBe(2);
+    expect(appended2.signedTreeHead.treeSize).toBe(3);
     expect(anchorCalls).toHaveLength(2);
-    expect(docs.filter((d) => d.docType === "leaf")).toHaveLength(5);
+    expect(docs.filter((d) => d.docType === "leaf")).toHaveLength(3);
 
     await expect(
       appendVerificationEventToLog({
@@ -347,13 +382,13 @@ describe("MongoDB Persistence (`transparency_log`), Real Tinfoil Leaves & Hourly
     ).rejects.toThrow(/Simulated nodes are not permitted/);
   });
 
-  it("removes simulated quorum, simulated release approvals, and simulated nodes from GET/POST /api/transparency", async () => {
+  it("handles an empty log plainly on GET /api/transparency and appends real entries starting at index 0 on POST /api/transparency", async () => {
     const { col } = createMockCollection();
     const { col: subCol } = createMockCollection();
     setTransparencyCollectionOverride(col);
     setVerifierSubmissionsCollectionOverride(subCol);
 
-    const getRes = await getTransparencyRoute(new Request("http://localhost/api/transparency?first=1&second=3"));
+    const getRes = await getTransparencyRoute(new Request("http://localhost/api/transparency"));
     expect(getRes.status).toBe(200);
     const body = await getRes.json();
 
@@ -364,10 +399,13 @@ describe("MongoDB Persistence (`transparency_log`), Real Tinfoil Leaves & Hourly
     expect(body.proofs).toBeUndefined();
     expect(body.releaseConsistencyProof).toBeUndefined();
 
+    expect(body.isEmpty).toBe(true);
+    expect(body.statusMessage).toBe("No checks recorded yet. The first one appears within the hour.");
+    expect(body.verificationLog.treeSize).toBe(0);
+    expect(body.verificationLog.events).toEqual([]);
     expect(body.operatorPublicKey).toBe(getOperatorPublicKey());
     expect(verifySignedTreeHeadClient(body.signedTreeHead, body.operatorPublicKey).ok).toBe(true);
     expect(verifyConsistencyProofClient(body.consistencyProof).ok).toBe(true);
-    expect(body.verificationLog.events.every((e: { nodeKind: string }) => e.nodeKind === "tinfoil")).toBe(true);
     expect(body.distinctVerifierCount).toBe(0);
     expect(body.totalSubmissions).toBe(0);
     expect(body.recentSubmissions).toEqual([]);
@@ -388,7 +426,7 @@ describe("MongoDB Persistence (`transparency_log`), Real Tinfoil Leaves & Hourly
     );
     expect(simPostRes.status).toBe(400);
 
-    // Accepts real tinfoil node POST
+    // Accepts real tinfoil node POST as leaf index 0
     const postRes = await postTransparencyRoute(
       new Request("http://localhost/api/transparency", {
         method: "POST",
@@ -407,7 +445,7 @@ describe("MongoDB Persistence (`transparency_log`), Real Tinfoil Leaves & Hourly
     const postBody = await postRes.json();
     expect(postBody.ok).toBe(true);
     expect(postBody.quorumSimulated).toBeUndefined();
-    expect(postBody.event.index).toBe(3);
+    expect(postBody.event.index).toBe(0);
   });
 });
 
@@ -490,7 +528,7 @@ describe("Permissionless Independent Verification (D8: CLI Key Gen, Canonical C1
     expect(body1.epochHourSec % 3600).toBe(0);
     expect(body1.distinctVerifierCount).toBe(1);
     expect(body1.totalSubmissions).toBe(1);
-    expect(body1.event.index).toBe(3);
+    expect(body1.event.index).toBe(0);
     expect(body1.event.verifierFingerprint).toBe(signed1.verifierFingerprint);
     expect(
       verifyTransparencyProofBundleClient({

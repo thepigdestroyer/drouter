@@ -10,6 +10,8 @@ import {
 import {
   buildPlainTrustPoints,
   buildVerifiableClaims,
+  describeTransparencyLogState,
+  EMPTY_TRANSPARENCY_LOG_MESSAGE,
   shortHex,
 } from "@/components/audit/audit-helpers";
 import { HONEST_LIMITS } from "@/app/about/page";
@@ -259,6 +261,29 @@ describe("buildVerifiableClaims and buildPlainTrustPoints live record links", ()
         `${point.title} ${point.description} ${point.badge} ${point.buttonLabel}`,
       );
     }
+
+    const emptyLogState = describeTransparencyLogState({
+      verificationLog: {
+        root: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        treeSize: 0,
+        events: [],
+        inclusionProofs: [],
+        consistencyProof: {
+          firstTreeSize: 0,
+          secondTreeSize: 0,
+          firstRoot: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          secondRoot: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          consistencyPath: [],
+        },
+      },
+    });
+    expect(emptyLogState.isEmpty).toBe(true);
+    expect(emptyLogState.treeSize).toBe(0);
+    expect(emptyLogState.message).toBe(EMPTY_TRANSPARENCY_LOG_MESSAGE);
+    expect(emptyLogState.message).toBe(
+      "No checks recorded yet. The first one appears within the hour.",
+    );
+    expectPlainLanguage(emptyLogState.message);
   });
 
   it("provides plain-language HONEST_LIMITS summaries without banned jargon", () => {

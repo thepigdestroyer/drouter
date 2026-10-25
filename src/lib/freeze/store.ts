@@ -1,4 +1,5 @@
 import { MongoClient, type Db } from "mongodb";
+import { resolveDbName } from "@/lib/mongo/db-name";
 import { coarsenEpochSecToHour } from "./crypto";
 
 export interface StoredFrozenBlob {
@@ -61,7 +62,7 @@ export interface FreezeCollectionLike {
 }
 
 export interface FreezeStorageModeInfo {
-  mode: "mongodb" | "simulated-memory";
+  mode: "mongodb" | "memory";
   persisted: boolean;
   label: string;
 }
@@ -140,9 +141,9 @@ export function getFreezeStorageMode(): FreezeStorageModeInfo {
     };
   }
   return {
-    mode: "simulated-memory",
+    mode: "memory",
     persisted: false,
-    label: "Simulated ephemeral memory (MONGODB_URI unset)",
+    label: "Temporary memory (database not configured)",
   };
 }
 
@@ -156,7 +157,7 @@ async function getMongoDb(): Promise<Db | null> {
       serverSelectionTimeoutMS: 5000,
     }).connect();
     const client = await globalForFreeze.__drouterFreezeMongo;
-    return client.db(process.env.MONGODB_DB ?? "drouter");
+    return client.db(resolveDbName());
   } catch {
     globalForFreeze.__drouterFreezeMongo = undefined;
     return null;

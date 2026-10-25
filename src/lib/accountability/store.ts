@@ -1,5 +1,6 @@
 import { MongoClient, type Collection, type Db } from "mongodb";
 import { coarsenToHour, EPHEMERAL_LOG_TTL_SECONDS } from "@/lib/db";
+import { resolveDbName } from "@/lib/mongo/db-name";
 import { coarsenEpochSecToHour } from "@/lib/transparency/log";
 import type { Hex } from "@/lib/types";
 
@@ -209,7 +210,7 @@ async function getMonitorCollection(): Promise<MonitorCollectionLike | null> {
       serverSelectionTimeoutMS: 4000,
     }).connect();
     const client = await globalForMonitor.__drouterMonitorMongo;
-    const db: Db = client.db(process.env.MONGODB_DB ?? "drouter");
+    const db: Db = client.db(resolveDbName());
     globalForMonitor.__drouterMonitorTtlIndexed ??= db
       .collection(MONITOR_RUNS_COLLECTION)
       .createIndex(

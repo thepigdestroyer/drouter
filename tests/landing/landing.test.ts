@@ -132,6 +132,12 @@ describe("landing copy and plain-language compliance", () => {
     expect(combinedAnswers).toContain("Tinfoil");
     expect(combinedAnswers).toContain("demo");
     expect(combinedAnswers).toContain("sealed computer");
+    expect(combinedAnswers).toContain("checked every hour");
+    expect(combinedAnswers.toLowerCase()).not.toContain("practice");
+
+    const aiFaq = FAQ_ITEMS.find((f) => f.question === "What is the AI?")!;
+    expect(aiFaq.techDetail.toLowerCase()).not.toContain("practice");
+    expect(aiFaq.techDetail).not.toContain("sim-1");
   });
 
   it("links primary CTA to /login?next=/app and secondary CTA to /explain", () => {

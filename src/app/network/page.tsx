@@ -296,10 +296,9 @@ async function PublicReceiptBookSection() {
             <div className="space-y-0.5">
               <div className="ep-label">Latest entry</div>
               <h3 className="font-serif text-lg font-medium text-ink">
-                Seal check on{" "}
                 {latestEvent
-                  ? plainNodeName(latestEvent.nodeId)
-                  : "Tinfoil sealed computer"}
+                  ? `Seal check on ${plainNodeName(latestEvent.nodeId)}`
+                  : "No checks recorded yet. The first one appears within the hour."}
               </h3>
             </div>
             <span className="ep-pass">
@@ -314,7 +313,7 @@ async function PublicReceiptBookSection() {
               <div className="font-mono text-ink font-medium">
                 {latestEvent
                   ? whenHour(new Date(latestEvent.epochHourSec * 1000))
-                  : whenHour(new Date(sth.timestampSec * 1000))}
+                  : "Within the hour"}
               </div>
             </div>
             <div className="ep-inset p-3.5 space-y-1">
@@ -324,7 +323,7 @@ async function PublicReceiptBookSection() {
                   ? latestEvent.ok
                     ? "Seal check passed"
                     : "Seal check failed"
-                  : "Seal check passed"}
+                  : "No checks recorded yet"}
               </div>
             </div>
             <div className="ep-inset p-3.5 space-y-1">
@@ -384,7 +383,7 @@ async function PublicReceiptBookSection() {
                     Storage:{" "}
                     {transparency.persisted
                       ? "MongoDB transparency_log"
-                      : "In-memory genesis fallback"}
+                      : "Temporary memory (database not configured)"}
                   </span>
                 </div>
               </div>

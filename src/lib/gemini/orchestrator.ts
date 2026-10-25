@@ -478,7 +478,7 @@ export interface Stage6MultimodalReadoutResult {
 export interface ArgonAutonomousRunResult {
   runId: string;
   timestampIso: string;
-  mode: "live" | "simulated";
+  mode: "live" | "tinfoil-planner";
   planner: ArgonPlannerDescriptor;
   dataSentToGoogle: typeof DATA_SENT_TO_GOOGLE;
   dataHandling: DataHandlingStatement;
@@ -543,7 +543,7 @@ export interface ArgonOrchestratorOptions {
   receiptRecorder?: (receipt: {
     receiptId: string;
     timestampIso: string;
-    mode: "live" | "simulated";
+    mode: "live" | "tinfoil-planner";
     primaryModel: string;
     enclaveModel: string;
     routerHost: string;
@@ -1727,9 +1727,9 @@ export async function runArgonAutonomousWorkflow(
     };
   }
 
-  const mode: "live" | "simulated" = liveGeminiCall.liveEndpointReached
+  const mode: "live" | "tinfoil-planner" = liveGeminiCall.liveEndpointReached
     ? "live"
-    : "simulated";
+    : "tinfoil-planner";
 
   const stage4Passed =
     argonValidation.valid &&
@@ -1913,7 +1913,7 @@ export async function runArgonAutonomousWorkflow(
   const nowMs = Date.now();
   const coarsenedIso = new Date(nowMs - (nowMs % 3_600_000)).toISOString();
 
-  if (options.receiptRecorder) {
+  if (options.receiptRecorder && (liveGeminiCall.liveEndpointReached || liveEnclaveCalled)) {
     await options
       .receiptRecorder({
         receiptId: runId,

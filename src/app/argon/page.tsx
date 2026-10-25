@@ -295,7 +295,7 @@ function ArgonAuthenticatedView() {
 
   const plannerBadgeText = resolvePlannerModeBadgeText({
     planner: plannerInfo,
-    mode: liveGeminiReached ? "live" : undefined,
+    mode: runResult?.mode ?? (liveGeminiReached ? "live" : "tinfoil-planner"),
     liveGeminiReached,
     enclaveModel:
       runResult?.stages.stage4.routedEnclaveModel ?? enclaveModel,

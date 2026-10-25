@@ -8,6 +8,7 @@ import {
   type AuditorResponse,
   buildPlainTrustPoints,
   buildVerifiableClaims,
+  describeTransparencyLogState,
   formatUnixSec,
   shortHex,
   type TransparencyResponse,
@@ -576,13 +577,15 @@ export default function AuditLabPage() {
                         independently checked deRoute
                       </div>
                       <p className="text-sm text-ink-2">
-                        Anyone can run their own seal check from their computer
-                        and add their signed result to the public receipt book (
-                        {transparency?.totalSubmissions ?? 0} signed{" "}
-                        {(transparency?.totalSubmissions ?? 0) === 1
-                          ? "check"
-                          : "checks"}{" "}
-                        recorded so far).
+                        {realVerificationEvents.length === 0
+                          ? describeTransparencyLogState(transparency).message
+                          : `Anyone can run their own seal check from their computer and add their signed result to the public receipt book (${
+                              transparency?.totalSubmissions ?? 0
+                            } signed ${
+                              (transparency?.totalSubmissions ?? 0) === 1
+                                ? "check"
+                                : "checks"
+                            } recorded so far).`}
                       </p>
                     </div>
                     <span className="ep-pass shrink-0">
@@ -1070,52 +1073,58 @@ export default function AuditLabPage() {
                               Verification log leaves and RFC 6962 inclusion
                               proofs
                             </div>
-                            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3 font-mono">
-                              {realVerificationEvents.map((ev) => {
-                                const proof =
-                                  transparency.verificationLog?.inclusionProofs?.find(
-                                    (p) => p.leafIndex === ev.index,
+                            {realVerificationEvents.length === 0 ? (
+                              <div className="ep-inset p-3 text-ink-2">
+                                {describeTransparencyLogState(transparency).message}
+                              </div>
+                            ) : (
+                              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3 font-mono">
+                                {realVerificationEvents.map((ev) => {
+                                  const proof =
+                                    transparency.verificationLog?.inclusionProofs?.find(
+                                      (p) => p.leafIndex === ev.index,
+                                    );
+                                  const verified = proof
+                                    ? verifyInclusionProofClient(proof)
+                                    : null;
+                                  return (
+                                    <div
+                                      key={ev.index}
+                                      className="ep-inset p-2.5 space-y-1 text-[11px] text-ink-2"
+                                    >
+                                      <div className="flex items-center justify-between gap-1">
+                                        <span className="text-ink font-medium">
+                                          #{ev.index} {ev.nodeId} ({ev.kind})
+                                        </span>
+                                        <span
+                                          className={
+                                            verified?.ok
+                                              ? "ep-pass"
+                                              : "ep-muted-chip"
+                                          }
+                                        >
+                                          {verified?.ok ? "Proof OK" : "Leaf"}
+                                        </span>
+                                      </div>
+                                      <div className="break-all">
+                                        Leaf: {shortHex(ev.leafHash, 12, 8)}
+                                      </div>
+                                      <div className="break-all">
+                                        Evidence:{" "}
+                                        {shortHex(ev.evidenceHash, 12, 8)}
+                                      </div>
+                                      <div>
+                                        Audit path:{" "}
+                                        {proof
+                                          ? `${proof.auditPath.length} step(s)`
+                                          : "n/a"}{" "}
+                                        | Hour: {formatUnixSec(ev.epochHourSec)}
+                                      </div>
+                                    </div>
                                   );
-                                const verified = proof
-                                  ? verifyInclusionProofClient(proof)
-                                  : null;
-                                return (
-                                  <div
-                                    key={ev.index}
-                                    className="ep-inset p-2.5 space-y-1 text-[11px] text-ink-2"
-                                  >
-                                    <div className="flex items-center justify-between gap-1">
-                                      <span className="text-ink font-medium">
-                                        #{ev.index} {ev.nodeId} ({ev.kind})
-                                      </span>
-                                      <span
-                                        className={
-                                          verified?.ok
-                                            ? "ep-pass"
-                                            : "ep-muted-chip"
-                                        }
-                                      >
-                                        {verified?.ok ? "Proof OK" : "Leaf"}
-                                      </span>
-                                    </div>
-                                    <div className="break-all">
-                                      Leaf: {shortHex(ev.leafHash, 12, 8)}
-                                    </div>
-                                    <div className="break-all">
-                                      Evidence:{" "}
-                                      {shortHex(ev.evidenceHash, 12, 8)}
-                                    </div>
-                                    <div>
-                                      Audit path:{" "}
-                                      {proof
-                                        ? `${proof.auditPath.length} step(s)`
-                                        : "n/a"}{" "}
-                                      | Hour: {formatUnixSec(ev.epochHourSec)}
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                            </div>
+                                })}
+                              </div>
+                            )}
                           </div>
                         </div>
                       ) : (

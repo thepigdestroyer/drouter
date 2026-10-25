@@ -503,6 +503,16 @@ export function FreezeDrawer({
                     {formatUtcHour(activeReceipt.expiresAt)}
                   </dd>
                 </div>
+                {activeReceipt.storageMode && (
+                  <div className="grid grid-cols-1 gap-1 sm:grid-cols-[8.5rem_1fr] sm:gap-2">
+                    <dt className="font-sans text-ink-3">Storage mode</dt>
+                    <dd className="font-sans text-ink-2">
+                      {activeReceipt.storageMode === "memory"
+                        ? "Temporary memory (database not configured)"
+                        : "MongoDB Atlas (TTL auto-shred enabled)"}
+                    </dd>
+                  </div>
+                )}
               </dl>
             </TechDetails>
           </div>

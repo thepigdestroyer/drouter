@@ -75,17 +75,25 @@ export async function GET(request?: Request) {
     getVerifierSubmissionsSummary({ limit: 20 }),
   ]);
 
+  const isEmpty = persistedLog.events.length === 0;
+  const statusMessage = isEmpty
+    ? "No checks recorded yet. The first one appears within the hour."
+    : `${persistedLog.events.length} verification check(s) recorded in the transparency log.`;
+
   return Response.json({
     operatorPublicKey: persistedLog.operatorPublicKey,
     signedTreeHead: persistedLog.signedTreeHead,
     anchorExplorerUrl: persistedLog.anchorExplorerUrl,
     persisted: persistedLog.persisted,
+    isEmpty,
+    statusMessage,
     verificationLog: {
       root: persistedLog.signedTreeHead.rootHash,
       treeSize: persistedLog.signedTreeHead.treeSize,
       events: persistedLog.events,
       inclusionProofs: persistedLog.inclusionProofs,
       consistencyProof: persistedLog.consistencyProof,
+      statusMessage,
     },
     consistencyProof: persistedLog.consistencyProof,
     distinctVerifierCount: verifications.distinctVerifierCount,
