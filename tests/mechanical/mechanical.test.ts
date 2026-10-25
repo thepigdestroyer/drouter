@@ -548,19 +548,125 @@ describe("D3: Deterministic Fail-Closed Mechanical Redaction Filter (mechanicalR
       expect(res.text).not.toContain(item);
     }
     expect(res.restore(res.text)).toBe(techInput);
+  });
 
-    // Version strings like 1.2.3 or v2.4.10 and ordinary code snippets must remain untouched (0 false positives)
-    const cleanCodeAndVersions = [
-      "Upgrade package from v1.2.3 to 2.4.10 before running the build.",
-      "function add(a: number, b: number): number { return a + b; }",
-      "const items = array.filter((x) => x.active).map((x) => x.label);",
-      "import { useState, useEffect } from 'react';",
+  it("fixes F5 Important #1: redacts compressed IPv6 followed by ': ' in log lines and hides IPv4-mapped IPv6 (::ffff:10.42.7.19) whole without leaking ::ffff:", () => {
+    const logLine1 = "IPv6 fe80::1: connection refused";
+    const res1 = mechanicalRedact(logLine1);
+    expect(res1.text).toBe("IPv6 [IP_1]: connection refused");
+    expect(res1.redactions).toEqual([{ kind: "IP", placeholder: "[IP_1]" }]);
+    expect(res1.restore(res1.text)).toBe(logLine1);
+
+    const logLine2 = "IPv6 fe80::1ff:fe23:456:89a: connection refused";
+    const res2 = mechanicalRedact(logLine2);
+    expect(res2.text).toBe("IPv6 [IP_1]: connection refused");
+    expect(res2.redactions).toEqual([{ kind: "IP", placeholder: "[IP_1]" }]);
+    expect(res2.restore(res2.text)).toBe(logLine2);
+
+    const mappedLine = "Client connected from ::ffff:10.42.7.19:8443.";
+    const res3 = mechanicalRedact(mappedLine);
+    expect(res3.text).not.toContain("::ffff:");
+    expect(res3.text).not.toContain("10.42.7.19");
+    expect(res3.redactions[0]).toEqual({ kind: "IP", placeholder: "[IP_1]" });
+    expect(res3.restore(res3.text)).toBe(mappedLine);
+
+    const bareMapped = "Upstream peer ::ffff:10.42.7.19 timed out.";
+    const res4 = mechanicalRedact(bareMapped);
+    expect(res4.text).toBe("Upstream peer [IP_1] timed out.");
+    expect(res4.redactions).toEqual([{ kind: "IP", placeholder: "[IP_1]" }]);
+    expect(res4.restore(res4.text)).toBe(bareMapped);
+  });
+
+  it("fixes F5 Minor #1: redacts sentence-final IPv4 (10.42.7.19.) as IP while keeping the trailing period and reusing [IP_1] across turns", () => {
+    const session = createMechanicalSession();
+    const turn1 = session.redact("Server 10.42.7.19, failing.");
+    expect(turn1.text).toBe("Server [IP_1], failing.");
+    expect(turn1.redactions).toEqual([{ kind: "IP", placeholder: "[IP_1]" }]);
+
+    const turn2 = session.redact("Restart 10.42.7.19.");
+    expect(turn2.text).toBe("Restart [IP_1].");
+    expect(turn2.redactions).toEqual([{ kind: "IP", placeholder: "[IP_1]" }]);
+    expect(turn2.restore(turn2.text)).toBe("Restart 10.42.7.19.");
+  });
+
+  it("fixes F5 Minor #2: redacts lowercase and forward-slash Windows user file paths (c:\\users\\dana\\... and C:/Users/dana/...)", () => {
+    const lowerWin = "c:\\users\\dana\\acme\\deploy.log";
+    const slashWin = "C:/Users/dana/acme/deploy.log";
+    const upperWin = "D:/USERS/dana_reyes/.ssh/id_ed25519";
+
+    const input = `Check ${lowerWin} and ${slashWin} and ${upperWin}.`;
+    const res = mechanicalRedact(input);
+
+    expect(res.text).toBe("Check [URL_1] and [URL_2] and [URL_3].");
+    expect(res.text).not.toContain("dana");
+    expect(res.text).not.toContain("deploy.log");
+    expect(res.text).not.toContain("C:");
+    expect(res.text).not.toContain("c:");
+    expect(res.restore(res.text)).toBe(input);
+  });
+
+  it("fixes F5 Minor #3: wrapping a substring inside a URL with ££...££ hides both the marked token and the surrounding URL", () => {
+    const input =
+      "Visit https://internal.corp/api?key=££my_secret_token££&ok=1 now.";
+    const res = mechanicalRedact(input);
+
+    expect(res.text).not.toContain("internal.corp");
+    expect(res.text).not.toContain("my_secret_token");
+    expect(res.text).not.toContain("https://");
+    expect(res.text).toBe("Visit [URL_1][MARKED_1][URL_2] now.");
+    expect(res.restore(res.text)).toBe(
+      "Visit https://internal.corp/api?key=my_secret_token&ok=1 now.",
+    );
+  });
+
+  it("fixes F5 Minor #4 and passes the comprehensive false-positive suite (prose, semver, CSS colours, timestamps, localhost, C:\\Program Files\\Nodejs\\node.exe, Markdown, TypeScript snippet)", () => {
+    const zeroRedactionInputs = [
+      // 1. Ordinary prose paragraphs
+      "Modern distributed systems rely on deterministic state machines and append-only logs to maintain consistency across replicas. When a leader node experiences network partitioning, the consensus protocol elects a successor without losing committed transactions.",
+      "During code review, engineers should verify that error boundaries handle unexpected network timeouts gracefully and that retry loops apply exponential backoff with jitter.",
+      // 2. Semver and version strings
+      "Upgrade dependencies from v18.19.1 and v20.11.0-alpha.1 to react@18.2.0, next@15.1.0-canary.42, and typescript ~5.3.3.",
+      // 3. CSS colours
+      "Theme palette uses primary #ffffff, surface #1a2b3c, overlay #001a2b3c, accent rgb(255, 128, 0), and muted hsl(210, 50%, 40%).",
+      // 4. Timestamps
+      "Scheduled maintenance window runs from 08:30:00 to 14:45:12.500 UTC every Sunday.",
+      // 5. Windows Program Files system path (Minor #4)
+      "Executable path is C:\\Program Files\\Nodejs\\node.exe on standard installations.",
+      // 6. Markdown formatting
+      "### Architecture overview\n\n- **Zero-trust ingress**: validates every request header.\n- *Deterministic rules*: runs locally in the browser.\n- See `README.md` for `npm test` instructions.",
+      // 7. Short TypeScript snippet
+      "export interface RetryConfig {\n  readonly maxAttempts: number;\n  readonly baseDelayMs: number;\n}\nexport function computeDelay(attempt: number, cfg: RetryConfig): number {\n  return cfg.baseDelayMs * Math.pow(2, attempt);\n}",
     ];
-    for (const snippet of cleanCodeAndVersions) {
-      const cleanRes = mechanicalRedact(snippet);
-      expect(cleanRes.redactions).toEqual([]);
-      expect(cleanRes.text).toBe(snippet);
+
+    for (const sample of zeroRedactionInputs) {
+      const res = mechanicalRedact(sample);
+      expect(
+        res.redactions,
+        `Expected 0 redactions for: ${sample}`,
+      ).toEqual([]);
+      expect(res.text).toBe(sample);
     }
+
+    // localhost:3000 check: contains no NAME/IP/SECRET false positives (only the 4-digit port 3000 is matched as DIGITS by the 4+ digit rule)
+    const localhostRes = mechanicalRedact("Local dev server runs on localhost:3000.");
+    expect(localhostRes.redactions).toEqual([
+      { kind: "DIGITS", placeholder: "[DIGITS_1]" },
+    ]);
+    expect(localhostRes.restore(localhostRes.text)).toBe(
+      "Local dev server runs on localhost:3000.",
+    );
+
+    // Mixed snippet with clean prose/code + 1 real secret: ONLY the real secret is redacted
+    const realSecret = joinParts("sk", "_live_", "51HxYz9876543210fictional");
+    const mixedWithSecret = `Run C:\\Program Files\\Nodejs\\node.exe with v18.19.1 at 08:30:00 using ${realSecret} and colour #1a2b3c.`;
+    const mixedRes = mechanicalRedact(mixedWithSecret);
+    expect(mixedRes.redactions).toEqual([
+      { kind: "SECRET", placeholder: "[SECRET_1]" },
+    ]);
+    expect(mixedRes.text).toBe(
+      "Run C:\\Program Files\\Nodejs\\node.exe with v18.19.1 at 08:30:00 using [SECRET_1] and colour #1a2b3c.",
+    );
+    expect(mixedRes.restore(mixedRes.text)).toBe(mixedWithSecret);
   });
 });
 

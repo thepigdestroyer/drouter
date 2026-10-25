@@ -841,6 +841,7 @@ export function mechanicalRedact(
     normEnd: number,
     kind: MechanicalRedactionKind,
     keySuffix?: string,
+    trimTrailingPunct?: boolean,
   ): void => {
     if (
       normStart < 0 ||
@@ -851,23 +852,88 @@ export function mechanicalRedact(
     }
     const origStart = mapToOriginal[normStart];
     const origEnd = mapToOriginalEnd[normEnd - 1];
-    if (origEnd <= origStart || overlaps(origStart, origEnd)) {
+    if (origEnd <= origStart) {
       return;
     }
-    const raw = text.slice(origStart, origEnd);
-    const normSlice = normalized.slice(normStart, normEnd);
-    const defaultKey =
-      kind === "SECRET" || kind === "ENTROPY"
-        ? normSlice
-        : normSlice.toLowerCase();
-    occupied.push({ start: origStart, end: origEnd });
-    candidates.push({
-      start: origStart,
-      end: origEnd,
-      kind,
-      raw,
-      canonicalKey: `${kind}:${keySuffix ?? defaultKey}`,
-    });
+    if (!overlaps(origStart, origEnd)) {
+      const raw = text.slice(origStart, origEnd);
+      const normSlice = normalized.slice(normStart, normEnd);
+      const defaultKey =
+        kind === "SECRET" || kind === "ENTROPY"
+          ? normSlice
+          : normSlice.toLowerCase();
+      occupied.push({ start: origStart, end: origEnd });
+      candidates.push({
+        start: origStart,
+        end: origEnd,
+        kind,
+        raw,
+        canonicalKey: `${kind}:${keySuffix ?? defaultKey}`,
+      });
+      return;
+    }
+
+    // If the range overlaps one or more explicit MARKED spans (and no other occupied spans),
+    // redact the non-overlapping normalized sub-ranges around the marked spans so wrapping a
+    // substring inside a URL/path/secret with ££...££ still hides the surrounding token.
+    const overlapping = occupied.filter(
+      (s) => origStart < s.end && origEnd > s.start,
+    );
+    const allOverlappingAreMarked = overlapping.every((s) =>
+      candidates.some(
+        (c) => c.kind === "MARKED" && c.start === s.start && c.end === s.end,
+      ),
+    );
+    if (!allOverlappingAreMarked) {
+      return;
+    }
+
+    let subStart = normStart;
+    while (subStart < normEnd) {
+      while (
+        subStart < normEnd &&
+        overlaps(mapToOriginal[subStart], mapToOriginalEnd[subStart])
+      ) {
+        subStart += 1;
+      }
+      if (subStart >= normEnd) break;
+      let subEnd = subStart + 1;
+      while (
+        subEnd < normEnd &&
+        !overlaps(mapToOriginal[subEnd], mapToOriginalEnd[subEnd])
+      ) {
+        subEnd += 1;
+      }
+      let trimmedEnd = subEnd;
+      if (trimTrailingPunct) {
+        const subRaw = normalized.slice(subStart, trimmedEnd);
+        const trimLen = trimTrailingPunctuation(subRaw, ruleset);
+        if (trimLen > 0 && trimLen < subRaw.length) {
+          trimmedEnd -= trimLen;
+        }
+      }
+      if (trimmedEnd > subStart) {
+        const segOrigStart = mapToOriginal[subStart];
+        const segOrigEnd = mapToOriginalEnd[trimmedEnd - 1];
+        if (segOrigEnd > segOrigStart && !overlaps(segOrigStart, segOrigEnd)) {
+          const segRaw = text.slice(segOrigStart, segOrigEnd);
+          const segNorm = normalized.slice(subStart, trimmedEnd);
+          const segKey =
+            kind === "SECRET" || kind === "ENTROPY"
+              ? segNorm
+              : segNorm.toLowerCase();
+          occupied.push({ start: segOrigStart, end: segOrigEnd });
+          candidates.push({
+            start: segOrigStart,
+            end: segOrigEnd,
+            kind,
+            raw: segRaw,
+            canonicalKey: `${kind}:${segKey}`,
+          });
+        }
+      }
+      subStart = subEnd;
+    }
   };
 
   const addMatches = (
@@ -922,7 +988,13 @@ export function mechanicalRedact(
         continue;
       }
 
-      addSpanFromNormalizedRange(normStart, normEnd, kind, options?.keySuffix);
+      addSpanFromNormalizedRange(
+        normStart,
+        normEnd,
+        kind,
+        options?.keySuffix,
+        options?.trimTrailingPunct,
+      );
     }
   };
 

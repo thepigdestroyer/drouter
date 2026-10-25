@@ -155,7 +155,7 @@ const NAME_WORD_SRC =
   "(?:(?:Mc|Mac|O'|D')[A-Z][a-z]{1,25}|[A-Z][a-z]{1,25}(?:[-'][A-Z]?[a-z]{1,25})*)";
 
 export const MECHANICAL_RULESET: MechanicalRuleset = {
-  version: "1.0.2",
+  version: "1.0.3",
   markerRule: {
     openMarker: "££",
     closeMarker: "££",
@@ -494,7 +494,7 @@ export const MECHANICAL_RULESET: MechanicalRuleset = {
       },
       {
         source:
-          "(?:(?<![A-Za-z0-9_.-])\\/(?:Users|home)\\/[A-Za-z0-9._-]+(?:\\/[^\\s\"'<>)\\],;:]*)?|\\b[A-Za-z]:\\\\Users\\\\[A-Za-z0-9._-]+(?:\\\\[^\\s\"'<>)\\],;:]*)?)",
+          "(?:(?<![A-Za-z0-9_.-])\\/(?:Users|home)\\/[A-Za-z0-9._-]+(?:\\/[^\\s\"'<>)\\],;:]*)?|\\b[A-Za-z]:[\\\\/](?:[Uu]sers|USERS)[\\\\/][A-Za-z0-9._-]+(?:[\\\\/][^\\s\"'<>)\\],;:]*)?)",
         flags: "g",
       },
       {
@@ -586,13 +586,13 @@ export const MECHANICAL_RULESET: MechanicalRuleset = {
     ip: [
       {
         source:
-          "(?<![0-9.])(?:(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(?::\\d{1,5})?(?![0-9.])\\b",
-        flags: "g",
+          "(?<![0-9a-fA-F]:|[0-9a-fA-F])(?:(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,5}|(?:[0-9a-fA-F]{1,4}:){1,7}:|::(?:ffff(?::0{1,4})?:)?(?:(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)|::(?:[0-9a-fA-F]{1,4}:){0,6}[0-9a-fA-F]{1,4})(?:%[0-9a-zA-Z]{1,16})?(?!:[0-9a-fA-F:]|[0-9a-fA-F])",
+        flags: "gi",
       },
       {
         source:
-          "(?<![0-9a-fA-F:])(?:(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|(?:[0-9a-fA-F]{1,4}:){1,7}:|(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,5}|::(?:ffff(?::0{1,4})?:)?(?:(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)|::(?:[0-9a-fA-F]{1,4}:){0,6}[0-9a-fA-F]{1,4})(?:%[0-9a-zA-Z]{1,16})?(?![0-9a-fA-F:])",
-        flags: "gi",
+          "(?<!\\d\\.|\\d)(?:(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(?::\\d{1,5})?(?!\\.\\d|\\d)\\b",
+        flags: "g",
       },
       {
         source:
@@ -883,6 +883,10 @@ export const MECHANICAL_RULESET: MechanicalRuleset = {
       "atlas cellular unit",
       "atlas cellular",
       "cellular unit",
+      "program files",
+      "windows defender",
+      "system volume",
+      "system volume information",
     ],
     technicalSingleWords: [
       "trusted",
