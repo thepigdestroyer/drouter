@@ -62,6 +62,7 @@ interface CandidateSpan {
   kind: MechanicalRedactionKind;
   raw: string;
   canonicalKey: string;
+  existingPlaceholder?: string;
   emptyRemoval?: boolean;
 }
 
@@ -836,6 +837,100 @@ export function mechanicalRedact(
     }
   }
 
+  // 0c. Re-hide known values already hidden in the session (longest first, single pass)
+  if (opts?.session && ruleset.sessionKnownValues.enabled) {
+    const knownCfg = ruleset.sessionKnownValues;
+    const cjkRe = compileRuleSpec(knownCfg.cjkPattern);
+    const startsWithWordRe = compileRuleSpec(
+      ruleset.patterns.startsWithWordChar,
+    );
+    const endsWithWordRe = compileRuleSpec(ruleset.patterns.endsWithWordChar);
+
+    const sessionEntries = opts.session.entries();
+    const eligibleEntries: Array<{
+      trimmed: string;
+      key: string;
+      placeholder: string;
+      kind: MechanicalRedactionKind;
+    }> = [];
+    const byKeyOrOriginal = new Map<
+      string,
+      { placeholder: string; kind: MechanicalRedactionKind }
+    >();
+
+    for (const entry of sessionEntries) {
+      const trimmed = entry.original.trim();
+      if (!trimmed) continue;
+      if (existingPlaceholderRe.test(trimmed)) {
+        existingPlaceholderRe.lastIndex = 0;
+        continue;
+      }
+      existingPlaceholderRe.lastIndex = 0;
+      const minLen = cjkRe.test(trimmed)
+        ? knownCfg.minLengthCjk
+        : knownCfg.minLength;
+      if (trimmed.length < minLen) continue;
+      const lookupKey = knownCfg.caseInsensitive
+        ? trimmed.toLowerCase()
+        : trimmed;
+      if (!byKeyOrOriginal.has(lookupKey)) {
+        const item = {
+          trimmed,
+          key: lookupKey,
+          placeholder: entry.placeholder,
+          kind: entry.kind,
+        };
+        byKeyOrOriginal.set(lookupKey, {
+          placeholder: entry.placeholder,
+          kind: entry.kind,
+        });
+        eligibleEntries.push(item);
+      }
+    }
+
+    if (eligibleEntries.length > 0) {
+      eligibleEntries.sort((a, b) => b.trimmed.length - a.trimmed.length);
+      const patternSources = eligibleEntries.map((item) => {
+        const escaped = escapeRegExp(item.trimmed, ruleset);
+        if (!knownCfg.wordBoundaryAscii) {
+          return escaped;
+        }
+        const prefix = startsWithWordRe.test(item.trimmed) ? "\\b" : "";
+        const suffix = endsWithWordRe.test(item.trimmed) ? "\\b" : "";
+        return `${prefix}${escaped}${suffix}`;
+      });
+      const knownRe = compileRuleSpec({
+        source: patternSources.join("|"),
+        flags: knownCfg.caseInsensitive ? "gi" : "g",
+      });
+      let knownMatch: RegExpExecArray | null;
+      while ((knownMatch = knownRe.exec(text)) !== null) {
+        const rawMatch = knownMatch[0];
+        if (!rawMatch) {
+          knownRe.lastIndex += 1;
+          continue;
+        }
+        const mStart = knownMatch.index;
+        const mEnd = mStart + rawMatch.length;
+        if (overlaps(mStart, mEnd)) continue;
+        const matchKey = knownCfg.caseInsensitive
+          ? rawMatch.toLowerCase()
+          : rawMatch;
+        const target = byKeyOrOriginal.get(matchKey);
+        if (!target) continue;
+        occupied.push({ start: mStart, end: mEnd });
+        candidates.push({
+          start: mStart,
+          end: mEnd,
+          kind: target.kind,
+          raw: rawMatch,
+          canonicalKey: "",
+          existingPlaceholder: target.placeholder,
+        });
+      }
+    }
+  }
+
   const addSpanFromNormalizedRange = (
     normStart: number,
     normEnd: number,
@@ -1248,6 +1343,18 @@ export function mechanicalRedact(
   const getOrCreatePlaceholder = (
     span: CandidateSpan,
   ): { placeholder: string; kind: MechanicalRedactionKind } => {
+    if (span.existingPlaceholder) {
+      const existingByPh = byPlaceholder.get(
+        span.existingPlaceholder.toUpperCase(),
+      );
+      if (existingByPh) {
+        return existingByPh;
+      }
+      return {
+        placeholder: span.existingPlaceholder,
+        kind: span.kind,
+      };
+    }
     const existing = byKey.get(span.canonicalKey);
     if (existing) {
       return existing;

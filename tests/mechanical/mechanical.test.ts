@@ -5,6 +5,7 @@ import {
   isHighEntropyToken,
   mechanicalRedact,
 } from "@/lib/privacy/mechanical";
+import { rehideKnownValues } from "@/lib/privacy/rehide-known";
 import {
   attestedPiiFilter,
   clearAttestedPiiFilterCacheForTests,
@@ -785,6 +786,97 @@ describe("D3: Deterministic Fail-Closed Mechanical Redaction Filter (mechanicalR
       "Run C:\\Program Files\\Nodejs\\node.exe with v18.19.1 at 08:30:00 using [SECRET_1] and colour #1a2b3c.",
     );
     expect(mixedRes.restore(mixedRes.text)).toBe(mixedWithSecret);
+  });
+
+  it("re-hides known session values in mechanicalRedact and rehideKnownValues (turn 2 plain repeat, multi-word ££ phrases with names/IPs/dates, short CJK & 2-char names, padded ££, word boundaries, redaction counts, and exact restore)", () => {
+    // 1. Turn 1 ££Project Falcon££, Turn 2 plain "project falcon" hidden as same placeholder & counted in redactions
+    const session1 = createMechanicalSession();
+    const t1 = session1.redact("Launch ££Project Falcon££ on schedule.");
+    expect(t1.text).toBe("Launch [MARKED_1] on schedule.");
+    expect(t1.redactions).toEqual([{ kind: "MARKED", placeholder: "[MARKED_1]" }]);
+
+    const t2 = session1.redact("Can we delay project falcon until Friday?");
+    expect(t2.text).toBe("Can we delay [MARKED_1] until Friday?");
+    expect(t2.redactions).toEqual([{ kind: "MARKED", placeholder: "[MARKED_1]" }]);
+    expect(t2.restore(t2.text)).toBe("Can we delay Project Falcon until Friday?");
+
+    // 2. ££Dana Reyes at 10.0.0.5££ then repeated plain is hidden whole, no part left visible (C2)
+    const session2 = createMechanicalSession();
+    const p1 = session2.redact(
+      "Keep ££Dana Reyes at 10.0.0.5££ and ££Dana Reyes has stage 2 lymphoma on 2026-10-25££ private.",
+    );
+    expect(p1.text).toBe("Keep [MARKED_1] and [MARKED_2] private.");
+
+    const p2 = session2.redact(
+      "Confirmed: Dana Reyes at 10.0.0.5 and dana reyes has stage 2 lymphoma on 2026-10-25.",
+    );
+    expect(p2.text).toBe("Confirmed: [MARKED_1] and [MARKED_2].");
+    expect(p2.text).not.toContain("Dana Reyes");
+    expect(p2.text).not.toContain("10.0.0.5");
+    expect(p2.text).not.toContain("at");
+    expect(p2.text).not.toContain("stage 2 lymphoma");
+    expect(p2.redactions).toEqual([
+      { kind: "MARKED", placeholder: "[MARKED_1]" },
+      { kind: "MARKED", placeholder: "[MARKED_2]" },
+    ]);
+    expect(p2.restore(p2.text)).toBe(
+      "Confirmed: Dana Reyes at 10.0.0.5 and Dana Reyes has stage 2 lymphoma on 2026-10-25.",
+    );
+
+    // 3. Short originals ££Wu££ and ££李明££ and ££王££, plus whitespace-padded ££ Project Falcon ££ (I1)
+    const session3 = createMechanicalSession();
+    const s1 = session3.redact(
+      "Contacts: ££Wu££, ££李明££, ££王££, and ££ Project Falcon ££.",
+    );
+    expect(s1.text).toBe(
+      "Contacts: [MARKED_1], [MARKED_2], [MARKED_3], and [MARKED_4].",
+    );
+    expect(s1.restore(s1.text)).toBe(
+      "Contacts: Wu, 李明, 王, and  Project Falcon .",
+    );
+
+    const s2 = session3.redact(
+      "Reply to Wu and 李明 and 王 about Project Falcon.",
+    );
+    expect(s2.text).toBe(
+      "Reply to [MARKED_1] and [MARKED_2] and [MARKED_3] about [MARKED_4].",
+    );
+    expect(s2.redactions).toEqual([
+      { kind: "MARKED", placeholder: "[MARKED_1]" },
+      { kind: "MARKED", placeholder: "[MARKED_2]" },
+      { kind: "MARKED", placeholder: "[MARKED_3]" },
+      { kind: "MARKED", placeholder: "[MARKED_4]" },
+    ]);
+    expect(
+      rehideKnownValues(
+        "Reply to Wu and 李明 and 王 about Project Falcon inside [MARKED_1].",
+        session3,
+      ),
+    ).toBe(
+      "Reply to [MARKED_1] and [MARKED_2] and [MARKED_3] about [MARKED_4] inside [MARKED_1].",
+    );
+
+    // 4. Word boundaries: "string" and "however" untouched when "st", "we", "art", "eve" were hidden (I2)
+    const session4 = createMechanicalSession();
+    session4.redact("Short tokens: ££st££, ££we££, ££Art££, ££Eve££.");
+    const wbInput =
+      "Notice string and however and starting and chart and every and partial, while st, we, Art, and Eve stand alone.";
+    const wbRes = session4.redact(wbInput);
+    expect(wbRes.text).toBe(
+      "Notice string and however and starting and chart and every and partial, while [MARKED_1], [MARKED_2], [MARKED_3], and [MARKED_4] stand alone.",
+    );
+    expect(wbRes.redactions).toEqual([
+      { kind: "MARKED", placeholder: "[MARKED_1]" },
+      { kind: "MARKED", placeholder: "[MARKED_2]" },
+      { kind: "MARKED", placeholder: "[MARKED_3]" },
+      { kind: "MARKED", placeholder: "[MARKED_4]" },
+    ]);
+    expect(wbRes.restore(wbRes.text)).toBe(wbInput);
+
+    const wbRehide = rehideKnownValues(wbInput, session4);
+    expect(wbRehide).toBe(
+      "Notice string and however and starting and chart and every and partial, while [MARKED_1], [MARKED_2], [MARKED_3], and [MARKED_4] stand alone.",
+    );
   });
 });
 

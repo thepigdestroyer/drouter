@@ -18,9 +18,19 @@ export interface ExplicitMarkerRuleSpec {
   kind: "MARKED";
 }
 
+export interface SessionKnownValuesRuleSpec {
+  enabled: boolean;
+  minLength: number;
+  minLengthCjk: number;
+  wordBoundaryAscii: boolean;
+  caseInsensitive: boolean;
+  cjkPattern: RegexRuleSpec;
+}
+
 export interface MechanicalRuleset {
   version: string;
   markerRule: ExplicitMarkerRuleSpec;
+  sessionKnownValues: SessionKnownValuesRuleSpec;
   placeholderPatterns: {
     existingPlaceholder: RegexRuleSpec;
     restorePlaceholder: RegexRuleSpec;
@@ -155,11 +165,22 @@ const NAME_WORD_SRC =
   "(?:(?:Mc|Mac|O'|D')[A-Z][a-z]{1,25}|[A-Z][a-z]{1,25}(?:[-'][A-Z]?[a-z]{1,25})*)";
 
 export const MECHANICAL_RULESET: MechanicalRuleset = {
-  version: "1.0.4",
+  version: "1.0.5",
   markerRule: {
     openMarker: "££",
     closeMarker: "££",
     kind: "MARKED",
+  },
+  sessionKnownValues: {
+    enabled: true,
+    minLength: 2,
+    minLengthCjk: 1,
+    wordBoundaryAscii: true,
+    caseInsensitive: true,
+    cjkPattern: {
+      source: "[\\u3040-\\u30ff\\u3400-\\u4dbf\\u4e00-\\u9fff\\uf900-\\ufaff\\uac00-\\ud7af]",
+      flags: "",
+    },
   },
   placeholderPatterns: {
     existingPlaceholder: {

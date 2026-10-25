@@ -59,8 +59,13 @@ describe("E2: rulesetFingerprint stability and sensitivity", () => {
 
     // 1. Version change
     const vChanged = cloneRuleset();
-    vChanged.version = "1.0.5";
+    vChanged.version = "1.0.6";
     expect(rulesetFingerprint(vChanged)).not.toBe(baseline);
+
+    // 1b. sessionKnownValues change
+    const knownChanged = cloneRuleset();
+    knownChanged.sessionKnownValues.minLength = 3;
+    expect(rulesetFingerprint(knownChanged)).not.toBe(baseline);
 
     // 2. Regex source change
     const regexSourceChanged = cloneRuleset();
