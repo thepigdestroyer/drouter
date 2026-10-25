@@ -25,7 +25,6 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 import { ed25519 } from "@noble/curves/ed25519.js";
-import { createSessionScrubber } from "@/lib/privacy/scrubber";
 import { mechanicalRedact as realMechanicalRedact } from "@/lib/privacy/mechanical";
 import { attestedPiiFilter as realAttestedPiiFilter } from "@/lib/privacy/attested-filter";
 import { bucketForTokens, estimateTokens } from "@/lib/privacy/padding";
@@ -46,6 +45,7 @@ import {
 import { canonicalJson, deriveEd25519Key } from "@/lib/transparency/log";
 import { cosineSimilarity, embedDocumentText } from "@/lib/atlas/embeddings";
 import { ATLAS_SEED_DOCS } from "@/lib/atlas/knowledge-base";
+import { nodeIdFor } from "@/lib/arc/nodes";
 import {
   ALLOWED_PLANNER_TOOLS,
   ARGON_COMPANION_MODELS,
@@ -129,25 +129,31 @@ export const HONEST_DATA_HANDLING_STATEMENT: DataHandlingStatement = {
     "Mechanically redacted and symmetry-masked prompt inside attested Tinfoil enclave (AMD SEV-SNP router + Intel TDX / NVIDIA CC GPU enclave) over RFC 9180 HPKE.",
 };
 
-function computeTokenShannonEntropy(token: string): number {
-  if (!token) return 0;
-  const counts = new Map<string, number>();
-  for (let i = 0; i < token.length; i++) {
-    const ch = token[i];
-    counts.set(ch, (counts.get(ch) ?? 0) + 1);
-  }
-  let entropy = 0;
-  const len = token.length;
-  for (const c of counts.values()) {
-    const p = c / len;
-    entropy -= p * Math.log2(p);
-  }
-  return entropy;
-}
-
-
 let cachedMechanicalRedactFn: MechanicalRedactFn | null = null;
 let cachedAttestedFilterFn: AttestedPiiFilterFn | null = null;
+
+export const MAX_ALWAYS_HIDE_TERMS = 64;
+export const MAX_ALWAYS_HIDE_TERM_CHARS = 128;
+
+/**
+ * Validates and length-caps user-configured `alwaysHide` terms from account settings.
+ */
+export function sanitizeAlwaysHideTerms(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (out.length >= MAX_ALWAYS_HIDE_TERMS) break;
+    if (typeof item !== "string") continue;
+    const trimmed = item.trim().slice(0, MAX_ALWAYS_HIDE_TERM_CHARS);
+    if (trimmed.length < 2) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(trimmed);
+  }
+  return out;
+}
 
 async function resolveMechanicalRedactFn(
   override?: MechanicalRedactFn,
@@ -270,9 +276,9 @@ export interface NamedUserPersona {
 }
 
 export const DEMO_PERSONA: NamedUserPersona = {
-  name: "Dana Reyes",
-  role: "Clinical data scientist, Oncology Trial Unit",
-  institution: "Riverside Teaching Hospital (fictional example)",
+  name: "Example: a fictional hospital data scientist",
+  role: "Example: a fictional hospital data scientist (clinical trial statistics)",
+  institution: "Example: a fictional hospital data scientist",
   assayProtocol:
     "Phase II trial survival analysis: protocol, de-identified case notes, and R analysis code",
   contextWindowScale:
@@ -282,10 +288,9 @@ export const DEMO_PERSONA: NamedUserPersona = {
 };
 
 export const DEFAULT_TASK_PROMPT =
-  "Audit our RTH-ONC-207 survival analysis pipeline for cohort RTH-COHORT-2026-08-14 " +
-  "(grant budget £125,000.00, contact dana.reyes@example.org, credential sk-test-4f9a2c7e1b8d6a3f5e0c). " +
-  "Verify that the patient-level survival models run inside an " +
-  "attested Tinfoil confidential enclave (AMD SEV-SNP router + Intel TDX and NVIDIA Confidential Computing GPUs, 262,144-token enclave context) with zero DDR5 memory-bus leaks.";
+  "Review our ONC-2041 survival study pipeline for group COHORT-2026-08-14 " +
+  "(grant budget £125,000.00, contact dana.reyes@example.org, test key sk-test-4f9a2c7e1b8d6a3f5e0c). " +
+  "Summarize the main findings in plain words without sharing any private names or keys.";
 
 export interface Stage1PrivacyFilterResult {
   stageNumber: 1;
@@ -369,8 +374,7 @@ export interface Stage3SandboxVerificationResult {
   stageName: "Live Tinfoil Enclave Measurement Verification & Automatic Model Failover";
   modelsUsed: string[];
   passed: boolean;
-  faultInjected: boolean;
-  selfHealed: boolean;
+  failedOver: boolean;
   attempts: SandboxAttemptRecord[];
   sandboxReceipt: {
     sandboxId: string;
@@ -486,7 +490,6 @@ export interface ArgonAutonomousRunResult {
   modelCalls: ArgonModelCallRecord[];
   persona: NamedUserPersona;
   overallPassed: boolean;
-  selfHealingTriggeredAndResolved: boolean;
   humanGateState: "paused_awaiting_human" | "executed_with_human_approval";
   stages: {
     stage1: Stage1PrivacyFilterResult;
@@ -522,9 +525,9 @@ export interface LiveTinfoilAttestationResult {
 
 export interface ArgonOrchestratorOptions {
   taskPrompt?: string;
+  alwaysHide?: string[];
   thinkingLevel?: ArgonThinkingLevel;
   background?: boolean;
-  injectFaultToTestSelfHealing?: boolean;
   humanApprovedExternalAction?: boolean;
   preferredEnclaveModel?: "gemma4-31b" | "kimi-k3";
   geminiApiKey?: string;
@@ -549,8 +552,7 @@ export interface ArgonOrchestratorOptions {
     routerHost: string;
     enclaveHost: string;
     overallPassed: boolean;
-    faultInjected: boolean;
-    selfHealed: boolean;
+    failedOver: boolean;
     humanGateState: "paused_awaiting_human" | "executed_with_human_approval";
     checksSummary: Array<{ id: string; passed: boolean }>;
     forensicProofDigestHex: string;
@@ -984,6 +986,31 @@ function hashToContentFree32Hex(input: string): string {
   return `0x${digest}`;
 }
 
+const UNRESTORED_PLACEHOLDER_RE =
+  /\[(?:SECRET|EMAIL|PHONE|IP|ACCT|ENTITY|URL|ADDRESS|DATE|NAME|DIGITS|ENTROPY)_\d+\]|<PRIVATE_[A-Z0-9_]+>/i;
+
+function sanitizeFailureReason(
+  rawReason: string | undefined,
+  extraSecrets: readonly (string | undefined)[] = [],
+): string {
+  if (!rawReason) return "request failed";
+  let cleaned = rawReason;
+  for (const sec of extraSecrets) {
+    if (sec && sec.trim().length >= 4) {
+      cleaned = cleaned.split(sec.trim()).join("[REDACTED_KEY]");
+    }
+  }
+  cleaned = cleaned
+    .replace(/\bAIza[0-9A-Za-z_-]{10,}\b/g, "[REDACTED_KEY]")
+    .replace(/\bsk-[0-9A-Za-z_-]{8,}\b/g, "[REDACTED_KEY]")
+    .replace(/\bghp_[0-9A-Za-z_-]{8,}\b/g, "[REDACTED_KEY]")
+    .replace(/\bBearer\s+\S+/gi, "Bearer [REDACTED_KEY]")
+    .replace(/[\u2013\u2014]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned.slice(0, 160) || "request failed";
+}
+
 /**
  * Executes the complete 6-stage split-knowledge confidential security and routing
  * workflow with deterministic code-computed pass/fail verification gates.
@@ -996,9 +1023,9 @@ export async function runArgonAutonomousWorkflow(
       ? options.taskPrompt.trim()
       : DEFAULT_TASK_PROMPT;
 
+  const alwaysHideTerms = sanitizeAlwaysHideTerms(options.alwaysHide);
   const thinkingLevel: ArgonThinkingLevel = options.thinkingLevel ?? "medium";
   const background = options.background ?? true;
-  const injectFault = Boolean(options.injectFaultToTestSelfHealing);
   const humanApproved = Boolean(options.humanApprovedExternalAction);
   const initialEnclaveModel: "gemma4-31b" | "kimi-k3" =
     options.preferredEnclaveModel ?? "gemma4-31b";
@@ -1010,56 +1037,32 @@ export async function runArgonAutonomousWorkflow(
   // =========================================================================
   // STAGE 1: Mechanical Redaction (D3), Attested PII Filter (D4), Symmetry Masking & Bucket Padding
   // =========================================================================
-  const symmetry = createSymmetryTransform({
-    dateShiftDays: 42,
-    numericScaleFactor: 4,
-    customEntities: {
-      "Riverside Teaching Hospital": "Northvale Institute",
-      "Oncology Trial Unit": "Atlas Cellular Unit",
-      "RTH-ONC-207": "ASSAY-774",
-      "RTH-COHORT": "COHORT-ALPHA",
-    },
-  });
-
-  // First apply reversible symmetry transform on structured study identifiers
-  const symmetryOut = symmetry.transform(rawPrompt);
-
-  // Run D3 mechanicalRedact + D4 attestedPiiFilter on the symmetry-transformed text
-  const redactionPass = await redactForNonEnclaveBoundary(symmetryOut.transformed, {
-    customTerms: [
-      "Riverside Teaching Hospital",
-      "Oncology Trial Unit",
-      "Dana Reyes",
-    ],
+  const redactionPass = await redactForNonEnclaveBoundary(rawPrompt, {
+    customTerms: alwaysHideTerms,
     enableAttestedFilter: Boolean(options.enableLiveEnclaveInference),
     mechanicalRedactor: options.mechanicalRedactor,
     attestedFilterRunner: options.attestedFilterRunner,
   });
 
-  // Also run mechanicalRedact on rawPrompt directly to capture true raw originals and category counts
-  const rawMechanicalPass = await redactForNonEnclaveBoundary(rawPrompt, {
-    customTerms: [
-      "Riverside Teaching Hospital",
-      "Oncology Trial Unit",
-      "Dana Reyes",
-    ],
-    enableAttestedFilter: false,
-    mechanicalRedactor: options.mechanicalRedactor,
+  const symmetry = createSymmetryTransform({
+    dateShiftDays: 42,
+    numericScaleFactor: 4,
+    customEntities: {},
   });
 
-  const papillonGeneralizedPrompt = redactionPass.mechanicalText;
+  const symmetryOut = symmetry.transform(redactionPass.mechanicalText);
+  const papillonGeneralizedPrompt = symmetryOut.transformed;
 
   const placeholders: Record<string, string> = {};
   for (const r of redactionPass.mechanicalRedactions) {
-    const restoredSym = redactionPass.restore(r.placeholder);
-    const restoredRaw = symmetry.untransform(restoredSym);
+    const restoredRaw = redactionPass.restore(r.placeholder);
     if (restoredRaw && restoredRaw !== r.placeholder) {
       placeholders[r.placeholder] = restoredRaw;
     }
   }
 
   const redactionCounts: Record<string, number> = {};
-  for (const r of rawMechanicalPass.mechanicalRedactions) {
+  for (const r of redactionPass.mechanicalRedactions) {
     const key = r.kind.toUpperCase();
     redactionCounts[key] = (redactionCounts[key] ?? 0) + 1;
   }
@@ -1070,10 +1073,7 @@ export async function runArgonAutonomousWorkflow(
     redactionCounts.ATTESTED_PII = redactionPass.attestedFilter.redactionCount;
   }
   const totalRedactions =
-    Math.max(
-      Object.keys(placeholders).length,
-      rawMechanicalPass.mechanicalRedactions.length,
-    ) +
+    redactionPass.mechanicalRedactions.length +
     symmetryOut.applied.length +
     redactionPass.attestedFilter.redactionCount;
   redactionCounts.TOTAL = totalRedactions;
@@ -1082,6 +1082,7 @@ export async function runArgonAutonomousWorkflow(
     new Set([
       ...Object.values(placeholders),
       ...symmetryOut.applied.map((a) => a.original),
+      ...alwaysHideTerms,
     ]),
   );
 
@@ -1100,12 +1101,49 @@ export async function runArgonAutonomousWorkflow(
     bucketBytes > 0 && bucketBytes % 4096 === 0 && tokenBucketInfo.bucketTokens >= 1024;
 
   const restoreAll = (maskedText: string): string => {
-    const unmaskedMechanical = redactionPass.restore(maskedText);
-    return symmetry.untransform(unmaskedMechanical);
+    const unmaskedSymmetry = symmetry.untransform(maskedText);
+    return redactionPass.restore(unmaskedSymmetry);
+  };
+
+  const verifyGenericRestore = (
+    maskedText: string,
+    restoredText: string,
+  ): boolean => {
+    if (!maskedText || !restoredText) return false;
+    if (UNRESTORED_PLACEHOLDER_RE.test(restoredText)) {
+      return false;
+    }
+    for (const placeholder of Object.keys(placeholders)) {
+      if (restoredText.includes(placeholder)) {
+        return false;
+      }
+    }
+    for (const mask of symmetryOut.applied) {
+      if (
+        mask.masked !== mask.original &&
+        !rawPrompt.includes(mask.masked) &&
+        restoredText.includes(mask.masked)
+      ) {
+        return false;
+      }
+    }
+    for (const [placeholder, original] of Object.entries(placeholders)) {
+      if (maskedText.includes(placeholder) && !restoredText.includes(original)) {
+        return false;
+      }
+    }
+    for (const mask of symmetryOut.applied) {
+      if (maskedText.includes(mask.masked) && !restoredText.includes(mask.original)) {
+        return false;
+      }
+    }
+    return true;
   };
 
   const roundTripRestored = restoreAll(papillonGeneralizedPrompt);
-  const symmetryHomomorphismVerified = roundTripRestored === rawPrompt;
+  const symmetryHomomorphismVerified =
+    roundTripRestored === rawPrompt &&
+    verifyGenericRestore(papillonGeneralizedPrompt, roundTripRestored);
 
   const stage1Passed =
     plaintextLeakCount === 0 &&
@@ -1132,7 +1170,7 @@ export async function runArgonAutonomousWorkflow(
       formula: "plaintextLeakCount === 0 && bucketBytes % 4096 === 0",
     },
     redactionCount: totalRedactions,
-    mechanicalRedactionCount: rawMechanicalPass.mechanicalRedactions.length,
+    mechanicalRedactionCount: redactionPass.mechanicalRedactions.length,
     redactionCounts,
     attestedFilter: {
       model: redactionPass.attestedFilter.model,
@@ -1149,35 +1187,179 @@ export async function runArgonAutonomousWorkflow(
   };
 
   // =========================================================================
-  // STAGE 2: Live 2-Hop Hardware Attestation, Atlas Hybrid Search & Registry Verification
+  // STAGE 2 & STAGE 3: Live 2-Hop Hardware Attestation, Atlas Hybrid Search,
+  // Registry Verification & Real Enclave Verification (Failover Only on Real Failure)
   // =========================================================================
   const tinfoilProvider =
     CONFIDENTIAL_PROVIDERS.find((p) => p.id === "tinfoil") ??
     CONFIDENTIAL_PROVIDERS[0];
 
+  const evaluateAttestationCandidate = async (
+    candidateModel: "gemma4-31b" | "kimi-k3",
+    att: LiveTinfoilAttestationResult,
+  ) => {
+    const verdict = verifyModelEnclaveStatus(att.modelAttestation);
+    const primaryHost =
+      att.modelAttestation.enclaveHosts[0]?.host ??
+      att.modelAttestation.repo;
+
+    let docChecksPassed = true;
+    if (typeof options.tinfoilClient?.getVerificationDocument === "function") {
+      try {
+        const rawDoc = await options.tinfoilClient.getVerificationDocument();
+        if (rawDoc && typeof rawDoc === "object" && "steps" in rawDoc) {
+          const docChecks = checksFromDocument(
+            rawDoc as Parameters<typeof checksFromDocument>[0],
+            att.modelAttestation,
+          );
+          docChecksPassed = docChecks.every((c) => c.status !== "fail");
+        }
+      } catch {
+        docChecksPassed = false;
+      }
+    }
+
+    const releaseMatch =
+      Boolean(att.routerReleaseDigest) &&
+      Boolean(att.modelAttestation.dmVerityRootHash) &&
+      att.modelAttestation.unverifiedHosts === 0 &&
+      att.modelAttestation.verifiedHosts > 0;
+
+    const enclaveAttestationVerified =
+      verdict.c5Pass &&
+      verdict.c7Pass &&
+      docChecksPassed &&
+      releaseMatch;
+
+    const failedInvariants: string[] = [];
+    if (!verdict.c5Pass) {
+      failedInvariants.push("C5_ConfidentialGpuVerificationFailed");
+    }
+    if (!verdict.c7Pass) {
+      failedInvariants.push("C7_DmVerityMeasurementFailed");
+    }
+    if (!docChecksPassed) {
+      failedInvariants.push("SdkVerificationDocumentFailed");
+    }
+    if (!att.routerReleaseDigest) {
+      failedInvariants.push("RouterReleaseDigestMissing");
+    }
+    if (
+      att.modelAttestation.unverifiedHosts > 0 ||
+      att.modelAttestation.verifiedHosts === 0
+    ) {
+      failedInvariants.push("UnverifiedEnclaveHosts");
+    }
+    if (plaintextLeakCount > 0) {
+      failedInvariants.push("I1_NoPlaintextEgress");
+    }
+
+    const stream = buildHighEntropyMeasurementStream(
+      `${primaryHost}:${att.modelAttestation.dmVerityRootHash}:${att.routerReleaseDigest}:${paddedFrame.bucketBytes}`,
+      4096,
+    );
+    const entropyBitsPerByte = computeBytesShannonEntropy(stream);
+    const repeated16ByteBlocks = countRepeated16ByteBlocks(stream);
+
+    const passed =
+      enclaveAttestationVerified &&
+      entropyBitsPerByte > 7.5 &&
+      repeated16ByteBlocks === 0 &&
+      plaintextLeakCount === 0;
+
+    return {
+      candidateModel,
+      att,
+      verdict,
+      primaryHost,
+      docChecksPassed,
+      releaseMatch,
+      enclaveAttestationVerified,
+      failedInvariants,
+      entropyBitsPerByte,
+      repeated16ByteBlocks,
+      passed,
+    };
+  };
+
   const t0Att = Date.now();
   const initialAtt = await fetchLiveTinfoilAttestation(initialEnclaveModel, options);
-  const initialModelVerdict = verifyModelEnclaveStatus(initialAtt.modelAttestation);
-  const initialPrimaryHost =
-    initialAtt.modelAttestation.enclaveHosts[0]?.host ??
-    initialAtt.modelAttestation.repo;
-  const attElapsedMs = Math.max(1, Date.now() - t0Att);
+  const initialEval = await evaluateAttestationCandidate(initialEnclaveModel, initialAtt);
 
-  let sdkDocChecksPassed = true;
-  if (typeof options.tinfoilClient?.getVerificationDocument === "function") {
-    try {
-      const rawDoc = await options.tinfoilClient.getVerificationDocument();
-      if (rawDoc && typeof rawDoc === "object" && "steps" in rawDoc) {
-        const docChecks = checksFromDocument(
-          rawDoc as Parameters<typeof checksFromDocument>[0],
-          initialAtt.modelAttestation,
-        );
-        sdkDocChecksPassed = docChecks.every((c) => c.status !== "fail");
-      }
-    } catch {
-      sdkDocChecksPassed = false;
+  const attempts: SandboxAttemptRecord[] = [];
+  let failedOver = false;
+  let activeEval = initialEval;
+
+  if (initialEval.passed) {
+    attempts.push({
+      attemptNumber: 1,
+      candidateNodeId: initialEval.primaryHost,
+      candidateModelId: initialEnclaveModel,
+      enclaveAttestationVerified: initialEval.enclaveAttestationVerified,
+      failedInvariants: initialEval.failedInvariants,
+      entropyBitsPerByte: initialEval.entropyBitsPerByte,
+      repeated16ByteBlocks: initialEval.repeated16ByteBlocks,
+      plaintextLeakMatches: plaintextLeakCount,
+      postPopAllZero: true,
+      passed: true,
+    });
+  } else {
+    const reroutedAtt = await fetchLiveTinfoilAttestation(alternateEnclaveModel, options);
+    const reroutedEval = await evaluateAttestationCandidate(alternateEnclaveModel, reroutedAtt);
+    const failureReasons: string[] = [];
+    if (!initialEval.verdict.c5Pass) failureReasons.push(initialEval.verdict.c5Detail);
+    if (!initialEval.verdict.c7Pass) failureReasons.push(initialEval.verdict.c7Detail);
+    if (!initialEval.docChecksPassed) failureReasons.push("SDK verification document failed");
+    if (
+      initialAtt.modelAttestation.unverifiedHosts > 0 ||
+      initialAtt.modelAttestation.verifiedHosts === 0
+    ) {
+      failureReasons.push(
+        `${initialAtt.modelAttestation.unverifiedHosts} unverified host(s)`,
+      );
+    }
+
+    attempts.push({
+      attemptNumber: 1,
+      candidateNodeId: initialEval.primaryHost,
+      candidateModelId: initialEnclaveModel,
+      enclaveAttestationVerified: initialEval.enclaveAttestationVerified,
+      failedInvariants: initialEval.failedInvariants,
+      entropyBitsPerByte: initialEval.entropyBitsPerByte,
+      repeated16ByteBlocks: initialEval.repeated16ByteBlocks,
+      plaintextLeakMatches: plaintextLeakCount,
+      postPopAllZero: false,
+      passed: false,
+      remediationApplied:
+        `Real verification of ${initialEnclaveModel} (${initialEval.primaryHost}) failed (${failureReasons.join("; ") || "measurement verification failed"}). ` +
+        `Failed over to alternate Tinfoil enclave model ${alternateEnclaveModel} (${reroutedEval.primaryHost}).`,
+    });
+
+    attempts.push({
+      attemptNumber: 2,
+      candidateNodeId: reroutedEval.primaryHost,
+      candidateModelId: alternateEnclaveModel,
+      enclaveAttestationVerified: reroutedEval.enclaveAttestationVerified,
+      failedInvariants: reroutedEval.failedInvariants,
+      entropyBitsPerByte: reroutedEval.entropyBitsPerByte,
+      repeated16ByteBlocks: reroutedEval.repeated16ByteBlocks,
+      plaintextLeakMatches: plaintextLeakCount,
+      postPopAllZero: reroutedEval.passed,
+      passed: reroutedEval.passed,
+    });
+
+    if (reroutedEval.passed) {
+      activeEval = reroutedEval;
+      failedOver = true;
     }
   }
+
+  const attElapsedMs = Math.max(1, Date.now() - t0Att);
+  const activeEnclaveModel = activeEval.candidateModel;
+  const activeAttestation = activeEval.att;
+  const activePrimaryHost = activeEval.primaryHost;
+  const activeVerdict = activeEval.verdict;
+  const releaseMatchPassed = activeEval.releaseMatch;
 
   // Run MongoDB Atlas Hybrid Search using a query that passes through D3 mechanicalRedact + D4 attestedPiiFilter
   const t0Atlas = Date.now();
@@ -1208,56 +1390,62 @@ export async function runArgonAutonomousWorkflow(
     model: "tinfoil-live-attestation-verifier (src/lib/tinfoil)",
     task: "Verify Hop 1 router-0.tinfoil.sh (AMD SEV-SNP) + Hop 2 Tinfoil model enclave (Intel TDX + NVIDIA CC GPUs) and Sigstore Rekor rootfs digest",
     latencyMs: attElapsedMs,
-    passed: initialModelVerdict.c5Pass && initialModelVerdict.c7Pass && sdkDocChecksPassed,
-    artifactSummary: `Verified Hop 1 (${initialAtt.routerHost}, AMD SEV-SNP) + Hop 2 (${initialPrimaryHost}, ${initialModelVerdict.c5Detail}) + dm-verity root 0x${initialAtt.modelAttestation.dmVerityRootHash.slice(0, 16)}...`,
+    passed: activeVerdict.c5Pass && activeVerdict.c7Pass && activeEval.docChecksPassed,
+    artifactSummary: `Verified Hop 1 (${activeAttestation.routerHost}, AMD SEV-SNP) + Hop 2 (${activePrimaryHost}, ${activeVerdict.c5Detail}) + dm-verity root 0x${activeAttestation.modelAttestation.dmVerityRootHash.slice(0, 16)}...`,
   };
 
-  const releaseMatchPassed =
-    Boolean(initialAtt.routerReleaseDigest) &&
-    Boolean(initialAtt.modelAttestation.dmVerityRootHash) &&
-    initialAtt.modelAttestation.unverifiedHosts === 0;
+  const t0Registry = Date.now();
+  const resolvedNodeRegistryId =
+    nodeIdFor(`tinfoil-${activeEnclaveModel}`) ??
+    nodeIdFor("tinfoil-router") ??
+    hashToContentFree32Hex(activeAttestation.modelAttestation.repo);
+  const arcRegistryReady =
+    Boolean(resolvedNodeRegistryId) &&
+    releaseMatchPassed &&
+    activeAttestation.modelAttestation.measurementRegisters.length > 0;
+  const regElapsedMs = Math.max(0, Date.now() - t0Registry);
 
   const registrySubagentTrace: SubagentTaskTrace = {
     subagentId: "subagent-arc-registry",
     model: "circle-arc-registry-verifier (src/lib/arc/registry)",
     task: "Verify live release measurement bindings and Circle Arc Testnet registry readiness (chainId 5042002)",
-    latencyMs: 1,
-    passed: releaseMatchPassed,
-    artifactSummary: `Verified ${initialAtt.modelAttestation.verifiedHosts}/${initialAtt.modelAttestation.configuredHosts} attested host(s) for ${initialPrimaryHost} and Circle Arc Testnet registry 0xbc8085c2b6fe6e0db05f169925c0b841828f4481.`,
+    latencyMs: regElapsedMs,
+    passed: arcRegistryReady,
+    artifactSummary: `Verified ${activeAttestation.modelAttestation.verifiedHosts}/${activeAttestation.modelAttestation.configuredHosts} attested host(s) for ${activePrimaryHost} (nodeId ${resolvedNodeRegistryId.slice(0, 14)}...) and Circle Arc Testnet registry 0xbc8085c2b6fe6e0db05f169925c0b841828f4481.`,
   };
 
   const sevenChecks: SevenCheckStatus[] = [
     {
       id: "check-1-snp-vcek",
       label: "1. Hop 1 Router AMD SEV-SNP Attestation (router-0.tinfoil.sh)",
-      passed: Boolean(initialAtt.routerReleaseDigest) && sdkDocChecksPassed,
-      detail: `Router ${initialAtt.routerHost} attested with ${initialAtt.routerPredicate} (release digest ${initialAtt.routerReleaseDigest.slice(0, 16)}...).`,
+      passed: Boolean(activeAttestation.routerReleaseDigest) && activeEval.docChecksPassed,
+      detail: `Router ${activeAttestation.routerHost} attested with ${activeAttestation.routerPredicate} (release digest ${activeAttestation.routerReleaseDigest.slice(0, 16)}...).`,
     },
     {
       id: "check-2-gpu-cc",
       label: "2. Hop 2 Model Enclave Intel TDX + NVIDIA Confidential Computing GPUs",
-      passed: initialModelVerdict.c5Pass,
-      detail: initialModelVerdict.c5Detail,
+      passed: activeVerdict.c5Pass,
+      detail: activeVerdict.c5Detail,
     },
     {
       id: "check-3-ehbp-hpke",
       label: "3. RFC 9180 HPKE Encrypted HTTP Body (EHBP) Key Binding",
       passed:
         tinfoilProvider.pqcHybrid &&
-        Boolean(initialAtt.modelAttestation.enclaveHosts[0]?.hpkeKey),
-      detail: `Ephemeral HPKE public key ${(initialAtt.modelAttestation.enclaveHosts[0]?.hpkeKey ?? "").slice(0, 16)}... bound to enclave TLS fingerprint.`,
+        Boolean(activeAttestation.modelAttestation.enclaveHosts[0]?.hpkeKey),
+      detail: `Ephemeral HPKE public key ${(activeAttestation.modelAttestation.enclaveHosts[0]?.hpkeKey ?? "").slice(0, 16)}... bound to enclave TLS fingerprint.`,
     },
     {
       id: "check-4-rekor-manifest",
       label: "4. Sigstore Rekor Transparency Log & Pinned Model Weights",
-      passed: initialModelVerdict.c7Pass,
-      detail: initialModelVerdict.c7Detail,
+      passed: activeVerdict.c7Pass,
+      detail: activeVerdict.c7Detail,
     },
     {
       id: "check-5-release-measurement",
       label: "5. Enclave Launch Measurement Matches Signed Release Digest",
       passed: releaseMatchPassed,
-      detail: `Verified ${initialAtt.modelAttestation.verifiedHosts}/${initialAtt.modelAttestation.configuredHosts} host(s) with 0 unverified hosts and ${initialAtt.modelAttestation.measurementRegisters.length} hardware measurement register(s).`,
+      detail: `Verified ${activeAttestation.modelAttestation.verifiedHosts}/${activeAttestation.modelAttestation.configuredHosts} host(s) with ${activeAttestation.modelAttestation.unverifiedHosts} unverified hosts and ${activeAttestation.modelAttestation.measurementRegisters.length} hardware measurement register(s).`,
     },
     {
       id: "check-6-atlas-hybrid",
@@ -1268,118 +1456,15 @@ export async function runArgonAutonomousWorkflow(
     {
       id: "check-7-arc-stake",
       label: "7. Circle Arc Testnet Registry (0xbc8085c2b6fe6e0db05f169925c0b841828f4481)",
-      passed: true,
-      detail: "Registry active on Circle Arc Testnet (chainId 5042002).",
+      passed: arcRegistryReady,
+      detail: arcRegistryReady
+        ? `Node ${resolvedNodeRegistryId.slice(0, 14)}... verified for Circle Arc Testnet registry (chainId 5042002).`
+        : "Enclave release measurement or host verification incomplete for Circle Arc Testnet registry.",
     },
   ];
 
   const checksPassedCount = sevenChecks.filter((c) => c.passed).length;
   const allSevenChecksPassed = checksPassedCount === sevenChecks.length;
-
-  // =========================================================================
-  // STAGE 3: Live Tinfoil Enclave Measurement Verification & Automatic Model Failover
-  // =========================================================================
-  const attempts: SandboxAttemptRecord[] = [];
-  let selfHealed = false;
-  let activeEnclaveModel: "gemma4-31b" | "kimi-k3" = initialEnclaveModel;
-  let activeAttestation: LiveTinfoilAttestationResult = initialAtt;
-  let activePrimaryHost: string = initialPrimaryHost;
-
-  if (injectFault) {
-    // Attempt 1: Test the real Tinfoil enclave verifier against a corrupted attestation bundle
-    const tamperedAttestation: ModelEnclaveAttestation = {
-      ...initialAtt.modelAttestation,
-      unverifiedHosts: Math.max(1, initialAtt.modelAttestation.configuredHosts),
-      ccGpuFlagsVerified: false,
-      dmVerityRootHash: "",
-      weightMpkHash: "",
-      containerImageDigest: "",
-      measurementRegisters: [],
-    };
-    const tamperedEnclaveVerdict = verifyModelEnclaveStatus(tamperedAttestation);
-    const tamperedEnclavePassed =
-      tamperedEnclaveVerdict.c5Pass && tamperedEnclaveVerdict.c7Pass;
-
-    const failedInvariants: string[] = [
-      "I1_NoPlaintextEgress",
-    ];
-    if (!tamperedEnclaveVerdict.c5Pass) {
-      failedInvariants.push("C5_ConfidentialGpuFlagsTampered");
-    }
-    if (!tamperedEnclaveVerdict.c7Pass) {
-      failedInvariants.push("C7_DmVerityMeasurementTampered");
-    }
-
-    const ecbSample = new Uint8Array(256);
-    for (let i = 0; i < 256; i++) {
-      ecbSample[i] = i % 16;
-    }
-    const faultyEntropy = computeBytesShannonEntropy(ecbSample);
-    const repeatedBlocksCount = countRepeated16ByteBlocks(ecbSample);
-    const tamperedProbeString = originalSensitiveTokens.slice(0, 2).join(" ");
-    const leakMatchesCount = countRemainingSensitiveLeaks(
-      tamperedProbeString,
-      originalSensitiveTokens,
-    );
-
-    const reroutedAtt = await fetchLiveTinfoilAttestation(alternateEnclaveModel, options);
-    const reroutedHost =
-      reroutedAtt.modelAttestation.enclaveHosts[0]?.host ??
-      reroutedAtt.modelAttestation.repo;
-
-    attempts.push({
-      attemptNumber: 1,
-      candidateNodeId: initialPrimaryHost,
-      candidateModelId: initialEnclaveModel,
-      enclaveAttestationVerified: tamperedEnclavePassed,
-      failedInvariants,
-      entropyBitsPerByte: faultyEntropy,
-      repeated16ByteBlocks: repeatedBlocksCount,
-      plaintextLeakMatches: leakMatchesCount,
-      postPopAllZero: false,
-      passed: false,
-      remediationApplied:
-        `Verifier caught corrupted measurement registers on ${initialEnclaveModel} (${initialPrimaryHost}: ${tamperedEnclaveVerdict.c5Detail}), I1_NoPlaintextEgress violation, and ${repeatedBlocksCount} repeated 16-byte blocks. ` +
-        `Quarantined ${initialEnclaveModel} (${initialPrimaryHost}) and failed over to alternate attested Tinfoil model ${alternateEnclaveModel} (${reroutedHost}).`,
-    });
-
-    activeEnclaveModel = alternateEnclaveModel;
-    activeAttestation = reroutedAtt;
-    activePrimaryHost = reroutedHost;
-    selfHealed = true;
-  }
-
-  const cleanEnclaveVerdict = verifyModelEnclaveStatus(
-    activeAttestation.modelAttestation,
-  );
-  const cleanEnclavePassed = cleanEnclaveVerdict.c5Pass && cleanEnclaveVerdict.c7Pass;
-
-  // Measure real Shannon entropy and 16-byte block uniqueness on the SHA-256 measurement stream of the active enclave
-  const realMeasurementStream = buildHighEntropyMeasurementStream(
-    `${activePrimaryHost}:${activeAttestation.modelAttestation.dmVerityRootHash}:${activeAttestation.routerReleaseDigest}:${paddedFrame.bucketBytes}`,
-    4096,
-  );
-  const cleanEntropyBitsPerByte = computeBytesShannonEntropy(realMeasurementStream);
-  const cleanRepeated16ByteBlocks = countRepeated16ByteBlocks(realMeasurementStream);
-
-  const cleanAttemptPassed =
-    cleanEnclavePassed &&
-    cleanEntropyBitsPerByte > 7.5 &&
-    cleanRepeated16ByteBlocks === 0 &&
-    plaintextLeakCount === 0;
-
-  attempts.push({
-    attemptNumber: attempts.length + 1,
-    candidateNodeId: activePrimaryHost,
-    candidateModelId: activeEnclaveModel,
-    enclaveAttestationVerified: cleanEnclavePassed,
-    failedInvariants: [],
-    entropyBitsPerByte: cleanEntropyBitsPerByte,
-    repeated16ByteBlocks: cleanRepeated16ByteBlocks,
-    plaintextLeakMatches: plaintextLeakCount,
-    postPopAllZero: true,
-    passed: cleanAttemptPassed,
-  });
 
   const stage2: Stage2SubagentSwarmResult = {
     stageNumber: 2,
@@ -1404,8 +1489,8 @@ export async function runArgonAutonomousWorkflow(
     ],
     sevenChecks,
     selectedEnclaveProvider: tinfoilProvider.name,
-    selectedEnclaveModel: initialEnclaveModel,
-    selectedEnclaveHost: initialPrimaryHost,
+    selectedEnclaveModel: activeEnclaveModel,
+    selectedEnclaveHost: activePrimaryHost,
     routerHost: activeAttestation.routerHost,
   };
 
@@ -1425,21 +1510,20 @@ export async function runArgonAutonomousWorkflow(
       "verifyModelEnclaveStatus (src/lib/tinfoil/deep-inspect)",
       "fetchLiveTinfoilAttestation (src/lib/gemini/orchestrator)",
     ],
-    passed: cleanAttemptPassed,
-    faultInjected: injectFault,
-    selfHealed,
+    passed: activeEval.passed,
+    failedOver,
     attempts,
     sandboxReceipt: {
       sandboxId: activePrimaryHost,
       imageMeasurementHex: realDmVerityHex,
       rtmr3Hex: realRtmrHex,
-      zeroizedOnDestroy: true,
+      zeroizedOnDestroy: activeEval.passed,
     },
     verificationSignal: {
-      enclaveAttestationVerified: cleanEnclavePassed,
-      entropyBitsPerByte: cleanEntropyBitsPerByte,
-      repeated16ByteBlocks: cleanRepeated16ByteBlocks,
-      postPopAllZero: true,
+      enclaveAttestationVerified: activeEval.enclaveAttestationVerified,
+      entropyBitsPerByte: activeEval.entropyBitsPerByte,
+      repeated16ByteBlocks: activeEval.repeated16ByteBlocks,
+      postPopAllZero: activeEval.passed,
       formula:
         "enclaveAttestationVerified === true && entropyBitsPerByte > 7.5 && repeated16ByteBlocks === 0",
     },
@@ -1466,10 +1550,10 @@ export async function runArgonAutonomousWorkflow(
       attestedPiiFilterVerified: redactionPass.attestedFilter.verified,
       bucketAligned4096,
       routerSevSnpVerified: Boolean(activeAttestation.routerReleaseDigest),
-      enclaveTdxGpuVerified: cleanEnclaveVerdict.c5Pass,
+      enclaveTdxGpuVerified: activeVerdict.c5Pass,
       hpkeKeyBound: Boolean(activeAttestation.modelAttestation.enclaveHosts[0]?.hpkeKey),
-      sigstoreManifestVerified: cleanEnclaveVerdict.c7Pass,
-      arcRegistryVerified: true,
+      sigstoreManifestVerified: activeVerdict.c7Pass,
+      arcRegistryVerified: arcRegistryReady,
     },
     allowedTools: ALLOWED_PLANNER_TOOLS,
   });
@@ -1535,7 +1619,6 @@ export async function runArgonAutonomousWorkflow(
           enclaveModel: activeEnclaveModel,
           checksPassed: stage2.verificationSignal.checksPassed,
           checksTotal: stage2.verificationSignal.checksTotal,
-          selfHealed: stage3.selfHealed,
           routerDigestHex: hashToContentFree32Hex(
             activeAttestation.routerReleaseDigest || activeAttestation.routerHost,
           ),
@@ -1550,6 +1633,7 @@ export async function runArgonAutonomousWorkflow(
           TOPIC_TO_SAFE_ATLAS_QUERY[topic] ??
           TOPIC_TO_SAFE_ATLAS_QUERY.tinfoil_enclave;
         const redactedQuery = await redactForNonEnclaveBoundary(baseQuery, {
+          customTerms: alwaysHideTerms,
           enableAttestedFilter: Boolean(options.enableLiveEnclaveInference),
           mechanicalRedactor: options.mechanicalRedactor,
           attestedFilterRunner: options.attestedFilterRunner,
@@ -1623,16 +1707,9 @@ export async function runArgonAutonomousWorkflow(
     modelCalls.push(liveGeminiCall.modelCallRecord);
   }
 
-  const firstEmailPlaceholder =
-    Object.keys(placeholders).find((k) => k.includes("EMAIL")) ?? "[EMAIL_1]";
-  const maskedDate =
-    symmetryOut.applied.find((m) => m.kind === "date")?.masked ?? "2026-09-25";
-  const maskedCurrency =
-    symmetryOut.applied.find((m) => m.kind === "currency")?.masked ?? "£500,000.00";
-
   const enclavePlannerPrompt =
     `Task (redacted): ${papillonGeneralizedPrompt}\n\n` +
-    `Use the handle-based verification tools if needed, then in one concise sentence (no em dashes) confirm completion of the ${taskDescriptor.taskKind} task for ASSAY-774 at Atlas Cellular Unit, Northvale Institute for cohort COHORT-ALPHA-${maskedDate} (budget ${maskedCurrency}, contact ${firstEmailPlaceholder}).`;
+    `Use the handle-based verification tools if needed, then provide a concise response (no em dashes) completing the ${taskDescriptor.taskKind} task using the redacted placeholders as written.`;
   assertOutboundPrivacyInvariant(enclavePlannerPrompt, originalSensitiveTokens);
 
   let planner: ArgonPlannerDescriptor;
@@ -1662,7 +1739,7 @@ export async function runArgonAutonomousWorkflow(
       if (tinfoilPlannerCall.modelCallRecord) {
         modelCalls.push(tinfoilPlannerCall.modelCallRecord);
       }
-      if (tinfoilPlannerCall.liveEndpointReached && tinfoilPlannerCall.finalText) {
+      if (tinfoilPlannerCall.liveEndpointReached) {
         liveEnclaveCalled = true;
       }
     }
@@ -1693,28 +1770,34 @@ export async function runArgonAutonomousWorkflow(
     }
   }
 
-  const maskedScopeSummary =
-    `ASSAY-774 at Atlas Cellular Unit, Northvale Institute, cohort COHORT-ALPHA-${maskedDate}, budget ${maskedCurrency}, contact ${firstEmailPlaceholder}`;
+  const rawEnclaveText = (tinfoilPlannerCall?.finalText ?? "").trim();
+  const isSynthesizedEmptyTinfoilFallback =
+    /^Tinfoil enclave planner \([^)]+\) executed \d+ tool call\(s\) over RFC 9180 HPKE\.$/i.test(
+      rawEnclaveText,
+    );
+  const actualEnclaveText =
+    liveEnclaveCalled && !isSynthesizedEmptyTinfoilFallback
+      ? rawEnclaveText
+      : "";
+  const enclaveModelProducedOutput = actualEnclaveText.length > 0;
 
-  if (liveEnclaveCalled && tinfoilPlannerCall?.finalText) {
+  let restoredClientOutput: string;
+  let homomorphicRestoreVerified: boolean;
+
+  if (enclaveModelProducedOutput) {
     enclaveCompletionMasked =
-      `[Live Attested Enclave ${activeEnclaveModel} on ${activePrimaryHost} | Masked scope: ${maskedScopeSummary}] ` +
-      tinfoilPlannerCall.finalText;
+      `[Live Attested Enclave ${activeEnclaveModel} on ${activePrimaryHost}] ` +
+      actualEnclaveText;
+    registerHandle(4, enclaveCompletionMasked);
+    restoredClientOutput = restoreAll(enclaveCompletionMasked);
+    homomorphicRestoreVerified =
+      symmetryHomomorphismVerified &&
+      verifyGenericRestore(enclaveCompletionMasked, restoredClientOutput);
   } else {
-    enclaveCompletionMasked =
-      `[Live Attested Enclave ${activeEnclaveModel} on ${activePrimaryHost} | Masked scope: ${maskedScopeSummary}] ` +
-      `Completed ${taskDescriptor.taskKind} verification over server-resolved handle $INPUT for ${maskedScopeSummary}.`;
+    enclaveCompletionMasked = "The sealed computer did not return an answer";
+    restoredClientOutput = "The sealed computer did not return an answer";
+    homomorphicRestoreVerified = false;
   }
-
-  registerHandle(4, enclaveCompletionMasked);
-
-  const restoredClientOutput = restoreAll(enclaveCompletionMasked);
-
-  const homomorphicRestoreVerified =
-    restoredClientOutput.includes("Riverside Teaching Hospital") &&
-    restoredClientOutput.includes("Oncology Trial Unit") &&
-    restoredClientOutput.includes("RTH-ONC-207") &&
-    !restoredClientOutput.includes("Northvale Institute");
 
   const resolvedHandles: Record<
     string,
@@ -1735,16 +1818,32 @@ export async function runArgonAutonomousWorkflow(
     argonValidation.valid &&
     stage1.verificationSignal.plaintextLeakCount === 0 &&
     liveGeminiCall.egressFirewallVerified &&
+    enclaveModelProducedOutput &&
     homomorphicRestoreVerified &&
     stage3.passed;
 
-  const stage4ModelsUsed: string[] = [
+  const geminiModelStatusNote =
     mode === "live"
       ? `${GEMINI_4_ARGON_MODEL_ID} (split-knowledge control plane; TaskDescriptor only)`
-      : `${GEMINI_4_ARGON_MODEL_ID} (not called: no GEMINI_API_KEY; routed to Tinfoil planner ${planner.model})`,
-    liveEnclaveCalled
-      ? `${activeEnclaveModel} (live attested Tinfoil enclave planner & content execution on ${activePrimaryHost})`
-      : `${activeEnclaveModel} (attested Tinfoil enclave host ${activePrimaryHost})`,
+      : liveGeminiCall.attemptedLiveCall
+        ? `${GEMINI_4_ARGON_MODEL_ID} (Gemini call failed: ${sanitizeFailureReason(
+            liveGeminiCall.modelCallRecord?.error ?? liveGeminiCall.fallbackReason,
+            [options.geminiApiKey],
+          )}; routed to Tinfoil planner ${planner.model})`
+        : `${GEMINI_4_ARGON_MODEL_ID} (no key configured; routed to Tinfoil planner ${planner.model})`;
+
+  const enclaveModelStatusNote = enclaveModelProducedOutput
+    ? `${activeEnclaveModel} (live attested Tinfoil enclave planner & content execution on ${activePrimaryHost})`
+    : tinfoilPlannerCall?.attemptedLiveCall && !tinfoilPlannerCall.liveEndpointReached
+      ? `${activeEnclaveModel} (enclave call failed on ${activePrimaryHost}: ${sanitizeFailureReason(
+          tinfoilPlannerCall.modelCallRecord?.error ?? tinfoilPlannerCall.fallbackReason,
+          [options.tinfoilApiKey],
+        )})`
+      : `${activeEnclaveModel} (The sealed computer did not return an answer on ${activePrimaryHost})`;
+
+  const stage4ModelsUsed: string[] = [
+    geminiModelStatusNote,
+    enclaveModelStatusNote,
   ];
 
   const stage4: Stage4ArgonSynthesisResult = {
@@ -1830,13 +1929,14 @@ export async function runArgonAutonomousWorkflow(
 
   const voiceTranscript = [
     modeHeader,
-    `Security briefing for ${DEMO_PERSONA.name}, ${DEMO_PERSONA.role}.`,
     `Stage 1 mechanical redaction and symmetry filter redacted ${stage1.redactionCount} sensitive items and padded the enclave payload to ${stage1.verificationSignal.bucketBytes} bytes with zero plaintext leaks.`,
-    `Stage 2 verified all 7 hardware, Sigstore, Atlas Hybrid Search, and Circle Arc registry checks across router ${stage2.routerHost} (AMD SEV-SNP) and model enclave ${stage2.selectedEnclaveHost}.`,
-    injectFault
-      ? `Stage 3 enclave verifier caught a corrupted C5/C7 measurement on ${initialEnclaveModel} (${initialPrimaryHost}), failed over to ${activeEnclaveModel} (${activePrimaryHost}), and verified its live hardware measurement registers.`
+    `Stage 2 verified ${stage2.verificationSignal.checksPassed} of ${stage2.verificationSignal.checksTotal} hardware, Sigstore, Atlas Hybrid Search, and Circle Arc registry checks across router ${stage2.routerHost} (AMD SEV-SNP) and model enclave ${stage2.selectedEnclaveHost}.`,
+    failedOver
+      ? `Stage 3 enclave verifier detected a real verification failure on ${initialEnclaveModel} (${initialEval.primaryHost}), failed over to ${activeEnclaveModel} (${activePrimaryHost}), and verified its live hardware measurement registers.`
       : `Stage 3 enclave verifier confirmed live hardware measurement registers on ${activePrimaryHost} with ${stage3.verificationSignal.entropyBitsPerByte} bits per byte of stream entropy and zero repeated 16-byte blocks.`,
-    `Stage 4 ran planner ${planner.provider}:${planner.model} over a content-free TaskDescriptor ($INPUT handle, dataSentToGoogle="${DATA_SENT_TO_GOOGLE}") and restored the ${activeEnclaveModel} enclave results locally.`,
+    enclaveModelProducedOutput
+      ? `Stage 4 ran planner ${planner.provider}:${planner.model} over a content-free TaskDescriptor ($INPUT handle, dataSentToGoogle="${DATA_SENT_TO_GOOGLE}") and restored the ${activeEnclaveModel} enclave results locally.`
+      : `Stage 4 failed because the sealed computer did not return an answer.`,
     humanApproved
       ? `Stage 5 Human-in-the-Loop approval was granted. The server anchors the signed run receipt on Circle Arc Testnet after this step.`
       : `Stage 5 Human-in-the-Loop gate is holding ${pendingActions.length} external Circle Arc state action(s) until you explicitly approve execution.`,
@@ -1846,7 +1946,6 @@ export async function runArgonAutonomousWorkflow(
   const computedDurationSeconds = Math.max(1, Math.round((wordCount / 2.5) * 10) / 10);
 
   const digestInput = canonicalJson({
-    persona: DEMO_PERSONA.name,
     mode,
     planner,
     dataSentToGoogle: DATA_SENT_TO_GOOGLE,
@@ -1856,7 +1955,7 @@ export async function runArgonAutonomousWorkflow(
     stage3Signal: stage3.verificationSignal,
     stage4Signal: stage4.verificationSignal,
     stage5Signal: stage5.verificationSignal,
-    selfHealed,
+    failedOver,
   });
   const digestBytes = sha256(utf8ToBytes(digestInput));
   const forensicProofDigestHex = bytesToHex(digestBytes);
@@ -1913,7 +2012,7 @@ export async function runArgonAutonomousWorkflow(
   const nowMs = Date.now();
   const coarsenedIso = new Date(nowMs - (nowMs % 3_600_000)).toISOString();
 
-  if (options.receiptRecorder && (liveGeminiCall.liveEndpointReached || liveEnclaveCalled)) {
+  if (options.receiptRecorder && (liveGeminiCall.liveEndpointReached || enclaveModelProducedOutput)) {
     await options
       .receiptRecorder({
         receiptId: runId,
@@ -1924,8 +2023,7 @@ export async function runArgonAutonomousWorkflow(
         routerHost: stage2.routerHost,
         enclaveHost: activePrimaryHost,
         overallPassed,
-        faultInjected: injectFault,
-        selfHealed,
+        failedOver,
         humanGateState: stage5.externalActionStatus,
         checksSummary: sevenChecks.map((c) => ({ id: c.id, passed: c.passed })),
         forensicProofDigestHex,
@@ -1946,7 +2044,6 @@ export async function runArgonAutonomousWorkflow(
     modelCalls,
     persona: DEMO_PERSONA,
     overallPassed,
-    selfHealingTriggeredAndResolved: injectFault && selfHealed && stage3.passed,
     humanGateState: stage5.externalActionStatus,
     stages: {
       stage1,

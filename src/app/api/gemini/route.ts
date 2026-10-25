@@ -13,12 +13,16 @@ import {
   FORBIDDEN_ARGON_PARAMETERS,
   GEMINI_4_ARGON_MODEL_ID,
   HONEST_DATA_HANDLING_STATEMENT,
+  MAX_ALWAYS_HIDE_TERM_CHARS,
+  MAX_ALWAYS_HIDE_TERMS,
   PlannerBudgetExceededError,
   PrivacyInvariantViolationError,
   redactForNonEnclaveBoundary,
   runArgonAutonomousWorkflow,
+  sanitizeAlwaysHideTerms,
   ToolPolicyViolationError,
   validateArgonRequestConfig,
+  type ArgonOrchestratorOptions,
   type ArgonThinkingLevel,
   type AtlasHybridRunnerResult,
 } from "@/lib/gemini";
@@ -67,9 +71,13 @@ async function serverAtlasRunner(query: string): Promise<AtlasHybridRunnerResult
 }
 
 async function serverReceiptRecorder(
-  receipt: Parameters<typeof recordAgentVerificationReceipt>[0],
+  receipt: Parameters<NonNullable<ArgonOrchestratorOptions["receiptRecorder"]>>[0],
 ): Promise<void> {
-  await recordAgentVerificationReceipt(receipt);
+  await recordAgentVerificationReceipt({
+    ...receipt,
+    faultInjected: false,
+    selfHealed: receipt.failedOver,
+  });
 }
 
 export async function GET() {
@@ -84,10 +92,9 @@ export async function GET() {
     taskPrompt: DEFAULT_TASK_PROMPT,
     thinkingLevel: "medium",
     background: true,
-    injectFaultToTestSelfHealing: true,
     humanApprovedExternalAction: false,
     preferredEnclaveModel: "gemma4-31b",
-    enableLiveEnclaveInference: false,
+    enableLiveEnclaveInference: true,
     atlasRunner: serverAtlasRunner,
   });
 
@@ -161,6 +168,28 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  if (body.alwaysHide !== undefined) {
+    if (
+      !Array.isArray(body.alwaysHide) ||
+      body.alwaysHide.length > MAX_ALWAYS_HIDE_TERMS ||
+      body.alwaysHide.some(
+        (item) =>
+          typeof item !== "string" || item.length > MAX_ALWAYS_HIDE_TERM_CHARS,
+      )
+    ) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "INVALID_ALWAYS_HIDE_TERMS",
+          maxTerms: MAX_ALWAYS_HIDE_TERMS,
+          maxTermChars: MAX_ALWAYS_HIDE_TERM_CHARS,
+        },
+        { status: 400 },
+      );
+    }
+  }
+  const alwaysHide = sanitizeAlwaysHideTerms(body.alwaysHide);
+
   const thinkingLevelRaw =
     typeof body.thinkingLevel === "string"
       ? body.thinkingLevel
@@ -216,9 +245,9 @@ export async function POST(request: NextRequest) {
         typeof body.taskPrompt === "string"
           ? body.taskPrompt
           : DEFAULT_TASK_PROMPT,
+      alwaysHide,
       thinkingLevel,
       background: validation.normalizedConfig?.background ?? true,
-      injectFaultToTestSelfHealing: Boolean(body.injectFaultToTestSelfHealing),
       humanApprovedExternalAction: Boolean(body.humanApprovedExternalAction),
       preferredEnclaveModel,
       geminiApiKey: ephemeralGeminiKey,

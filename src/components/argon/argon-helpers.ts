@@ -23,19 +23,19 @@ export interface ExampleAgentTask {
 export const EXAMPLE_AGENT_TASKS: readonly ExampleAgentTask[] = [
   {
     id: "study-notes",
-    label: "Example 1: Check hospital study notes",
+    label: "Example: a fictional hospital data scientist",
     description:
       "Hides emails, dates, budgets, group codes, and secret keys before checking the study.",
     prompt:
-      "Review our RTH-ONC-207 survival study pipeline for group RTH-COHORT-2026-08-14 (grant budget £125,000.00, contact dana.reyes@example.org, test key sk-test-4f9a2c7e1b8d6a3f5e0c). Summarize the main findings in plain words without sharing any private names or keys.",
+      "Review our ONC-2041 survival study pipeline for group COHORT-2026-08-14 (grant budget £125,000.00, contact dana.reyes@example.org, test key sk-test-4f9a2c7e1b8d6a3f5e0c). Summarize the main findings in plain words without sharing any private names or keys.",
   },
   {
     id: "research-agreement",
-    label: "Example 2: Check a private research agreement",
+    label: "Example: a private legal agreement review",
     description:
-      "Hides phone numbers, emails, dates, and project codes before reviewing the draft.",
+      "Hides names, firm names, phone numbers, emails, dates, and secret keys before reviewing the draft.",
     prompt:
-      "Review our draft research agreement for project RTH-ONC-207 and group RTH-COHORT-2026-08-14 (budget £125,000.00, contact dana.reyes@example.org, phone +44 7911 123456, test key sk-test-4f9a2c7e1b8d6a3f5e0c). List any missing safety rules in plain words before we sign.",
+      "Review our draft acquisition agreement for Priya Natarajan at Halden & Moss LLP dated 2026-05-10 (budget £125,000.00, contact priya.natarajan@example.org, phone +44 7911 123456, test key sk-test-4f9a2c7e1b8d6a3f5e0c). List any missing safety rules in plain words before we sign.",
   },
 ] as const;
 
@@ -164,15 +164,23 @@ export function findForbiddenPlainTerms(text: string): string[] {
 /**
  * Honest plain-language planner line:
  * - "Planned by Gemini 4 Argon" when Gemini 4 Argon did the planning
- * - "Planned by <model> because no Gemini key is set" when a fallback model planned the run
+ * - "Planned by <model> because the Gemini call failed" when a Gemini call was attempted and failed
+ * - "Planned by <model> because no Gemini key is set" when no Gemini key was configured
  */
 export function resolvePlannerModeBadgeText(params: {
   planner?: ArgonPlannerInfo | null;
   mode?: string;
   liveGeminiReached?: boolean;
+  attemptedLiveCall?: boolean;
   enclaveModel?: string;
 }): string {
-  const { planner, mode, liveGeminiReached, enclaveModel } = params;
+  const {
+    planner,
+    mode,
+    liveGeminiReached,
+    attemptedLiveCall = false,
+    enclaveModel,
+  } = params;
   if (planner && typeof planner.model === "string" && planner.model.trim()) {
     const provider = (planner.provider ?? "").toLowerCase();
     const model = planner.model.trim();
@@ -183,6 +191,9 @@ export function resolvePlannerModeBadgeText(params: {
     ) {
       return "Planned by Gemini 4 Argon";
     }
+    if (attemptedLiveCall && !liveGeminiReached) {
+      return `Planned by ${model} because the Gemini call failed`;
+    }
     return `Planned by ${model} because no Gemini key is set`;
   }
 
@@ -191,6 +202,9 @@ export function resolvePlannerModeBadgeText(params: {
   }
 
   const fallbackModel = enclaveModel?.trim() || "gemma4-31b";
+  if (attemptedLiveCall && !liveGeminiReached) {
+    return `Planned by ${fallbackModel} because the Gemini call failed`;
+  }
   return `Planned by ${fallbackModel} because no Gemini key is set`;
 }
 
@@ -199,12 +213,14 @@ export function resolvePlannerSubtitleText(params: {
   attemptedLiveCall?: boolean;
   liveGeminiReached?: boolean;
   isInitialPreview?: boolean;
+  failureReason?: string;
 }): string {
   const {
     isLiveGeminiBadge,
     attemptedLiveCall = false,
     liveGeminiReached = false,
     isInitialPreview = false,
+    failureReason,
   } = params;
 
   if (isLiveGeminiBadge) {
@@ -212,7 +228,16 @@ export function resolvePlannerSubtitleText(params: {
   }
 
   if (attemptedLiveCall && !liveGeminiReached) {
-    return "We tried to reach Gemini 4 Argon with the provided key, but the call did not succeed, so a sealed computer model planned the steps instead.";
+    const cleanedReason = failureReason
+      ? sanitizeJargonToPlainWords(
+          failureReason
+            .replace(/\bAIza[0-9A-Za-z_-]{10,}\b/g, "[hidden key]")
+            .replace(/\bsk-[0-9A-Za-z_-]{8,}\b/g, "[hidden key]")
+            .replace(/\bghp_[0-9A-Za-z_-]{8,}\b/g, "[hidden key]"),
+        )
+      : "";
+    const reasonClause = cleanedReason ? ` (${cleanedReason})` : "";
+    return `We tried to reach Gemini 4 Argon with the provided key, but the Gemini call failed${reasonClause}, so a sealed computer model planned the steps instead.`;
   }
 
   if (isInitialPreview) {
@@ -379,10 +404,16 @@ export function buildPlainTimelineSteps(params: {
   const checksPassed = stage2.verificationSignal.checksPassed;
   const checksTotal = stage2.verificationSignal.checksTotal;
   const step2Passed = stage2.passed && stage3.passed;
+  const firstAttempt = stage3.attempts[0];
+  const secondAttempt = stage3.attempts[1];
+  const firstModelLabel =
+    firstAttempt?.candidateModelId ?? firstAttempt?.candidateNodeId ?? "first model";
+  const secondModelLabel =
+    secondAttempt?.candidateModelId ?? secondAttempt?.candidateNodeId ?? "alternate model";
   const step2Result = !step2Passed
     ? `The seal check failed (${checksPassed} of ${checksTotal} safety checks passed), so we refused to send your task to that computer.`
-    : stage3.faultInjected && stage3.selfHealed
-      ? `We checked the seal is intact (${checksPassed} of ${checksTotal} safety checks passed). When we tested a faulty computer, we caught the broken seal, blocked it, and switched to a clean sealed computer automatically.`
+    : stage3.failedOver && firstAttempt && secondAttempt
+      ? `The seal check on the first sealed computer (${firstModelLabel}) failed, so we switched to an alternate sealed computer (${secondModelLabel}) whose seal check passed (${checksPassed} of ${checksTotal} safety checks passed).`
       : `We checked the seal is intact (${checksPassed} of ${checksTotal} safety checks passed) and confirmed the sealed computer software matches the public software log.`;
 
   // Step 3: Thinking (Stage 4)
@@ -391,12 +422,17 @@ export function buildPlainTimelineSteps(params: {
   const plannerPrivacyNote = plannedByGemini
     ? "Gemini planned the steps without seeing your words."
     : "The sealed computer planned the steps itself, so your words never left it.";
+  const noAnswerReturned =
+    stage4.restoredClientOutput === "The sealed computer did not return an answer" ||
+    stage4.enclaveCompletionMasked === "The sealed computer did not return an answer";
   const runKindNote = isLiveRun
     ? `${plannerPrivacyNote} The sealed computer finished the work and your device put your real names, dates, and numbers back in place.`
-    : `${plannerPrivacyNote} This initial preview loaded without making a paid call on page load. Click Run above to run the live task, and your device will put your real names, dates, and numbers back in place.`;
+    : `${plannerPrivacyNote} The sealed computer finished the work and your device put your real names, dates, and numbers back in place.`;
   const step3Result = step3Passed
     ? `${plannerBadgeText}. ${runKindNote}`
-    : `${plannerBadgeText}. The thinking step could not finish all safety checks.`;
+    : noAnswerReturned
+      ? `${plannerBadgeText}. The sealed computer did not return an answer.`
+      : `${plannerBadgeText}. The thinking step could not finish all safety checks.`;
 
   // Step 4: Waiting for you (Stage 5)
   const isGatePending =
@@ -436,7 +472,9 @@ export function buildPlainTimelineSteps(params: {
   );
   const step5Result = step5Passed
     ? `${plainAnswer} Your result is signed with a tamper-proof seal so you can verify it anytime.`
-    : "The final summary could not be signed.";
+    : noAnswerReturned
+      ? "The sealed computer did not return an answer, so there is no final result to sign."
+      : "The final summary could not be signed.";
 
   return [
     {
@@ -484,9 +522,7 @@ export function buildPlainTimelineSteps(params: {
 
 /**
  * Formats a clean JSON representation of `ArgonAutonomousRunResult` for expert
- * inspection, omitting deprecated compatibility aliases (`quorumValidSignatures`,
- * `quorumRequired`, `vmpl0StatesChecked`, `vmpl0Verified`, `enclaveAttestationVerified`,
- * `sandboxReceipt`, and `mode: "simulated"`).
+ * inspection.
  */
 export function formatCleanRunJsonForDisplay(
   run: ArgonAutonomousRunResult,
@@ -503,7 +539,6 @@ export function formatCleanRunJsonForDisplay(
     taskDescriptor: run.taskDescriptor,
     modelCalls: run.modelCalls,
     overallPassed: run.overallPassed,
-    selfHealingTriggeredAndResolved: run.selfHealingTriggeredAndResolved,
     humanGateState: run.humanGateState,
     stages: {
       stage1,
@@ -530,8 +565,7 @@ export function formatCleanRunJsonForDisplay(
         stageName: stage3.stageName,
         modelsUsed: stage3.modelsUsed,
         passed: stage3.passed,
-        faultInjected: stage3.faultInjected,
-        selfHealed: stage3.selfHealed,
+        failedOver: stage3.failedOver,
         attempts: stage3.attempts.map((att) => ({
           attemptNumber: att.attemptNumber,
           candidateNodeId: att.candidateNodeId,

@@ -183,10 +183,9 @@ describe("Gemini 4 Argon Config Contract, TaskDescriptor & Content-Free Egress F
 
     // 3. Names and redaction placeholders in strings are rejected
     const nameSamples = [
+      "Priya Natarajan",
+      "Halden & Moss LLP",
       "Dana Reyes",
-      "Riverside Teaching Hospital",
-      "Northvale Institute",
-      "Atlas Cellular Unit",
       "Dr. Clara Vance",
       "[EMAIL_1]",
       "[SECRET_1]",
@@ -578,8 +577,8 @@ describe("Gemini 4 Argon Config Contract, TaskDescriptor & Content-Free Egress F
   it("aborts both Google and Tinfoil planner SDK calls if any unredacted PII or non-content-free string is present", async () => {
     const originals = [
       "sk-test-4f9a2c7e1b8d6a3f5e0c",
-      "dana.reyes@example.org",
-      "Riverside Teaching Hospital",
+      "priya.natarajan@haldenmoss.example",
+      "Halden & Moss LLP",
     ];
 
     expect(() =>
@@ -601,7 +600,7 @@ describe("Gemini 4 Argon Config Contract, TaskDescriptor & Content-Free Egress F
     // Tamper the payload with free text to verify egress firewall blocks the SDK call
     const tamperedPayload = {
       ...validPayload,
-      input: [{ role: "user" as const, content: "Free text prompt for Dana Reyes" }],
+      input: [{ role: "user" as const, content: "Free text prompt for Priya Natarajan" }],
     };
 
     await expect(
@@ -621,7 +620,7 @@ describe("Gemini 4 Argon Config Contract, TaskDescriptor & Content-Free Egress F
     await expect(
       callTinfoilPlannerToolLoop({
         model: "kimi-k3",
-        scrubbedPrompt: "Leaked Riverside Teaching Hospital in Tinfoil planner prompt",
+        scrubbedPrompt: "Leaked Halden & Moss LLP in Tinfoil planner prompt",
         sensitiveOriginals: originals,
         tinfoilClient: mockTinfoilClient,
       }),
@@ -630,76 +629,365 @@ describe("Gemini 4 Argon Config Contract, TaskDescriptor & Content-Free Egress F
   });
 });
 
+function buildMockHealthyAttestation(
+  enclaveModel: "gemma4-31b" | "kimi-k3",
+) {
+  const isKimi = enclaveModel === "kimi-k3";
+  const repo = isKimi
+    ? "tinfoilsh/confidential-kimi-k3"
+    : "tinfoilsh/confidential-gemma4-31b";
+  const tag = isKimi ? "v0.0.15" : "v0.0.12";
+  const host = isKimi
+    ? "kimi-k3-inf14.tinfoil.containers.tinfoil.dev"
+    : "gemma4-31b-inf10.tinfoil.containers.tinfoil.dev";
+  const dmVerityRootHash = isKimi
+    ? "69c029108ac795b767e972858e926186c0e7b6a61f6c7fa9ce70ce1a6ee87f2c"
+    : "8b4029108ac795b767e972858e926186c0e7b6a61f6c7fa9ce70ce1a6ee87f1a";
+  const register0 = `${dmVerityRootHash}980bb51973cdf396404412ebb7c1a7b7`;
+
+  return {
+    routerHost: "router-0.tinfoil.sh",
+    routerReleaseDigest:
+      "5233a27f1468f474d27c103e06c1a7a607e6a722ff4f9299ddf4e32fa87f201e",
+    routerPredicate: "https://tinfoil.sh/predicate/sev-snp-guest/v2",
+    fetchedLive: true,
+    modelAttestation: {
+      modelId: enclaveModel,
+      repo,
+      tag,
+      hardwarePredicate: "https://tinfoil.sh/predicate/tdx-guest/v2",
+      tierClassification: "Tier B (Intel TDX + 8x Confidential GPU)" as const,
+      configuredHosts: 1,
+      verifiedHosts: 1,
+      healthyHosts: 1,
+      unverifiedHosts: 0,
+      enclaveHosts: [
+        {
+          host,
+          hpkeKey:
+            "5df270bc5c4329725ce4a4a37dac06977355db702ee2de3e834803f825ea492d",
+          predicate: "https://tinfoil.sh/predicate/tdx-guest/v2",
+          tlsKeyFp:
+            "6758bad98341283b96ddfe1a7db25b270dc26ae789de9dbb17d66566c9b2aa2d",
+          codeTag: tag,
+        },
+      ],
+      measurementRegisters: [register0],
+      vmShape: { cpus: 32, memoryMb: 262144, gpus: 8, disks: 1 },
+      dmVerityRootHash,
+      kernelHash:
+        "7e57f9877b4533e7dcb8dd7419dfaf422f3c7cef6fd337a4eaf27ae90a751ff",
+      initrdHash:
+        "2c23dba70e90589414b334be5b648fab4ead1d5b17ef355f04fd7ede2a9e2e7",
+      containerImageDigest: `sha256:${dmVerityRootHash}`,
+      weightRepoCommit: `${repo}@${tag}`,
+      weightMpkHash: dmVerityRootHash,
+      ccGpuFlagsVerified: true,
+      releaseUrl: `https://github.com/${repo}/releases/tag/${tag}`,
+      sigstoreSearchUrl: `https://search.sigstore.dev/?hash=${dmVerityRootHash}`,
+    },
+  };
+}
+
+function createEchoPlaceholderTinfoilClient(
+  prefixText: string,
+): TinfoilPlannerClientLike {
+  return {
+    ready: vi.fn(async () => {}),
+    chat: {
+      completions: {
+        create: vi.fn(async (params: Record<string, unknown>) => {
+          const messages = Array.isArray(params.messages)
+            ? (params.messages as Array<{ role?: string; content?: string }>)
+            : [];
+          const userContent =
+            messages.find((m) => m.role === "user")?.content ?? "";
+          const placeholderMatches = Array.from(
+            new Set(
+              userContent.match(
+                /\[(?:SECRET|EMAIL|PHONE|IP|ACCT|ENTITY|URL|ADDRESS|DATE|NAME|DIGITS|ENTROPY)_\d+\]/g,
+              ) ?? [],
+            ),
+          );
+          return {
+            id: "chatcmpl-mock-enclave",
+            choices: [
+              {
+                finish_reason: "stop",
+                message: {
+                  role: "assistant",
+                  content: `${prefixText} Verified placeholders: ${placeholderMatches.join(", ")}.`,
+                },
+              },
+            ],
+            usage: { prompt_tokens: 120, completion_tokens: 32 },
+          };
+        }),
+      },
+    },
+  };
+}
+
+const BANNED_SCRIPTED_STRINGS = [
+  "Riverside",
+  "Northvale",
+  "ASSAY-774",
+  "quarantined",
+  "self-heal",
+  "faulty computer",
+] as const;
+
 describe("Autonomous 6-Stage Split-Knowledge Orchestrator (orchestrator.ts)", () => {
-  it("fetches live Tinfoil attestation, fails a real check on fault injection for gemma4-31b, fails over to kimi-k3, and blocks unapproved external actions", async () => {
-    const result = await runArgonAutonomousWorkflow({
-      taskPrompt:
-        "Audit our RTH-ONC-207 survival analysis pipeline for cohort RTH-COHORT-2026-08-14 " +
-        "(grant budget £125,000.00, contact dana.reyes@example.org, phone +44 7911 123456, SSN 123-45-6789, credential sk-test-4f9a2c7e1b8d6a3f5e0c).",
+  it("passes every stage with mocks for two unrelated arbitrary tasks (legal memo naming Priya Natarajan and Halden & Moss LLP, and code review with API key and email)", async () => {
+    // Task 1: Legal memo naming "Priya Natarajan" and "Halden & Moss LLP"
+    const legalTaskPrompt =
+      "Draft a legal memo for Priya Natarajan at Halden & Moss LLP regarding the 2026-05-10 acquisition ($250,000.00, contact priya.natarajan@haldenmoss.example).";
+
+    const legalRun = await runArgonAutonomousWorkflow({
+      taskPrompt: legalTaskPrompt,
+      alwaysHide: ["Halden & Moss LLP"],
       thinkingLevel: "medium",
       background: true,
-      injectFaultToTestSelfHealing: true,
       humanApprovedExternalAction: false,
       preferredEnclaveModel: "gemma4-31b",
-      enableLiveEnclaveInference: false,
+      attestationFetcher: async (m) => buildMockHealthyAttestation(m),
+      tinfoilClient: createEchoPlaceholderTinfoilClient(
+        "Legal memo prepared for counsel.",
+      ),
     });
 
-    expect(result.mode).toBe("tinfoil-planner");
-    expect(result.dataSentToGoogle).toBe("content-free task descriptor only");
-    expect(result.dataHandling).toEqual(HONEST_DATA_HANDLING_STATEMENT);
-    expect(() => assertContentFree(result.taskDescriptor)).not.toThrow();
-    expect(result.planner).toEqual({
-      provider: "tinfoil",
-      model: "kimi-k3",
+    expect(legalRun.overallPassed).toBe(true);
+    expect(legalRun.stages.stage1.passed).toBe(true);
+    expect(legalRun.stages.stage1.verificationSignal.plaintextLeakCount).toBe(0);
+    expect(legalRun.stages.stage1.papillonGeneralizedPrompt).not.toContain(
+      "Priya Natarajan",
+    );
+    expect(legalRun.stages.stage1.papillonGeneralizedPrompt).not.toContain(
+      "Halden & Moss LLP",
+    );
+    expect(legalRun.stages.stage1.papillonGeneralizedPrompt).not.toContain(
+      "priya.natarajan@haldenmoss.example",
+    );
+    expect(legalRun.stages.stage2.passed).toBe(true);
+    expect(legalRun.stages.stage3.passed).toBe(true);
+    expect(legalRun.stages.stage3.failedOver).toBe(false);
+    expect(legalRun.stages.stage3.attempts).toHaveLength(1);
+    expect(legalRun.stages.stage4.passed).toBe(true);
+    expect(
+      legalRun.stages.stage4.verificationSignal.homomorphicRestoreVerified,
+    ).toBe(true);
+    expect(legalRun.stages.stage4.restoredClientOutput).toContain(
+      "Priya Natarajan",
+    );
+    expect(legalRun.stages.stage4.restoredClientOutput).toContain(
+      "Halden & Moss LLP",
+    );
+    expect(legalRun.stages.stage4.restoredClientOutput).toContain(
+      "priya.natarajan@haldenmoss.example",
+    );
+    expect(legalRun.stages.stage5.passed).toBe(true);
+    expect(legalRun.stages.stage6.passed).toBe(true);
+
+    // Task 2: Code review containing an API key and an email
+    const codeReviewPrompt =
+      "Review our auth middleware configured by security-eng@acme-dev.example using production credential sk-live-9f8e7d6c5b4a3210fedcba98 and webhook https://hooks.acme-dev.example/v1/audit.";
+
+    const codeReviewRun = await runArgonAutonomousWorkflow({
+      taskPrompt: codeReviewPrompt,
+      thinkingLevel: "high",
+      background: true,
+      humanApprovedExternalAction: false,
+      preferredEnclaveModel: "kimi-k3",
+      attestationFetcher: async (m) => buildMockHealthyAttestation(m),
+      tinfoilClient: createEchoPlaceholderTinfoilClient(
+        "Code review completed with zero secret leaks.",
+      ),
     });
-    expect(result.persona.name).toBe(DEMO_PERSONA.name);
-    expect(result.overallPassed).toBe(true);
-    expect(result.selfHealingTriggeredAndResolved).toBe(true);
 
-    const { stage1, stage2, stage3, stage4, stage5, stage6 } = result.stages;
-    expect(stage1.passed).toBe(true);
-    expect(stage1.verificationSignal.plaintextLeakCount).toBe(0);
-    expect(stage1.verificationSignal.bucketBytes % 4096).toBe(0);
-    expect(stage1.verificationSignal.symmetryHomomorphismVerified).toBe(true);
-    expect(stage1.papillonGeneralizedPrompt).not.toContain("sk-test-4f9a2c7e1b8d6a3f5e0c");
-    expect(stage1.papillonGeneralizedPrompt).not.toContain("dana.reyes@example.org");
-    expect(stage1.papillonGeneralizedPrompt).not.toContain("+44 7911 123456");
-    expect(stage1.papillonGeneralizedPrompt).not.toContain("123-45-6789");
-    expect(stage1.papillonGeneralizedPrompt).not.toContain("Riverside Teaching Hospital");
+    expect(codeReviewRun.overallPassed).toBe(true);
+    expect(codeReviewRun.stages.stage1.passed).toBe(true);
+    expect(
+      codeReviewRun.stages.stage1.verificationSignal.plaintextLeakCount,
+    ).toBe(0);
+    expect(codeReviewRun.stages.stage1.papillonGeneralizedPrompt).not.toContain(
+      "sk-live-9f8e7d6c5b4a3210fedcba98",
+    );
+    expect(codeReviewRun.stages.stage1.papillonGeneralizedPrompt).not.toContain(
+      "security-eng@acme-dev.example",
+    );
+    expect(codeReviewRun.stages.stage2.passed).toBe(true);
+    expect(codeReviewRun.stages.stage3.passed).toBe(true);
+    expect(codeReviewRun.stages.stage4.passed).toBe(true);
+    expect(
+      codeReviewRun.stages.stage4.verificationSignal.homomorphicRestoreVerified,
+    ).toBe(true);
+    expect(codeReviewRun.stages.stage4.restoredClientOutput).toContain(
+      "sk-live-9f8e7d6c5b4a3210fedcba98",
+    );
+    expect(codeReviewRun.stages.stage4.restoredClientOutput).toContain(
+      "security-eng@acme-dev.example",
+    );
+    expect(codeReviewRun.stages.stage5.passed).toBe(true);
+    expect(codeReviewRun.stages.stage6.passed).toBe(true);
 
-    expect(stage2.passed).toBe(true);
-    expect(stage2.verificationSignal.allSevenChecksPassed).toBe(true);
-    expect(stage2.routerHost).toBe("router-0.tinfoil.sh");
-    expect(stage2.selectedEnclaveModel).toBe("gemma4-31b");
+    for (const run of [legalRun, codeReviewRun]) {
+      const jsonStr = JSON.stringify(run);
+      for (const banned of BANNED_SCRIPTED_STRINGS) {
+        expect(jsonStr.toLowerCase()).not.toContain(banned.toLowerCase());
+      }
+    }
+  });
 
-    expect(stage3.passed).toBe(true);
-    expect(stage3.faultInjected).toBe(true);
-    expect(stage3.selfHealed).toBe(true);
-    expect(stage3.attempts).toHaveLength(2);
-    expect(stage3.attempts[0].passed).toBe(false);
-    expect(stage3.attempts[0].candidateModelId).toBe("gemma4-31b");
-    expect(stage3.attempts[1].passed).toBe(true);
-    expect(stage3.attempts[1].candidateModelId).toBe("kimi-k3");
+  it("fails Stage 4 honestly with 'The sealed computer did not return an answer' when the model returns nothing", async () => {
+    const emptyModelClient: TinfoilPlannerClientLike = {
+      ready: vi.fn(async () => {}),
+      chat: {
+        completions: {
+          create: vi.fn(async () => ({
+            id: "chatcmpl-empty",
+            choices: [
+              {
+                finish_reason: "stop",
+                message: {
+                  role: "assistant",
+                  content: "",
+                },
+              },
+            ],
+          })),
+        },
+      },
+    };
 
-    expect(stage4.passed).toBe(true);
-    expect(stage4.dataSentToGoogle).toBe("content-free task descriptor only");
-    expect(() => assertContentFree(stage4.interactionsPayload)).not.toThrow();
-    expect(stage4.routedEnclaveModel).toBe("kimi-k3");
-    expect(stage4.restoredClientOutput).toContain("Riverside Teaching Hospital");
-    expect(stage4.restoredClientOutput).toContain("Oncology Trial Unit");
-    expect(stage4.restoredClientOutput).toContain("RTH-ONC-207");
+    const run = await runArgonAutonomousWorkflow({
+      taskPrompt:
+        "Review code for priya.natarajan@haldenmoss.example with key sk-live-9f8e7d6c5b4a3210fedcba98.",
+      preferredEnclaveModel: "gemma4-31b",
+      attestationFetcher: async (m) => buildMockHealthyAttestation(m),
+      tinfoilClient: emptyModelClient,
+    });
 
-    expect(stage5.passed).toBe(true);
-    expect(stage5.requiresHumanApproval).toBe(true);
-    expect(stage5.approvedByHuman).toBe(false);
-    expect(stage5.stateChangedOnChain).toBe(false);
-    expect(stage5.externalActionStatus).toBe("paused_awaiting_human");
-    expect(stage5.pendingActions).toHaveLength(1);
-    expect(stage5.pendingActions[0].kind).toBe("anchor_arc_receipt");
+    expect(run.stages.stage1.passed).toBe(true);
+    expect(run.stages.stage2.passed).toBe(true);
+    expect(run.stages.stage3.passed).toBe(true);
+    expect(run.stages.stage4.passed).toBe(false);
+    expect(run.stages.stage4.enclaveCompletionMasked).toBe(
+      "The sealed computer did not return an answer",
+    );
+    expect(run.stages.stage4.restoredClientOutput).toBe(
+      "The sealed computer did not return an answer",
+    );
+    expect(
+      run.stages.stage4.verificationSignal.homomorphicRestoreVerified,
+    ).toBe(false);
+    expect(run.overallPassed).toBe(false);
+  });
 
-    expect(stage6.passed).toBe(true);
-    expect(stage6.forensicProofDigestHex).toHaveLength(64);
-    expect(stage6.verificationSignal.signatureVerified).toBe(true);
+  it("triggers real failover with an honest failover message only when real verification of the selected node fails", async () => {
+    const { buildPlainTimelineSteps, resolvePlannerModeBadgeText } =
+      await import("@/components/argon/argon-helpers");
+
+    const run = await runArgonAutonomousWorkflow({
+      taskPrompt:
+        "Draft a legal memo for Priya Natarajan at Halden & Moss LLP (contact priya.natarajan@haldenmoss.example).",
+      alwaysHide: ["Halden & Moss LLP"],
+      preferredEnclaveModel: "gemma4-31b",
+      attestationFetcher: async (model) => {
+        if (model === "gemma4-31b") {
+          const broken = buildMockHealthyAttestation("gemma4-31b");
+          return {
+            ...broken,
+            modelAttestation: {
+              ...broken.modelAttestation,
+              verifiedHosts: 0,
+              unverifiedHosts: 1,
+              ccGpuFlagsVerified: false,
+              dmVerityRootHash: "",
+              measurementRegisters: [],
+            },
+          };
+        }
+        return buildMockHealthyAttestation("kimi-k3");
+      },
+      tinfoilClient: createEchoPlaceholderTinfoilClient(
+        "Completed legal memo on backup enclave.",
+      ),
+    });
+
+    expect(run.stages.stage3.failedOver).toBe(true);
+    expect(run.stages.stage3.passed).toBe(true);
+    expect(run.stages.stage3.attempts).toHaveLength(2);
+    expect(run.stages.stage3.attempts[0].candidateModelId).toBe("gemma4-31b");
+    expect(run.stages.stage3.attempts[0].passed).toBe(false);
+    expect(run.stages.stage3.attempts[0].remediationApplied).toContain(
+      "Real verification of gemma4-31b",
+    );
+    expect(run.stages.stage3.attempts[0].remediationApplied).toContain(
+      "Failed over to alternate Tinfoil enclave model kimi-k3",
+    );
+    expect(run.stages.stage3.attempts[1].candidateModelId).toBe("kimi-k3");
+    expect(run.stages.stage3.attempts[1].passed).toBe(true);
+    expect(run.stages.stage4.routedEnclaveModel).toBe("kimi-k3");
+    expect(run.overallPassed).toBe(true);
+
+    const plannerBadgeText = resolvePlannerModeBadgeText({
+      planner: run.planner,
+      mode: run.mode,
+    });
+    const steps = buildPlainTimelineSteps({
+      run,
+      plannerBadgeText,
+      arcAnchor: null,
+    });
+    expect(steps[1].passed).toBe(true);
+    expect(steps[1].plainResult).toContain(
+      "The seal check on the first sealed computer (gemma4-31b) failed, so we switched to an alternate sealed computer (kimi-k3) whose seal check passed",
+    );
+
+    const serialized = JSON.stringify({ run, steps });
+    for (const banned of BANNED_SCRIPTED_STRINGS) {
+      expect(serialized.toLowerCase()).not.toContain(banned.toLowerCase());
+    }
+  });
+
+  it("distinguishes 'no key configured' from 'Gemini call failed' in stage4ModelsUsed without leaking secrets", async () => {
+    const noKeyRun = await runArgonAutonomousWorkflow({
+      taskPrompt: "Review auth code for security@acme-dev.example.",
+      attestationFetcher: async (m) => buildMockHealthyAttestation(m),
+      tinfoilClient: createEchoPlaceholderTinfoilClient("Reviewed."),
+    });
+    expect(noKeyRun.stages.stage4.modelsUsed[0]).toContain("no key configured");
+    expect(noKeyRun.stages.stage4.modelsUsed[0]).not.toContain(
+      "Gemini call failed",
+    );
+
+    const failingGenaiClient: GenAIInteractionsClientLike = {
+      interactions: {
+        create: vi.fn(async () => {
+          throw new Error(
+            "HTTP 403 Permission denied for key AIzaSySecretKeyValue123456789",
+          );
+        }),
+      },
+    };
+
+    const failedKeyRun = await runArgonAutonomousWorkflow({
+      taskPrompt: "Review auth code for security@acme-dev.example.",
+      geminiApiKey: "AIzaSySecretKeyValue123456789",
+      genaiClient: failingGenaiClient,
+      attestationFetcher: async (m) => buildMockHealthyAttestation(m),
+      tinfoilClient: createEchoPlaceholderTinfoilClient("Reviewed."),
+    });
+
+    expect(failedKeyRun.stages.stage4.modelsUsed[0]).toContain(
+      "Gemini call failed:",
+    );
+    expect(failedKeyRun.stages.stage4.modelsUsed[0]).not.toContain(
+      "no key configured",
+    );
+    expect(failedKeyRun.stages.stage4.modelsUsed[0]).not.toContain(
+      "AIzaSySecretKeyValue123456789",
+    );
   });
 
   it("uses the attested Tinfoil model as fallback planner through the handle-based tool plumbing when no GEMINI_API_KEY is present", async () => {
@@ -714,9 +1002,8 @@ describe("Autonomous 6-Stage Split-Knowledge Orchestrator (orchestrator.ts)", ()
             tinfoilCalls.push(params);
             const serialized = JSON.stringify(params);
             expect(serialized).not.toContain("sk-test-4f9a2c7e1b8d6a3f5e0c");
-            expect(serialized).not.toContain("dana.reyes@example.org");
-            expect(serialized).not.toContain("Riverside Teaching Hospital");
-            expect(serialized).not.toContain("RTH-ONC-207");
+            expect(serialized).not.toContain("priya.natarajan@haldenmoss.example");
+            expect(serialized).not.toContain("Halden & Moss LLP");
 
             turn += 1;
             if (turn === 1) {
@@ -803,7 +1090,7 @@ describe("Autonomous 6-Stage Split-Knowledge Orchestrator (orchestrator.ts)", ()
                   message: {
                     role: "assistant",
                     content:
-                      "Survival analysis pipeline audit completed for ASSAY-774 at Atlas Cellular Unit, Northvale Institute with all 5 verification tools passing.",
+                      "Completed review for [NAME_1] at [ENTITY_1] ([EMAIL_1]) with all 5 verification tools passing.",
                   },
                 },
               ],
@@ -815,11 +1102,14 @@ describe("Autonomous 6-Stage Split-Knowledge Orchestrator (orchestrator.ts)", ()
     };
 
     const run = await runArgonAutonomousWorkflow({
+      taskPrompt:
+        "Review agreement for Priya Natarajan at Halden & Moss LLP (contact priya.natarajan@haldenmoss.example, key sk-test-4f9a2c7e1b8d6a3f5e0c).",
+      alwaysHide: ["Halden & Moss LLP"],
       thinkingLevel: "high",
       background: true,
-      injectFaultToTestSelfHealing: false,
       humanApprovedExternalAction: false,
       preferredEnclaveModel: "gemma4-31b",
+      attestationFetcher: async (m) => buildMockHealthyAttestation(m),
       tinfoilClient: mockTinfoilClient,
     });
 
@@ -846,7 +1136,8 @@ describe("Autonomous 6-Stage Split-Knowledge Orchestrator (orchestrator.ts)", ()
         "$RESULT_4",
       ]),
     );
-    expect(run.stages.stage4.restoredClientOutput).toContain("Riverside Teaching Hospital");
+    expect(run.stages.stage4.restoredClientOutput).toContain("Priya Natarajan");
+    expect(run.stages.stage4.restoredClientOutput).toContain("Halden & Moss LLP");
     expect(tinfoilCalls).toHaveLength(2);
   });
 
@@ -863,11 +1154,9 @@ describe("Autonomous 6-Stage Split-Knowledge Orchestrator (orchestrator.ts)", ()
 
           const serialized = JSON.stringify(params);
           expect(serialized).not.toContain("sk-test-4f9a2c7e1b8d6a3f5e0c");
-          expect(serialized).not.toContain("dana.reyes@example.org");
-          expect(serialized).not.toContain("Riverside Teaching Hospital");
-          expect(serialized).not.toContain("Northvale Institute");
-          expect(serialized).not.toContain("RTH-ONC-207");
-          expect(serialized).not.toContain("ASSAY-774");
+          expect(serialized).not.toContain("priya.natarajan@haldenmoss.example");
+          expect(serialized).not.toContain("Priya Natarajan");
+          expect(serialized).not.toContain("Halden & Moss LLP");
 
           argonTurn += 1;
           if (argonTurn === 1) {
@@ -906,7 +1195,7 @@ describe("Autonomous 6-Stage Split-Knowledge Orchestrator (orchestrator.ts)", ()
                   name: "invoke_attested_enclave",
                   arguments: {
                     inputHandle: "$RESULT_1",
-                    enclaveModel: "gemma4-31b",
+                    enclaveModel: "kimi-k3",
                     taskKind: "review",
                   },
                 },
@@ -937,12 +1226,18 @@ describe("Autonomous 6-Stage Split-Knowledge Orchestrator (orchestrator.ts)", ()
     };
 
     const liveRun = await runArgonAutonomousWorkflow({
+      taskPrompt:
+        "Review agreement for Priya Natarajan at Halden & Moss LLP (contact priya.natarajan@haldenmoss.example, key sk-test-4f9a2c7e1b8d6a3f5e0c).",
+      alwaysHide: ["Halden & Moss LLP"],
       thinkingLevel: "high",
       background: true,
-      injectFaultToTestSelfHealing: true,
       humanApprovedExternalAction: true,
       preferredEnclaveModel: "kimi-k3",
+      attestationFetcher: async (m) => buildMockHealthyAttestation(m),
       genaiClient: mockGenaiClient,
+      tinfoilClient: createEchoPlaceholderTinfoilClient(
+        "Enclave review complete.",
+      ),
     });
 
     expect(liveRun.mode).toBe("live");
@@ -952,8 +1247,8 @@ describe("Autonomous 6-Stage Split-Knowledge Orchestrator (orchestrator.ts)", ()
       model: "gemini-4-argon",
     });
     expect(liveRun.overallPassed).toBe(true);
-    expect(liveRun.stages.stage4.routedEnclaveModel).toBe("gemma4-31b");
-    expect(liveRun.modelCalls).toHaveLength(1);
+    expect(liveRun.stages.stage4.routedEnclaveModel).toBe("kimi-k3");
+    expect(liveRun.modelCalls).toHaveLength(2);
     expect(liveRun.modelCalls[0].model).toBe("gemini-4-argon");
     expect(liveRun.stages.stage4.liveGeminiCall.toolCallsExecuted).toEqual([
       "scrub_and_symmetry_mask",
@@ -968,59 +1263,139 @@ describe("Autonomous 6-Stage Split-Knowledge Orchestrator (orchestrator.ts)", ()
     expect(recordedCalls).toHaveLength(2);
   });
 
-  it("returns dataSentToGoogle: 'content-free task descriptor only' from POST /api/gemini, enforces config validation, and never echoes ephemeral keys", async () => {
-    const { POST } = await import("@/app/api/gemini/route");
-    const { NextRequest } = await import("next/server");
+  it("returns dataSentToGoogle: 'content-free task descriptor only' from POST /api/gemini, validates alwaysHide and config, and never echoes ephemeral keys", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("tinfoil-proxy")) {
+          return new Response(
+            JSON.stringify({
+              models: {
+                "gemma4-31b": {
+                  repo: "tinfoilsh/confidential-gemma4-31b",
+                  tag: "v0.0.12",
+                  measurement: {
+                    type: "https://tinfoil.sh/predicate/tdx-guest/v2",
+                    registers: [
+                      "8b4029108ac795b767e972858e926186c0e7b6a61f6c7fa9ce70ce1a6ee87f1a980bb51973cdf396404412ebb7c1a7b7",
+                    ],
+                  },
+                  enclaves: {
+                    "gemma4-31b-inf10.tinfoil.containers.tinfoil.dev": {
+                      hpke_key:
+                        "5df270bc5c4329725ce4a4a37dac06977355db702ee2de3e834803f825ea492d",
+                      predicate: "https://tinfoil.sh/predicate/tdx-guest/v2",
+                      tls_key_fp:
+                        "6758bad98341283b96ddfe1a7db25b270dc26ae789de9dbb17d66566c9b2aa2d",
+                    },
+                  },
+                  verification: {
+                    configured: 1,
+                    verified: 1,
+                    healthy: 1,
+                    unverified: 0,
+                  },
+                },
+              },
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.includes("atc.tinfoil.sh")) {
+          return new Response(
+            JSON.stringify({
+              domain: "router-0.tinfoil.sh",
+              digest:
+                "5233a27f1468f474d27c103e06c1a7a607e6a722ff4f9299ddf4e32fa87f201e",
+              enclaveAttestationReport: {
+                format: "https://tinfoil.sh/predicate/sev-snp-guest/v2",
+              },
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({}), { status: 200 });
+      });
 
-    // 1. Rejects forbidden legacy parameters with 400
-    const badReq = new NextRequest("http://localhost:3000/api/gemini", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-forwarded-for": "198.51.100.11",
-      },
-      body: JSON.stringify({
-        taskPrompt: "Review our trial protocol",
-        thinkingLevel: "high",
-        temperature: 0.7,
-      }),
-    });
-    const badRes = await POST(badReq);
-    expect(badRes.status).toBe(400);
-    const badJson = (await badRes.json()) as Record<string, unknown>;
-    expect(badJson.ok).toBe(false);
-    expect(badJson.error).toBe("INVALID_GEMINI_4_ARGON_CONFIG");
+    try {
+      const { POST } = await import("@/app/api/gemini/route");
+      const { NextRequest } = await import("next/server");
 
-    // 2. Valid POST returns content-free TaskDescriptor and honest data-handling statement
-    const validReq = new NextRequest("http://localhost:3000/api/gemini", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-forwarded-for": "198.51.100.12",
-      },
-      body: JSON.stringify({
-        taskPrompt:
-          "Review our RTH-ONC-207 survival study pipeline for group RTH-COHORT-2026-08-14 (grant budget £125,000.00, contact dana.reyes@example.org, test key sk-test-4f9a2c7e1b8d6a3f5e0c).",
-        thinkingLevel: "medium",
-        background: true,
-        injectFaultToTestSelfHealing: true,
-        humanApprovedExternalAction: false,
-        preferredEnclaveModel: "gemma4-31b",
-      }),
-    });
-    const validRes = await POST(validReq);
-    expect(validRes.status).toBe(200);
-    const validJson = (await validRes.json()) as Record<string, unknown>;
-    expect(validJson.ok).toBe(true);
-    expect(validJson.dataSentToGoogle).toBe("content-free task descriptor only");
-    expect(validJson.dataHandling).toEqual(HONEST_DATA_HANDLING_STATEMENT);
-    expect(() => assertContentFree(validJson.taskDescriptor)).not.toThrow();
-    expect(() =>
-      assertContentFree(validJson.interactionsCreatePayload),
-    ).not.toThrow();
+      // 1. Rejects forbidden legacy parameters with 400
+      const badReq = new NextRequest("http://localhost:3000/api/gemini", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": "198.51.100.11",
+        },
+        body: JSON.stringify({
+          taskPrompt: "Review our trial protocol",
+          thinkingLevel: "high",
+          temperature: 0.7,
+        }),
+      });
+      const badRes = await POST(badReq);
+      expect(badRes.status).toBe(400);
+      const badJson = (await badRes.json()) as Record<string, unknown>;
+      expect(badJson.ok).toBe(false);
+      expect(badJson.error).toBe("INVALID_GEMINI_4_ARGON_CONFIG");
+
+      // 2. Rejects invalid alwaysHide array with 400
+      const badAlwaysHideReq = new NextRequest("http://localhost:3000/api/gemini", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": "198.51.100.14",
+        },
+        body: JSON.stringify({
+          taskPrompt: "Review our memo",
+          alwaysHide: "not-an-array",
+        }),
+      });
+      const badAlwaysHideRes = await POST(badAlwaysHideReq);
+      expect(badAlwaysHideRes.status).toBe(400);
+
+      // 3. Valid POST returns content-free TaskDescriptor and honest data-handling statement
+      const validReq = new NextRequest("http://localhost:3000/api/gemini", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": "198.51.100.12",
+        },
+        body: JSON.stringify({
+          taskPrompt:
+            "Draft a legal memo for Priya Natarajan at Halden & Moss LLP regarding the 2026-05-10 acquisition ($250,000.00, contact priya.natarajan@haldenmoss.example, key sk-test-4f9a2c7e1b8d6a3f5e0c).",
+          alwaysHide: ["Halden & Moss LLP"],
+          thinkingLevel: "medium",
+          background: true,
+          humanApprovedExternalAction: false,
+          preferredEnclaveModel: "gemma4-31b",
+        }),
+      });
+      const validRes = await POST(validReq);
+      expect(validRes.status).toBe(200);
+      const validJson = (await validRes.json()) as Record<string, unknown>;
+      expect(validJson.ok).toBe(true);
+      expect(validJson.dataSentToGoogle).toBe("content-free task descriptor only");
+      expect(validJson.dataHandling).toEqual(HONEST_DATA_HANDLING_STATEMENT);
+      expect(() => assertContentFree(validJson.taskDescriptor)).not.toThrow();
+      expect(() =>
+        assertContentFree(validJson.interactionsCreatePayload),
+      ).not.toThrow();
+
+      const serializedResponse = JSON.stringify(validJson);
+      for (const banned of BANNED_SCRIPTED_STRINGS) {
+        expect(serializedResponse.toLowerCase()).not.toContain(
+          banned.toLowerCase(),
+        );
+      }
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
-  it("maintains full compatibility with Argon plain-language UI helpers (argon-helpers.ts)", async () => {
+  it("maintains full compatibility with Argon plain-language UI helpers (argon-helpers.ts) and contains zero banned scripted terms", async () => {
     const {
       buildPlainTimelineSteps,
       EXAMPLE_AGENT_TASKS,
@@ -1029,15 +1404,24 @@ describe("Autonomous 6-Stage Split-Knowledge Orchestrator (orchestrator.ts)", ()
       resolvePlannerModeBadgeText,
     } = await import("@/components/argon/argon-helpers");
 
+    expect(EXAMPLE_AGENT_TASKS[0].label).toBe(
+      "Example: a fictional hospital data scientist",
+    );
+    expect(DEMO_PERSONA.name).toBe(
+      "Example: a fictional hospital data scientist",
+    );
+
     for (const task of EXAMPLE_AGENT_TASKS) {
       const run = await runArgonAutonomousWorkflow({
         taskPrompt: task.prompt,
         thinkingLevel: "medium",
         background: true,
-        injectFaultToTestSelfHealing: true,
         humanApprovedExternalAction: false,
         preferredEnclaveModel: "gemma4-31b",
-        enableLiveEnclaveInference: false,
+        attestationFetcher: async (m) => buildMockHealthyAttestation(m),
+        tinfoilClient: createEchoPlaceholderTinfoilClient(
+          "Completed private analysis.",
+        ),
       });
 
       expect(run.overallPassed).toBe(true);
@@ -1069,7 +1453,11 @@ describe("Autonomous 6-Stage Split-Knowledge Orchestrator (orchestrator.ts)", ()
         run.stages.stage4.restoredClientOutput,
       );
       expect(findForbiddenPlainTerms(plainRestored)).toEqual([]);
-      expect(plainRestored).toContain("Riverside Teaching Hospital");
+
+      const combinedText = JSON.stringify({ run, steps, plainRestored });
+      for (const banned of BANNED_SCRIPTED_STRINGS) {
+        expect(combinedText.toLowerCase()).not.toContain(banned.toLowerCase());
+      }
     }
   });
 });

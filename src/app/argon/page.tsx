@@ -7,6 +7,7 @@ import { AtlasExplorer } from "@/components/atlas-explorer";
 import { InkButton } from "@/components/ink/ink-button";
 import { InkReveal } from "@/components/ink/ink-reveal";
 import { TechDetails } from "@/components/ink/tech-details";
+import { getActiveCustomScrubTerms } from "@/lib/auth/vault";
 import {
   ExhibitSection,
   SpecimenFooter,
@@ -115,7 +116,6 @@ function ArgonAuthenticatedView() {
   const [enclaveModel, setEnclaveModel] = useState<"gemma4-31b" | "kimi-k3">(
     "gemma4-31b",
   );
-  const [injectFault, setInjectFault] = useState<boolean>(true);
   const [humanApproved, setHumanApproved] = useState<boolean>(false);
   const [userDeclinedApproval, setUserDeclinedApproval] =
     useState<boolean>(false);
@@ -195,14 +195,16 @@ function ArgonAuthenticatedView() {
     }
 
     try {
+      const alwaysHide =
+        typeof window !== "undefined" ? getActiveCustomScrubTerms() : [];
       const response = await fetch("/api/gemini", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           taskPrompt,
+          alwaysHide,
           thinkingLevel,
           background: backgroundDecode,
-          injectFaultToTestSelfHealing: injectFault,
           humanApprovedExternalAction: effectiveApproval,
           preferredEnclaveModel: enclaveModel,
           geminiApiKey: geminiApiKey.trim() || undefined,
@@ -297,6 +299,7 @@ function ArgonAuthenticatedView() {
     planner: plannerInfo,
     mode: runResult?.mode ?? (liveGeminiReached ? "live" : "tinfoil-planner"),
     liveGeminiReached,
+    attemptedLiveCall: attemptedLiveGemini,
     enclaveModel:
       runResult?.stages.stage4.routedEnclaveModel ?? enclaveModel,
   });
@@ -307,6 +310,9 @@ function ArgonAuthenticatedView() {
     attemptedLiveCall: attemptedLiveGemini,
     liveGeminiReached,
     isInitialPreview,
+    failureReason:
+      runResult?.stages.stage4.liveGeminiCall.modelCallRecord?.error ??
+      runResult?.stages.stage4.liveGeminiCall.fallbackReason,
   });
 
   const isGatePending =
@@ -764,7 +770,10 @@ function ArgonAuthenticatedView() {
                                   Attempt #{att.attemptNumber}:{" "}
                                   {att.candidateNodeId} (
                                   {att.candidateModelId ?? "enclave"} -{" "}
-                                  {att.passed ? "Verified" : "Fault caught"})
+                                  {att.passed
+                                    ? "Verified"
+                                    : "Verification failed"}
+                                  )
                                 </div>
                                 <div>
                                   Enclave attestation verified:{" "}
@@ -1139,7 +1148,7 @@ function ArgonAuthenticatedView() {
                   <div className="ep-label">
                     Expert agent settings (used on next Run)
                   </div>
-                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                     {/* Thinking level */}
                     <div className="space-y-1.5">
                       <span className="ep-label block">Thinking level</span>
@@ -1164,28 +1173,6 @@ function ArgonAuthenticatedView() {
                           </button>
                         ))}
                       </div>
-                    </div>
-
-                    {/* Automatic failover test */}
-                    <div className="space-y-1.5">
-                      <span className="ep-label block">
-                        Test automatic failover
-                      </span>
-                      <button
-                        type="button"
-                        role="switch"
-                        aria-checked={injectFault}
-                        onClick={() => setInjectFault((prev) => !prev)}
-                        className={
-                          injectFault
-                            ? "ep-btn w-full py-1.5 px-3 text-xs font-mono cursor-pointer"
-                            : "ep-btn-ghost w-full py-1.5 px-3 text-xs font-mono cursor-pointer"
-                        }
-                      >
-                        {injectFault
-                          ? "On: test failover to backup model"
-                          : "Off: primary model only"}
-                      </button>
                     </div>
 
                     {/* Enclave model */}
