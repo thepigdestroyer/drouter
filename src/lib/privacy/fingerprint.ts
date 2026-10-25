@@ -12,7 +12,7 @@ import publishedFingerprintRaw from "./published-fingerprint.json";
 export const ARC_TESTNET_CHAIN_ID = 5042002;
 export const ARC_TESTNET_EXPLORER = "https://explorer.testnet.arc.io";
 export const ARC_PUBLIC_RPC_URL: string =
-  arcTestnet.rpcUrls.default.http[0] || "https://rpc.testnet.arc.network";
+  arcTestnet.rpcUrls.default.http[0] || "https://rpc.testnet.arc.io";
 
 export interface PublishedFilterFingerprint {
   version: string;

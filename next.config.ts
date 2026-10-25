@@ -6,7 +6,7 @@ const CSP_DIRECTIVES = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
-  "connect-src 'self' https://atc.tinfoil.sh https://inference.tinfoil.sh https://router-0.tinfoil.sh https://github-proxy.tinfoil.sh https://kds-proxy.tinfoil.sh https://*.tinfoil.sh https://*.containers.tinfoil.dev https://github.com https://api.github.com https://objects.githubusercontent.com https://release-assets.githubusercontent.com https://rekor.sigstore.dev https://log2025-1.rekor.sigstore.dev https://fulcio.sigstore.dev https://ctfe.sigstore.dev https://timestamp.sigstore.dev https://search.sigstore.dev https://kdsintf.amd.com https://rpc.testnet.arc.network",
+  "connect-src 'self' https://atc.tinfoil.sh https://inference.tinfoil.sh https://router-0.tinfoil.sh https://github-proxy.tinfoil.sh https://kds-proxy.tinfoil.sh https://*.tinfoil.sh https://*.containers.tinfoil.dev https://github.com https://api.github.com https://objects.githubusercontent.com https://release-assets.githubusercontent.com https://rekor.sigstore.dev https://log2025-1.rekor.sigstore.dev https://fulcio.sigstore.dev https://ctfe.sigstore.dev https://timestamp.sigstore.dev https://search.sigstore.dev https://kdsintf.amd.com https://rpc.testnet.arc.io",
   "worker-src 'self' blob:",
   "frame-ancestors 'none'",
   "base-uri 'none'",
