@@ -4,6 +4,10 @@ import React, { useCallback, useEffect, useState } from "react";
 import { AuthGate } from "@/components/auth/auth-gate";
 import { AuthPill } from "@/components/auth-pill";
 import { AtlasExplorer } from "@/components/atlas-explorer";
+import {
+  FilterFingerprintBadge,
+  useFilterFingerprintStatus,
+} from "@/components/privacy/filter-fingerprint-badge";
 import { InkButton } from "@/components/ink/ink-button";
 import { InkReveal } from "@/components/ink/ink-reveal";
 import { TechDetails } from "@/components/ink/tech-details";
@@ -109,6 +113,8 @@ function ArgonAuthenticatedView() {
   );
   const [isInitialLoading, setIsInitialLoading] = useState<boolean>(true);
   const [isRunning, setIsRunning] = useState<boolean>(false);
+  const filterFingerprintStatus = useFilterFingerprintStatus();
+  const filterBlocked = filterFingerprintStatus.blockingSend;
   const [apiError, setApiError] = useState<string | null>(null);
   const [lastActionKind, setLastActionKind] = useState<"get" | "post">("get");
   const [lastApprovalOverride, setLastApprovalOverride] = useState<
@@ -179,6 +185,8 @@ function ArgonAuthenticatedView() {
   }, [loadInitialRun]);
 
   async function handleExecuteWorkflow(overrideApproval?: boolean) {
+    // A filter that does not match its published fingerprint must not prepare any task.
+    if (filterBlocked) return;
     setIsRunning(true);
     setApiError(null);
     setLastActionKind("post");
@@ -599,12 +607,14 @@ function ArgonAuthenticatedView() {
               </div>
             </div>
 
+            <FilterFingerprintBadge status={filterFingerprintStatus} />
+
             {/* Single Run InkButton */}
             <div className="pt-1">
               <InkButton
                 type="button"
                 variant="primary"
-                disabled={isRunning || isInitialLoading}
+                disabled={isRunning || isInitialLoading || filterBlocked}
                 onClick={() => {
                   setHumanApproved(false);
                   setUserDeclinedApproval(false);
