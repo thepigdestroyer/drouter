@@ -372,4 +372,181 @@ describe("Oblivious Relay Routing for pii-filter.tinfoil.sh and Standard Enclave
       clearAttestedPiiFilterCacheForTests();
     }
   });
+
+  it("falls back to the on-device filter when the verified enclave is not pii-filter.tinfoil.sh, without sending the text", async () => {
+    const {
+      attestedPiiFilter,
+      clearAttestedPiiFilterCacheForTests,
+      setAttestedPiiSecureClientFactoryForTests,
+    } = await import("@/lib/privacy/attested-filter");
+
+    clearAttestedPiiFilterCacheForTests();
+    let sent = 0;
+    try {
+      setAttestedPiiSecureClientFactoryForTests(() => {
+        const clientObj = {
+          _transport: {
+            fetch: async () => {
+              sent += 1;
+              return new Response("{}", { status: 200 });
+            },
+          },
+          ready: async () => {},
+          getVerificationDocument: () => ({
+            securityVerified: true,
+            enclaveHost: "other-model.tinfoil.sh",
+          }),
+          fetch: (input: RequestInfo | URL, init?: RequestInit) =>
+            clientObj._transport.fetch(input, init),
+        };
+        return clientObj;
+      });
+
+      const res = await attestedPiiFilter("Email alice@example.com for details.", {
+        useRelay: true,
+        relayOrigin: "https://drouter.example",
+      });
+
+      expect(res.verified).toBe(false);
+      expect(res.text).not.toContain("alice@example.com");
+      expect(sent).toBe(0);
+    } finally {
+      setAttestedPiiSecureClientFactoryForTests(null);
+      clearAttestedPiiFilterCacheForTests();
+    }
+  });
+
+  it("rejects leading dot and leading/trailing hyphen hostnames in isAllowedEnclave and relay routes (Minor 3)", async () => {
+    const malformedUrls = [
+      "https://.tinfoil.sh",
+      "https://-.tinfoil.sh",
+      "https://-pii.tinfoil.sh",
+      "https://pii-.tinfoil.sh",
+      "https://sub.-bad.tinfoil.sh",
+      "https://sub.bad-.tinfoil.dev",
+      "https://pii-filter.tinfoil.sh.",
+    ];
+
+    for (const badUrl of malformedUrls) {
+      expect(isAllowedEnclave(badUrl)).toBe(false);
+
+      const req = new Request("http://localhost:3000/api/relay/v1/redact", {
+        method: "POST",
+        headers: {
+          "x-tinfoil-enclave-url": badUrl,
+          "ehbp-encapsulated-key": "aa".repeat(32),
+        },
+        body: "ciphertext",
+      });
+      const res = await postRelay(req, {
+        params: Promise.resolve({ path: ["redact"] }),
+      });
+      expect(res.status).toBe(400);
+    }
+
+    // Valid multi-label and single-char label Tinfoil hosts continue to pass
+    expect(isAllowedEnclave("https://tinfoil.sh")).toBe(true);
+    expect(isAllowedEnclave("https://a.tinfoil.sh")).toBe(true);
+    expect(isAllowedEnclave("https://pii-filter.tinfoil.sh")).toBe(true);
+    expect(isAllowedEnclave("https://kimi-k3-01.containers.tinfoil.dev")).toBe(true);
+  });
+
+  it("routes both /v1/redact and /v1/chat/completions for pii-filter.tinfoil.sh to /redact if transport is recreated on key rotation (Minor 1 relay defense)", async () => {
+    const forwardedUrls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        forwardedUrls.push(String(input));
+        return new Response(new Uint8Array([0x01, 0x02]), {
+          status: 200,
+          headers: {
+            "content-type": "application/octet-stream",
+            "ehbp-response-nonce": "44".repeat(16),
+          },
+        });
+      }),
+    );
+
+    for (const path of [["redact"], ["chat", "completions"]]) {
+      const req = new Request(
+        `http://localhost:3000/api/relay/v1/${path.join("/")}`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/octet-stream",
+            "x-tinfoil-enclave-url": "https://pii-filter.tinfoil.sh",
+            "x-tinfoil-model": "pii-filter",
+            "ehbp-encapsulated-key": "55".repeat(32),
+          },
+          body: new Uint8Array([9, 8, 7]),
+        },
+      );
+      const res = await postRelay(req, {
+        params: Promise.resolve({ path }),
+      });
+      expect(res.status).toBe(200);
+    }
+
+    expect(forwardedUrls).toEqual([
+      "https://pii-filter.tinfoil.sh/redact",
+      "https://pii-filter.tinfoil.sh/redact",
+    ]);
+  });
+
+  it("fails closed to mechanicalRedact when relay rejects non-pii-filter enclave host on /v1/redact (Minor 2 relay defense)", async () => {
+    const {
+      attestedPiiFilter,
+      clearAttestedPiiFilterCacheForTests,
+      setAttestedPiiSecureClientFactoryForTests,
+    } = await import("@/lib/privacy/attested-filter");
+
+    clearAttestedPiiFilterCacheForTests();
+    try {
+      setAttestedPiiSecureClientFactoryForTests((opts) => {
+        const baseURL = String(opts.baseURL);
+        const mockTransport = {
+          fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+            const targetUrl = new URL(String(input), baseURL);
+            const pathSegs = targetUrl.pathname
+              .replace(/^\/api\/relay\/v1\//, "")
+              .split("/")
+              .filter(Boolean);
+            const reqHeaders = new Headers(init?.headers);
+            // Mismatched enclave host attempting to hit /v1/redact
+            reqHeaders.set("x-tinfoil-enclave-url", "https://inference.tinfoil.sh");
+            reqHeaders.set("ehbp-encapsulated-key", "66".repeat(32));
+            const relayReq = new Request(targetUrl.toString(), {
+              method: init?.method ?? "POST",
+              headers: reqHeaders,
+              body: init?.body,
+            });
+            return postRelay(relayReq, {
+              params: Promise.resolve({ path: pathSegs }),
+            });
+          },
+        };
+        const clientObj = {
+          _transport: mockTransport,
+          ready: async () => {},
+          getVerificationDocument: () => ({
+            securityVerified: true,
+            enclaveHost: "inference.tinfoil.sh",
+          }),
+          fetch: (input: RequestInfo | URL, init?: RequestInit) =>
+            clientObj._transport.fetch(input, init),
+        };
+        return clientObj;
+      });
+
+      const res = await attestedPiiFilter("Email alice@example.com for details.", {
+        useRelay: true,
+        relayOrigin: "https://drouter.example",
+      });
+      expect(res.verified).toBe(false);
+      expect(res.text).not.toContain("alice@example.com");
+    } finally {
+      setAttestedPiiSecureClientFactoryForTests(null);
+      clearAttestedPiiFilterCacheForTests();
+    }
+  });
 });

@@ -152,7 +152,7 @@ async function getVerifiedPiiSecureClient(opts?: {
     const doc = await mockClient.getVerificationDocument();
     return {
       client: mockClient,
-      enclaveHost: doc?.enclaveHost || "pii-filter.tinfoil.sh",
+      enclaveHost: doc?.enclaveHost ?? "",
       releaseTag: doc?.releaseTag,
       securityVerified: Boolean(doc?.securityVerified),
       viaRelay: Boolean(opts?.useRelay) || typeof window !== "undefined",
@@ -260,7 +260,7 @@ async function getVerifiedPiiSecureClient(opts?: {
 
         return {
           client: client as unknown as AttestedPiiSecureClientLike,
-          enclaveHost: doc?.enclaveHost || "pii-filter.tinfoil.sh",
+          enclaveHost: doc?.enclaveHost ?? "",
           releaseTag: doc?.releaseTag,
           securityVerified: Boolean(doc?.securityVerified),
           viaRelay: true,
@@ -284,7 +284,7 @@ async function getVerifiedPiiSecureClient(opts?: {
       const doc = client.getVerificationDocument();
       return {
         client: client as unknown as AttestedPiiSecureClientLike,
-        enclaveHost: doc?.enclaveHost || "pii-filter.tinfoil.sh",
+        enclaveHost: doc?.enclaveHost ?? "",
         releaseTag: doc?.releaseTag,
         securityVerified: Boolean(doc?.securityVerified),
         viaRelay: false,
@@ -413,7 +413,11 @@ export async function attestedPiiFilter(
       useRelay: isBrowserOrRelay,
       relayOrigin: opts?.relayOrigin,
     });
-    if (!verifiedSession.securityVerified) {
+    // Only the attested pii-filter enclave may receive text for the second pass.
+    if (
+      !verifiedSession.securityVerified ||
+      verifiedSession.enclaveHost !== new URL(TINFOIL_PII_FILTER_ENCLAVE_URL).host
+    ) {
       return buildMechanicalFallback(text, opts?.customTerms);
     }
 

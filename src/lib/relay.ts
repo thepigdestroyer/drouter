@@ -127,7 +127,7 @@ export function isAllowedEnclave(rawUrl: string | null): rawUrl is string {
   if (url.protocol !== "https:" || url.username || url.password || url.port) return false;
   if (url.pathname !== "/" || url.search || url.hash) return false;
   const host = url.hostname.toLowerCase();
-  if (!/^[a-z0-9.-]+$/.test(host) || host.includes("..")) return false;
+  if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/.test(host)) return false;
   return (
     host === "tinfoil.sh" ||
     host.endsWith(".tinfoil.sh") ||
