@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// deRoute Private Local Proxy (source commit: 82617252e320)
+// deRoute Private Local Proxy (source commit: feb5071c1a4f)
 import { createRequire as __derouteCreateRequire } from "node:module";
 const require = __derouteCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -48016,6 +48016,35 @@ function mechanicalRedact(text, opts) {
   };
 }
 
+// src/lib/privacy/rehide-known.ts
+var PLACEHOLDER = /\[[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_\d+\]/g;
+function escapeRegExp2(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function rehideKnownValues(text, session) {
+  if (!session || !text) return text;
+  const known = session.entries().filter((e) => e.original.trim().length >= 3).sort((a, b) => b.original.length - a.original.length);
+  if (known.length === 0) return text;
+  const byOriginal = /* @__PURE__ */ new Map();
+  for (const e of known) {
+    const key = e.original.toLowerCase();
+    if (!byOriginal.has(key)) byOriginal.set(key, e.placeholder);
+  }
+  const pattern = new RegExp(
+    known.map((e) => escapeRegExp2(e.original)).join("|"),
+    "gi"
+  );
+  const rehide = (segment) => segment.replace(pattern, (m) => byOriginal.get(m.toLowerCase()) ?? m);
+  let out = "";
+  let last = 0;
+  for (const m of text.matchAll(PLACEHOLDER)) {
+    const at = m.index ?? 0;
+    out += rehide(text.slice(last, at)) + m[0];
+    last = at + m[0].length;
+  }
+  return out + rehide(text.slice(last));
+}
+
 // src/lib/relay.ts
 var ALLOWED_RELAY_V1_PATHS = [
   "chat/completions",
@@ -48198,12 +48227,12 @@ function redactConversationMessages(messages, session) {
   const redactString = (text) => {
     const res = session.redact(text);
     redactionsCount += res.redactions.length;
-    return res.text;
+    return rehideKnownValues(res.text, session);
   };
   const out = messages.map((msg) => {
     if (!msg || typeof msg !== "object") return msg;
     const role = typeof msg.role === "string" ? msg.role.toLowerCase() : "";
-    const shouldRedact = role === "user" || role === "assistant" || role === "tool";
+    const shouldRedact = role === "user" || role === "assistant" || role === "tool" || role === "system" || role === "developer";
     if (!shouldRedact) {
       return { ...msg };
     }
