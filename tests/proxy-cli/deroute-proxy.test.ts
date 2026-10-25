@@ -1798,4 +1798,389 @@ describe("K2: deroute-proxy unit & integration tests", () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it("[C3, I3, I5] two-pass redaction hides unmarked system values marked later with ££, filters all roles/fields/nested parts, counts re-hidden values in X-DRouter-Redactions, drops user/metadata, refuses image/audio/file parts with 400, and restores reasoning_content (streaming & non-streaming)", async () => {
+    // 1. I3 & I5: System message mentions "Project Falcon" and "our merger offer" unmarked while user message marks "££Project Falcon££" and "££our merger offer££" -> neither leaks, and re-hidden values count in redactionsCount
+    const session1 = createMechanicalSession();
+    const twoPassRes = redactConversationMessages(
+      [
+        {
+          role: "system",
+          content:
+            "Workspace context: Project Falcon and our merger offer are under NDA.",
+        },
+        {
+          role: "user",
+          content:
+            "Summarise ££Project Falcon££ and ££our merger offer££ for me.",
+        },
+      ],
+      session1,
+    );
+    const twoPassWire = JSON.stringify(twoPassRes.messages);
+    expect(twoPassWire).not.toContain("Project Falcon");
+    expect(twoPassWire).not.toContain("our merger offer");
+    expect(twoPassWire).not.toContain("££");
+    expect(twoPassRes.messages[0].content).toBe(
+      "Workspace context: [MARKED_1] and [MARKED_2] are under NDA.",
+    );
+    expect(twoPassRes.messages[1].content).toBe(
+      "Summarise [MARKED_1] and [MARKED_2] for me.",
+    );
+    expect(twoPassRes.redactionsCount).toBe(4);
+
+    // 2. C3: Filter every role (including function and unknown roles), msg.name, msg.reasoning_content, msg.refusal, msg.function_call.arguments, and recursive content parts (text, content strings & nested arrays, input_text, thinking, file.filename)
+    const session2 = createMechanicalSession();
+    const complexRes = redactConversationMessages(
+      [
+        {
+          role: "user",
+          name: "dana.reyes@example.com",
+          content: [
+            {
+              type: "input_text",
+              input_text: "Input from dana.reyes@example.com on 10.42.7.19",
+            },
+            {
+              type: "thinking",
+              thinking: "User dana.reyes@example.com mentioned ££Project Falcon££",
+            },
+            {
+              type: "file",
+              file: {
+                filename: "/Users/dana/Project Falcon/dana.reyes@example.com.pdf",
+              },
+            },
+            {
+              type: "tool_result",
+              content: [
+                "Nested string with dana.reyes@example.com and Project Falcon",
+                {
+                  type: "text",
+                  text: "Deeply nested 10.42.7.19 for dana.reyes@example.com",
+                  content: [
+                    {
+                      type: "text",
+                      text: "Triple nested sk_live_51HxYzAbCdEfGhIjKlMn",
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        {
+          role: "assistant",
+          name: "agent_for_dana.reyes@example.com",
+          reasoning_content:
+            "Reasoning about dana.reyes@example.com and Project Falcon on 10.42.7.19.",
+          refusal: "Cannot share sk_live_51HxYzAbCdEfGhIjKlMn with dana.reyes@example.com.",
+          function_call: {
+            name: "send_mail",
+            arguments: '{"to":"dana.reyes@example.com","topic":"Project Falcon"}',
+          },
+        },
+        {
+          role: "function",
+          name: "send_mail",
+          content: '{"status":"delivered to dana.reyes@example.com for Project Falcon"}',
+        },
+        {
+          role: "custom_agent_role",
+          name: "custom_dana.reyes@example.com",
+          content: "Custom role message for 10.42.7.19 and Project Falcon.",
+        },
+      ],
+      session2,
+    );
+    const complexWire = JSON.stringify(complexRes.messages);
+    expect(complexWire).not.toContain("dana.reyes@example.com");
+    expect(complexWire).not.toContain("10.42.7.19");
+    expect(complexWire).not.toContain("Project Falcon");
+    expect(complexWire).not.toContain("sk_live_51HxYzAbCdEfGhIjKlMn");
+    expect(complexWire).not.toContain("/Users/dana");
+    expect(complexRes.messages[0].name).toContain("[EMAIL_1]");
+    expect(complexRes.messages[1].reasoning_content).toContain("[EMAIL_1]");
+    expect(complexRes.messages[1].reasoning_content).toContain("[MARKED_1]");
+    expect(complexRes.messages[1].refusal).toContain("[SECRET_1]");
+    expect(
+      (complexRes.messages[1].function_call as { arguments: string }).arguments,
+    ).toContain("[EMAIL_1]");
+    expect(
+      (complexRes.messages[1].function_call as { arguments: string }).arguments,
+    ).toContain("[MARKED_1]");
+    expect(complexRes.messages[2].content).toContain("[EMAIL_1]");
+    expect(complexRes.messages[2].content).toContain("[MARKED_1]");
+    expect(complexRes.messages[3].content).toContain("[IP_1]");
+    expect(complexRes.messages[3].content).toContain("[MARKED_1]");
+
+    // 3. HTTP server tests for C3, I3, I5:
+    // - refuses image_url, input_audio, and file parts with 400 ("images, audio and files are not supported by the private proxy yet")
+    // - drops body.user, body.metadata, body.prediction (while keeping logit_bias)
+    // - counts re-hidden values in X-DRouter-Redactions
+    // - restores reasoning_content in both non-streaming and streaming (across chunk boundaries)
+    const tmpDir = makeTempDir("deroute-proxy-c3-i3-i5");
+    const spentPath = path.join(tmpDir, "spent.json");
+    const tokens = makeSampleTokens(5);
+    const accessKey = encodeAccessKey(tokens);
+    const capturedBodies: Array<Record<string, unknown>> = [];
+
+    const mockClient: DerouteProxyClientLike = {
+      async ready() {},
+      async getVerificationDocument() {
+        return {
+          securityVerified: true,
+          enclaveHost: "router-0.tinfoil.sh",
+          checks: ALL_PASS_CHECKS,
+        };
+      },
+      chat: {
+        completions: {
+          async create(body) {
+            capturedBodies.push(structuredClone(body));
+            if (body.stream) {
+              async function* streamGen() {
+                yield {
+                  id: "chatcmpl-reasoning-stream",
+                  object: "chat.completion.chunk",
+                  choices: [
+                    {
+                      index: 0,
+                      delta: {
+                        role: "assistant",
+                        reasoning_content: "Thinking about [MARK",
+                      },
+                      finish_reason: null,
+                    },
+                  ],
+                };
+                yield {
+                  id: "chatcmpl-reasoning-stream",
+                  object: "chat.completion.chunk",
+                  choices: [
+                    {
+                      index: 0,
+                      delta: {
+                        reasoning_content: "ED_1] and [EM",
+                      },
+                      finish_reason: null,
+                    },
+                  ],
+                };
+                yield {
+                  id: "chatcmpl-reasoning-stream",
+                  object: "chat.completion.chunk",
+                  choices: [
+                    {
+                      index: 0,
+                      delta: {
+                        reasoning_content: "AIL_1].",
+                        content: "Answer for [MARK",
+                      },
+                      finish_reason: null,
+                    },
+                  ],
+                };
+                yield {
+                  id: "chatcmpl-reasoning-stream",
+                  object: "chat.completion.chunk",
+                  choices: [
+                    {
+                      index: 0,
+                      delta: {
+                        content: "ED_1]!",
+                      },
+                      finish_reason: "stop",
+                    },
+                  ],
+                };
+              }
+              return streamGen();
+            }
+
+            return {
+              id: "chatcmpl-reasoning-nonstream",
+              object: "chat.completion",
+              choices: [
+                {
+                  index: 0,
+                  message: {
+                    role: "assistant",
+                    reasoning_content:
+                      "Evaluated [MARKED_1] for [EMAIL_1].",
+                    content: "Summary of [MARKED_1] sent to [EMAIL_1].",
+                    function_call: {
+                      name: "audit_log",
+                      arguments: '{"project":"[MARKED_1]","user":"[EMAIL_1]"}',
+                    },
+                  },
+                },
+              ],
+            };
+          },
+        },
+      },
+    };
+
+    const started = await startDerouteProxy({
+      port: 0,
+      accessKey,
+      spentFilePath: spentPath,
+      clientFactory: () => mockClient,
+      stderr: () => {},
+      stdout: () => {},
+    });
+
+    try {
+      // 3a. Refuse image_url, input_audio, and file parts with 400 and do not spend tokens
+      for (const unsupportedPart of [
+        {
+          type: "image_url",
+          image_url: { url: "https://example.com/secret.png" },
+        },
+        {
+          type: "input_audio",
+          input_audio: { data: "UklGRiQAAABXQVZFZm10", format: "wav" },
+        },
+        {
+          type: "file",
+          file: { filename: "secret.pdf", file_data: "JVBERi0xLjQK" },
+        },
+      ]) {
+        const badRes = await fetch(
+          `http://127.0.0.1:${started.port}/v1/chat/completions`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model: "kimi-k3",
+              messages: [{ role: "user", content: [unsupportedPart] }],
+            }),
+          },
+        );
+        expect(badRes.status).toBe(400);
+        const badJson = (await badRes.json()) as {
+          error: { message: string };
+        };
+        expect(badJson.error.message).toBe(
+          "images, audio and files are not supported by the private proxy yet",
+        );
+      }
+      expect(capturedBodies).toHaveLength(0);
+
+      // 3b. Non-streaming request: system message has unmarked "Project Falcon", user marks "££Project Falcon££" + email, includes user/metadata/prediction/logit_bias
+      const nonStreamRes = await fetch(
+        `http://127.0.0.1:${started.port}/v1/chat/completions`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "kimi-k3",
+            user: "dana.reyes@example.com",
+            metadata: { owner: "dana.reyes@example.com", secret: "Project Falcon" },
+            prediction: { type: "content", content: "Project Falcon" },
+            logit_bias: { "100": -5 },
+            messages: [
+              {
+                role: "system",
+                content: "Context: Project Falcon is active.",
+              },
+              {
+                role: "user",
+                content:
+                  "Brief dana.reyes@example.com on ££Project Falcon££.",
+              },
+            ],
+          }),
+        },
+      );
+      expect(nonStreamRes.status).toBe(200);
+      // 1 re-hidden in system + 2 redacted in user = 3 total redactions
+      expect(nonStreamRes.headers.get("x-drouter-redactions")).toBe("3");
+
+      expect(capturedBodies).toHaveLength(1);
+      const sentBody = capturedBodies[0];
+      expect(sentBody.user).toBeUndefined();
+      expect(sentBody.metadata).toBeUndefined();
+      expect(sentBody.prediction).toBeUndefined();
+      expect(sentBody.logit_bias).toEqual({ "100": -5 });
+      expect(JSON.stringify(sentBody)).not.toContain("Project Falcon");
+      expect(JSON.stringify(sentBody)).not.toContain("dana.reyes@example.com");
+
+      const nonStreamJson = (await nonStreamRes.json()) as {
+        choices: Array<{
+          message: {
+            reasoning_content: string;
+            content: string;
+            function_call: { arguments: string };
+          };
+        }>;
+      };
+      expect(nonStreamJson.choices[0].message.reasoning_content).toBe(
+        "Evaluated Project Falcon for dana.reyes@example.com.",
+      );
+      expect(nonStreamJson.choices[0].message.content).toBe(
+        "Summary of Project Falcon sent to dana.reyes@example.com.",
+      );
+      expect(nonStreamJson.choices[0].message.function_call.arguments).toBe(
+        '{"project":"Project Falcon","user":"dana.reyes@example.com"}',
+      );
+
+      // 3c. Streaming request with unmarked "Project Falcon" (re-hidden from session) and split reasoning_content placeholders
+      const streamRes = await fetch(
+        `http://127.0.0.1:${started.port}/v1/chat/completions`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "kimi-k3",
+            stream: true,
+            messages: [
+              {
+                role: "user",
+                content: "Follow up on Project Falcon.",
+              },
+            ],
+          }),
+        },
+      );
+      expect(streamRes.status).toBe(200);
+      // "Project Falcon" is re-hidden and counted in X-DRouter-Redactions
+      expect(Number(streamRes.headers.get("x-drouter-redactions"))).toBeGreaterThanOrEqual(1);
+
+      const rawSse = await streamRes.text();
+      const dataLines = rawSse
+        .split("\n")
+        .filter((l) => l.startsWith("data: ") && l !== "data: [DONE]");
+      let fullReasoning = "";
+      let fullContent = "";
+      for (const line of dataLines) {
+        const chunk = JSON.parse(line.slice("data: ".length)) as {
+          choices?: Array<{
+            delta?: { reasoning_content?: string; content?: string };
+          }>;
+        };
+        const delta = chunk.choices?.[0]?.delta;
+        if (delta?.reasoning_content) {
+          expect(delta.reasoning_content).not.toContain("[MARK");
+          expect(delta.reasoning_content).not.toContain("ED_1]");
+          expect(delta.reasoning_content).not.toContain("[EM");
+          expect(delta.reasoning_content).not.toContain("AIL_1]");
+          fullReasoning += delta.reasoning_content;
+        }
+        if (delta?.content) {
+          expect(delta.content).not.toContain("[MARK");
+          expect(delta.content).not.toContain("ED_1]");
+          fullContent += delta.content;
+        }
+      }
+      expect(fullReasoning).toBe(
+        "Thinking about Project Falcon and dana.reyes@example.com.",
+      );
+      expect(fullContent).toBe("Answer for Project Falcon!");
+    } finally {
+      await started.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });

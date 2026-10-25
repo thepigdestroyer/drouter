@@ -260,6 +260,217 @@ export interface ProxyChatMessage {
   [key: string]: unknown;
 }
 
+const PLACEHOLDER_COUNT_RE = /\[[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_\d+\]/g;
+
+function countPlaceholdersInString(text: string): number {
+  return (text.match(PLACEHOLDER_COUNT_RE) ?? []).length;
+}
+
+function extractMarkedSpans(text: string): string[] {
+  const marker = "££";
+  const spans: string[] = [];
+  let searchFrom = 0;
+  while (searchFrom < text.length) {
+    const openIdx = text.indexOf(marker, searchFrom);
+    if (openIdx === -1) break;
+    const contentStart = openIdx + marker.length;
+    const closeIdx = text.indexOf(marker, contentStart);
+    if (closeIdx === -1) {
+      spans.push(text.slice(openIdx));
+      break;
+    }
+    const spanEnd = closeIdx + marker.length;
+    spans.push(text.slice(openIdx, spanEnd));
+    searchFrom = spanEnd;
+  }
+  return spans;
+}
+
+function transformContentPart(
+  part: unknown,
+  transform: (text: string) => string,
+): unknown {
+  if (typeof part === "string") {
+    return transform(part);
+  }
+  if (Array.isArray(part)) {
+    return part.map((item) => transformContentPart(item, transform));
+  }
+  if (!part || typeof part !== "object") {
+    return part;
+  }
+
+  const partObj = part as Record<string, unknown>;
+  const nextPart: Record<string, unknown> = { ...partObj };
+
+  if (typeof partObj.text === "string") {
+    nextPart.text = transform(partObj.text);
+  }
+  if (typeof partObj.content === "string") {
+    nextPart.content = transform(partObj.content);
+  } else if (Array.isArray(partObj.content)) {
+    nextPart.content = partObj.content.map((item) =>
+      transformContentPart(item, transform),
+    );
+  } else if (partObj.content && typeof partObj.content === "object") {
+    nextPart.content = transformContentPart(partObj.content, transform);
+  }
+  if (typeof partObj.input_text === "string") {
+    nextPart.input_text = transform(partObj.input_text);
+  }
+  if (typeof partObj.thinking === "string") {
+    nextPart.thinking = transform(partObj.thinking);
+  }
+  if (typeof partObj.reasoning === "string") {
+    nextPart.reasoning = transform(partObj.reasoning);
+  }
+  if (typeof partObj.reasoning_content === "string") {
+    nextPart.reasoning_content = transform(partObj.reasoning_content);
+  }
+  if (typeof partObj.refusal === "string") {
+    nextPart.refusal = transform(partObj.refusal);
+  }
+  if (
+    partObj.file &&
+    typeof partObj.file === "object" &&
+    !Array.isArray(partObj.file)
+  ) {
+    const fileObj = partObj.file as Record<string, unknown>;
+    const nextFile: Record<string, unknown> = { ...fileObj };
+    if (typeof fileObj.filename === "string") {
+      nextFile.filename = transform(fileObj.filename);
+    }
+    nextPart.file = nextFile;
+  }
+  if (
+    partObj.image_url &&
+    typeof partObj.image_url === "object" &&
+    !Array.isArray(partObj.image_url)
+  ) {
+    const imgObj = partObj.image_url as Record<string, unknown>;
+    const nextImg: Record<string, unknown> = { ...imgObj };
+    if (typeof imgObj.url === "string") {
+      nextImg.url = transform(imgObj.url);
+    }
+    nextPart.image_url = nextImg;
+  }
+
+  return nextPart;
+}
+
+function transformSingleMessage(
+  msg: ProxyChatMessage,
+  transform: (text: string) => string,
+): ProxyChatMessage {
+  if (!msg || typeof msg !== "object") return msg;
+  const nextMsg: ProxyChatMessage = { ...msg };
+
+  if (typeof msg.content === "string") {
+    nextMsg.content = transform(msg.content);
+  } else if (Array.isArray(msg.content)) {
+    nextMsg.content = msg.content.map((part) =>
+      transformContentPart(part, transform),
+    );
+  } else if (msg.content && typeof msg.content === "object") {
+    nextMsg.content = transformContentPart(msg.content, transform);
+  }
+
+  if (typeof msg.name === "string") {
+    nextMsg.name = transform(msg.name);
+  }
+  if (typeof msg.reasoning_content === "string") {
+    nextMsg.reasoning_content = transform(msg.reasoning_content);
+  }
+  if (typeof msg.reasoning === "string") {
+    nextMsg.reasoning = transform(msg.reasoning);
+  }
+  if (typeof msg.refusal === "string") {
+    nextMsg.refusal = transform(msg.refusal);
+  }
+
+  if (
+    msg.function_call &&
+    typeof msg.function_call === "object" &&
+    !Array.isArray(msg.function_call)
+  ) {
+    const fcObj = msg.function_call as Record<string, unknown>;
+    const nextFc: Record<string, unknown> = { ...fcObj };
+    if (typeof fcObj.arguments === "string") {
+      nextFc.arguments = transform(fcObj.arguments);
+    }
+    nextMsg.function_call = nextFc;
+  }
+
+  if (Array.isArray(msg.tool_calls)) {
+    nextMsg.tool_calls = msg.tool_calls.map((tc) => {
+      if (!tc || typeof tc !== "object") return tc;
+      const tcObj = tc as Record<string, unknown>;
+      const fnObj =
+        tcObj.function && typeof tcObj.function === "object"
+          ? (tcObj.function as Record<string, unknown>)
+          : null;
+      if (fnObj && typeof fnObj.arguments === "string") {
+        return {
+          ...tcObj,
+          function: {
+            ...fnObj,
+            arguments: transform(fnObj.arguments),
+          },
+        };
+      }
+      return { ...tcObj };
+    });
+  }
+
+  return nextMsg;
+}
+
+export function hasUnsupportedMediaPart(
+  messages: readonly unknown[],
+): boolean {
+  const inspectPart = (part: unknown): boolean => {
+    if (!part || typeof part !== "object") return false;
+    if (Array.isArray(part)) {
+      return part.some(inspectPart);
+    }
+    const partObj = part as Record<string, unknown>;
+    const type =
+      typeof partObj.type === "string" ? partObj.type.toLowerCase() : "";
+    if (
+      type === "image_url" ||
+      type === "input_image" ||
+      type === "image" ||
+      type === "input_audio" ||
+      type === "audio" ||
+      type === "file" ||
+      type === "input_file" ||
+      partObj.image_url !== undefined ||
+      partObj.input_audio !== undefined ||
+      partObj.file !== undefined
+    ) {
+      return true;
+    }
+    if (Array.isArray(partObj.content)) {
+      return partObj.content.some(inspectPart);
+    }
+    if (partObj.content && typeof partObj.content === "object") {
+      return inspectPart(partObj.content);
+    }
+    return false;
+  };
+
+  for (const msg of messages) {
+    if (!msg || typeof msg !== "object") continue;
+    const msgObj = msg as Record<string, unknown>;
+    if (Array.isArray(msgObj.content)) {
+      if (msgObj.content.some(inspectPart)) return true;
+    } else if (msgObj.content && typeof msgObj.content === "object") {
+      if (inspectPart(msgObj.content)) return true;
+    }
+  }
+  return false;
+}
+
 export function redactConversationMessages(
   messages: readonly ProxyChatMessage[],
   session: MechanicalSession,
@@ -269,79 +480,53 @@ export function redactConversationMessages(
 } {
   let redactionsCount = 0;
 
-  const redactString = (text: string): string => {
+  // Pre-register any explicit ££...££ markers across all messages so that
+  // multi-word or Title-Case ££ phrases in later messages are already known
+  // to the session before earlier messages (e.g. system) are redacted.
+  const preRegisterMarkers = (text: string): string => {
+    for (const span of extractMarkedSpans(text)) {
+      session.redact(span);
+    }
+    return text;
+  };
+  for (const msg of messages) {
+    transformSingleMessage(msg, preRegisterMarkers);
+  }
+
+  // Pass 1: run session.redact across every message so the session learns all
+  // marked (££...££) and detected values across the entire conversation.
+  const pass1Transform = (text: string): string => {
+    const beforePlaceholders = countPlaceholdersInString(text);
     const res = session.redact(text);
-    redactionsCount += res.redactions.length;
-    // Earlier replies can repeat hidden values without markers (for example
-    // text first wrapped in ££), so values hidden before stay hidden.
-    return rehideKnownValues(res.text, session);
+    const afterPlaceholders = countPlaceholdersInString(res.text);
+    const addedPlaceholders = Math.max(
+      0,
+      afterPlaceholders - beforePlaceholders,
+    );
+    redactionsCount += Math.max(res.redactions.length, addedPlaceholders);
+    return res.text;
   };
 
-  const out = messages.map((msg) => {
-    if (!msg || typeof msg !== "object") return msg;
-    const role = typeof msg.role === "string" ? msg.role.toLowerCase() : "";
-    // System and developer messages are filtered too: coding tools put
-    // folder paths, usernames and project notes there.
-    const shouldRedact =
-      role === "user" ||
-      role === "assistant" ||
-      role === "tool" ||
-      role === "system" ||
-      role === "developer";
-    if (!shouldRedact) {
-      return { ...msg };
+  const pass1Messages = messages.map((msg) =>
+    transformSingleMessage(msg, pass1Transform),
+  );
+
+  // Pass 2: run rehideKnownValues over the already-redacted text of all
+  // messages so a value marked with ££ in a later message is also hidden
+  // where it appears unmarked in an earlier message (e.g. system/developer).
+  const pass2Transform = (text: string): string => {
+    const beforePlaceholders = countPlaceholdersInString(text);
+    const out = rehideKnownValues(text, session);
+    const afterPlaceholders = countPlaceholdersInString(out);
+    if (afterPlaceholders > beforePlaceholders) {
+      redactionsCount += afterPlaceholders - beforePlaceholders;
     }
+    return out;
+  };
 
-    const nextMsg: ProxyChatMessage = { ...msg };
-
-    if (typeof msg.content === "string") {
-      nextMsg.content = redactString(msg.content);
-    } else if (Array.isArray(msg.content)) {
-      nextMsg.content = msg.content.map((part) => {
-        if (typeof part === "string") {
-          return redactString(part);
-        }
-        if (part && typeof part === "object") {
-          const partObj = part as Record<string, unknown>;
-          const nextPart: Record<string, unknown> = { ...partObj };
-          if (typeof partObj.text === "string") {
-            nextPart.text = redactString(partObj.text);
-          }
-          if (typeof partObj.content === "string") {
-            nextPart.content = redactString(partObj.content);
-          }
-          if (typeof partObj.input_text === "string") {
-            nextPart.input_text = redactString(partObj.input_text);
-          }
-          return nextPart;
-        }
-        return part;
-      });
-    }
-
-    if (role === "assistant" && Array.isArray(msg.tool_calls)) {
-      nextMsg.tool_calls = msg.tool_calls.map((tc) => {
-        if (!tc || typeof tc !== "object") return tc;
-        const tcObj = tc as Record<string, unknown>;
-        const fnObj =
-          tcObj.function && typeof tcObj.function === "object"
-            ? (tcObj.function as Record<string, unknown>)
-            : null;
-        if (fnObj && typeof fnObj.arguments === "string") {
-          return {
-            ...tcObj,
-            function: {
-              ...fnObj,
-              arguments: redactString(fnObj.arguments),
-            },
-          };
-        }
-        return { ...tcObj };
-      });
-    }
-
-    return nextMsg;
-  });
+  const out = pass1Messages.map((msg) =>
+    transformSingleMessage(msg, pass2Transform),
+  );
 
   return { messages: out, redactionsCount };
 }
@@ -881,6 +1066,33 @@ function sanitizeErrorText(rawMessage: string): string {
     .replace(/\b[0-9a-fA-F]{64,}\b/g, "[REDACTED_HEX]");
 }
 
+const DROPPED_TOP_LEVEL_BODY_FIELDS = new Set([
+  "user",
+  "metadata",
+  "prediction",
+  "prompt",
+  "instructions",
+  "safety_identifier",
+  "prompt_cache_key",
+]);
+
+function buildOutboundChatBody(
+  body: Record<string, unknown>,
+  model: string,
+  messages: ProxyChatMessage[],
+  stream: boolean,
+): Record<string, unknown> {
+  const clean: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(body)) {
+    if (DROPPED_TOP_LEVEL_BODY_FIELDS.has(key)) continue;
+    clean[key] = value;
+  }
+  clean.model = model;
+  clean.messages = messages;
+  clean.stream = stream;
+  return clean;
+}
+
 export interface DerouteProxyClientLike {
   ready(): Promise<void>;
   getVerificationDocument(): Promise<
@@ -1152,6 +1364,17 @@ export function createDerouteProxyServer(
         return;
       }
 
+      if (hasUnsupportedMediaPart(body.messages)) {
+        sendJsonResponse(res, 400, {
+          error: {
+            message:
+              "images, audio and files are not supported by the private proxy yet",
+            type: "invalid_request_error",
+          },
+        });
+        return;
+      }
+
       const rawModel =
         typeof body.model === "string" && body.model.trim()
           ? body.model.trim()
@@ -1218,12 +1441,7 @@ export function createDerouteProxyServer(
       try {
         if (body.stream) {
           const stream = (await verifiedSession.client.chat.completions.create(
-            {
-              ...body,
-              model,
-              messages: redactedMessages,
-              stream: true,
-            },
+            buildOutboundChatBody(body, model, redactedMessages, true),
             { headers: upstreamHeaders },
           )) as AsyncIterable<Record<string, unknown>>;
 
@@ -1235,6 +1453,7 @@ export function createDerouteProxyServer(
           });
 
           const contentRestorers = new Map<number, StreamRestorer>();
+          const reasoningRestorers = new Map<number, StreamRestorer>();
           const toolArgRestorers = new Map<string, StreamRestorer>();
           let lastChunkTemplate: Record<string, unknown> | null = null;
 
@@ -1243,6 +1462,15 @@ export function createDerouteProxyServer(
             if (!r) {
               r = createMechanicalStreamRestorer(session);
               contentRestorers.set(choiceIdx, r);
+            }
+            return r;
+          };
+
+          const getReasoningRestorer = (choiceIdx: number): StreamRestorer => {
+            let r = reasoningRestorers.get(choiceIdx);
+            if (!r) {
+              r = createMechanicalStreamRestorer(session);
+              reasoningRestorers.set(choiceIdx, r);
             }
             return r;
           };
@@ -1296,7 +1524,10 @@ export function createDerouteProxyServer(
 
               if (delta) {
                 const otherDeltaKeys = Object.keys(delta).filter(
-                  (k) => k !== "content" && k !== "tool_calls",
+                  (k) =>
+                    k !== "content" &&
+                    k !== "reasoning_content" &&
+                    k !== "tool_calls",
                 );
                 if (otherDeltaKeys.some((k) => delta[k] !== undefined)) {
                   choiceShouldEmit = true;
@@ -1308,6 +1539,20 @@ export function createDerouteProxyServer(
                     getContentRestorer(choiceIdx).push(delta.content);
                   delta.content = restoredContent;
                   if (restoredContent.length > 0) {
+                    choiceShouldEmit = true;
+                  }
+                }
+
+                if (
+                  typeof delta.reasoning_content === "string" &&
+                  delta.reasoning_content.length > 0
+                ) {
+                  hadStreamableField = true;
+                  const restoredReasoning = getReasoningRestorer(
+                    choiceIdx,
+                  ).push(delta.reasoning_content);
+                  delta.reasoning_content = restoredReasoning;
+                  if (restoredReasoning.length > 0) {
                     choiceShouldEmit = true;
                   }
                 }
@@ -1381,6 +1626,18 @@ export function createDerouteProxyServer(
                   }
                 }
 
+                const existingReasoningRestorer =
+                  reasoningRestorers.get(choiceIdx);
+                if (existingReasoningRestorer) {
+                  const flushedReasoning = existingReasoningRestorer.flush();
+                  if (flushedReasoning.length > 0) {
+                    targetDelta.reasoning_content =
+                      (typeof targetDelta.reasoning_content === "string"
+                        ? targetDelta.reasoning_content
+                        : "") + flushedReasoning;
+                  }
+                }
+
                 const choicePrefix = `${choiceIdx}:`;
                 for (const [key, r] of toolArgRestorers.entries()) {
                   if (!key.startsWith(choicePrefix)) continue;
@@ -1437,6 +1694,7 @@ export function createDerouteProxyServer(
               index: number;
               delta: {
                 content?: string;
+                reasoning_content?: string;
                 tool_calls?: Array<{
                   index: number;
                   function: { arguments: string };
@@ -1458,6 +1716,13 @@ export function createDerouteProxyServer(
             const tail = r.flush();
             if (tail) {
               ensureFlushChoice(choiceIdx).delta.content = tail;
+            }
+          }
+
+          for (const [choiceIdx, r] of reasoningRestorers.entries()) {
+            const tail = r.flush();
+            if (tail) {
+              ensureFlushChoice(choiceIdx).delta.reasoning_content = tail;
             }
           }
 
@@ -1497,12 +1762,7 @@ export function createDerouteProxyServer(
         }
 
         const completion = (await verifiedSession.client.chat.completions.create(
-          {
-            ...body,
-            model,
-            messages: redactedMessages,
-            stream: false,
-          },
+          buildOutboundChatBody(body, model, redactedMessages, false),
           { headers: upstreamHeaders },
         )) as Record<string, unknown>;
 
@@ -1520,6 +1780,29 @@ export function createDerouteProxyServer(
           const nextMessage: Record<string, unknown> = { ...choice.message };
           if (typeof choice.message.content === "string") {
             nextMessage.content = session.restore(choice.message.content);
+          }
+          if (typeof choice.message.reasoning_content === "string") {
+            nextMessage.reasoning_content = session.restore(
+              choice.message.reasoning_content,
+            );
+          }
+          if (typeof choice.message.refusal === "string") {
+            nextMessage.refusal = session.restore(choice.message.refusal);
+          }
+          if (
+            choice.message.function_call &&
+            typeof choice.message.function_call === "object"
+          ) {
+            const fcObj = choice.message.function_call as Record<
+              string,
+              unknown
+            >;
+            if (typeof fcObj.arguments === "string") {
+              nextMessage.function_call = {
+                ...fcObj,
+                arguments: session.restore(fcObj.arguments),
+              };
+            }
           }
           if (Array.isArray(choice.message.tool_calls)) {
             nextMessage.tool_calls = choice.message.tool_calls.map((tc) => {
