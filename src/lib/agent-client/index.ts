@@ -796,68 +796,117 @@ export async function requestAgentPlanFromBrowser(
   };
 }
 
-function buildFallbackModelAttestationFromMatrix(
+const MODEL_ID_ALIASES: Readonly<Record<string, readonly string[]>> = {
+  "gemma4-31b": ["gemma4-31b", "gemma-4-31b", "gemma-4-31b-it"],
+  "kimi-k3": ["kimi-k3"],
+};
+
+export function resolveModelAttestationFromMatrix(
   modelId: "gemma4-31b" | "kimi-k3",
   bundle: DeepAttestationBundle | null,
 ): {
   routerHost: string;
   routerReleaseDigest: string;
   routerPredicate: string;
+  hasSeparateRecord: boolean;
   modelAttestation: ModelEnclaveAttestation;
 } {
   const routerHost = bundle?.routerHost || "router-0.tinfoil.sh";
   const routerReleaseDigest = bundle?.routerReleaseDigest || "";
   const routerPredicate = "https://tinfoil.sh/predicate/sev-snp-guest/v2";
 
-  const existing =
-    bundle?.models?.[modelId] ??
-    (modelId === "gemma4-31b" ? bundle?.models?.["kimi-k3"] : undefined);
+  const candidateKeys = MODEL_ID_ALIASES[modelId] ?? [modelId];
+  let matchedRecord: ModelEnclaveAttestation | undefined;
+  if (bundle?.models && typeof bundle.models === "object") {
+    for (const key of candidateKeys) {
+      const candidate = bundle.models[key];
+      if (candidate) {
+        matchedRecord = candidate;
+        break;
+      }
+    }
+    if (!matchedRecord) {
+      const defaultRepo =
+        modelId === "kimi-k3"
+          ? "tinfoilsh/confidential-kimi-k3"
+          : "tinfoilsh/confidential-gemma4-31b";
+      matchedRecord = Object.values(bundle.models).find(
+        (m) =>
+          m &&
+          (candidateKeys.includes(m.modelId) ||
+            (typeof m.repo === "string" && m.repo === defaultRepo)),
+      );
+    }
+  }
 
-  if (existing && existing.status !== "unavailable") {
+  if (matchedRecord && matchedRecord.status !== "unavailable") {
     return {
       routerHost,
       routerReleaseDigest:
         routerReleaseDigest ||
-        existing.sigstoreReleaseDigest ||
-        existing.dmVerityRootHash,
+        matchedRecord.sigstoreReleaseDigest ||
+        matchedRecord.dmVerityRootHash,
       routerPredicate,
+      hasSeparateRecord: true,
       modelAttestation: {
-        ...existing,
+        ...matchedRecord,
         modelId,
       },
     };
   }
 
+  // Never borrow another model's attestation record when the requested model
+  // has no separate record in the matrix or its record is unavailable.
+  const defaultRepo =
+    modelId === "kimi-k3"
+      ? "tinfoilsh/confidential-kimi-k3"
+      : "tinfoilsh/confidential-gemma4-31b";
+  const routerAttested = Boolean(routerReleaseDigest);
+  const missingReason = matchedRecord?.unavailableReason
+    ? matchedRecord.unavailableReason
+    : routerAttested
+      ? `No separate enclave record for ${modelId} in /api/relay/enclave-matrix (routed through ${routerHost}).`
+      : `No enclave attestation record available for ${modelId}.`;
+
   return {
     routerHost,
     routerReleaseDigest,
     routerPredicate,
+    hasSeparateRecord: false,
     modelAttestation: {
       modelId,
       status: "unavailable",
-      repo:
-        modelId === "kimi-k3"
-          ? "tinfoilsh/confidential-kimi-k3"
-          : "tinfoilsh/confidential-gemma4-31b",
-      tag: "",
-      hardwarePredicate: "https://tinfoil.sh/predicate/tdx-guest/v2",
-      tierClassification: "Tier B (Intel TDX + 8x Confidential GPU)",
-      configuredHosts: 0,
-      verifiedHosts: 0,
-      healthyHosts: 0,
-      unverifiedHosts: 1,
-      enclaveHosts: [],
-      measurementRegisters: [],
-      vmShape: { cpus: 0, memoryMb: 0, gpus: 0, disks: 0 },
-      dmVerityRootHash: "",
-      kernelHash: "",
-      initrdHash: "",
-      containerImageDigest: "",
-      weightRepoCommit: "",
-      weightMpkHash: "",
-      ccGpuFlagsVerified: false,
-      releaseUrl: "",
-      sigstoreSearchUrl: "",
+      unavailableReason: missingReason,
+      repo: matchedRecord?.repo || defaultRepo,
+      tag: matchedRecord?.tag || "",
+      hardwarePredicate:
+        matchedRecord?.hardwarePredicate ||
+        "https://tinfoil.sh/predicate/tdx-guest/v2",
+      tierClassification:
+        matchedRecord?.tierClassification ||
+        "Tier B (Intel TDX + 8x Confidential GPU)",
+      configuredHosts: matchedRecord?.configuredHosts ?? 0,
+      verifiedHosts: matchedRecord?.verifiedHosts ?? 0,
+      healthyHosts: matchedRecord?.healthyHosts ?? 0,
+      unverifiedHosts:
+        matchedRecord?.unverifiedHosts ?? (matchedRecord ? 0 : 1),
+      enclaveHosts: matchedRecord?.enclaveHosts ?? [],
+      measurementRegisters: matchedRecord?.measurementRegisters ?? [],
+      vmShape: matchedRecord?.vmShape ?? {
+        cpus: 0,
+        memoryMb: 0,
+        gpus: 0,
+        disks: 0,
+      },
+      dmVerityRootHash: matchedRecord?.dmVerityRootHash ?? "",
+      kernelHash: matchedRecord?.kernelHash ?? "",
+      initrdHash: matchedRecord?.initrdHash ?? "",
+      containerImageDigest: matchedRecord?.containerImageDigest ?? "",
+      weightRepoCommit: matchedRecord?.weightRepoCommit ?? "",
+      weightMpkHash: matchedRecord?.weightMpkHash ?? "",
+      ccGpuFlagsVerified: matchedRecord?.ccGpuFlagsVerified ?? false,
+      releaseUrl: matchedRecord?.releaseUrl ?? "",
+      sigstoreSearchUrl: matchedRecord?.sigstoreSearchUrl ?? "",
     },
   };
 }
@@ -1015,13 +1064,16 @@ export async function runBrowserAgentWorkflow(
   const attElapsedMs = Math.max(1, Date.now() - t0Att);
 
   const evaluateCandidateModel = (candidateModel: "gemma4-31b" | "kimi-k3") => {
-    const att = buildFallbackModelAttestationFromMatrix(
+    const att = resolveModelAttestationFromMatrix(
       candidateModel,
       matrixRes,
     );
     const verdict = verifyModelEnclaveStatus(att.modelAttestation);
     const primaryHost =
-      att.modelAttestation.enclaveHosts[0]?.host ?? att.modelAttestation.repo;
+      att.modelAttestation.enclaveHosts[0]?.host ??
+      (att.hasSeparateRecord
+        ? att.modelAttestation.repo
+        : `${candidateModel} (no separate enclave record; router ${att.routerHost})`);
     const verifiedHosts = att.modelAttestation.verifiedHosts;
     const configuredHosts = att.modelAttestation.configuredHosts;
     const unverifiedHosts = att.modelAttestation.unverifiedHosts;
@@ -1040,6 +1092,9 @@ export async function runBrowserAgentWorkflow(
       verdict.c5Pass && verdict.c7Pass && releaseMatch;
 
     const failedInvariants: string[] = [];
+    if (!att.hasSeparateRecord) {
+      failedInvariants.push("ModelEnclaveRecordMissingFromMatrix");
+    }
     if (!verdict.c5Pass) {
       failedInvariants.push("C5_ConfidentialGpuVerificationFailed");
     }
@@ -1101,6 +1156,9 @@ export async function runBrowserAgentWorkflow(
     });
   } else {
     const reroutedEval = evaluateCandidateModel(alternateEnclaveModel);
+    const remediationReason = initialEval.att.hasSeparateRecord
+      ? `Real verification of ${initialEnclaveModel} (${initialEval.primaryHost}) failed.`
+      : `No separate enclave attestation record for ${initialEnclaveModel} in /api/relay/enclave-matrix (router ${initialEval.att.routerHost}).`;
     attempts.push({
       attemptNumber: 1,
       candidateNodeId: initialEval.primaryHost,
@@ -1115,7 +1173,9 @@ export async function runBrowserAgentWorkflow(
       failedInvariants: initialEval.failedInvariants,
       plaintextLeakMatches: stage1.verificationSignal.plaintextLeakCount,
       passed: false,
-      remediationApplied: `Real verification of ${initialEnclaveModel} (${initialEval.primaryHost}) failed. Failed over to alternate Tinfoil enclave model ${alternateEnclaveModel} (${reroutedEval.primaryHost}).`,
+      remediationApplied: reroutedEval.passed
+        ? `${remediationReason} Failed over to alternate Tinfoil enclave model ${alternateEnclaveModel} (${reroutedEval.primaryHost}).`
+        : `${remediationReason} Alternate model ${alternateEnclaveModel} (${reroutedEval.primaryHost}) also failed verification.`,
     });
     attempts.push({
       attemptNumber: 2,
@@ -1177,7 +1237,9 @@ export async function runBrowserAgentWorkflow(
     task: "Verify Hop 1 router-0.tinfoil.sh (AMD SEV-SNP) + Hop 2 Tinfoil model enclave (Intel TDX + NVIDIA CC GPUs) and Sigstore Rekor rootfs digest",
     latencyMs: attElapsedMs,
     passed: activeVerdict.c5Pass && activeVerdict.c7Pass,
-    artifactSummary: `Verified Hop 1 (${activeAttestation.routerHost}, AMD SEV-SNP) + Hop 2 (${activePrimaryHost}, ${activeVerdict.c5Detail}) + dm-verity root 0x${activeAttestation.modelAttestation.dmVerityRootHash.slice(0, 16)}...`,
+    artifactSummary: activeAttestation.modelAttestation.dmVerityRootHash
+      ? `Verified Hop 1 (${activeAttestation.routerHost}, AMD SEV-SNP) + Hop 2 (${activeEnclaveModel} on ${activePrimaryHost}, ${activeVerdict.c5Detail}) + dm-verity root 0x${activeAttestation.modelAttestation.dmVerityRootHash.slice(0, 16)}...`
+      : `Hop 1 (${activeAttestation.routerHost}, AMD SEV-SNP) checked; Hop 2 (${activeEnclaveModel} on ${activePrimaryHost}): ${activeVerdict.c5Detail} (no separate dm-verity root record).`,
   };
 
   const registrySubagentTrace: SubagentTaskTrace = {
@@ -1186,41 +1248,46 @@ export async function runBrowserAgentWorkflow(
     task: "Verify live release measurement bindings and Circle Arc Testnet registry readiness (chainId 5042002)",
     latencyMs: attElapsedMs,
     passed: arcRegistryReady,
-    artifactSummary: `Verified ${activeAttestation.modelAttestation.verifiedHosts}/${activeAttestation.modelAttestation.configuredHosts} attested host(s) for ${activePrimaryHost} (nodeId ${resolvedNodeRegistryId.slice(0, 14)}...) and Circle Arc Testnet registry 0xbc8085c2b6fe6e0db05f169925c0b841828f4481.`,
+    artifactSummary: `Verified ${activeAttestation.modelAttestation.verifiedHosts}/${activeAttestation.modelAttestation.configuredHosts} attested host(s) for ${activeEnclaveModel} (${activePrimaryHost}, nodeId ${resolvedNodeRegistryId.slice(0, 14)}...) and Circle Arc Testnet registry 0xbc8085c2b6fe6e0db05f169925c0b841828f4481.`,
   };
+
+  const primaryHpkeKey =
+    activeAttestation.modelAttestation.enclaveHosts[0]?.hpkeKey ?? "";
 
   const sevenChecks: SevenCheckStatus[] = [
     {
       id: "check-1-snp-vcek",
       label: "1. Hop 1 Router AMD SEV-SNP Attestation (router-0.tinfoil.sh)",
       passed: Boolean(activeAttestation.routerReleaseDigest),
-      detail: `Router ${activeAttestation.routerHost} attested with ${activeAttestation.routerPredicate} (release digest ${activeAttestation.routerReleaseDigest.slice(0, 16)}...).`,
+      detail: activeAttestation.routerReleaseDigest
+        ? `Router ${activeAttestation.routerHost} attested with ${activeAttestation.routerPredicate} (release digest ${activeAttestation.routerReleaseDigest.slice(0, 16)}...).`
+        : `Router ${activeAttestation.routerHost} release digest unavailable.`,
     },
     {
       id: "check-2-gpu-cc",
       label: "2. Hop 2 Model Enclave Intel TDX + NVIDIA Confidential Computing GPUs",
       passed: activeVerdict.c5Pass,
-      detail: activeVerdict.c5Detail,
+      detail: `${activeEnclaveModel} (${activePrimaryHost}): ${activeVerdict.c5Detail}`,
     },
     {
       id: "check-3-ehbp-hpke",
       label: "3. RFC 9180 HPKE Encrypted HTTP Body (EHBP) Key Binding",
-      passed:
-        tinfoilProvider.pqcHybrid &&
-        Boolean(activeAttestation.modelAttestation.enclaveHosts[0]?.hpkeKey),
-      detail: `Ephemeral HPKE public key ${(activeAttestation.modelAttestation.enclaveHosts[0]?.hpkeKey ?? "").slice(0, 16)}... bound to enclave TLS fingerprint.`,
+      passed: tinfoilProvider.pqcHybrid && Boolean(primaryHpkeKey),
+      detail: primaryHpkeKey
+        ? `Ephemeral HPKE public key ${primaryHpkeKey.slice(0, 16)}... bound to ${activeEnclaveModel} enclave TLS fingerprint (${activePrimaryHost}).`
+        : `No separate HPKE public key record for ${activeEnclaveModel} in /api/relay/enclave-matrix.`,
     },
     {
       id: "check-4-rekor-manifest",
       label: "4. Sigstore Rekor Transparency Log & Pinned Model Weights",
       passed: activeVerdict.c7Pass,
-      detail: activeVerdict.c7Detail,
+      detail: `${activeEnclaveModel} (${activeAttestation.modelAttestation.repo}): ${activeVerdict.c7Detail}`,
     },
     {
       id: "check-5-release-measurement",
       label: "5. Enclave Launch Measurement Matches Signed Release Digest",
       passed: releaseMatchPassed,
-      detail: `Verified ${activeAttestation.modelAttestation.verifiedHosts}/${activeAttestation.modelAttestation.configuredHosts} host(s) with ${activeAttestation.modelAttestation.unverifiedHosts} unverified hosts and ${activeAttestation.modelAttestation.measurementRegisters.length} hardware measurement register(s).`,
+      detail: `Verified ${activeAttestation.modelAttestation.verifiedHosts}/${activeAttestation.modelAttestation.configuredHosts} host(s) for ${activeEnclaveModel} (${activePrimaryHost}) with ${activeAttestation.modelAttestation.unverifiedHosts} unverified hosts and ${activeAttestation.modelAttestation.measurementRegisters.length} hardware measurement register(s).`,
     },
     {
       id: "check-6-atlas-hybrid",
@@ -1233,8 +1300,8 @@ export async function runBrowserAgentWorkflow(
       label: "7. Circle Arc Testnet Registry (0xbc8085c2b6fe6e0db05f169925c0b841828f4481)",
       passed: arcRegistryReady,
       detail: arcRegistryReady
-        ? `Node ${resolvedNodeRegistryId.slice(0, 14)}... verified for Circle Arc Testnet registry (chainId 5042002).`
-        : "Enclave release measurement or host verification incomplete for Circle Arc Testnet registry.",
+        ? `Node ${resolvedNodeRegistryId.slice(0, 14)}... (${activeEnclaveModel}) verified for Circle Arc Testnet registry (chainId 5042002).`
+        : `Enclave release measurement or host verification incomplete for ${activeEnclaveModel} on Circle Arc Testnet registry.`,
     },
   ];
 

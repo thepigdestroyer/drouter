@@ -32,6 +32,7 @@ import {
   getExpectedCoreImageDigests,
   NEXT_SERVER_RECEIPT_LABEL,
   requestAgentPlanFromBrowser,
+  resolveModelAttestationFromMatrix,
   runBrowserAgentWorkflow,
   runBrowserRedactionPipeline,
   SEALED_GOOGLE_COMPUTER_RECEIPT_LABEL,
@@ -279,7 +280,7 @@ function buildMockEnclaveMatrix() {
     "8b4029108ac795b767e972858e926186c0e7b6a61f6c7fa9ce70ce1a6ee87f1a";
   const register0 = `${dmVerityRootHash}980bb51973cdf396404412ebb7c1a7b7`;
   return {
-    status: "verified",
+    status: "verified" as const,
     routerHost: "router-0.tinfoil.sh",
     routerReleaseTag: "v0.1.0",
     routerReleaseDigest:
@@ -295,11 +296,12 @@ function buildMockEnclaveMatrix() {
     models: {
       "gemma4-31b": {
         modelId: "gemma4-31b",
-        status: "router-attested",
+        status: "router-attested" as const,
         repo: "tinfoilsh/confidential-gemma4-31b",
         tag: "v0.0.12",
         hardwarePredicate: "https://tinfoil.sh/predicate/tdx-guest/v2",
-        tierClassification: "Tier B (Intel TDX + 8x Confidential GPU)",
+        tierClassification:
+          "Tier B (Intel TDX + 8x Confidential GPU)" as const,
         configuredHosts: 1,
         verifiedHosts: 1,
         healthyHosts: 1,
@@ -332,11 +334,12 @@ function buildMockEnclaveMatrix() {
       },
       "kimi-k3": {
         modelId: "kimi-k3",
-        status: "router-attested",
+        status: "router-attested" as const,
         repo: "tinfoilsh/confidential-kimi-k3",
         tag: "v0.0.15",
         hardwarePredicate: "https://tinfoil.sh/predicate/tdx-guest/v2",
-        tierClassification: "Tier B (Intel TDX + 8x Confidential GPU)",
+        tierClassification:
+          "Tier B (Intel TDX + 8x Confidential GPU)" as const,
         configuredHosts: 1,
         verifiedHosts: 1,
         healthyHosts: 1,
@@ -1774,5 +1777,173 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
     }
 
     expect(visited.size).toBeGreaterThan(15);
+  });
+
+  it("maps each model (gemma4-31b and kimi-k3) to its own enclave record and never borrows another model's record when a record is missing", async () => {
+    const matrix = buildMockEnclaveMatrix();
+    matrix.models["gemma4-31b"].dmVerityRootHash =
+      "1111111111111111111111111111111111111111111111111111111111111111";
+    matrix.models["gemma4-31b"].measurementRegisters = [
+      "1111111111111111111111111111111111111111111111111111111111111111980bb51973cdf396404412ebb7c1a7b7",
+    ];
+    matrix.models["kimi-k3"].dmVerityRootHash =
+      "2222222222222222222222222222222222222222222222222222222222222222";
+    matrix.models["kimi-k3"].measurementRegisters = [
+      "2222222222222222222222222222222222222222222222222222222222222222980bb51973cdf396404412ebb7c1a7b7",
+    ];
+
+    // 1. Both models present in matrix -> each model resolves its own host, repo, and measurement
+    const gemmaAtt = resolveModelAttestationFromMatrix("gemma4-31b", matrix);
+    expect(gemmaAtt.hasSeparateRecord).toBe(true);
+    expect(gemmaAtt.modelAttestation.modelId).toBe("gemma4-31b");
+    expect(gemmaAtt.modelAttestation.repo).toBe(
+      "tinfoilsh/confidential-gemma4-31b",
+    );
+    expect(gemmaAtt.modelAttestation.enclaveHosts[0].host).toBe(
+      "gemma4-31b-inf10.tinfoil.containers.tinfoil.dev",
+    );
+    expect(gemmaAtt.modelAttestation.dmVerityRootHash).toBe(
+      "1111111111111111111111111111111111111111111111111111111111111111",
+    );
+
+    const kimiAtt = resolveModelAttestationFromMatrix("kimi-k3", matrix);
+    expect(kimiAtt.hasSeparateRecord).toBe(true);
+    expect(kimiAtt.modelAttestation.modelId).toBe("kimi-k3");
+    expect(kimiAtt.modelAttestation.repo).toBe("tinfoilsh/confidential-kimi-k3");
+    expect(kimiAtt.modelAttestation.enclaveHosts[0].host).toBe(
+      "kimi-k3-inf14.tinfoil.containers.tinfoil.dev",
+    );
+    expect(kimiAtt.modelAttestation.dmVerityRootHash).toBe(
+      "2222222222222222222222222222222222222222222222222222222222222222",
+    );
+
+    // 2. When gemma4-31b is missing from the matrix (only kimi-k3 present), resolveModelAttestationFromMatrix
+    // reports gemma4-31b as unavailable rather than borrowing kimi-k3's record
+    const matrixWithoutGemma = {
+      ...matrix,
+      models: {
+        "kimi-k3": matrix.models["kimi-k3"],
+      },
+    };
+    const missingGemmaAtt = resolveModelAttestationFromMatrix(
+      "gemma4-31b",
+      matrixWithoutGemma,
+    );
+    expect(missingGemmaAtt.hasSeparateRecord).toBe(false);
+    expect(missingGemmaAtt.modelAttestation.modelId).toBe("gemma4-31b");
+    expect(missingGemmaAtt.modelAttestation.status).toBe("unavailable");
+    expect(missingGemmaAtt.modelAttestation.repo).toBe(
+      "tinfoilsh/confidential-gemma4-31b",
+    );
+    expect(missingGemmaAtt.modelAttestation.enclaveHosts).toEqual([]);
+    expect(missingGemmaAtt.modelAttestation.dmVerityRootHash).toBe("");
+    expect(missingGemmaAtt.modelAttestation.unavailableReason).toContain(
+      "No separate enclave record for gemma4-31b",
+    );
+
+    // 3. End-to-end runBrowserAgentWorkflow when gemma4-31b has no record in /api/relay/enclave-matrix:
+    // attempt #1 records gemma4-31b's missing record honestly (never kimi-k3's host) and fails over to kimi-k3
+    const mockFetchMissingGemma: typeof fetch = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/gemini/plan") {
+          const parsedDesc = JSON.parse(String(init?.body ?? "{}"));
+          const { plan, egressReceipt } =
+            buildMockSealedComputerPlanAndReceipt(parsedDesc);
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              planner: GEMINI_4_ARGON_MODEL_ID,
+              plannerSource: "sealed-google-computer",
+              model: GEMINI_4_ARGON_MODEL_ID,
+              interactionId: "inter-argon-turn-1",
+              status: "completed",
+              dataSentToGoogle: "content-free task descriptor only",
+              egressFirewallVerified: true,
+              plan,
+              egressReceipt,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (url === "/api/core/attestation") {
+          return new Response(
+            JSON.stringify(coreAttestationFixture.attestationResponseJson),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (url === "/api/relay/enclave-matrix") {
+          return new Response(JSON.stringify(matrixWithoutGemma), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (url === "/api/registry") {
+          return new Response(JSON.stringify({ nodes: [] }), { status: 200 });
+        }
+        if (url === "/api/knowledge/corpus") {
+          const corpusPayload = buildMockCorpusResponse();
+          return new Response(JSON.stringify(corpusPayload), {
+            status: 200,
+            headers: { ETag: corpusPayload.contentSha256 },
+          });
+        }
+        return new Response("{}", { status: 200 });
+      },
+    );
+
+    const outcomeMissingGemma = await runBrowserAgentWorkflow({
+      taskPrompt:
+        "Review agreement for Priya Natarajan at Halden & Moss LLP (contact priya.natarajan@example.org).",
+      alwaysHide: ["Halden & Moss LLP"],
+      preferredEnclaveModel: "gemma4-31b",
+      fetchFn: mockFetchMissingGemma,
+      openSessionFn: async () => ({
+        async *send() {
+          yield "Reviewed [ENTITY_1] for [EMAIL_1].";
+        },
+      }),
+      coreAttestationOptions: {
+        pinnedRootCaPem: coreAttestationFixture.pinnedRootCaPem,
+        nowSec: TEST_NOW_SEC,
+      },
+    });
+
+    const stage3 = outcomeMissingGemma.run.stages.stage3;
+    expect(stage3.failedOver).toBe(true);
+    expect(stage3.attempts).toHaveLength(2);
+    expect(stage3.attempts[0].candidateModelId).toBe("gemma4-31b");
+    expect(stage3.attempts[0].passed).toBe(false);
+    expect(stage3.attempts[0].candidateNodeId).toContain(
+      "gemma4-31b (no separate enclave record",
+    );
+    expect(stage3.attempts[0].candidateNodeId).not.toContain("kimi-k3");
+    expect(stage3.attempts[0].failedInvariants).toContain(
+      "ModelEnclaveRecordMissingFromMatrix",
+    );
+    expect(stage3.attempts[0].remediationApplied).toContain(
+      "No separate enclave attestation record for gemma4-31b",
+    );
+    expect(stage3.attempts[1].candidateModelId).toBe("kimi-k3");
+    expect(stage3.attempts[1].candidateNodeId).toBe(
+      "kimi-k3-inf14.tinfoil.containers.tinfoil.dev",
+    );
+    expect(stage3.attempts[1].passed).toBe(true);
+    expect(outcomeMissingGemma.run.stages.stage2.selectedEnclaveModel).toBe(
+      "kimi-k3",
+    );
+    expect(outcomeMissingGemma.run.stages.stage4.routedEnclaveModel).toBe(
+      "kimi-k3",
+    );
+
+    const steps = buildPlainTimelineSteps({
+      run: outcomeMissingGemma.run,
+      plannerBadgeText: "Planned by Gemini 4 Argon",
+    });
+    expect(steps[1].passed).toBe(true);
+    expect(steps[1].plainResult).toContain(
+      "No separate seal record was published for the first sealed computer (gemma4-31b), so we switched to an alternate sealed computer (kimi-k3) whose seal check passed",
+    );
+    expect(findForbiddenPlainTerms(steps[1].plainResult)).toEqual([]);
   });
 });

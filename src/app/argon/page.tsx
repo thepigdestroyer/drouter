@@ -103,7 +103,7 @@ function ArgonAuthenticatedView() {
     useState<ArgonThinkingLevel>("high");
   const [backgroundDecode] = useState<boolean>(true);
   const [enclaveModel, setEnclaveModel] = useState<"gemma4-31b" | "kimi-k3">(
-    "gemma4-31b",
+    "kimi-k3",
   );
   const [humanApproved, setHumanApproved] = useState<boolean>(false);
   const [userDeclinedApproval, setUserDeclinedApproval] =
@@ -142,7 +142,7 @@ function ArgonAuthenticatedView() {
         thinkingLevel: "medium",
         background: true,
         humanApprovedExternalAction: false,
-        preferredEnclaveModel: "gemma4-31b",
+        preferredEnclaveModel: "kimi-k3",
       });
       setRunResult(outcome.run);
       setPlannerInfo(outcome.run.planner);
@@ -871,20 +871,19 @@ function ArgonAuthenticatedView() {
                           </div>
                           <div>
                             <span className="text-ink font-medium">
-                              Active enclave measurement:
+                              Active enclave measurement (
+                              {runResult.stages.stage2.selectedEnclaveModel}):
                             </span>{" "}
                             {runResult.stages.stage3.sandboxReceipt.sandboxId} |
-                            dm-verity root 0x
-                            {runResult.stages.stage3.sandboxReceipt.imageMeasurementHex.slice(
-                              0,
-                              16,
-                            )}
-                            ... | RTMR 0x
-                            {runResult.stages.stage3.sandboxReceipt.rtmr3Hex.slice(
-                              0,
-                              16,
-                            )}
-                            ...
+                            dm-verity root{" "}
+                            {runResult.stages.stage3.sandboxReceipt
+                              .imageMeasurementHex
+                              ? `0x${runResult.stages.stage3.sandboxReceipt.imageMeasurementHex.slice(0, 16)}...`
+                              : "unavailable (no separate model enclave record)"}{" "}
+                            | RTMR{" "}
+                            {runResult.stages.stage3.sandboxReceipt.rtmr3Hex
+                              ? `0x${runResult.stages.stage3.sandboxReceipt.rtmr3Hex.slice(0, 16)}...`
+                              : "unavailable"}
                           </div>
                         </div>
                       </TechDetails>

@@ -449,11 +449,25 @@ export function buildPlainTimelineSteps(params: {
     secondAttempt?.candidateModelId ??
     secondAttempt?.candidateNodeId ??
     "alternate model";
+  const selectedModelLabel =
+    stage2.selectedEnclaveModel ||
+    secondAttempt?.candidateModelId ||
+    firstAttempt?.candidateModelId ||
+    "sealed computer";
+  const firstMissingSeparateRecord = Boolean(
+    firstAttempt?.failedInvariants?.includes(
+      "ModelEnclaveRecordMissingFromMatrix",
+    ),
+  );
   const step2Result = !step2Passed
-    ? `The seal check failed (${checksPassed} of ${checksTotal} safety checks passed), so we refused to send your task to that computer.`
+    ? firstMissingSeparateRecord
+      ? `No separate seal record was found for ${firstModelLabel} (${checksPassed} of ${checksTotal} safety checks passed), so we refused to send your task without a verified seal.`
+      : `The seal check for ${selectedModelLabel} failed (${checksPassed} of ${checksTotal} safety checks passed), so we refused to send your task to that computer.`
     : stage3.failedOver && firstAttempt && secondAttempt
-      ? `The seal check on the first sealed computer (${firstModelLabel}) failed, so we switched to an alternate sealed computer (${secondModelLabel}) whose seal check passed (${checksPassed} of ${checksTotal} safety checks passed).`
-      : `We checked the seal is intact (${checksPassed} of ${checksTotal} safety checks passed) and confirmed the sealed computer software matches the public software log.`;
+      ? firstMissingSeparateRecord
+        ? `No separate seal record was published for the first sealed computer (${firstModelLabel}), so we switched to an alternate sealed computer (${secondModelLabel}) whose seal check passed (${checksPassed} of ${checksTotal} safety checks passed).`
+        : `The seal check on the first sealed computer (${firstModelLabel}) failed, so we switched to an alternate sealed computer (${secondModelLabel}) whose seal check passed (${checksPassed} of ${checksTotal} safety checks passed).`
+      : `We checked the seal for ${selectedModelLabel} is intact (${checksPassed} of ${checksTotal} safety checks passed) and confirmed the sealed computer software matches the public software log.`;
 
   // Step 3: Thinking (Stage 4)
   const step3Passed = stage4.passed;

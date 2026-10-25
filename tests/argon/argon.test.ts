@@ -1011,6 +1011,111 @@ describe("deRoute wave 6 Argon browser agent & plain-language helpers", () => {
     expect(findForbiddenPlainTerms(stepsNotNow[3].plainResult)).toEqual([]);
   });
 
+  it("shows each model's own sealed computer record (gemma4-31b vs kimi-k3) and reports a missing model record honestly without borrowing another model's record", async () => {
+    // 1. gemma4-31b selected and present -> Stage 2, Stage 3, Stage 4, and timeline step 2 describe gemma4-31b
+    const { run: gemmaRun } = await runBrowserAgentWorkflow({
+      taskPrompt: EXAMPLE_AGENT_TASKS[0].prompt,
+      preferredEnclaveModel: "gemma4-31b",
+      fetchFn: createMockBrowserFetch(),
+      openSessionFn: createEchoPlaceholderSession("Gemma analysis complete."),
+    });
+
+    expect(gemmaRun.stages.stage2.selectedEnclaveModel).toBe("gemma4-31b");
+    expect(gemmaRun.stages.stage2.selectedEnclaveHost).toBe(
+      "gemma4-31b-inf10.tinfoil.containers.tinfoil.dev",
+    );
+    expect(gemmaRun.stages.stage3.sandboxReceipt.sandboxId).toBe(
+      "gemma4-31b-inf10.tinfoil.containers.tinfoil.dev",
+    );
+    expect(gemmaRun.stages.stage3.sandboxReceipt.imageMeasurementHex).toBe(
+      "8b4029108ac795b767e972858e926186c0e7b6a61f6c7fa9ce70ce1a6ee87f1a",
+    );
+    expect(gemmaRun.stages.stage4.routedEnclaveModel).toBe("gemma4-31b");
+    expect(gemmaRun.stages.stage4.routedEnclaveHost).toBe(
+      "gemma4-31b-inf10.tinfoil.containers.tinfoil.dev",
+    );
+    const gemmaSteps = buildPlainTimelineSteps({
+      run: gemmaRun,
+      plannerBadgeText: "Planned by Gemini 4 Argon",
+    });
+    expect(gemmaSteps[1].plainResult).toContain(
+      "We checked the seal for gemma4-31b is intact",
+    );
+    expect(findForbiddenPlainTerms(gemmaSteps[1].plainResult)).toEqual([]);
+
+    // 2. kimi-k3 selected and present -> Stage 2, Stage 3, Stage 4, and timeline step 2 describe kimi-k3
+    const { run: kimiRun } = await runBrowserAgentWorkflow({
+      taskPrompt: EXAMPLE_AGENT_TASKS[0].prompt,
+      preferredEnclaveModel: "kimi-k3",
+      fetchFn: createMockBrowserFetch(),
+      openSessionFn: createEchoPlaceholderSession("Kimi analysis complete."),
+    });
+
+    expect(kimiRun.stages.stage2.selectedEnclaveModel).toBe("kimi-k3");
+    expect(kimiRun.stages.stage2.selectedEnclaveHost).toBe(
+      "kimi-k3-inf14.tinfoil.containers.tinfoil.dev",
+    );
+    expect(kimiRun.stages.stage3.sandboxReceipt.sandboxId).toBe(
+      "kimi-k3-inf14.tinfoil.containers.tinfoil.dev",
+    );
+    expect(kimiRun.stages.stage3.sandboxReceipt.imageMeasurementHex).toBe(
+      "69c029108ac795b767e972858e926186c0e7b6a61f6c7fa9ce70ce1a6ee87f2c",
+    );
+    expect(kimiRun.stages.stage4.routedEnclaveModel).toBe("kimi-k3");
+    expect(kimiRun.stages.stage4.routedEnclaveHost).toBe(
+      "kimi-k3-inf14.tinfoil.containers.tinfoil.dev",
+    );
+    const kimiSteps = buildPlainTimelineSteps({
+      run: kimiRun,
+      plannerBadgeText: "Planned by Gemini 4 Argon",
+    });
+    expect(kimiSteps[1].plainResult).toContain(
+      "We checked the seal for kimi-k3 is intact",
+    );
+    expect(findForbiddenPlainTerms(kimiSteps[1].plainResult)).toEqual([]);
+
+    // 3. Both models missing from matrix -> honest failure message without borrowing any record
+    const baseFetch = createMockBrowserFetch();
+    const emptyMatrixFetch: typeof fetch = vi.fn(async (input, init) => {
+      if (String(input) === "/api/relay/enclave-matrix") {
+        return new Response(
+          JSON.stringify({
+            ...buildMockEnclaveMatrix(),
+            models: {},
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return baseFetch(input, init);
+    });
+
+    const { run: missingBothRun } = await runBrowserAgentWorkflow({
+      taskPrompt: EXAMPLE_AGENT_TASKS[0].prompt,
+      preferredEnclaveModel: "gemma4-31b",
+      fetchFn: emptyMatrixFetch,
+      openSessionFn: createEchoPlaceholderSession("Fallback."),
+    });
+
+    expect(missingBothRun.stages.stage3.passed).toBe(false);
+    expect(missingBothRun.stages.stage3.failedOver).toBe(false);
+    expect(missingBothRun.stages.stage2.selectedEnclaveModel).toBe("gemma4-31b");
+    expect(missingBothRun.stages.stage2.selectedEnclaveHost).toContain(
+      "gemma4-31b (no separate enclave record",
+    );
+    expect(missingBothRun.stages.stage3.sandboxReceipt.imageMeasurementHex).toBe(
+      "",
+    );
+    const missingSteps = buildPlainTimelineSteps({
+      run: missingBothRun,
+      plannerBadgeText: "Planned by Gemini 4 Argon",
+    });
+    expect(missingSteps[1].passed).toBe(false);
+    expect(missingSteps[1].plainResult).toContain(
+      "No separate seal record was found for gemma4-31b",
+    );
+    expect(findForbiddenPlainTerms(missingSteps[1].plainResult)).toEqual([]);
+  });
+
   it("ensures unexpanded JSX outside TechDetails and page/helper copy contain zero forbidden jargon, dRouter, simulated items, or scripted hospital/fault terms", () => {
     const repoRoot = path.resolve(__dirname, "../..");
     const filesToCheck = [
