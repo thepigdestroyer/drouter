@@ -499,6 +499,80 @@ describe("K2: deroute-proxy unit & integration tests", () => {
     }
   });
 
+  it("ends a stream that fails after it started with an error event, no [DONE], and keeps serving", async () => {
+    const tmpDir = makeTempDir("deroute-proxy-sse-error");
+    let calls = 0;
+    const client: DerouteProxyClientLike = {
+      async ready() {},
+      async getVerificationDocument() {
+        return {
+          securityVerified: true,
+          enclaveHost: "router-0.tinfoil.sh",
+          checks: ALL_PASS_CHECKS,
+        };
+      },
+      chat: {
+        completions: {
+          async create() {
+            calls += 1;
+            const failMidway = calls === 1;
+            async function* generateChunks() {
+              yield {
+                id: "chatcmpl-stream",
+                object: "chat.completion.chunk",
+                choices: [{ index: 0, delta: { content: "Partial [EM" } }],
+              };
+              if (failMidway) throw new Error("connection reset");
+              yield {
+                id: "chatcmpl-stream",
+                object: "chat.completion.chunk",
+                choices: [{ index: 0, delta: { content: "AIL_1] done." } }],
+              };
+            }
+            return generateChunks();
+          },
+        },
+      },
+    };
+
+    const started = await startDerouteProxy({
+      port: 0,
+      spentFilePath: path.join(tmpDir, "spent.json"),
+      clientFactory: () => client,
+      stderr: () => {},
+      stdout: () => {},
+    });
+
+    const send = () =>
+      fetch(`http://127.0.0.1:${started.port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "kimi-k3",
+          stream: true,
+          messages: [{ role: "user", content: "Email dana.reyes@example.com" }],
+        }),
+      });
+
+    try {
+      const failed = await send();
+      expect(failed.status).toBe(200);
+      const failedSse = await failed.text();
+      expect(failedSse).not.toContain("data: [DONE]");
+      expect(failedSse).toContain('"type":"upstream_error"');
+      expect(failedSse).not.toContain("[EM");
+
+      const ok = await send();
+      expect(ok.status).toBe(200);
+      const okSse = await ok.text();
+      expect(okSse).toContain("data: [DONE]");
+      expect(okSse).not.toContain("upstream_error");
+    } finally {
+      await started.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("refuses to start on filter fingerprint mismatch and refuses requests when any of the seven checks C1-C7 fail", async () => {
     const tmpDir = makeTempDir("deroute-proxy-refusal");
     const spentPath = path.join(tmpDir, "spent.json");

@@ -1552,6 +1552,22 @@ export function createDerouteProxyServer(
           err instanceof Error
             ? sanitizeErrorText(err.message)
             : "Upstream enclave request failed";
+        // A stream that fails after it started cannot change its status code:
+        // end it with an error event (no [DONE], so clients see it as failed).
+        if (res.headersSent) {
+          if (!res.writableEnded) {
+            res.write(
+              `data: ${JSON.stringify({
+                error: {
+                  message: `Upstream enclave request failed: ${msg}`,
+                  type: "upstream_error",
+                },
+              })}\n\n`,
+            );
+            res.end();
+          }
+          return;
+        }
         sendJsonResponse(
           res,
           502,
