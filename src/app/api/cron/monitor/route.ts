@@ -1,8 +1,10 @@
 import { NextResponse, connection } from "next/server";
 import {
   executeContinuousMonitorRun,
+  getMonitorRunsHistory,
   type ExecuteMonitorOptions,
 } from "@/lib/accountability";
+import { coarsenEpochSecToHour } from "@/lib/transparency/log";
 import { bytesEqual, utf8 } from "@/lib/sim/bytes";
 
 let testMonitorOptions: ExecuteMonitorOptions | null = null;
@@ -47,6 +49,16 @@ export async function GET(request: Request) {
   const auth = verifyCronMonitorAuthorization(request);
   if (!auth.ok) {
     return NextResponse.json({ ok: false, error: auth.error }, { status: auth.status });
+  }
+
+  // The check is scheduled more than once an hour so a skipped scheduler tick leaves no gap;
+  // later calls in the same hour return the run already recorded.
+  if (!testMonitorOptions) {
+    const currentHourSec = coarsenEpochSecToHour(Math.floor(Date.now() / 1000));
+    const { latestRun } = await getMonitorRunsHistory(1);
+    if (latestRun && latestRun.epochHourSec === currentHourSec) {
+      return NextResponse.json({ ok: true, skipped: true, reason: "already checked this hour", run: latestRun });
+    }
   }
 
   try {

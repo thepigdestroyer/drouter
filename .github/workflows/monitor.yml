@@ -4,7 +4,10 @@ name: Hourly enclave monitor
 # sealed computers is triggered from here instead.
 on:
   schedule:
+    # GitHub sometimes delays or drops scheduled runs; the second slot is a backup and the
+    # endpoint skips if this hour has already been checked.
     - cron: "17 * * * *"
+    - cron: "47 * * * *"
   workflow_dispatch:
 
 permissions: {}
@@ -27,5 +30,5 @@ jobs:
             -H "Authorization: Bearer ${CRON_SECRET}" \
             https://drouter-demo.vercel.app/api/cron/monitor)
           echo "HTTP ${code}"
-          node -e 'const j=JSON.parse(require("fs").readFileSync("body.json","utf8"));const r=j.run||{};console.log(JSON.stringify({ok:j.ok,total:r.totalEnclaves,passed:r.passedEnclaves,failed:r.failedEnclaves,anchorTx:r.anchorTx}))' || true
+          node -e 'const j=JSON.parse(require("fs").readFileSync("body.json","utf8"));const r=j.run||{};console.log(JSON.stringify({ok:j.ok,skipped:j.skipped===true,total:r.totalEnclaves,passed:r.passedEnclaves,failed:r.failedEnclaves,anchorTx:r.anchorTx}))' || true
           test "${code}" = "200"
