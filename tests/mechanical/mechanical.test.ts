@@ -565,9 +565,11 @@ describe("D3: Deterministic Fail-Closed Mechanical Redaction Filter (mechanicalR
 
     const mappedLine = "Client connected from ::ffff:10.42.7.19:8443.";
     const res3 = mechanicalRedact(mappedLine);
+    expect(res3.text).toBe("Client connected from [IP_1].");
     expect(res3.text).not.toContain("::ffff:");
     expect(res3.text).not.toContain("10.42.7.19");
-    expect(res3.redactions[0]).toEqual({ kind: "IP", placeholder: "[IP_1]" });
+    expect(res3.text).not.toContain(".42.7.19");
+    expect(res3.redactions).toEqual([{ kind: "IP", placeholder: "[IP_1]" }]);
     expect(res3.restore(res3.text)).toBe(mappedLine);
 
     const bareMapped = "Upstream peer ::ffff:10.42.7.19 timed out.";
@@ -575,6 +577,122 @@ describe("D3: Deterministic Fail-Closed Mechanical Redaction Filter (mechanicalR
     expect(res4.text).toBe("Upstream peer [IP_1] timed out.");
     expect(res4.redactions).toEqual([{ kind: "IP", placeholder: "[IP_1]" }]);
     expect(res4.restore(res4.text)).toBe(bareMapped);
+  });
+
+  it("fixes F6 Important #1: hides IPv4-mapped IPv6 with port (::ffff:10.42.7.19:8443, [::ffff:10.42.7.19]:8443, [2001:db8::1]:8443) whole without partial IPv4 leak", () => {
+    const bareWithPort = "Peer ::ffff:10.42.7.19:8443 disconnected.";
+    const resBare = mechanicalRedact(bareWithPort);
+    expect(resBare.text).toBe("Peer [IP_1] disconnected.");
+    expect(resBare.text).not.toContain("10");
+    expect(resBare.text).not.toContain("42.7.19");
+    expect(resBare.redactions).toEqual([{ kind: "IP", placeholder: "[IP_1]" }]);
+    expect(resBare.restore(resBare.text)).toBe(bareWithPort);
+
+    const bracketedMapped =
+      "Sockets [::ffff:10.42.7.19]:8443 and [2001:db8::1]:8443 and [::ffff:0:10.42.7.19]:443 active.";
+    const resBracketed = mechanicalRedact(bracketedMapped);
+    expect(resBracketed.text).not.toContain("::ffff");
+    expect(resBracketed.text).not.toContain("10.42.7.19");
+    expect(resBracketed.text).not.toContain("42.7.19");
+    expect(resBracketed.text).not.toContain("2001:db8::1");
+    expect(resBracketed.text).toContain("[[IP_1]]");
+    expect(resBracketed.text).toContain("[[IP_2]]");
+    expect(resBracketed.text).toContain("[[IP_3]]:443");
+    expect(resBracketed.restore(resBracketed.text)).toBe(bracketedMapped);
+  });
+
+  it("fixes F6 Minor #1: produces zero false-positive IP redactions on C++, Rust, CSS, PHP, Ruby, Haskell, and TypeScript :: syntax while still redacting ::1 and fe80::1%en0", () => {
+    const codeSamples = [
+      "std::vector<std::string> items; Foo::bar(); a::b::c(); ::global_fn();",
+      "use crate::module::func; let v = Vec::<u8>::new(); std::collections::HashMap::new();",
+      "a::before, p::first-line, button::after, input::placeholder, ::selection { color: red; }",
+      "PHP return self::CONST_VAL + static:: cache() + parent::init();",
+      "Ruby module Foo::Bar; val = ActiveRecord::Base::connection; end",
+      "Haskell map :: (a -> b) -> [a] -> [b]; x :: Int; main :: IO ()",
+      "export const handler = (req: Request): Response => ({ ok: true } as unknown as Response);",
+    ];
+
+    for (const snippet of codeSamples) {
+      const res = mechanicalRedact(snippet);
+      const ipRedactions = res.redactions.filter((r) => r.kind === "IP");
+      expect(
+        ipRedactions,
+        `Expected 0 IP redactions in code snippet: ${snippet}`,
+      ).toEqual([]);
+      expect(res.restore(res.text)).toBe(snippet);
+    }
+
+    const loopbackAndZone =
+      "Bind ::1 and fe80::1%en0 and fe80::1: connection refused while calling std::vector and Vec::<u8>::new().";
+    const resMixed = mechanicalRedact(loopbackAndZone);
+    expect(resMixed.text).toBe(
+      "Bind [IP_1] and [IP_2] and [IP_3]: connection refused while calling std::vector and Vec::<u8>::new().",
+    );
+    expect(resMixed.redactions).toEqual([
+      { kind: "IP", placeholder: "[IP_1]" },
+      { kind: "IP", placeholder: "[IP_2]" },
+      { kind: "IP", placeholder: "[IP_3]" },
+    ]);
+    expect(resMixed.restore(resMixed.text)).toBe(loopbackAndZone);
+  });
+
+  it("fixes F6 Minor #2: rejects version-prefixed 4-part numbers (v1.2.3.4) while redacting plain IPv4 after space, (, [, =, @, /, :, or at line start", () => {
+    const versionString =
+      "Release v1.2.3.4, V2.0.1.9, and app_1.2.3.4 deployed with v18.19.1.";
+    const resVer = mechanicalRedact(versionString);
+    expect(resVer.redactions).toEqual([]);
+    expect(resVer.text).toBe(versionString);
+
+    const contexts = [
+      "10.42.7.19 at line start",
+      "space 10.42.7.19 here",
+      "paren (10.42.7.19) here",
+      "bracket [10.42.7.19] here",
+      "equals host=10.42.7.19 here",
+      "at user@10.42.7.19 here",
+      "slash /10.42.7.19/32 here",
+      "colon host:10.42.7.19 here",
+    ];
+    for (const ctx of contexts) {
+      const res = mechanicalRedact(ctx);
+      expect(
+        res.redactions.some((r) => r.kind === "IP"),
+        `Expected IP redaction for: ${ctx}`,
+      ).toBe(true);
+      expect(res.text).not.toContain("10.42.7.19");
+      expect(res.restore(res.text)).toBe(ctx);
+    }
+  });
+
+  it("passes the multi-language code & log false-positive suite (C++, Rust, CSS, PHP, Ruby, Haskell, TypeScript, timestamps 12:34:56, MAC addresses, and real IPs)", () => {
+    const cleanCodeAndTimestamps = [
+      "std::vector<std::string> v; Foo::bar(); crate::module::func(); Vec::<u8>::new();",
+      "a::before { content: ''; } p::first-line { font-weight: bold; } ::",
+      "self::CONST; Foo::Bar; x :: Int;",
+      "type Entry<T> = { readonly key: string; readonly value: T };",
+      "[12:34:56] INFO worker started at 00:00:00 and finished at 23:59:59.999 with v1.2.3.4.",
+    ].join("\n");
+
+    const cleanRes = mechanicalRedact(cleanCodeAndTimestamps);
+    expect(cleanRes.redactions.filter((r) => r.kind === "IP")).toEqual([]);
+
+    const logWithRealAddresses = [
+      "[12:34:56] INFO std::vector & Vec::<u8>::new() & a::before & v1.2.3.4",
+      "[12:34:57] WARN peer ::ffff:10.42.7.19:8443 and [2001:db8::1]:8080 and fe80::1%en0 and ::1",
+      "[12:34:58] WARN mac 00:1A:2B:3C:4D:5E and 02-42-ac-11-00-02 and 001a.2b3c.4d5e and ipv4 10.42.7.19.",
+    ].join("\n");
+
+    const logRes = mechanicalRedact(logWithRealAddresses);
+    expect(logRes.text).toContain("[12:34:56] INFO std::vector & Vec::<u8>::new() & a::before & v1.2.3.4");
+    expect(logRes.text).not.toContain("10.42.7.19");
+    expect(logRes.text).not.toContain("2001:db8::1");
+    expect(logRes.text).not.toContain("fe80::1");
+    expect(logRes.text).not.toContain("00:1A:2B:3C:4D:5E");
+    expect(logRes.text).not.toContain("02-42-ac-11-00-02");
+    expect(logRes.text).not.toContain("001a.2b3c.4d5e");
+    // Exactly 8 real IP/MAC occurrences (::ffff:10.42.7.19:8443, 2001:db8::1, fe80::1%en0, ::1, 3 MACs, 10.42.7.19)
+    expect(logRes.redactions.filter((r) => r.kind === "IP")).toHaveLength(8);
+    expect(logRes.restore(logRes.text)).toBe(logWithRealAddresses);
   });
 
   it("fixes F5 Minor #1: redacts sentence-final IPv4 (10.42.7.19.) as IP while keeping the trailing period and reusing [IP_1] across turns", () => {
