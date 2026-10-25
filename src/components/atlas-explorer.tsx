@@ -9,9 +9,21 @@ import {
   resolveEffectiveAtlasQuery,
 } from "@/components/argon/argon-helpers";
 import { getActiveCustomScrubTerms } from "@/lib/auth/vault";
+import {
+  type CorpusDocument,
+  type CorpusInput,
+  fetchCorpus,
+  getCachedCorpus,
+  rankLocally,
+} from "@/lib/broker";
 import { mechanicalRedact } from "@/lib/privacy/mechanical";
 
-interface AtlasSearchResultItem {
+export const ATLAS_PUBLIC_SEARCH_NOTICE =
+  "This searches public reference material. What you type is filtered on your device before it reaches the database." as const;
+
+export const ATLAS_DEVICE_ONLY_LABEL = "Search on my device only" as const;
+
+export interface AtlasSearchResultItem {
   docId: string;
   title: string;
   category: string;
@@ -22,6 +34,7 @@ interface AtlasSearchResultItem {
   sourceUrl?: string;
   docsUrl?: string;
   url?: string;
+  retrievedAt?: string;
   metadata?: {
     sourceUrl?: string;
     docsUrl?: string;
@@ -40,14 +53,14 @@ interface AtlasSearchResultItem {
   embeddingModel?: string;
 }
 
-interface AtlasEnginesInfo {
+export interface AtlasEnginesInfo {
   vectorSearch: "atlas" | "app-fallback" | string;
   textSearch: "atlas" | "app-fallback" | string;
   fusion: "$rankFusion" | "app-rrf" | string;
   embedding: string;
 }
 
-interface AtlasResponse {
+export interface AtlasResponse {
   query: string;
   results: AtlasSearchResultItem[];
   featuresUsed?: string[];
@@ -99,50 +112,252 @@ function resolveItemSourceUrl(item: AtlasSearchResultItem): string | null {
   return null;
 }
 
-export function AtlasExplorer() {
+function inferCorpusDocMeta(doc: CorpusDocument): {
+  docId: string;
+  category: string;
+} {
+  const titleLower = doc.title.toLowerCase();
+  const url = doc.sourceUrl.trim();
+
+  if (url === "https://tee.fail/") {
+    return { docId: "advisory-tee-fail-ddr5", category: "advisory" };
+  }
+  if (url === "https://ddropattack.eu/") {
+    return { docId: "advisory-ddrop", category: "advisory" };
+  }
+  if (url === "https://cipherleaks.com/") {
+    return { docId: "advisory-cipherleaks", category: "advisory" };
+  }
+  if (titleLower.startsWith("voltpillager:")) {
+    return { docId: "advisory-voltpillager", category: "advisory" };
+  }
+  if (url === "https://www.rfc-editor.org/rfc/rfc9474.html") {
+    return { docId: "arch-vmpl0-inner-monitor", category: "architecture" };
+  }
+  if (titleLower.startsWith("tinfoil chained two-hop")) {
+    return { docId: "arch-two-hop-gpu-custody", category: "architecture" };
+  }
+
+  const providerPrefixMap: ReadonlyArray<[string, string]> = [
+    ["tinfoil -", "provider-tinfoil"],
+    ["phala cloud / redpill -", "provider-phala-redpill"],
+    ["near ai cloud -", "provider-near-ai-cloud"],
+    ["venice.ai -", "provider-venice-ai"],
+    ["prem ai -", "provider-prem-ai"],
+    ["ppq.ai -", "provider-ppq-ai"],
+    ["confidential ai -", "provider-confidential-ai"],
+    ["chutes -", "provider-chutes-bittensor"],
+    ["privatemode", "provider-privatemode-cosmian"],
+    ["nanogpt -", "provider-nanogpt"],
+  ];
+  for (const [prefix, id] of providerPrefixMap) {
+    if (titleLower.startsWith(prefix)) {
+      return { docId: id, category: "provider" };
+    }
+  }
+
+  const slug = titleLower
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+  return {
+    docId: `corpus-${slug || "doc"}`,
+    category: "architecture",
+  };
+}
+
+export interface ExecuteAtlasExplorerSearchOptions {
+  rawInputQuery: string;
+  deviceOnly?: boolean;
+  customTerms?: string[];
+  fetchImpl?: typeof fetch;
+  corpus?: CorpusInput | null;
+  limit?: number;
+}
+
+/**
+ * Executes a public knowledge search from the browser:
+ * - When `deviceOnly` is true: ranks the already-downloaded corpus locally with
+ *   `rankLocally` (BM25 over title, summary, and tags) and sends nothing over the network.
+ * - When `deviceOnly` is false: runs `mechanicalRedact` on the typed query in the browser
+ *   before sending only the redacted text to `POST /api/atlas`.
+ */
+export async function executeAtlasExplorerSearch(
+  options: ExecuteAtlasExplorerSearchOptions,
+): Promise<AtlasResponse> {
+  const {
+    rawInputQuery,
+    deviceOnly = false,
+    customTerms,
+    fetchImpl,
+    corpus,
+    limit = 4,
+  } = options;
+
+  const effectiveQuery = resolveEffectiveAtlasQuery(rawInputQuery);
+  const activeCustomTerms =
+    customTerms ??
+    (typeof window !== "undefined" ? getActiveCustomScrubTerms() : []);
+
+  if (deviceOnly) {
+    const localCorpus: CorpusInput =
+      corpus ?? getCachedCorpus() ?? (await fetchCorpus(fetchImpl));
+    const totalCorpusDocs =
+      "documents" in localCorpus
+        ? localCorpus.documents.length
+        : localCorpus.length;
+    const ranked = rankLocally(effectiveQuery, localCorpus, limit);
+    const results: AtlasSearchResultItem[] = ranked.map((doc) => {
+      const meta = inferCorpusDocMeta(doc);
+      return {
+        docId: meta.docId,
+        title: doc.title,
+        category: meta.category,
+        summary: doc.summary,
+        sourceUrl: doc.sourceUrl,
+        retrievedAt: doc.retrievedAt,
+        tags: [...doc.tags],
+        vectorScore: 0,
+        textScore: doc.score,
+        rrfScore: Number((1 / (60 + doc.rank)).toFixed(6)),
+        vectorRank: doc.rank,
+        textRank: doc.rank,
+        embeddingModel: "local-bm25 (device-only)",
+      };
+    });
+
+    return {
+      query: effectiveQuery,
+      results,
+      embeddingModel: "local-bm25 (device-only)",
+      engines: {
+        vectorSearch: "none (device-only)",
+        textSearch: "browser-bm25",
+        fusion: "local-bm25",
+        embedding: "local-bm25 (device-only)",
+      },
+      search: {
+        engines: {
+          vectorSearch: "none (device-only)",
+          textSearch: "browser-bm25",
+          fusion: "local-bm25",
+          embedding: "local-bm25 (device-only)",
+        },
+        embeddingModel: "local-bm25 (device-only)",
+        executionMode: "device-only-bm25",
+        totalCorpusDocs,
+      },
+      analytics: {
+        connected: false,
+        totalKnowledgeDocs: totalCorpusDocs,
+        totalIntelligenceDocs: totalCorpusDocs,
+        searchIndexes: [],
+      },
+    };
+  }
+
+  // Always redact on the device before sending anything to /api/atlas
+  const scrubbedQuery = mechanicalRedact(effectiveQuery, {
+    customTerms: activeCustomTerms,
+  }).text;
+
+  const effectiveFetch = fetchImpl ?? globalThis.fetch;
+  const res = await effectiveFetch("/api/atlas", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      query: scrubbedQuery,
+      limit,
+    }),
+  });
+
+  const body = (await res.json().catch(() => null)) as AtlasResponse | null;
+  if (!res.ok || !body) {
+    const msg =
+      body?.error || `Knowledge search failed with HTTP ${res.status}.`;
+    throw new Error(msg);
+  }
+  return body;
+}
+
+export interface AtlasExplorerProps {
+  initialDeviceOnly?: boolean;
+  fetchImpl?: typeof fetch;
+  preloadedCorpus?: CorpusInput | null;
+}
+
+export function AtlasExplorer({
+  initialDeviceOnly = false,
+  fetchImpl,
+  preloadedCorpus = null,
+}: AtlasExplorerProps = {}) {
   const [query, setQuery] = useState<string>(
     PLAIN_ATLAS_PRESET_QUERIES[0].label,
+  );
+  const [deviceOnly, setDeviceOnly] = useState<boolean>(initialDeviceOnly);
+  const [downloadedCorpus, setDownloadedCorpus] = useState<CorpusInput | null>(
+    preloadedCorpus ?? getCachedCorpus(),
   );
   const [data, setData] = useState<AtlasResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const runSearch = useCallback(async (rawInputQuery: string) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const effectiveQuery = resolveEffectiveAtlasQuery(rawInputQuery);
-      const customTerms =
-        typeof window !== "undefined" ? getActiveCustomScrubTerms() : [];
-      const scrubbedQuery = mechanicalRedact(effectiveQuery, {
-        customTerms,
-      }).text;
+  const runSearch = useCallback(
+    async (rawInputQuery: string, useDeviceOnly = deviceOnly) => {
+      setLoading(true);
+      setError(null);
+      try {
+        let activeCorpus = downloadedCorpus ?? getCachedCorpus();
+        if (useDeviceOnly && !activeCorpus) {
+          const fetched = await fetchCorpus(fetchImpl);
+          activeCorpus = fetched;
+          setDownloadedCorpus(fetched);
+        }
 
-      const res = await fetch(
-        `/api/atlas?q=${encodeURIComponent(scrubbedQuery)}`,
-      );
-      const body = (await res.json().catch(() => null)) as AtlasResponse | null;
-      if (!res.ok || !body) {
-        const msg =
-          body?.error || `Knowledge search failed with HTTP ${res.status}.`;
-        setError(msg);
-        return;
+        const result = await executeAtlasExplorerSearch({
+          rawInputQuery,
+          deviceOnly: useDeviceOnly,
+          fetchImpl,
+          corpus: activeCorpus,
+        });
+        setData(result);
+      } catch (err) {
+        setError(
+          err instanceof Error
+            ? err.message
+            : "Network error while searching our knowledge base.",
+        );
+      } finally {
+        setLoading(false);
       }
-      setData(body);
-    } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Network error while searching our knowledge base.",
-      );
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+    },
+    [deviceOnly, downloadedCorpus, fetchImpl],
+  );
 
   useEffect(() => {
-    void runSearch(PLAIN_ATLAS_PRESET_QUERIES[0].query);
-  }, [runSearch]);
+    void runSearch(PLAIN_ATLAS_PRESET_QUERIES[0].query, initialDeviceOnly);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleToggleDeviceOnly = async (nextChecked: boolean) => {
+    setDeviceOnly(nextChecked);
+    if (nextChecked && !downloadedCorpus && !getCachedCorpus()) {
+      try {
+        const fetched = await fetchCorpus(fetchImpl);
+        setDownloadedCorpus(fetched);
+        void runSearch(query, true);
+        return;
+      } catch (err) {
+        setError(
+          err instanceof Error
+            ? err.message
+            : "Could not download the public reference library.",
+        );
+        return;
+      }
+    }
+    void runSearch(query, nextChecked);
+  };
 
   const engines = data?.engines ?? data?.search?.engines;
   const embeddingModel =
@@ -197,6 +412,10 @@ export function AtlasExplorer() {
           Look up how deRoute protects your messages, which sealed computers we
           use, and how we guard against physical hardware attacks.
         </p>
+        <p className="max-w-[70ch] text-xs text-ink-3">
+          This searches public reference material. What you type is filtered on
+          your device before it reaches the database.
+        </p>
       </div>
 
       {/* Search form */}
@@ -204,7 +423,7 @@ export function AtlasExplorer() {
         className="flex flex-col gap-2 sm:flex-row"
         onSubmit={(e) => {
           e.preventDefault();
-          void runSearch(query);
+          void runSearch(query, deviceOnly);
         }}
       >
         <label htmlFor="atlas-search-input" className="sr-only">
@@ -227,6 +446,29 @@ export function AtlasExplorer() {
         </InkButton>
       </form>
 
+      {/* Device-only search toggle */}
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-ink-2">
+        <label
+          htmlFor="atlas-device-only-toggle"
+          className="inline-flex items-center gap-2 cursor-pointer select-none"
+        >
+          <input
+            id="atlas-device-only-toggle"
+            type="checkbox"
+            checked={deviceOnly}
+            onChange={(e) => void handleToggleDeviceOnly(e.target.checked)}
+            className="h-4 w-4 accent-ink cursor-pointer"
+          />
+          <span className="font-medium text-ink">Search on my device only</span>
+        </label>
+        {deviceOnly && (
+          <span className="text-ink-3">
+            Ranks the downloaded reference library on your device and sends
+            nothing.
+          </span>
+        )}
+      </div>
+
       {/* Preset queries in plain words */}
       <div className="flex flex-wrap items-center gap-2">
         <span className="ep-label">Try asking:</span>
@@ -240,7 +482,7 @@ export function AtlasExplorer() {
               aria-pressed={isSelected}
               onClick={() => {
                 setQuery(preset.label);
-                void runSearch(preset.query);
+                void runSearch(preset.query, deviceOnly);
               }}
               className={`ep-muted-chip max-w-full whitespace-normal text-left hover:border-ink hover:text-ink transition-colors cursor-pointer ${
                 isSelected ? "border-ink text-ink" : ""
@@ -266,7 +508,7 @@ export function AtlasExplorer() {
             type="button"
             variant="ghost"
             disabled={loading}
-            onClick={() => void runSearch(query)}
+            onClick={() => void runSearch(query, deviceOnly)}
             className="text-xs"
           >
             Try again

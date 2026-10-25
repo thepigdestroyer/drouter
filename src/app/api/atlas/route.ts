@@ -82,6 +82,12 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  try {
+    await connection();
+  } catch {
+    // Allow direct invocation in unit tests outside Next.js AsyncLocalStorage request store
+  }
+
   let rawText: string;
   try {
     rawText = await request.text();
