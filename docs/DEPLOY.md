@@ -33,7 +33,7 @@ Configure the following environment variables in the Vercel project settings (`P
 | `NEXT_PUBLIC_ARC_REGISTRY_ADDRESS` | Client + Server | Public `DRouterRegistry` contract address (`0xbc8085c2b6fe6e0db05f169925c0b841828f4481`) exposed to the browser for explorer links and verification badges. |
 | `GEMINI_API_KEY` | Server | Google Gemini API key for live `gemini-4-argon` control-plane planning in `POST /api/gemini/plan` when `deroute-core` is not deployed. When unset (and `CORE_HOST` is unset), `POST /api/gemini/plan` returns HTTP `503` with `planner: "unavailable"` and `plan: null` (never a fake or simulated plan). |
 | `CORE_HOST` | Server | Host and port (`<VM_PUBLIC_IP>:8443`) of the `deroute-core` Google Cloud Confidential Space VM behind `/api/core/[...path]`. Currently unset because the Confidential Space VM is built and reviewed but not yet deployed; while unset, `/api/core/*` returns HTTP `503 { "core": "not-deployed" }`. |
-| `CORE_IMAGE_DIGESTS` / `NEXT_PUBLIC_CORE_IMAGE_DIGESTS` | Client + Server | Optional comma-separated `sha256:<64-hex>` allowlist narrowing the committed digest list in `src/lib/attestation/expected-core-digests.json` (`sha256:82be4787cf95bc8776b1e4c0b91dabfc4e0b6fe967d0200203be7dd0c6c64c86`). Can only narrow, never widen, the committed list. |
+| `CORE_IMAGE_DIGESTS` / `NEXT_PUBLIC_CORE_IMAGE_DIGESTS` | Client + Server | Optional comma-separated `sha256:<64-hex>` allowlist narrowing the committed digest list in `src/lib/attestation/expected-core-digests.json` (`sha256:220578e0d103bfb6969cffde67e332cfaac278a4affc9eba7e84c96253f03207`). Can only narrow, never widen, the committed list. |
 | `MONGODB_DB` | Server | Database name override (defaults to `drouter` in production; tests automatically isolate to a separate database). |
 | `ATLAS_INGEST_TOKEN` | Server | Shared secret verified in constant time against `X-Atlas-Ingest-Token` on `POST /api/atlas` (`action: "ingest"`). If unset, external document ingestion is disabled (`403`). |
 | `ARC_DEPLOYER_PRIVATE_KEY` | Local CLI only | Deployer/owner private key used offline by `scripts/arc-deploy.mjs` and `scripts/arc-seed.mjs`. Never needed on Vercel. |
@@ -155,7 +155,7 @@ node scripts/drouter-cli.mjs verify --submit --upstream https://drouter-demo.ver
 
 ## 5. `deroute-core` on Google Cloud Confidential Space (Built & Reviewed, Not Yet Deployed)
 
-The `deroute-core` enclave workload (`core/`, image `ghcr.io/thepigdestroyer/deroute-core@sha256:82be4787cf95bc8776b1e4c0b91dabfc4e0b6fe967d0200203be7dd0c6c64c86` in `src/lib/attestation/expected-core-digests.json`) and its operational scripts in `scripts/gcp/` are built and reviewed, but **not deployed to a live Google Cloud VM yet** until billing is confirmed.
+The `deroute-core` enclave workload (`core/`, image `ghcr.io/thepigdestroyer/deroute-core@sha256:220578e0d103bfb6969cffde67e332cfaac278a4affc9eba7e84c96253f03207` in `src/lib/attestation/expected-core-digests.json`) and its operational scripts in `scripts/gcp/` are built and reviewed, but **not deployed to a live Google Cloud VM yet** until billing is confirmed.
 
 Once ready to deploy:
 
@@ -165,12 +165,12 @@ PROJECT_ID=<gcp-project-id> \
 REGION=us-central1 \
 ZONE=us-central1-a \
 CHIP=sev \
-IMAGE_DIGEST=sha256:82be4787cf95bc8776b1e4c0b91dabfc4e0b6fe967d0200203be7dd0c6c64c86 \
+IMAGE_DIGEST=sha256:220578e0d103bfb6969cffde67e332cfaac278a4affc9eba7e84c96253f03207 \
 bash scripts/gcp/deploy-core.sh
 
 # 2. Independently verify the VM's Google Confidential Space PKI token and nonces
 CORE_HOST=<VM_PUBLIC_IP>:8443 \
-CORE_IMAGE_DIGESTS=sha256:82be4787cf95bc8776b1e4c0b91dabfc4e0b6fe967d0200203be7dd0c6c64c86 \
+CORE_IMAGE_DIGESTS=sha256:220578e0d103bfb6969cffde67e332cfaac278a4affc9eba7e84c96253f03207 \
 node scripts/gcp/verify-core.mjs
 
 # 3. Lifecycle management scripts

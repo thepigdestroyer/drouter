@@ -58,7 +58,7 @@ import {
 
 const TEST_NOW_SEC = 1_792_886_400;
 const TEST_CORE_IMAGE_DIGEST =
-  "sha256:82be4787cf95bc8776b1e4c0b91dabfc4e0b6fe967d0200203be7dd0c6c64c86";
+  "sha256:220578e0d103bfb6969cffde67e332cfaac278a4affc9eba7e84c96253f03207";
 const SEALED_SECRET_KEY = new Uint8Array(32).fill(0x21);
 const SEALED_PUBLIC_KEY_HEX = bytesToHex(
   ed25519.getPublicKey(SEALED_SECRET_KEY),

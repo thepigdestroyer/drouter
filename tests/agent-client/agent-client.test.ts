@@ -86,7 +86,7 @@ import { resetAnchorRateLimitState } from "@/lib/transparency/store";
 
 const TEST_NOW_SEC = 1_792_886_400;
 const TEST_CORE_IMAGE_DIGEST =
-  "sha256:82be4787cf95bc8776b1e4c0b91dabfc4e0b6fe967d0200203be7dd0c6c64c86";
+  "sha256:220578e0d103bfb6969cffde67e332cfaac278a4affc9eba7e84c96253f03207";
 const SEALED_SECRET_KEY = new Uint8Array(32).fill(0x42);
 const SEALED_PUBLIC_KEY_HEX = bytesToHex(
   ed25519.getPublicKey(SEALED_SECRET_KEY),
@@ -1547,7 +1547,7 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
     // 5. Verify core attestation helper extracts the attested egress key using committed expected-core-digests.json
     expect(expectedCoreDigestsJson).toEqual({
       digests: [
-        "sha256:82be4787cf95bc8776b1e4c0b91dabfc4e0b6fe967d0200203be7dd0c6c64c86",
+        "sha256:220578e0d103bfb6969cffde67e332cfaac278a4affc9eba7e84c96253f03207",
       ],
       updated: "2026-10-25",
     });
