@@ -89,12 +89,14 @@ export function buildGeminiInteractionsRequest(descriptor) {
 
   const createRequest = {
     model: GEMINI_4_ARGON_MODEL_ID,
-    background: true,
+    // Google only allows background interactions when it may store them; we never let it store.
+    background: false,
     store: false,
     system_instruction: SPLIT_KNOWLEDGE_SYSTEM_INSTRUCTION,
     generation_config: {
       thinking_level: "medium",
-      max_output_tokens: 131_072,
+      // A plan is a few tool calls; Gemini 4 Argon allows at most 32,768 output tokens.
+      max_output_tokens: 8_192,
     },
     input: [
       {
