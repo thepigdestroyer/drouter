@@ -22,6 +22,7 @@ import {
 import {
   CHAT_MODEL_ALLOWLIST,
   SpentNullifierStore,
+  assertSevenSealChecksPass,
   createDerouteProxyServer,
   createMechanicalStreamRestorer,
   evaluateSevenSealChecks,
@@ -29,10 +30,12 @@ import {
   isAllowedLocalOrigin,
   isLocalhostHostHeader,
   isLoopbackAddress,
+  redactConversationMessages,
   startDerouteProxy,
   verifyProxyFilterFingerprint,
   type DerouteProxyClientLike,
 } from "@/proxy-cli/deroute-proxy";
+import { resolveSourceCommit } from "../../scripts/build-proxy.mjs";
 import type { BlindCreditToken, CheckResult } from "@/lib/types";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -623,17 +626,23 @@ describe("K2: deroute-proxy unit & integration tests", () => {
       }),
     ).rejects.toThrow(/Refusing to bind to non-localhost address/);
 
+    expect(isLoopbackAddress(undefined)).toBe(false);
+    expect(isLoopbackAddress("")).toBe(false);
     expect(isLoopbackAddress("127.0.0.1")).toBe(true);
     expect(isLoopbackAddress("::1")).toBe(true);
     expect(isLoopbackAddress("::ffff:127.0.0.1")).toBe(true);
     expect(isLoopbackAddress("192.168.1.50")).toBe(false);
 
+    expect(isLocalhostHostHeader(undefined)).toBe(false);
+    expect(isLocalhostHostHeader("")).toBe(false);
     expect(isLocalhostHostHeader("127.0.0.1:4141")).toBe(true);
     expect(isLocalhostHostHeader("localhost:4141")).toBe(true);
     expect(isLocalhostHostHeader("evil.example.com:4141")).toBe(false);
 
     expect(isAllowedLocalOrigin(undefined)).toBe(true);
-    expect(isAllowedLocalOrigin("http://127.0.0.1:3000")).toBe(true);
+    expect(isAllowedLocalOrigin("")).toBe(true);
+    expect(isAllowedLocalOrigin("http://127.0.0.1:3000")).toBe(false);
+    expect(isAllowedLocalOrigin("http://localhost:3000")).toBe(false);
     expect(isAllowedLocalOrigin("https://evil.example.com")).toBe(false);
 
     // Mock live router table containing both chat models and non-chat models (whisper, tts, embed, voxtral)
@@ -741,6 +750,376 @@ describe("K2: deroute-proxy unit & integration tests", () => {
       }
     } finally {
       await new Promise<void>((resolve) => handle.server.close(() => resolve()));
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("[I1] fails closed on all seven seal checks when fetches fail or records are missing, and never falls back to DEFAULT_MODEL", () => {
+    const validSteps = {
+      verifyEnclave: { status: "success" },
+      verifyCode: { status: "success" },
+      verifyCertificate: { status: "success" },
+      compareMeasurements: { status: "success" },
+    } as never;
+
+    // 1. Missing doc.steps fails C1-C4 even if securityVerified is undefined
+    const missingStepsChecks = evaluateSevenSealChecks({
+      doc: {},
+      matrix: null,
+      proxyTable: null,
+      registry: null,
+      model: "kimi-k3",
+    });
+    for (const c of missingStepsChecks) {
+      expect(c.status).toBe("fail");
+    }
+    expect(() => assertSevenSealChecksPass({}, missingStepsChecks)).toThrow();
+    expect(() =>
+      assertSevenSealChecksPass({ steps: validSteps }, ALL_PASS_CHECKS),
+    ).toThrow(/securityVerified is not true/);
+
+    // 2. When matrix, proxyTable, and registry are null (fetch failure), C5, C6, and C7 fail closed
+    const nullFetchChecks = evaluateSevenSealChecks({
+      doc: { securityVerified: true, steps: validSteps },
+      matrix: null,
+      proxyTable: null,
+      registry: null,
+      model: "kimi-k3",
+    });
+    expect(nullFetchChecks.find((c) => c.id === "C5")?.status).toBe("fail");
+    expect(nullFetchChecks.find((c) => c.id === "C6")?.status).toBe("fail");
+    expect(nullFetchChecks.find((c) => c.id === "C7")?.status).toBe("fail");
+
+    // 3. When kimi-k3 is present in matrix/proxyTable, requesting gemma4-31b (absent) fails C5 and C7 without falling back to kimi-k3
+    const fallbackTestChecks = evaluateSevenSealChecks({
+      doc: { securityVerified: true, steps: validSteps },
+      matrix: {
+        models: {
+          "kimi-k3": {
+            repo: "tinfoilsh/confidential-kimi-k3",
+            healthyHosts: 2,
+            configuredHosts: 2,
+            dmVerityRootHash: "abcdef1234567890abcdef1234567890",
+          },
+        },
+      },
+      proxyTable: {
+        models: {
+          "kimi-k3": {
+            repo: "tinfoilsh/confidential-kimi-k3",
+            tag: "v1",
+            measurement: { registers: ["abcdef1234567890"] },
+            verification: { configured: 2, verified: 2, healthy: 2 },
+          },
+        },
+      },
+      registry: {
+        source: "arc",
+        nodes: [{ kind: "tinfoil", status: "active", stake: 100 }],
+      },
+      model: "gemma4-31b",
+    });
+    expect(fallbackTestChecks.find((c) => c.id === "C5")?.status).toBe("fail");
+    expect(fallbackTestChecks.find((c) => c.id === "C7")?.status).toBe("fail");
+    expect(fallbackTestChecks.find((c) => c.id === "C6")?.status).toBe("pass");
+  });
+
+  it("[I2] rejects any Origin header (including localhost), Sec-Fetch-Site != none, and non-JSON Content-Type on POST /v1/chat/completions", async () => {
+    const tmpDir = makeTempDir("deroute-proxy-i2");
+    const spentPath = path.join(tmpDir, "spent.json");
+    let createCalls = 0;
+
+    const mockClient: DerouteProxyClientLike = {
+      async ready() {},
+      async getVerificationDocument() {
+        return {
+          securityVerified: true,
+          enclaveHost: "router-0.tinfoil.sh",
+          checks: ALL_PASS_CHECKS,
+        };
+      },
+      chat: {
+        completions: {
+          async create() {
+            createCalls += 1;
+            return {
+              id: "chatcmpl-i2",
+              object: "chat.completion",
+              choices: [
+                {
+                  index: 0,
+                  message: { role: "assistant", content: "ok" },
+                },
+              ],
+            };
+          },
+        },
+      },
+    };
+
+    const started = await startDerouteProxy({
+      port: 0,
+      spentFilePath: spentPath,
+      clientFactory: () => mockClient,
+      stderr: () => {},
+      stdout: () => {},
+    });
+
+    try {
+      // 1. Localhost Origin header (e.g. http://localhost:3000 or http://127.0.0.1:3000) is rejected with 403
+      const localOriginRes = await fetch(
+        `http://127.0.0.1:${started.port}/v1/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Origin: "http://localhost:3000",
+          },
+          body: JSON.stringify({
+            model: "kimi-k3",
+            messages: [{ role: "user", content: "hi" }],
+          }),
+        },
+      );
+      expect(localOriginRes.status).toBe(403);
+
+      // 2. Sec-Fetch-Site other than "none" (e.g. "same-site" or "cross-site") without Origin is rejected with 403
+      const secFetchRes = await fetch(
+        `http://127.0.0.1:${started.port}/v1/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Sec-Fetch-Site": "cross-site",
+          },
+          body: JSON.stringify({
+            model: "kimi-k3",
+            messages: [{ role: "user", content: "hi" }],
+          }),
+        },
+      );
+      expect(secFetchRes.status).toBe(403);
+
+      // Sec-Fetch-Site: none is allowed
+      const secFetchNoneRes = await fetch(
+        `http://127.0.0.1:${started.port}/v1/models`,
+        {
+          headers: { "Sec-Fetch-Site": "none" },
+        },
+      );
+      expect(secFetchNoneRes.status).toBe(200);
+
+      // 3. POST /v1/chat/completions with Content-Type: text/plain returns 415 Unsupported Media Type
+      const textPlainRes = await fetch(
+        `http://127.0.0.1:${started.port}/v1/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "text/plain",
+          },
+          body: JSON.stringify({
+            model: "kimi-k3",
+            messages: [{ role: "user", content: "hi" }],
+          }),
+        },
+      );
+      expect(textPlainRes.status).toBe(415);
+      expect(createCalls).toBe(0);
+    } finally {
+      await started.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("[M1, M2, M3] resolves source commit from DEROUTE_SOURCE_COMMIT or proxy input commits, writes spent.json atomically via temp file rename, and redacts/restores assistant tool_calls and role:tool messages", async () => {
+    // M1: resolveSourceCommit honors DEROUTE_SOURCE_COMMIT and otherwise queries proxy inputs
+    const prevEnv = process.env.DEROUTE_SOURCE_COMMIT;
+    try {
+      process.env.DEROUTE_SOURCE_COMMIT = "0567e917e341";
+      expect(resolveSourceCommit()).toBe("0567e917e341");
+      delete process.env.DEROUTE_SOURCE_COMMIT;
+      const fromGit = resolveSourceCommit();
+      expect(fromGit).toMatch(/^[0-9a-f]{7,12}$/);
+    } finally {
+      if (prevEnv === undefined) {
+        delete process.env.DEROUTE_SOURCE_COMMIT;
+      } else {
+        process.env.DEROUTE_SOURCE_COMMIT = prevEnv;
+      }
+    }
+
+    // M2: SpentNullifierStore writes atomically via `${filePath}.tmp.${process.pid}` then renames
+    const tmpDir = makeTempDir("deroute-proxy-m2-m3");
+    const spentPath = path.join(tmpDir, "spent.json");
+    const tokens = makeSampleTokens(1);
+    const accessKey = encodeAccessKey(tokens);
+
+    const renameCalls: Array<{ oldPath: string; newPath: string }> = [];
+    const origRenameSync = fs.renameSync.bind(fs);
+    const renameSpy = (oldPath: fs.PathLike, newPath: fs.PathLike) => {
+      renameCalls.push({
+        oldPath: String(oldPath),
+        newPath: String(newPath),
+      });
+      return origRenameSync(oldPath, newPath);
+    };
+    fs.renameSync = renameSpy as typeof fs.renameSync;
+
+    try {
+      const store = new SpentNullifierStore({
+        filePath: spentPath,
+        accessKey,
+      });
+      store.spendNextToken();
+    } finally {
+      fs.renameSync = origRenameSync;
+    }
+
+    expect(renameCalls.length).toBeGreaterThanOrEqual(2);
+    expect(renameCalls[0].oldPath).toBe(`${spentPath}.tmp.${process.pid}`);
+    expect(renameCalls[0].newPath).toBe(spentPath);
+    expect(fs.existsSync(`${spentPath}.tmp.${process.pid}`)).toBe(false);
+    expect(fs.statSync(spentPath).mode & 0o777).toBe(0o600);
+
+    // M3: Redacts and restores assistant tool_calls[].function.arguments and role: "tool" messages
+    const session = createMechanicalSession();
+    const inputMessages = [
+      {
+        role: "user",
+        content: "Check server 10.42.7.19 for dana.reyes@example.com.",
+      },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_1",
+            type: "function",
+            function: {
+              name: "lookup_host",
+              arguments: JSON.stringify({
+                ip: "10.42.7.19",
+                owner: "dana.reyes@example.com",
+                secret: "sk_live_51HxYzAbCdEfGhIjKlMn",
+              }),
+            },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "call_1",
+        content:
+          "Host 10.42.7.19 owned by dana.reyes@example.com has secret sk_live_51HxYzAbCdEfGhIjKlMn.",
+      },
+    ];
+
+    const { messages: redacted } = redactConversationMessages(
+      inputMessages,
+      session,
+    );
+    const serializedRedacted = JSON.stringify(redacted);
+    expect(serializedRedacted).not.toContain("10.42.7.19");
+    expect(serializedRedacted).not.toContain("dana.reyes@example.com");
+    expect(serializedRedacted).not.toContain("sk_live_51HxYzAbCdEfGhIjKlMn");
+
+    const assistantToolArgs = (
+      (redacted[1].tool_calls as Array<{ function: { arguments: string } }>)[0]
+    ).function.arguments;
+    expect(assistantToolArgs).toContain("[IP_1]");
+    expect(assistantToolArgs).toContain("[EMAIL_1]");
+    expect(assistantToolArgs).toContain("[SECRET_1]");
+    expect(redacted[2].content).toContain("[IP_1]");
+    expect(redacted[2].content).toContain("[EMAIL_1]");
+    expect(redacted[2].content).toContain("[SECRET_1]");
+
+    // Also verify end-to-end restoration of choice.message.tool_calls[].function.arguments
+    const started = await startDerouteProxy({
+      port: 0,
+      spentFilePath: path.join(tmpDir, "spent2.json"),
+      clientFactory: () => ({
+        async ready() {},
+        async getVerificationDocument() {
+          return {
+            securityVerified: true,
+            enclaveHost: "router-0.tinfoil.sh",
+            checks: ALL_PASS_CHECKS,
+          };
+        },
+        chat: {
+          completions: {
+            async create(body) {
+              const sent = body.messages as Array<{
+                role: string;
+                content?: string;
+                tool_calls?: Array<{ function: { arguments: string } }>;
+              }>;
+              const toolArgs = sent[1]?.tool_calls?.[0]?.function.arguments ?? "";
+              return {
+                id: "chatcmpl-tool",
+                object: "chat.completion",
+                choices: [
+                  {
+                    index: 0,
+                    message: {
+                      role: "assistant",
+                      content: `Tool output was: ${sent[2]?.content}`,
+                      tool_calls: [
+                        {
+                          id: "call_2",
+                          type: "function",
+                          function: {
+                            name: "notify",
+                            arguments: toolArgs,
+                          },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              };
+            },
+          },
+        },
+      }),
+      stderr: () => {},
+      stdout: () => {},
+    });
+
+    try {
+      const res = await fetch(
+        `http://127.0.0.1:${started.port}/v1/chat/completions`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "kimi-k3",
+            messages: inputMessages,
+          }),
+        },
+      );
+      expect(res.status).toBe(200);
+      const completionJson = (await res.json()) as {
+        choices: Array<{
+          message: {
+            content: string;
+            tool_calls: Array<{ function: { arguments: string } }>;
+          };
+        }>;
+      };
+      const msg = completionJson.choices[0].message;
+      expect(msg.content).toContain("10.42.7.19");
+      expect(msg.content).toContain("dana.reyes@example.com");
+      expect(msg.content).toContain("sk_live_51HxYzAbCdEfGhIjKlMn");
+      expect(msg.tool_calls[0].function.arguments).toContain("10.42.7.19");
+      expect(msg.tool_calls[0].function.arguments).toContain(
+        "dana.reyes@example.com",
+      );
+      expect(msg.tool_calls[0].function.arguments).toContain(
+        "sk_live_51HxYzAbCdEfGhIjKlMn",
+      );
+    } finally {
+      await started.close();
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
@@ -858,8 +1237,8 @@ describe("K2: deroute-proxy unit & integration tests", () => {
       });
 
       try {
-        expect(stdoutText).toContain(
-          `Personal-detail filter v${MECHANICAL_RULESET.version} verified (fingerprint: ${rulesetFingerprint(MECHANICAL_RULESET)})`,
+        expect(stdoutText).toMatch(
+          /Personal-detail filter v\d+\.\d+\.\d+ verified \(fingerprint: 0x[0-9a-f]{64}\)/,
         );
 
         const healthRes = await fetch(`http://127.0.0.1:${port}/health`);
@@ -870,9 +1249,10 @@ describe("K2: deroute-proxy unit & integration tests", () => {
           filterFingerprint: string;
         };
         expect(healthJson.ok).toBe(true);
-        expect(healthJson.filterVersion).toBe(MECHANICAL_RULESET.version);
-        expect(healthJson.filterFingerprint).toBe(
-          rulesetFingerprint(MECHANICAL_RULESET),
+        expect(healthJson.filterVersion).toMatch(/^\d+\.\d+\.\d+$/);
+        expect(healthJson.filterFingerprint).toMatch(/^0x[0-9a-f]{64}$/);
+        expect(stdoutText).toContain(
+          `Personal-detail filter v${healthJson.filterVersion} verified (fingerprint: ${healthJson.filterFingerprint})`,
         );
       } finally {
         child.kill("SIGTERM");

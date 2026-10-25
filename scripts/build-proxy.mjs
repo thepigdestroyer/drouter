@@ -21,8 +21,23 @@ const OUT_DIR = path.join(ROOT, "public", "downloads");
 const OUT_FILE = path.join(OUT_DIR, "deroute-proxy.mjs");
 const SHA256_FILE = path.join(OUT_DIR, "deroute-proxy.mjs.sha256");
 
-function resolveSourceCommit() {
+export function resolveSourceCommit() {
+  if (
+    process.env.DEROUTE_SOURCE_COMMIT &&
+    process.env.DEROUTE_SOURCE_COMMIT.trim()
+  ) {
+    return process.env.DEROUTE_SOURCE_COMMIT.trim();
+  }
   try {
+    const commit = execSync(
+      "git log -n 1 --format=%h --abbrev=12 HEAD -- src/ scripts/build-proxy.mjs package.json",
+      {
+        cwd: ROOT,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      },
+    ).trim();
+    if (commit) return commit;
     return execSync("git rev-parse --short=12 HEAD", {
       cwd: ROOT,
       encoding: "utf8",

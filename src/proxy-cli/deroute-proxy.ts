@@ -179,10 +179,17 @@ export class SpentNullifierStore {
       null,
       2,
     );
-    fs.writeFileSync(this.filePath, `${payload}\n`, {
+    const tmpPath = `${this.filePath}.tmp.${process.pid}`;
+    fs.writeFileSync(tmpPath, `${payload}\n`, {
       encoding: "utf8",
       mode: 0o600,
     });
+    try {
+      fs.chmodSync(tmpPath, 0o600);
+    } catch {
+      // Ignore chmod errors on platforms without POSIX permissions
+    }
+    fs.renameSync(tmpPath, this.filePath);
     try {
       fs.chmodSync(this.filePath, 0o600);
     } catch {
@@ -270,45 +277,61 @@ export function redactConversationMessages(
   const out = messages.map((msg) => {
     if (!msg || typeof msg !== "object") return msg;
     const role = typeof msg.role === "string" ? msg.role.toLowerCase() : "";
-    const shouldRedact = role === "user" || role === "assistant";
+    const shouldRedact =
+      role === "user" || role === "assistant" || role === "tool";
     if (!shouldRedact) {
       return { ...msg };
     }
 
+    const nextMsg: ProxyChatMessage = { ...msg };
+
     if (typeof msg.content === "string") {
-      return {
-        ...msg,
-        content: redactString(msg.content),
-      };
+      nextMsg.content = redactString(msg.content);
+    } else if (Array.isArray(msg.content)) {
+      nextMsg.content = msg.content.map((part) => {
+        if (typeof part === "string") {
+          return redactString(part);
+        }
+        if (part && typeof part === "object") {
+          const partObj = part as Record<string, unknown>;
+          const nextPart: Record<string, unknown> = { ...partObj };
+          if (typeof partObj.text === "string") {
+            nextPart.text = redactString(partObj.text);
+          }
+          if (typeof partObj.content === "string") {
+            nextPart.content = redactString(partObj.content);
+          }
+          if (typeof partObj.input_text === "string") {
+            nextPart.input_text = redactString(partObj.input_text);
+          }
+          return nextPart;
+        }
+        return part;
+      });
     }
 
-    if (Array.isArray(msg.content)) {
-      return {
-        ...msg,
-        content: msg.content.map((part) => {
-          if (typeof part === "string") {
-            return redactString(part);
-          }
-          if (part && typeof part === "object") {
-            const partObj = part as Record<string, unknown>;
-            const nextPart: Record<string, unknown> = { ...partObj };
-            if (typeof partObj.text === "string") {
-              nextPart.text = redactString(partObj.text);
-            }
-            if (typeof partObj.content === "string") {
-              nextPart.content = redactString(partObj.content);
-            }
-            if (typeof partObj.input_text === "string") {
-              nextPart.input_text = redactString(partObj.input_text);
-            }
-            return nextPart;
-          }
-          return part;
-        }),
-      };
+    if (role === "assistant" && Array.isArray(msg.tool_calls)) {
+      nextMsg.tool_calls = msg.tool_calls.map((tc) => {
+        if (!tc || typeof tc !== "object") return tc;
+        const tcObj = tc as Record<string, unknown>;
+        const fnObj =
+          tcObj.function && typeof tcObj.function === "object"
+            ? (tcObj.function as Record<string, unknown>)
+            : null;
+        if (fnObj && typeof fnObj.arguments === "string") {
+          return {
+            ...tcObj,
+            function: {
+              ...fnObj,
+              arguments: redactString(fnObj.arguments),
+            },
+          };
+        }
+        return { ...tcObj };
+      });
     }
 
-    return { ...msg };
+    return nextMsg;
   });
 
   return { messages: out, redactionsCount };
@@ -452,10 +475,7 @@ export function evaluateSevenSealChecks(params: {
   const stepToStatus = (
     step: { status?: string; error?: string } | undefined,
   ): "pass" | "fail" => {
-    if (!hasStepsObject) {
-      return doc?.securityVerified === false ? "fail" : "pass";
-    }
-    if (!step) return "fail";
+    if (!hasStepsObject || !step) return "fail";
     return step.status === "success" ? "pass" : "fail";
   };
 
@@ -473,15 +493,14 @@ export function evaluateSevenSealChecks(params: {
   const c3Status: "pass" | "fail" = stepToStatus(steps.verifyCertificate);
   const c4Status: "pass" | "fail" = stepToStatus(steps.compareMeasurements);
 
-  // Resolve model enclave record for C5 and C7
-  const mAtt = matrix?.models?.[model] ?? matrix?.models?.[DEFAULT_MODEL];
-  const pMod =
-    proxyTable?.models?.[model] ?? proxyTable?.models?.[DEFAULT_MODEL];
+  // Resolve model enclave record for C5 and C7 (never fall back to another model's record)
+  const mAtt = matrix?.models?.[model];
+  const pMod = proxyTable?.models?.[model];
 
-  let c5Status: "pass" | "fail" = "pass";
-  let c5Detail = "Confidential GPU pool verified by attested router";
-  let c7Status: "pass" | "fail" = "pass";
-  let c7Detail = "Model weights and dm-verity root pinned in signed manifest";
+  let c5Status: "pass" | "fail" = "fail";
+  let c5Detail = `Model ${model} not found in enclave attestation matrix`;
+  let c7Status: "pass" | "fail" = "fail";
+  let c7Detail = `Model ${model} manifest not found in enclave attestation matrix`;
 
   if (mAtt) {
     const healthy = mAtt.healthyHosts ?? 0;
@@ -516,15 +535,15 @@ export function evaluateSevenSealChecks(params: {
       pMod.repo && reg0
         ? `Pinned ${pMod.repo}@${pMod.tag ?? "latest"} (${reg0.slice(0, 16)}...)`
         : `Missing measurement register for ${model}`;
-  } else if (matrix || proxyTable) {
+  } else {
     c5Status = "fail";
     c5Detail = `Model ${model} not found in enclave attestation matrix`;
     c7Status = "fail";
     c7Detail = `Model ${model} manifest not found in enclave attestation matrix`;
   }
 
-  let c6Status: "pass" | "fail" = "pass";
-  let c6Detail = "Verified in registry";
+  let c6Status: "pass" | "fail" = "fail";
+  let c6Detail = "Registry verification unavailable or failed";
   if (registry && Array.isArray(registry.nodes)) {
     const node = registry.nodes.find((n) => n.kind === "tinfoil");
     if (!node) {
@@ -615,7 +634,7 @@ export function assertSevenSealChecksPass(
   },
   checks: readonly CheckResult[],
 ): void {
-  if (!doc || doc.securityVerified === false) {
+  if (!doc || doc.securityVerified !== true) {
     const failedCheck = checks.find((c) => c.status === "fail");
     if (failedCheck) {
       throw new Error(
@@ -623,7 +642,7 @@ export function assertSevenSealChecksPass(
       );
     }
     throw new Error(
-      "Enclave attestation verification failed: securityVerified is false",
+      "Enclave attestation verification failed: securityVerified is not true",
     );
   }
 
@@ -759,8 +778,9 @@ export async function fetchAllowedChatModels(opts?: {
 // ============================================================================
 
 export function isLoopbackAddress(address: string | undefined | null): boolean {
-  if (!address) return true;
+  if (!address) return false;
   const clean = address.trim().toLowerCase();
+  if (!clean) return false;
   return (
     clean === "127.0.0.1" ||
     clean === "::1" ||
@@ -770,15 +790,14 @@ export function isLoopbackAddress(address: string | undefined | null): boolean {
 }
 
 export function isLocalhostHostHeader(host: string | undefined): boolean {
-  if (!host) return true;
+  if (!host) return false;
   const clean = host.trim().toLowerCase();
+  if (!clean) return false;
   return /^(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/.test(clean);
 }
 
 export function isAllowedLocalOrigin(origin: string | undefined): boolean {
-  if (!origin) return true;
-  const clean = origin.trim().toLowerCase();
-  return /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/.test(clean);
+  return !origin;
 }
 
 function readBoundedJsonBody(
@@ -1010,10 +1029,20 @@ export function createDerouteProxyServer(
 
     const originHeader =
       typeof req.headers.origin === "string" ? req.headers.origin : undefined;
-    if (!isAllowedLocalOrigin(originHeader)) {
+    const secFetchSiteHeader = req.headers["sec-fetch-site"];
+    const secFetchSite =
+      typeof secFetchSiteHeader === "string"
+        ? secFetchSiteHeader.trim().toLowerCase()
+        : Array.isArray(secFetchSiteHeader)
+          ? String(secFetchSiteHeader[0] ?? "").trim().toLowerCase()
+          : undefined;
+    if (
+      !isAllowedLocalOrigin(originHeader) ||
+      (secFetchSite !== undefined && secFetchSite !== "none")
+    ) {
       sendJsonResponse(res, 403, {
         error: {
-          message: "Cross-origin requests from external origins are forbidden.",
+          message: "Cross-origin requests from browser origins are forbidden.",
           type: "forbidden",
         },
       });
@@ -1077,6 +1106,17 @@ export function createDerouteProxyServer(
       (url.pathname === "/v1/chat/completions" ||
         url.pathname === "/api/v1/chat/completions")
     ) {
+      const contentType = (req.headers["content-type"] ?? "").toLowerCase();
+      if (!contentType.includes("application/json")) {
+        sendJsonResponse(res, 415, {
+          error: {
+            message: "POST /v1/chat/completions requires Content-Type: application/json",
+            type: "invalid_request_error",
+          },
+        });
+        return;
+      }
+
       let body: Record<string, unknown>;
       try {
         body = await readBoundedJsonBody(req);
@@ -1253,16 +1293,37 @@ export function createDerouteProxyServer(
           : [];
 
         const restoredChoices = rawChoices.map((choice) => {
-          if (typeof choice?.message?.content === "string") {
-            return {
-              ...choice,
-              message: {
-                ...choice.message,
-                content: session.restore(choice.message.content),
-              },
-            };
+          if (!choice?.message || typeof choice.message !== "object") {
+            return choice;
           }
-          return choice;
+          const nextMessage: Record<string, unknown> = { ...choice.message };
+          if (typeof choice.message.content === "string") {
+            nextMessage.content = session.restore(choice.message.content);
+          }
+          if (Array.isArray(choice.message.tool_calls)) {
+            nextMessage.tool_calls = choice.message.tool_calls.map((tc) => {
+              if (!tc || typeof tc !== "object") return tc;
+              const tcObj = tc as Record<string, unknown>;
+              const fnObj =
+                tcObj.function && typeof tcObj.function === "object"
+                  ? (tcObj.function as Record<string, unknown>)
+                  : null;
+              if (fnObj && typeof fnObj.arguments === "string") {
+                return {
+                  ...tcObj,
+                  function: {
+                    ...fnObj,
+                    arguments: session.restore(fnObj.arguments),
+                  },
+                };
+              }
+              return { ...tcObj };
+            });
+          }
+          return {
+            ...choice,
+            message: nextMessage,
+          };
         });
 
         sendJsonResponse(
