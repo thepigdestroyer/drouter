@@ -386,7 +386,9 @@ describe("Oblivious Relay Routing for pii-filter.tinfoil.sh and Standard Enclave
       setAttestedPiiSecureClientFactoryForTests(() => {
         const clientObj = {
           _transport: {
-            fetch: async (..._args: unknown[]) => {
+            fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+              void input;
+              void init;
               sent += 1;
               return new Response("{}", { status: 200 });
             },
@@ -546,6 +548,100 @@ describe("Oblivious Relay Routing for pii-filter.tinfoil.sh and Standard Enclave
       expect(res.text).not.toContain("alice@example.com");
     } finally {
       setAttestedPiiSecureClientFactoryForTests(null);
+      clearAttestedPiiFilterCacheForTests();
+    }
+  });
+
+  it("keys attestedPiiFilter cache by SHA-256 digest, caps cache size, and pads direct server-to-enclave calls to 4096B (F-07)", async () => {
+    const {
+      attestedPiiFilter,
+      clearAttestedPiiFilterCacheForTests,
+      hashAttestedPiiInputSha256,
+      MAX_ATTESTED_PII_CACHE_ENTRIES,
+      setAttestedPiiFilterClientForTests,
+    } = await import("@/lib/privacy/attested-filter");
+
+    clearAttestedPiiFilterCacheForTests();
+    const capturedBodies: string[] = [];
+    let fetchCount = 0;
+
+    try {
+      setAttestedPiiFilterClientForTests({
+        ready: async () => {},
+        getVerificationDocument: () => ({
+          securityVerified: true,
+          enclaveHost: "pii-filter.tinfoil.sh",
+        }),
+        fetch: async (_url, init) => {
+          fetchCount += 1;
+          const bodyStr = typeof init?.body === "string" ? init.body : "";
+          capturedBodies.push(bodyStr);
+          return new Response(
+            JSON.stringify({
+              redacted_text: "Consult <PRIVATE_PERSON> at wing B.",
+              summary: { span_count: 1 },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        },
+      });
+
+      const sensitiveSample = "Consult Cousin Leo at wing B.";
+      const first = await attestedPiiFilter(sensitiveSample, {
+        useRelay: false,
+        apiKey: "test-server-key",
+      });
+      expect(first.verified).toBe(true);
+      expect(first.text).toBe("Consult <PRIVATE_PERSON> at wing B.");
+      expect(fetchCount).toBe(1);
+
+      // Direct server-to-enclave payload must be padded to a 4096-byte bucket
+      expect(new TextEncoder().encode(capturedBodies[0]).byteLength).toBe(4096);
+      expect(JSON.parse(capturedBodies[0])).toEqual({ text: sensitiveSample });
+
+      // Second call hits SHA-256 digest cache without network call
+      const second = await attestedPiiFilter(sensitiveSample, {
+        useRelay: false,
+        apiKey: "test-server-key",
+      });
+      expect(second).toEqual(first);
+      expect(fetchCount).toBe(1);
+
+      const rawCache = (
+        globalThis as unknown as {
+          __drouterAttestedPiiResultCache?: Map<string, unknown>;
+        }
+      ).__drouterAttestedPiiResultCache;
+      expect(rawCache).toBeDefined();
+      expect(rawCache!.has(sensitiveSample)).toBe(false);
+      expect(rawCache!.has(hashAttestedPiiInputSha256(sensitiveSample))).toBe(
+        true,
+      );
+      for (const key of rawCache!.keys()) {
+        expect(key).toMatch(/^[0-9a-f]{64}$/);
+        expect(key).not.toContain("Cousin Leo");
+      }
+
+      // Verify size cap at MAX_ATTESTED_PII_CACHE_ENTRIES
+      for (let i = 0; i < MAX_ATTESTED_PII_CACHE_ENTRIES + 10; i++) {
+        await attestedPiiFilter(`Synthetic query item #${i}`, {
+          useRelay: false,
+          apiKey: "test-server-key",
+        });
+      }
+      expect(rawCache!.size).toBe(MAX_ATTESTED_PII_CACHE_ENTRIES);
+      expect(
+        rawCache!.has(hashAttestedPiiInputSha256("Synthetic query item #0")),
+      ).toBe(false);
+      expect(
+        rawCache!.has(
+          hashAttestedPiiInputSha256(
+            `Synthetic query item #${MAX_ATTESTED_PII_CACHE_ENTRIES + 9}`,
+          ),
+        ),
+      ).toBe(true);
+    } finally {
+      setAttestedPiiFilterClientForTests(null);
       clearAttestedPiiFilterCacheForTests();
     }
   });

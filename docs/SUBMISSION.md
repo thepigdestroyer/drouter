@@ -72,7 +72,7 @@
 - **Action**: Scroll to the **Public reference library** section on `/argon`, show the `"Search on my device only"` toggle, and run in the terminal:
   ```bash
   curl -s http://localhost:3000/api/knowledge/corpus | jq '{documentCount, contentSha256, firstDoc: .documents[0].title}'
-  curl -s "http://localhost:3000/api/atlas?q=Kimi+K3+8x+GPU+confidential+enclave" | jq '{engines, filterRan, topHit: .results[0].docId, rrfScore: .results[0].rrfScore}'
+  curl -s -X POST http://localhost:3000/api/atlas -H "content-type: application/json" -d '{"query":"Kimi K3 8x GPU confidential enclave"}' | jq '{engines, filterRan, topHit: .results[0].docId, rrfScore: .results[0].rrfScore}'
   ```
 - **Say**: "For confidential runs, the browser downloads the entire 16-document reference corpus from `/api/knowledge/corpus` with zero query parameters, verifies `contentSha256`, and ranks locally with BM25 so MongoDB learns nothing about what a user looks up. For public exploration, `/api/atlas` runs `mechanicalRedact` in the browser and `attestedPiiFilter` on the server before executing native MongoDB 8.0 `$rankFusion` combining 768-dimensional `$vectorSearch` (`drouter_vector_index`) and `$search` (`drouter_text_search`)."
 

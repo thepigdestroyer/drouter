@@ -1,3 +1,5 @@
+import { sha256 } from "@noble/hashes/sha2.js";
+import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 import { padJsonPayloadToBucket } from "@/lib/relay";
 import { mechanicalRedact } from "./mechanical";
 
@@ -5,6 +7,11 @@ export const TINFOIL_PII_FILTER_MODEL_ID = "pii-filter" as const;
 export const TINFOIL_PII_FILTER_ENCLAVE_URL = "https://pii-filter.tinfoil.sh" as const;
 export const TINFOIL_PII_FILTER_REDACT_URL = "https://pii-filter.tinfoil.sh/redact" as const;
 export const TINFOIL_PII_FILTER_CONFIG_REPO = "tinfoilsh/confidential-pii-cpu" as const;
+export const MAX_ATTESTED_PII_CACHE_ENTRIES = 256 as const;
+
+export function hashAttestedPiiInputSha256(text: string): string {
+  return bytesToHex(sha256(utf8ToBytes(text)));
+}
 
 export interface AttestedPiiDetectedSpan {
   label: string;
@@ -94,10 +101,28 @@ function getResultCache(): Map<string, AttestedPiiFilterResult> {
   return globalForAttestedPii.__drouterAttestedPiiResultCache;
 }
 
+function setBoundedResultCacheEntry(
+  cache: Map<string, AttestedPiiFilterResult>,
+  digestKey: string,
+  value: AttestedPiiFilterResult,
+  maxEntries: number = MAX_ATTESTED_PII_CACHE_ENTRIES,
+): void {
+  if (cache.has(digestKey)) {
+    cache.delete(digestKey);
+  }
+  while (cache.size >= maxEntries) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey === undefined) break;
+    cache.delete(oldestKey);
+  }
+  cache.set(digestKey, value);
+}
+
 export function setAttestedPiiFilterClientForTests(
   client: AttestedPiiSecureClientLike | null,
 ): void {
   globalForAttestedPii.__drouterTestPiiSecureClient = client;
+  globalForAttestedPii.__drouterAttestedPiiResultCache?.clear();
   globalForAttestedPii.__drouterVerifiedPiiClientPromise = undefined;
   globalForAttestedPii.__drouterVerifiedPiiRelayClientPromise = undefined;
 }
@@ -108,6 +133,7 @@ export function setAttestedPiiSecureClientFactoryForTests(
     | null,
 ): void {
   globalForAttestedPii.__drouterTestPiiSecureClientFactory = factory;
+  globalForAttestedPii.__drouterAttestedPiiResultCache?.clear();
   globalForAttestedPii.__drouterVerifiedPiiClientPromise = undefined;
   globalForAttestedPii.__drouterVerifiedPiiRelayClientPromise = undefined;
 }
@@ -392,9 +418,12 @@ export async function attestedPiiFilter(
   }
 
   const cache = getResultCache();
-  if (!globalForAttestedPii.__drouterTestPiiSecureClient && !opts?.includeSpans) {
-    const cached = cache.get(text);
+  const cacheKey = hashAttestedPiiInputSha256(text);
+  if (!opts?.includeSpans) {
+    const cached = cache.get(cacheKey);
     if (cached && cached.verified) {
+      cache.delete(cacheKey);
+      cache.set(cacheKey, cached);
       return cached;
     }
   }
@@ -445,7 +474,8 @@ export async function attestedPiiFilter(
             Authorization: `Bearer ${apiKey ?? "test-token"}`,
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({ text }),
+          body: padJsonPayloadToBucket(JSON.stringify({ text }), 4096)
+            .paddedJson,
         });
 
     if (!res.ok) {
@@ -468,8 +498,8 @@ export async function attestedPiiFilter(
         : {}),
     };
 
-    if (!globalForAttestedPii.__drouterTestPiiSecureClient && !opts?.includeSpans) {
-      cache.set(text, result);
+    if (!opts?.includeSpans) {
+      setBoundedResultCacheEntry(cache, cacheKey, result);
     }
 
     return result;

@@ -43,6 +43,12 @@ function safeTokenCompare(a: string, b: string): boolean {
   return timingSafeEqual(bufA, bufB);
 }
 
+const ALLOWED_GET_QUERY_PARAMS = new Set(["category", "limit"]);
+const ALLOWED_ATLAS_CATEGORIES = new Set(["provider", "advisory", "architecture"]);
+
+const URL_QUERY_TEXT_FORBIDDEN_MESSAGE =
+  "Search text is not allowed in URL query parameters. Send a JSON body to POST /api/atlas after filtering on your device.";
+
 export async function GET(request: Request) {
   try {
     await connection();
@@ -50,11 +56,35 @@ export async function GET(request: Request) {
     // Allow direct invocation in unit tests outside Next.js AsyncLocalStorage request store
   }
 
-  const url = new URL(request.url);
-  const q =
-    url.searchParams.get("q")?.trim() ||
-    "AMD SEV-SNP 8x GPU confidential mode TEE.fail mitigation";
-  const category = url.searchParams.get("category")?.trim() || undefined;
+  let url: URL;
+  try {
+    url = new URL(request.url, "http://localhost");
+  } catch {
+    return NextResponse.json({ error: "Malformed request URL." }, { status: 400 });
+  }
+
+  for (const key of url.searchParams.keys()) {
+    if (!ALLOWED_GET_QUERY_PARAMS.has(key)) {
+      return NextResponse.json(
+        { error: URL_QUERY_TEXT_FORBIDDEN_MESSAGE },
+        { status: 400 },
+      );
+    }
+  }
+
+  const rawCategory = url.searchParams.get("category");
+  if (rawCategory !== null) {
+    const trimmedCategory = rawCategory.trim();
+    if (!ALLOWED_ATLAS_CATEGORIES.has(trimmedCategory)) {
+      return NextResponse.json(
+        { error: URL_QUERY_TEXT_FORBIDDEN_MESSAGE },
+        { status: 400 },
+      );
+    }
+  }
+
+  const q = "AMD SEV-SNP 8x GPU confidential mode TEE.fail mitigation";
+  const category = rawCategory?.trim() || undefined;
   const limitParam = Number(url.searchParams.get("limit") ?? 10);
   const limit = Number.isFinite(limitParam) && limitParam > 0 ? limitParam : 10;
 
@@ -86,6 +116,20 @@ export async function POST(request: Request) {
     await connection();
   } catch {
     // Allow direct invocation in unit tests outside Next.js AsyncLocalStorage request store
+  }
+
+  let postUrl: URL;
+  try {
+    postUrl = new URL(request.url, "http://localhost");
+  } catch {
+    return NextResponse.json({ error: "Malformed request URL." }, { status: 400 });
+  }
+
+  if (request.url.includes("?") || Array.from(postUrl.searchParams.keys()).length > 0) {
+    return NextResponse.json(
+      { error: URL_QUERY_TEXT_FORBIDDEN_MESSAGE },
+      { status: 400 },
+    );
   }
 
   let rawText: string;
@@ -217,7 +261,9 @@ export async function POST(request: Request) {
   const query =
     typeof body.query === "string" && body.query.trim().length > 0
       ? body.query.trim()
-      : "AMD SEV-SNP 8x GPU confidential mode TEE.fail mitigation";
+      : typeof body.q === "string" && body.q.trim().length > 0
+        ? body.q.trim()
+        : "AMD SEV-SNP 8x GPU confidential mode TEE.fail mitigation";
   const category = typeof body.category === "string" ? body.category.trim() : undefined;
   const limit = typeof body.limit === "number" && body.limit > 0 ? body.limit : 10;
   const customTerms = Array.isArray(body.customTerms)

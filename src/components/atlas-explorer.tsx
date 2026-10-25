@@ -17,12 +17,35 @@ import {
   getCachedCorpus,
   rankLocally,
 } from "@/lib/broker";
+import * as filterFingerprintMod from "@/lib/privacy/fingerprint";
+import { evaluateLocalFilterFingerprint } from "@/lib/privacy/fingerprint";
 import { mechanicalRedact } from "@/lib/privacy/mechanical";
 
 export const ATLAS_PUBLIC_SEARCH_NOTICE =
   "This searches public reference material. What you type is filtered on your device before it reaches the database." as const;
 
 export const ATLAS_DEVICE_ONLY_LABEL = "Search on my device only" as const;
+
+export const ATLAS_FILTER_MISMATCH_BLOCKED_MESSAGE =
+  "Sending is blocked because the personal-detail filter running in this browser does not match the published version in the public receipt book. Reload the page to get the latest version; if this keeps happening, wait until the public receipt book is updated." as const;
+
+function assertFilterFingerprintAllowsSend(): void {
+  const maybeAssert = (
+    filterFingerprintMod as {
+      assertFilterFingerprintAllowsSend?: () => void;
+    }
+  ).assertFilterFingerprintAllowsSend;
+  if (typeof maybeAssert === "function") {
+    maybeAssert();
+    return;
+  }
+  const status = evaluateLocalFilterFingerprint();
+  if (status.blockingSend) {
+    throw new Error(
+      status.blockReason ?? ATLAS_FILTER_MISMATCH_BLOCKED_MESSAGE,
+    );
+  }
+}
 
 export interface AtlasSearchResultItem {
   docId: string;
@@ -257,6 +280,9 @@ export async function executeAtlasExplorerSearch(
     };
   }
 
+  // Verify the on-device personal-detail filter fingerprint matches the published version before sending
+  assertFilterFingerprintAllowsSend();
+
   // Always redact on the device before sending anything to /api/atlas
   const scrubbedQuery = mechanicalRedact(effectiveQuery, {
     customTerms: activeCustomTerms,
@@ -338,7 +364,9 @@ export function AtlasExplorer({
   );
 
   useEffect(() => {
-    void runSearch(PLAIN_ATLAS_PRESET_QUERIES[0].query, initialDeviceOnly);
+    void Promise.resolve().then(() =>
+      runSearch(PLAIN_ATLAS_PRESET_QUERIES[0].query, initialDeviceOnly),
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

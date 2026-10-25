@@ -260,17 +260,24 @@ describe("MongoDB Atlas Enclave Intelligence, D3/D4 Query Redaction & Hybrid Sea
     expect(d3AndD4Res.query).not.toContain("St. Jude");
     expect(JSON.stringify(capturedPipelines)).not.toContain("St. Jude");
 
-    // 3. Verify GET /api/atlas and POST /api/atlas expose redaction counts and filterRan
-    const getReq = new Request(
+    // 3. Verify GET /api/atlas rejects q / free-text URL query params with 400 without echoing text,
+    // while parameterless GET /api/atlas and POST /api/atlas expose redaction counts and filterRan
+    const getWithQueryReq = new Request(
       `http://localhost:3000/api/atlas?q=${encodeURIComponent(sensitiveQuery)}`,
     );
-    const getHttpRes = await atlasGet(getReq);
+    const getWithQueryRes = await atlasGet(getWithQueryReq);
+    expect(getWithQueryRes.status).toBe(400);
+    const getWithQueryText = await getWithQueryRes.text();
+    expect(getWithQueryText).not.toContain("alice.johnson@hospital.org");
+    expect(getWithQueryText).not.toContain("Alice Johnson");
+    expect(getWithQueryText).not.toContain("sk-live-9876543210abcdef");
+
+    const getDefaultReq = new Request("http://localhost:3000/api/atlas");
+    const getHttpRes = await atlasGet(getDefaultReq);
     expect(getHttpRes.status).toBe(200);
     const getBody = (await getHttpRes.json()) as Record<string, unknown>;
     expect(getBody.filterRan).toBe("mechanical+attested");
     expect(typeof getBody.totalRedactions).toBe("number");
-    expect((getBody.totalRedactions as number) >= 8).toBe(true);
-    expect(JSON.stringify(getBody)).not.toContain("alice.johnson@hospital.org");
 
     const postReq = new Request("http://localhost:3000/api/atlas", {
       method: "POST",
@@ -559,5 +566,89 @@ describe("MongoDB Atlas Enclave Intelligence, D3/D4 Query Redaction & Hybrid Sea
     expect(analytics.categoryBreakdown.length).toBeGreaterThanOrEqual(3);
     expect(analytics.searchIndexes.length).toBeGreaterThanOrEqual(2);
     expect(analytics.pipelineStagesExecuted).toContain("$facet");
+  });
+
+  it("rejects GET /api/atlas with q or any free-text query parameter with HTTP 400 without echoing the text (F-03)", async () => {
+    const canarySecret = "sk-live-canary-998877665544332211";
+    const forbiddenQueryUrls = [
+      `http://localhost:3000/api/atlas?q=${encodeURIComponent(canarySecret)}`,
+      "http://localhost:3000/api/atlas?q=",
+      `http://localhost:3000/api/atlas?query=${encodeURIComponent(canarySecret)}`,
+      `http://localhost:3000/api/atlas?search=${encodeURIComponent(canarySecret)}`,
+      `http://localhost:3000/api/atlas?text=${encodeURIComponent(canarySecret)}`,
+      `http://localhost:3000/api/atlas?prompt=${encodeURIComponent(canarySecret)}`,
+      `http://localhost:3000/api/atlas?category=${encodeURIComponent(canarySecret)}`,
+    ];
+
+    for (const url of forbiddenQueryUrls) {
+      const res = await atlasGet(new Request(url));
+      expect(res.status).toBe(400);
+      const rawBody = await res.text();
+      expect(rawBody).not.toContain(canarySecret);
+      expect(rawBody).not.toContain("sk-live-canary");
+    }
+
+    // POST with URL query parameters is also rejected with 400 without echoing text
+    const postWithUrlParam = await atlasPost(
+      new Request(
+        `http://localhost:3000/api/atlas?q=${encodeURIComponent(canarySecret)}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ query: "Intel TDX" }),
+        },
+      ),
+    );
+    expect(postWithUrlParam.status).toBe(400);
+    expect(await postWithUrlParam.text()).not.toContain(canarySecret);
+
+    // Valid closed category and numeric limit on GET still succeed
+    const validGet = await atlasGet(
+      new Request("http://localhost:3000/api/atlas?category=advisory&limit=3"),
+    );
+    expect(validGet.status).toBe(200);
+  });
+
+  it("blocks executeAtlasExplorerSearch when assertFilterFingerprintAllowsSend detects a mismatched filter fingerprint (F-08)", async () => {
+    const {
+      ATLAS_FILTER_MISMATCH_BLOCKED_MESSAGE,
+      executeAtlasExplorerSearch,
+    } = await import("@/components/atlas-explorer");
+    const {
+      setFilterFingerprintStatusForTests,
+      setFilterFingerprintVerifyOptionsForTests,
+    } = await import("@/lib/privacy/fingerprint");
+    const { findForbiddenPlainTerms } = await import("@/lib/plain-copy");
+
+    let networkCalled = false;
+    const spyFetch: typeof fetch = async () => {
+      networkCalled = true;
+      return new Response("{}", { status: 200 });
+    };
+
+    try {
+      setFilterFingerprintVerifyOptionsForTests({
+        published: {
+          version: "0.0.1-mismatched",
+          fingerprint: `0x${"f".repeat(64)}`,
+          anchorTx: null,
+        },
+      });
+
+      await expect(
+        executeAtlasExplorerSearch({
+          rawInputQuery: "Patient Alice Johnson asks about TEE.fail",
+          deviceOnly: false,
+          fetchImpl: spyFetch,
+        }),
+      ).rejects.toThrow(ATLAS_FILTER_MISMATCH_BLOCKED_MESSAGE);
+
+      expect(networkCalled).toBe(false);
+      expect(findForbiddenPlainTerms(ATLAS_FILTER_MISMATCH_BLOCKED_MESSAGE)).toEqual([]);
+      expect(ATLAS_FILTER_MISMATCH_BLOCKED_MESSAGE).not.toMatch(/[\u2013\u2014]/);
+    } finally {
+      setFilterFingerprintStatusForTests(null);
+      setFilterFingerprintVerifyOptionsForTests(null);
+    }
   });
 });

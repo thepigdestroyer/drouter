@@ -43,7 +43,7 @@ const GET_ROUTES = [
   "/api/relay/enclave-matrix",
   "/api/relay/attestation",
   "/api/relay/relay-eu-zurich/attestation",
-  "/api/atlas?q=SEV-SNP&limit=5",
+  "/api/atlas",
   "/api/gemini",
 ];
 
