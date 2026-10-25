@@ -51,6 +51,7 @@ import {
   ARGON_COMPANION_MODELS,
   ARGON_MAX_UNIFIED_CONTEXT_TOKENS,
   assertContentFree,
+  assertGoogleBoundMessage,
   assertOutboundPrivacyInvariant,
   assertValidToolCall,
   buildInteractionsCreatePayload,
@@ -63,6 +64,7 @@ import {
   generateInteractionsSdkSnippets,
   MAX_PLANNER_STEPS,
   MAX_PLANNER_WALL_CLOCK_MS,
+  roundUpToPowerOfTwo,
   TINFOIL_KIMI_K3_MAX_CONTEXT_TOKENS,
   validateArgonRequestConfig,
   type AllowedAtlasTopic,
@@ -1695,7 +1697,7 @@ export async function runArgonAutonomousWorkflow(
 
   const taskDescriptor: TaskDescriptor = buildTaskDescriptor({
     taskKind: classifyTaskKind(rawPrompt),
-    inputTokenEstimate: estimateTokens(rawPrompt),
+    inputTokenEstimate: roundUpToPowerOfTwo(estimateTokens(rawPrompt)),
     redactionCounts,
     verification: {
       mechanicalRedactionPassed: stage1Passed,
@@ -1710,7 +1712,8 @@ export async function runArgonAutonomousWorkflow(
     allowedTools: ALLOWED_PLANNER_TOOLS,
   });
 
-  // Egress firewall check on TaskDescriptor
+  // Closed schema gate + Egress firewall check on TaskDescriptor
+  assertGoogleBoundMessage("taskDescriptor", taskDescriptor, "$.taskDescriptor");
   assertContentFree(taskDescriptor, "$.taskDescriptor");
 
   const argonValidation = validateArgonRequestConfig({
@@ -1729,8 +1732,13 @@ export async function runArgonAutonomousWorkflow(
     maxOutputTokens: 131_072,
   });
 
-  // Enforce both Privacy Invariant and Content-Free Egress Firewall on outbound payload
+  // Enforce Privacy Invariant, Closed Schema Gate, and Content-Free Egress Firewall on outbound payload
   assertOutboundPrivacyInvariant(interactionsPayload, originalSensitiveTokens);
+  assertGoogleBoundMessage(
+    "interactionsPayload",
+    interactionsPayload,
+    "$.interactionsPayload",
+  );
   assertContentFree(interactionsPayload, "$.interactionsPayload");
 
   const sdkSnippets = generateInteractionsSdkSnippets(interactionsPayload);
@@ -1742,6 +1750,11 @@ export async function runArgonAutonomousWorkflow(
   ): Promise<Record<string, unknown>> => {
     const args = assertValidToolCall(toolName, rawArgs);
     assertOutboundPrivacyInvariant(args, originalSensitiveTokens);
+    assertGoogleBoundMessage(
+      `toolCall:${toolName}`,
+      args,
+      `$.toolExecutor.args(${toolName})`,
+    );
     assertContentFree(args, `$.toolExecutor.args(${toolName})`);
 
     switch (toolName) {
@@ -1754,13 +1767,24 @@ export async function runArgonAutonomousWorkflow(
           status: stage1.passed ? "ok" : "failed",
           passed: stage1.passed,
           outputHandle: outHandle,
-          redactionCount: stage1.redactionCount,
-          mechanicalRedactionCount: stage1.mechanicalRedactionCount,
-          attestedRedactionCount: stage1.attestedFilter.redactionCount,
+          redactionCount: Math.min(64, stage1.redactionCount),
+          mechanicalRedactionCount: Math.min(64, stage1.mechanicalRedactionCount),
+          attestedRedactionCount: Math.min(
+            64,
+            stage1.attestedFilter.redactionCount,
+          ),
           bucketBytes: stage1.verificationSignal.bucketBytes,
-          plaintextLeakCount: stage1.verificationSignal.plaintextLeakCount,
+          plaintextLeakCount: Math.min(
+            5,
+            stage1.verificationSignal.plaintextLeakCount,
+          ),
           contentHandle: "$DIGEST_1",
         };
+        assertGoogleBoundMessage(
+          "toolResult:scrub_and_symmetry_mask",
+          result,
+          "$.toolExecutor.result(scrub_and_symmetry_mask)",
+        );
         assertContentFree(result, "$.toolExecutor.result(scrub_and_symmetry_mask)");
         return result;
       }
@@ -1782,6 +1806,11 @@ export async function runArgonAutonomousWorkflow(
           routerHandle: "$ROUTER_1",
           enclaveMeasurementHandle: "$MEASUREMENT_1",
         };
+        assertGoogleBoundMessage(
+          "toolResult:verify_two_hop_enclave_and_quorum",
+          result,
+          "$.toolExecutor.result(verify_two_hop_enclave_and_quorum)",
+        );
         assertContentFree(result, "$.toolExecutor.result(verify_two_hop_enclave_and_quorum)");
         return result;
       }
@@ -1811,10 +1840,15 @@ export async function runArgonAutonomousWorkflow(
           vectorEngine: searchRes.engines.vectorSearch,
           textEngine: searchRes.engines.textSearch,
           fusionEngine: searchRes.engines.fusion,
-          totalDocs: searchRes.totalDocs,
-          matchingReceiptsCount: searchRes.matchingReceiptsCount,
+          totalDocs: Math.min(64, searchRes.totalDocs),
+          matchingReceiptsCount: Math.min(64, searchRes.matchingReceiptsCount),
           topDocHandle: "$DOC_1",
         };
+        assertGoogleBoundMessage(
+          "toolResult:search_atlas_hybrid_kb",
+          result,
+          "$.toolExecutor.result(search_atlas_hybrid_kb)",
+        );
         assertContentFree(result, "$.toolExecutor.result(search_atlas_hybrid_kb)");
         return result;
       }
@@ -1827,10 +1861,17 @@ export async function runArgonAutonomousWorkflow(
           status: "completed",
           outputHandle: outHandle,
           enclaveModel: activeEnclaveModel,
-          outputTokenEstimate: estimateTokens(resolvedPrompt),
+          outputTokenEstimate: roundUpToPowerOfTwo(
+            estimateTokens(resolvedPrompt),
+          ),
           outputDigestHandle: "$DIGEST_2",
           attested: stage3.passed,
         };
+        assertGoogleBoundMessage(
+          "toolResult:invoke_attested_enclave",
+          result,
+          "$.toolExecutor.result(invoke_attested_enclave)",
+        );
         assertContentFree(result, "$.toolExecutor.result(invoke_attested_enclave)");
         return result;
       }
@@ -1849,6 +1890,11 @@ export async function runArgonAutonomousWorkflow(
           stateChangedOnChain: humanApproved,
           receiptHandle: "$RECEIPT_1",
         };
+        assertGoogleBoundMessage(
+          "toolResult:anchor_arc_settlement_with_human_gate",
+          result,
+          "$.toolExecutor.result(anchor_arc_settlement_with_human_gate)",
+        );
         assertContentFree(result, "$.toolExecutor.result(anchor_arc_settlement_with_human_gate)");
         return result;
       }

@@ -3,6 +3,7 @@ import { canonicalJson } from "./canonical.js";
 import {
   ARGON_CONFIDENTIAL_TOOLS,
   assertContentFree,
+  assertGoogleBoundMessage,
   assertValidTaskDescriptor,
   assertValidToolCall,
   ContentFreeEgressError,
@@ -81,6 +82,9 @@ export function buildGeminiInteractionsRequest(descriptor) {
     tools,
   };
 
+  assertGoogleBoundMessage("taskDescriptor", validated, "$.taskDescriptor");
+  assertContentFree(validated, "$.taskDescriptor");
+  assertGoogleBoundMessage("createRequest", createRequest, "$.createRequest");
   assertContentFree(createRequest, "$.createRequest");
   return { validatedDescriptor: validated, createRequest };
 }
@@ -148,7 +152,8 @@ export async function planWithGemini({
   const abortController = new AbortController();
 
   try {
-    // Re-assert content-free firewall immediately prior to network transmission.
+    // Re-assert closed schema gate and content-free firewall immediately prior to network transmission.
+    assertGoogleBoundMessage("createRequest", createRequest, "$.createRequest");
     assertContentFree(createRequest, "$.createRequest");
 
     const requestOptions = {
@@ -164,9 +169,7 @@ export async function planWithGemini({
     ).finally(() => abortController.abort());
 
     const rawSteps = Array.isArray(interaction?.steps) ? interaction.steps : [];
-    const fnCalls = rawSteps.filter(
-      (s) => s && s.type === "function_call" && typeof s.name === "string",
-    );
+    const fnCalls = rawSteps.filter((s) => s && s.type === "function_call");
 
     if (fnCalls.length > effectiveMaxSteps) {
       throw new PlannerBudgetExceededError("max_steps", effectiveMaxSteps);
@@ -175,7 +178,12 @@ export async function planWithGemini({
     const validatedSteps = [];
     for (let idx = 0; idx < fnCalls.length; idx++) {
       const call = fnCalls[idx];
-      const toolName = call.name;
+      const toolName = typeof call.name === "string" ? call.name : "";
+      if (!toolName) {
+        throw new ToolPolicyViolationError("<missing>", [
+          "Function call step is missing tool name.",
+        ]);
+      }
       const sanitizedArgs = assertValidToolCall(
         toolName,
         call.arguments ?? {},
@@ -187,11 +195,23 @@ export async function planWithGemini({
         !/\d{4,}/.test(call.id)
           ? call.id
           : `call-${idx + 1}`;
+      const validatedToolCall = {
+        id: safeCallId,
+        type: "function_call",
+        name: toolName,
+        arguments: { ...sanitizedArgs },
+      };
+      assertGoogleBoundMessage(
+        "toolCall",
+        validatedToolCall,
+        `$.toolCall(${toolName})`,
+      );
+      assertContentFree(validatedToolCall, `$.toolCall(${toolName})`);
       validatedSteps.push({
         step: idx + 1,
-        id: safeCallId,
-        tool: toolName,
-        arguments: sanitizedArgs,
+        id: validatedToolCall.id,
+        tool: validatedToolCall.name,
+        arguments: { ...validatedToolCall.arguments },
       });
     }
 

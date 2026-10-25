@@ -122,7 +122,7 @@ describe("Gemini 4 Argon Config Contract, TaskDescriptor & Content-Free Egress F
     expect(descriptor).toEqual({
       taskKind: "review",
       inputHandle: "$INPUT",
-      inputTokenEstimate: 120,
+      inputTokenEstimate: 128,
       redactionCounts: { SECRET: 1, EMAIL: 1, DIGITS: 2, TOTAL: 4 },
       verification: {
         mechanicalRedactionPassed: true,
@@ -164,7 +164,7 @@ describe("Gemini 4 Argon Config Contract, TaskDescriptor & Content-Free Egress F
         taskKind: "analyze",
         inputHandle: "$INPUT",
         outputHandle: "$RESULT_1",
-        resultHandle: "$RESULT_64",
+        resultHandle: "$RESULT_16",
         inputTokenEstimate: 256,
         passed: true,
         status: "verified",

@@ -16,6 +16,33 @@
 import { GoogleGenAI } from "@google/genai";
 import { estimateTokens } from "@/lib/privacy/padding";
 import { canonicalJson } from "@/lib/transparency/log";
+import {
+  assertAnyToolResultSchema,
+  assertFunctionResultStepSchema,
+  assertGeminiCreateRequestSchema,
+  assertGeminiFollowUpRequestSchema,
+  assertGoogleBoundMessage,
+  assertInteractionsCreatePayloadSchema,
+  assertTaskDescriptorSchema,
+  assertToolCallArgumentsSchema,
+  assertToolCallSchema,
+  assertToolResultSchema,
+  type GoogleBoundMessageKind,
+} from "./egress-schemas";
+
+export {
+  assertAnyToolResultSchema,
+  assertFunctionResultStepSchema,
+  assertGeminiCreateRequestSchema,
+  assertGeminiFollowUpRequestSchema,
+  assertGoogleBoundMessage,
+  assertInteractionsCreatePayloadSchema,
+  assertTaskDescriptorSchema,
+  assertToolCallArgumentsSchema,
+  assertToolCallSchema,
+  assertToolResultSchema,
+  type GoogleBoundMessageKind,
+};
 
 export const GEMINI_4_ARGON_MODEL_ID = "gemini-4-argon" as const;
 
@@ -500,8 +527,52 @@ export const ARGON_CONFIDENTIAL_TOOLS: readonly ArgonInteractionToolDeclaration[
   },
 ] as const;
 
+export const MAX_HANDLE_INDEX = 16;
+
+export const INPUT_LITERAL_HANDLE_REGEX = /^\$INPUT$/;
+export const INPUT_OR_RESULT_HANDLE_REGEX =
+  /^(?:\$INPUT|\$RESULT_(?:[1-9]|1[0-6]))$/;
+export const RESULT_HANDLE_REGEX = /^\$RESULT_(?:[1-9]|1[0-6])$/;
+export const DOC_HANDLE_REGEX = /^\$DOC_(?:[1-9]|1[0-6])$/;
+export const RECEIPT_HANDLE_REGEX = /^\$RECEIPT_(?:[1-9]|1[0-6])$/;
+export const DIGEST_HANDLE_REGEX = /^\$DIGEST_(?:[1-9]|1[0-6])$/;
+export const ROUTER_HANDLE_REGEX = /^\$ROUTER_(?:[1-9]|1[0-6])$/;
+export const MEASUREMENT_HANDLE_REGEX = /^\$MEASUREMENT_(?:[1-9]|1[0-6])$/;
+
+export const HANDLE_KEY_TO_REGEX: Readonly<Record<string, RegExp>> = {
+  inputHandle: INPUT_OR_RESULT_HANDLE_REGEX,
+  outputHandle: RESULT_HANDLE_REGEX,
+  resultHandle: INPUT_OR_RESULT_HANDLE_REGEX,
+  docHandle: DOC_HANDLE_REGEX,
+  topDocHandle: DOC_HANDLE_REGEX,
+  receiptHandle: RECEIPT_HANDLE_REGEX,
+  digestHandle: DIGEST_HANDLE_REGEX,
+  contentHandle: DIGEST_HANDLE_REGEX,
+  outputDigestHandle: DIGEST_HANDLE_REGEX,
+  routerHandle: ROUTER_HANDLE_REGEX,
+  enclaveMeasurementHandle: MEASUREMENT_HANDLE_REGEX,
+};
+
+export const CLOSED_CALL_ID_REGEX =
+  /^(?:call|tc|inter)-(?:[1-9]|1[0-6]|turn-(?:[1-9]|1[0-6])|argon-turn-(?:[1-9]|1[0-6])|(?:(?:[1-9]|1[0-6])-)?(?:scrub_and_symmetry_mask|verify_two_hop_enclave_and_quorum|search_atlas_hybrid_kb|invoke_attested_enclave|anchor_arc_settlement_with_human_gate)|(?:[1-9]|1[0-6])-(?:[1-9]|1[0-6]))$/;
+
+export function isPowerOfTwoInRange(
+  value: unknown,
+  min: number,
+  max: number,
+): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    !Object.is(value, -0) &&
+    value >= min &&
+    value <= max &&
+    (value & (value - 1)) === 0
+  );
+}
+
 const OPAQUE_HANDLE_REGEX =
-  /^(?:\$INPUT|\$(?:RESULT|DOC|RECEIPT|DIGEST|ROUTER|MEASUREMENT)_(?:[1-9]|[1-5]\d|6[0-4]))$/;
+  /^(?:\$INPUT|\$(?:RESULT|DOC|RECEIPT|DIGEST|ROUTER|MEASUREMENT)_(?:[1-9]|1[0-6]))$/;
 const SHORT_HEX_REGEX = /^0x(?:[0-9a-f]{2}){1,7}$/;
 const FIXED_SHA256_HEX_REGEX = /^0x[0-9a-f]{64}$/;
 export const MAX_GOOGLE_BOUND_HEX_LENGTH = 16;
@@ -516,11 +587,26 @@ export const MAX_GOOGLE_BOUND_HEX_LENGTH = 16;
  */
 export const ALLOW_LEGACY_ORCHESTRATOR_SHA256_UNTIL_MIGRATED = false;
 
-export const SAFE_CALL_ID_REGEX =
-  /^(?:call|tc|inter)-(?:[1-9]\d{0,2}|turn-[1-9]\d{0,1}|argon-turn-[1-9]|(?:[1-9]-)?(?:scrub_and_symmetry_mask|verify_two_hop_enclave_and_quorum|search_atlas_hybrid_kb|invoke_attested_enclave|anchor_arc_settlement_with_human_gate)|[1-9]-[1-9]\d{0,1})$/;
+export const SAFE_CALL_ID_REGEX = CLOSED_CALL_ID_REGEX;
 
 export const MAX_REDACTION_COUNT_PER_KIND = 5;
 export const MAX_TOKEN_BUCKET = 1_048_576;
+
+export function isPowerOfTwo(n: unknown): n is number {
+  return isPowerOfTwoInRange(n, 1, MAX_TOKEN_BUCKET);
+}
+
+export function roundUpToPowerOfTwo(n: number): number {
+  const clamped = Math.max(
+    1,
+    Math.min(MAX_TOKEN_BUCKET, Math.ceil(Number(n) || 1)),
+  );
+  let bucket = 1;
+  while (bucket < clamped && bucket < MAX_TOKEN_BUCKET) {
+    bucket *= 2;
+  }
+  return bucket;
+}
 
 export const ALLOWED_REDACTION_COUNT_KEYS: ReadonlySet<string> = new Set<string>([
   "SECRET",
@@ -628,6 +714,7 @@ const ALLOWED_JSON_STRING_KEYS: ReadonlySet<string> = new Set<string>([
   "text",
   "content",
   "result",
+  "arguments",
 ]);
 
 const ALLOWED_OBJECT_ONLY_KEYS: ReadonlySet<string> = new Set<string>([
@@ -940,14 +1027,53 @@ function isStrictGoogleBoundPath(path: string, insideJsonString: boolean): boole
   return false;
 }
 
+const ALLOWED_SUBAGENT_ROUTING_KEYS = new Set<string>([
+  "sandbox_verifier",
+  "fast_swarm",
+  "quorum_checker",
+  "deep_research",
+  "on_device_filter",
+  "attested_enclave_model",
+  "tinfoil_enclave_target",
+  "voice_briefing",
+  "live_voice_gate",
+]);
+
+const ALLOWED_METADATA_KEYS = new Set<string>([
+  "sdk_target",
+  "api_surface",
+  "persona",
+  "enclave_protocol",
+  "data_sent_to_google",
+]);
+
+const ALLOWED_GENERATION_CONFIG_KEYS = new Set<string>([
+  "thinking_level",
+  "max_output_tokens",
+]);
+
+const HIGH_RANGE_NUMERIC_KEYS = new Set<string>([
+  "inputTokenEstimate",
+  "outputTokenEstimate",
+  "max_output_tokens",
+  "max_context_tokens",
+  "max_tokens",
+  "bucketQuantumBytes",
+  "bucketBytes",
+]);
+
 function hasAsciiRunOrCount(byteValues: readonly number[]): boolean {
   let consecutivePrintableAscii = 0;
+  let maxConsecutivePrintableAscii = 0;
   let totalPrintableLettersOrSpaces = 0;
   let totalPrintableAscii = 0;
   for (let i = 0; i < byteValues.length; i++) {
     const byteVal = byteValues[i];
     if (byteVal >= 0x20 && byteVal <= 0x7e) {
       consecutivePrintableAscii += 1;
+      if (consecutivePrintableAscii > maxConsecutivePrintableAscii) {
+        maxConsecutivePrintableAscii = consecutivePrintableAscii;
+      }
       totalPrintableAscii += 1;
       if (
         byteVal === 0x20 ||
@@ -965,9 +1091,9 @@ function hasAsciiRunOrCount(byteValues: readonly number[]): boolean {
   }
   if (byteValues.length > 0 && byteValues.length < 16) {
     return (
-      consecutivePrintableAscii >= 4 ||
-      totalPrintableLettersOrSpaces >= 4 ||
-      totalPrintableAscii >= Math.max(3, Math.ceil(byteValues.length * 0.7))
+      maxConsecutivePrintableAscii >= 2 ||
+      totalPrintableLettersOrSpaces >= 2 ||
+      totalPrintableAscii >= 3
     );
   }
   return totalPrintableLettersOrSpaces >= 18 || totalPrintableAscii >= 20;
@@ -1021,6 +1147,14 @@ export function hasSmuggledAsciiInHex(hexWithoutPrefix: string): boolean {
   if (hasAsciiRunOrCount(strippedNulls)) {
     return true;
   }
+  if (bytes.length < 16) {
+    const strippedControls = bytes.filter(
+      (b) => b > 0x1f && b !== 0x7f && b !== 0xff,
+    );
+    if (hasAsciiRunOrCount(strippedControls)) {
+      return true;
+    }
+  }
   let consecutiveHighBitText = 0;
   let totalHighBitLettersOrSpaces = 0;
   let consecutiveLow7Text = 0;
@@ -1040,7 +1174,7 @@ export function hasSmuggledAsciiInHex(hexWithoutPrefix: string): boolean {
     if (isLetterOrSpace || isDigitOrCommonPunct) {
       consecutiveLow7Text += 1;
       totalLow7Text += 1;
-      if (consecutiveLow7Text >= (bytes.length < 16 ? 4 : 16)) {
+      if (consecutiveLow7Text >= (bytes.length < 16 ? 2 : 16)) {
         return true;
       }
       if ((b & 0x80) !== 0) {
@@ -1048,7 +1182,7 @@ export function hasSmuggledAsciiInHex(hexWithoutPrefix: string): boolean {
         if (isLetterOrSpace) {
           totalHighBitLettersOrSpaces += 1;
         }
-        if (consecutiveHighBitText >= (bytes.length < 16 ? 4 : 8)) {
+        if (consecutiveHighBitText >= (bytes.length < 16 ? 2 : 8)) {
           return true;
         }
       } else {
@@ -1061,7 +1195,7 @@ export function hasSmuggledAsciiInHex(hexWithoutPrefix: string): boolean {
   }
   if (bytes.length < 16) {
     return (
-      totalHighBitLettersOrSpaces >= 4 ||
+      totalHighBitLettersOrSpaces >= 3 ||
       totalLow7Text >= Math.max(3, Math.ceil(bytes.length * 0.7))
     );
   }
@@ -1100,6 +1234,9 @@ export function isContentFreeString(
   if (keyContext === "required") {
     return ALLOWED_REQUIRED_PARAM_NAMES.has(value);
   }
+  if (keyContext === "allowedTools") {
+    return (ALLOWED_PLANNER_TOOLS as readonly string[]).includes(value);
+  }
   if (
     keyContext === "id" ||
     keyContext === "call_id" ||
@@ -1112,13 +1249,10 @@ export function isContentFreeString(
     return ALLOWED_STATIC_SCHEMA_DESCRIPTIONS.has(value);
   }
   if (ALLOWED_HANDLE_KEYS.has(keyContext)) {
-    return OPAQUE_HANDLE_REGEX.test(value);
+    return HANDLE_KEY_TO_REGEX[keyContext]?.test(value) ?? false;
   }
   if (/^(?:0x)?[0-9a-fA-F]{15,}$/.test(value) && value.length > MAX_GOOGLE_BOUND_HEX_LENGTH) {
     return false;
-  }
-  if (OPAQUE_HANDLE_REGEX.test(value)) {
-    return true;
   }
   return ALLOWED_CONTENT_FREE_ENUMS.has(value);
 }
@@ -1177,20 +1311,58 @@ export function replaceDigestsWithOpaqueHandles(
   state: DigestHandleMapState = createDigestHandleMapState(),
 ): Record<string, unknown> {
   if (!isPlainObject(rawResult)) {
-    return rawResult;
+    throw new ContentFreeEgressError(String(rawResult), "$");
   }
   const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(rawResult)) {
+  for (const key of Object.getOwnPropertyNames(rawResult)) {
+    const desc = Object.getOwnPropertyDescriptor(rawResult, key);
+    if (!desc || !("value" in desc) || desc.enumerable !== true) {
+      throw new ContentFreeEgressError(key, `$.${key}`);
+    }
+    const value = desc.value;
+    if (value === undefined) {
+      throw new ContentFreeEgressError("undefined", `$.${key}`);
+    }
     const spec = HASH_KEY_TO_HANDLE_SPEC[key];
-    if (spec && typeof value === "string") {
-      if (OPAQUE_HANDLE_REGEX.test(value)) {
+    if (spec) {
+      if (typeof value !== "string") {
+        throw new ContentFreeEgressError(String(value), `$.${key}`);
+      }
+      const handleRegex = HANDLE_KEY_TO_REGEX[spec.handleKey];
+      if (Object.prototype.hasOwnProperty.call(rawResult, spec.handleKey)) {
+        const existingHandle = rawResult[spec.handleKey];
+        if (
+          typeof existingHandle !== "string" ||
+          !handleRegex ||
+          !handleRegex.test(existingHandle)
+        ) {
+          throw new ContentFreeEgressError(
+            String(existingHandle),
+            `$.${spec.handleKey}`,
+          );
+        }
+      }
+      if (handleRegex && handleRegex.test(value)) {
         out[spec.handleKey] = value;
         continue;
+      }
+      const isValidDigestHex =
+        (FIXED_SHA256_HEX_REGEX.test(value) || SHORT_HEX_REGEX.test(value)) &&
+        !hasSmuggledAsciiInHex(value.slice(2));
+      if (!isValidDigestHex) {
+        throw new ContentFreeEgressError(value, `$.${key}`);
       }
       const cacheKey = `${spec.prefix}:${value}`;
       let handle = state.byDigest.get(cacheKey);
       if (!handle) {
-        const nextIdx = Math.min(64, (state.counters[spec.prefix] ?? 0) + 1);
+        const currentCount = state.counters[spec.prefix] ?? 0;
+        if (currentCount >= MAX_HANDLE_INDEX) {
+          throw new ContentFreeEgressError(
+            "<handle_table_exhausted>",
+            `$.${key}`,
+          );
+        }
+        const nextIdx = currentCount + 1;
         state.counters[spec.prefix] = nextIdx;
         handle = `$${spec.prefix}_${nextIdx}`;
         state.byDigest.set(cacheKey, handle);
@@ -1263,10 +1435,59 @@ export function assertContentFree(
       throw new ContentFreeEgressError(String(value), path);
     }
     if (
-      ALLOWED_REDACTION_COUNT_KEYS.has(keyContext) &&
-      num > MAX_REDACTION_COUNT_PER_KIND
+      ALLOWED_REDACTION_COUNT_KEYS.has(keyContext) ||
+      keyContext === "plaintextLeakCount"
     ) {
-      throw new ContentFreeEgressError(String(value), path);
+      if (num > MAX_REDACTION_COUNT_PER_KIND) {
+        throw new ContentFreeEgressError(String(value), path);
+      }
+    } else if (
+      keyContext === "bucketQuantumBytes" ||
+      keyContext === "bucketBytes"
+    ) {
+      if (!isPowerOfTwoInRange(num, 512, 65_536)) {
+        throw new ContentFreeEgressError(String(value), path);
+      }
+    } else if (keyContext === "checksPassed") {
+      if (num > 16) {
+        throw new ContentFreeEgressError(String(value), path);
+      }
+    } else if (keyContext === "checksTotal") {
+      if (num < 1 || num > 16) {
+        throw new ContentFreeEgressError(String(value), path);
+      }
+    } else if (
+      keyContext === "redactionCount" ||
+      keyContext === "mechanicalRedactionCount" ||
+      keyContext === "attestedRedactionCount" ||
+      keyContext === "totalDocs" ||
+      keyContext === "matchingReceiptsCount"
+    ) {
+      if (num > 64) {
+        throw new ContentFreeEgressError(String(value), path);
+      }
+    } else if (keyContext === "max_tokens") {
+      if (num < 1 || num > 4096) {
+        throw new ContentFreeEgressError(String(value), path);
+      }
+    } else if (keyContext === "max_output_tokens") {
+      if (!isPowerOfTwoInRange(num, 1024, 131_072)) {
+        throw new ContentFreeEgressError(String(value), path);
+      }
+    } else if (keyContext === "max_context_tokens") {
+      if (
+        num !== ARGON_MAX_UNIFIED_CONTEXT_TOKENS &&
+        !isPowerOfTwoInRange(num, 1024, MAX_TOKEN_BUCKET)
+      ) {
+        throw new ContentFreeEgressError(String(value), path);
+      }
+    } else if (
+      keyContext === "inputTokenEstimate" ||
+      keyContext === "outputTokenEstimate"
+    ) {
+      if (!isPowerOfTwoInRange(num, 1, MAX_TOKEN_BUCKET)) {
+        throw new ContentFreeEgressError(String(value), path);
+      }
     }
     return;
   }
@@ -1316,9 +1537,56 @@ export function assertContentFree(
     if (
       !keyContext ||
       !ALLOWED_ARRAY_KEYS.has(keyContext) ||
+      value.length === 0 ||
       value.length > 32
     ) {
       throw new ContentFreeEgressError("<disallowed_array>", path);
+    }
+    if (keyContext === "allowedTools") {
+      if (
+        value.length > ALLOWED_PLANNER_TOOLS.length ||
+        new Set(value).size !== value.length
+      ) {
+        throw new ContentFreeEgressError("<invalid_allowedTools>", path);
+      }
+      let lastCanonicalIdx = -1;
+      for (let i = 0; i < value.length; i++) {
+        const idx = (ALLOWED_PLANNER_TOOLS as readonly string[]).indexOf(
+          String(value[i]),
+        );
+        if (idx === -1 || idx <= lastCanonicalIdx) {
+          throw new ContentFreeEgressError(String(value[i]), `${path}[${i}]`);
+        }
+        lastCanonicalIdx = idx;
+      }
+    } else if (keyContext === "required") {
+      if (
+        !path.endsWith(".parameters.required") ||
+        value.length > ALLOWED_REQUIRED_PARAM_NAMES.size ||
+        new Set(value).size !== value.length
+      ) {
+        throw new ContentFreeEgressError("<invalid_required>", path);
+      }
+    } else if (keyContext === "enum") {
+      if (
+        !/\.properties\.[A-Za-z0-9_]+\.enum$/.test(path) ||
+        value.length > 32 ||
+        new Set(value).size !== value.length
+      ) {
+        throw new ContentFreeEgressError("<invalid_enum>", path);
+      }
+    } else if (keyContext === "tools") {
+      if (depth !== 1 || value.length > ALLOWED_PLANNER_TOOLS.length) {
+        throw new ContentFreeEgressError("<invalid_tools>", path);
+      }
+    } else if (keyContext === "input" || keyContext === "messages") {
+      if (depth !== 1 || value.length > 16) {
+        throw new ContentFreeEgressError("<invalid_input_array>", path);
+      }
+    } else if (keyContext === "tool_calls") {
+      if (!path.endsWith(".tool_calls") || value.length > MAX_PLANNER_STEPS) {
+        throw new ContentFreeEgressError("<invalid_tool_calls>", path);
+      }
     }
     const expectsStringElements = ALLOWED_STRING_ARRAY_KEYS.has(keyContext);
     for (let i = 0; i < value.length; i++) {
@@ -1361,9 +1629,16 @@ export function assertContentFree(
       throw new ContentFreeEgressError("<custom_toJSON>", path);
     }
     const ownKeys = Object.getOwnPropertyNames(value);
+    if (ownKeys.length === 0) {
+      throw new ContentFreeEgressError("<empty_object>", path);
+    }
     if (ownKeys.length > 64) {
       throw new ContentFreeEgressError("<too_many_keys>", path);
     }
+    let numericKeyCount = 0;
+    let highRangeNumericCount = 0;
+    let hasInputEstimate = false;
+    let hasOutputEstimate = false;
     for (const k of ownKeys) {
       if (
         k === "__proto__" ||
@@ -1373,12 +1648,53 @@ export function assertContentFree(
       ) {
         throw new ContentFreeEgressError(k, `${path}.${k}`);
       }
+      if (keyContext === "redactionCounts" && !ALLOWED_REDACTION_COUNT_KEYS.has(k)) {
+        throw new ContentFreeEgressError(k, `${path}.${k}`);
+      }
+      if (keyContext === "verification" && !ALLOWED_VERIFICATION_KEYS.has(k)) {
+        throw new ContentFreeEgressError(k, `${path}.${k}`);
+      }
+      if (
+        keyContext === "generation_config" &&
+        !ALLOWED_GENERATION_CONFIG_KEYS.has(k)
+      ) {
+        throw new ContentFreeEgressError(k, `${path}.${k}`);
+      }
+      if (
+        keyContext === "subagent_routing" &&
+        !ALLOWED_SUBAGENT_ROUTING_KEYS.has(k)
+      ) {
+        throw new ContentFreeEgressError(k, `${path}.${k}`);
+      }
+      if (keyContext === "metadata" && !ALLOWED_METADATA_KEYS.has(k)) {
+        throw new ContentFreeEgressError(k, `${path}.${k}`);
+      }
       const desc = Object.getOwnPropertyDescriptor(value, k);
       if (!desc || !("value" in desc) || desc.enumerable !== true) {
         throw new ContentFreeEgressError(k, `${path}.${k}`);
       }
       if (desc.value === undefined) {
-        continue;
+        throw new ContentFreeEgressError("undefined", `${path}.${k}`);
+      }
+      if (typeof desc.value === "number") {
+        numericKeyCount += 1;
+        if (HIGH_RANGE_NUMERIC_KEYS.has(k)) {
+          highRangeNumericCount += 1;
+        }
+        if (k === "inputTokenEstimate") hasInputEstimate = true;
+        if (k === "outputTokenEstimate") hasOutputEstimate = true;
+        if (keyContext !== "redactionCounts" && numericKeyCount > 5) {
+          throw new ContentFreeEgressError("<too_many_numeric_keys>", path);
+        }
+        if (
+          highRangeNumericCount > 2 ||
+          (hasInputEstimate && hasOutputEstimate)
+        ) {
+          throw new ContentFreeEgressError(
+            "<incompatible_numeric_keys>",
+            path,
+          );
+        }
       }
       assertContentFree(
         desc.value,
@@ -1537,9 +1853,9 @@ export function validateToolCallArguments(
         errors.push(`Argument '${field}' on '${toolName}' must be a string.`);
         continue;
       }
-      if (spec.isHandle && !OPAQUE_HANDLE_REGEX.test(val)) {
+      if (spec.isHandle && !INPUT_OR_RESULT_HANDLE_REGEX.test(val)) {
         errors.push(
-          `Argument '${field}' on '${toolName}' must be an opaque handle ($INPUT or $RESULT_1..$RESULT_64), got '${val.slice(0, 24)}'.`,
+          `Argument '${field}' on '${toolName}' must be an opaque handle ($INPUT or $RESULT_1..$RESULT_16), got '${val.slice(0, 24)}'.`,
         );
         continue;
       }
@@ -1563,6 +1879,15 @@ export function validateToolCallArguments(
         errors.push(`Argument '${field}' on '${toolName}' must be <= ${spec.max}.`);
         continue;
       }
+      if (
+        field === "bucketQuantumBytes" &&
+        !isPowerOfTwoInRange(val, 512, 65_536)
+      ) {
+        errors.push(
+          `Argument '${field}' on '${toolName}' must be a power-of-two byte bucket between 512 and 65536.`,
+        );
+        continue;
+      }
       sanitizedArgs[field] = val;
     } else if (spec.type === "BOOLEAN") {
       if (typeof val !== "boolean") {
@@ -1575,6 +1900,11 @@ export function validateToolCallArguments(
 
   if (errors.length === 0) {
     try {
+      assertGoogleBoundMessage(
+        `toolCall:${toolName}`,
+        sanitizedArgs,
+        `$.toolCall(${toolName})`,
+      );
       assertContentFree(sanitizedArgs, `$.toolCall(${toolName})`);
     } catch (err) {
       errors.push(err instanceof Error ? err.message : "Failed content-free check.");
@@ -1926,15 +2256,9 @@ export function buildTaskDescriptor(params: {
 }): TaskDescriptor {
   const taskKind: TaskKind =
     params.taskKind ?? classifyTaskKind(params.rawTextForClassification ?? "");
-  const inputTokenEstimate = Math.min(
-    MAX_TOKEN_BUCKET,
-    Math.max(
-      1,
-      Math.trunc(
-        params.inputTokenEstimate ??
-          estimateTokens(params.rawTextForClassification ?? "task"),
-      ),
-    ),
+  const inputTokenEstimate = roundUpToPowerOfTwo(
+    params.inputTokenEstimate ??
+      estimateTokens(params.rawTextForClassification ?? "task"),
   );
 
   const sanitizedRedactionCounts: Record<string, number> = {};
@@ -1976,6 +2300,7 @@ export function buildTaskDescriptor(params: {
     allowedTools: allowedTools.length > 0 ? [...allowedTools] : [...ALLOWED_PLANNER_TOOLS],
   };
 
+  assertGoogleBoundMessage("taskDescriptor", descriptor, "$.taskDescriptor");
   assertContentFree(descriptor, "$.taskDescriptor");
   return descriptor;
 }
@@ -2010,6 +2335,7 @@ export function buildInteractionsCreatePayload(params: {
       rawTextForClassification: params.scrubbedPrompt ?? "",
     });
 
+  assertGoogleBoundMessage("taskDescriptor", descriptor, "$.taskDescriptor");
   assertContentFree(descriptor, "$.taskDescriptor");
 
   const payload: InteractionsCreatePayload = {
@@ -2053,6 +2379,7 @@ export function buildInteractionsCreatePayload(params: {
     },
   };
 
+  assertGoogleBoundMessage("interactionsPayload", payload, "$.payload");
   assertContentFree(payload, "$.payload");
   return payload;
 }
@@ -2256,8 +2583,9 @@ export async function callGeminiInteractionsEndpoint(params: {
 }): Promise<LiveGeminiCallResult> {
   const sensitiveOriginals = params.sensitiveOriginals ?? [];
 
-  // Enforce both Privacy Invariant and Content-Free Egress Firewall before checking key or calling Google
+  // Enforce both Privacy Invariant, Closed Schema Gate, and Content-Free Egress Firewall before checking key or calling Google
   assertOutboundPrivacyInvariant(params.payload, sensitiveOriginals);
+  assertGoogleBoundMessage("interactionsPayload", params.payload, "$.payload");
   assertContentFree(params.payload, "$.payload");
 
   if (typeof window !== "undefined" && !params.genaiClient) {
@@ -2327,6 +2655,7 @@ export async function callGeminiInteractionsEndpoint(params: {
     };
 
     assertOutboundPrivacyInvariant(createRequest, sensitiveOriginals);
+    assertGoogleBoundMessage("createRequest", createRequest, "$.createRequest");
     assertContentFree(createRequest, "$.createRequest");
 
     const createAbortController = new AbortController();
@@ -2354,7 +2683,7 @@ export async function callGeminiInteractionsEndpoint(params: {
     const digestHandleState = createDigestHandleMapState();
     while (params.toolExecutor && Array.isArray(interaction.steps)) {
       const fnCalls = interaction.steps.filter(
-        (s) => s && s.type === "function_call" && typeof s.name === "string",
+        (s) => s && s.type === "function_call",
       );
       if (fnCalls.length === 0) break;
 
@@ -2365,8 +2694,29 @@ export async function callGeminiInteractionsEndpoint(params: {
       const fnResults: Array<Record<string, unknown>> = [];
       for (let idx = 0; idx < fnCalls.length; idx++) {
         const call = fnCalls[idx];
-        const name = call.name as string;
+        const name = typeof call.name === "string" ? call.name : "";
+        if (!name) {
+          throw new ToolPolicyViolationError("<missing>", [
+            "Function call step is missing tool name.",
+          ]);
+        }
         const validatedArgs = assertValidToolCall(name, call.arguments ?? {});
+        const safeCallId =
+          typeof call.id === "string" &&
+          SAFE_CALL_ID_REGEX.test(call.id) &&
+          !/\d{4,}/.test(call.id)
+            ? call.id
+            : `call-${turn + 1}-${idx + 1}`;
+        assertGoogleBoundMessage(
+          "toolCall",
+          {
+            id: safeCallId,
+            type: "function_call",
+            name,
+            arguments: validatedArgs,
+          },
+          `$.toolCall(${name})`,
+        );
         stepCount += 1;
         toolCallsExecuted.push(name);
 
@@ -2382,14 +2732,13 @@ export async function callGeminiInteractionsEndpoint(params: {
           digestHandleState,
         );
         assertOutboundPrivacyInvariant(resultObj, sensitiveOriginals);
+        assertGoogleBoundMessage(
+          `toolResult:${name}`,
+          resultObj,
+          `$.toolResult(${name})`,
+        );
         assertContentFree(resultObj, `$.toolResult(${name})`);
 
-        const safeCallId =
-          typeof call.id === "string" &&
-          SAFE_CALL_ID_REGEX.test(call.id) &&
-          !/\d{4,}/.test(call.id)
-            ? call.id
-            : `call-${turn + 1}-${idx + 1}`;
         const resultStep: Record<string, unknown> = {
           type: "function_result",
           call_id: safeCallId,
@@ -2397,6 +2746,11 @@ export async function callGeminiInteractionsEndpoint(params: {
           result: canonicalJson(resultObj),
         };
         assertOutboundPrivacyInvariant(resultStep, sensitiveOriginals);
+        assertGoogleBoundMessage(
+          "functionResult",
+          resultStep,
+          `$.functionResult(${name})`,
+        );
         assertContentFree(resultStep, `$.functionResult(${name})`);
         fnResults.push(resultStep);
       }
@@ -2422,6 +2776,11 @@ export async function callGeminiInteractionsEndpoint(params: {
       };
 
       assertOutboundPrivacyInvariant(followUpRequest, sensitiveOriginals);
+      assertGoogleBoundMessage(
+        "followUpRequest",
+        followUpRequest,
+        `$.followUpRequest(${turn + 1})`,
+      );
       assertContentFree(followUpRequest, `$.followUpRequest(${turn + 1})`);
 
       const followUpAbortController = new AbortController();
@@ -2565,6 +2924,11 @@ export async function callTinfoilPlannerToolLoop(params: {
   assertOutboundPrivacyInvariant(params.scrubbedPrompt, sensitiveOriginals);
   assertOutboundPrivacyInvariant(systemInstruction, sensitiveOriginals);
   if (params.taskDescriptor) {
+    assertGoogleBoundMessage(
+      "taskDescriptor",
+      params.taskDescriptor,
+      "$.tinfoilTaskDescriptor",
+    );
     assertContentFree(params.taskDescriptor, "$.tinfoilTaskDescriptor");
   }
 
@@ -2710,30 +3074,90 @@ export async function callTinfoilPlannerToolLoop(params: {
         throw new PlannerBudgetExceededError("max_steps", maxSteps);
       }
 
-      messages.push({
-        role: "assistant",
-        content: msg?.content ?? null,
-        tool_calls: toolCalls,
-      });
+      const validatedToolCallsForTurn: Array<{
+        safeTcId: string;
+        fnName: string;
+        validatedArgs: Record<string, unknown>;
+        sanitizedToolCall: {
+          id: string;
+          type: "function";
+          function: { name: string; arguments: string };
+        };
+      }> = [];
 
-      for (const tc of toolCalls) {
-        const fnName = tc.function?.name;
-        if (!fnName) continue;
-        let parsedArgs: Record<string, unknown> = {};
-        if (typeof tc.function?.arguments === "string" && tc.function.arguments.trim()) {
-          try {
-            const parsed = JSON.parse(tc.function.arguments) as unknown;
-            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-              parsedArgs = parsed as Record<string, unknown>;
-            }
-          } catch {
-            throw new ToolPolicyViolationError(fnName, [
-              "Tool arguments must be valid JSON object.",
-            ]);
+      for (let idx = 0; idx < toolCalls.length; idx++) {
+        const tc = toolCalls[idx];
+        const fnName =
+          tc && typeof tc === "object" && typeof tc.function?.name === "string"
+            ? tc.function.name.trim()
+            : "";
+        if (!fnName) {
+          throw new ToolPolicyViolationError("<missing>", [
+            "Tool call is missing function.name.",
+          ]);
+        }
+        let parsedArgs: Record<string, unknown>;
+        if (
+          typeof tc.function?.arguments !== "string" ||
+          !tc.function.arguments.trim()
+        ) {
+          throw new ToolPolicyViolationError(fnName, [
+            "Tool arguments must be a non-empty JSON object string.",
+          ]);
+        }
+        try {
+          const parsed = JSON.parse(tc.function.arguments) as unknown;
+          if (!isPlainObject(parsed)) {
+            throw new Error("not a plain object");
           }
+          parsedArgs = parsed;
+        } catch {
+          throw new ToolPolicyViolationError(fnName, [
+            "Tool arguments must be a valid JSON object.",
+          ]);
         }
         assertOutboundPrivacyInvariant(parsedArgs, sensitiveOriginals);
         const validatedArgs = assertValidToolCall(fnName, parsedArgs);
+        const safeTcId =
+          typeof tc.id === "string" &&
+          SAFE_CALL_ID_REGEX.test(tc.id) &&
+          !/\d{4,}/.test(tc.id)
+            ? tc.id
+            : `tc-${turn + 1}-${idx + 1}`;
+        const sanitizedToolCall = {
+          id: safeTcId,
+          type: "function" as const,
+          function: {
+            name: fnName,
+            arguments: canonicalJson(validatedArgs),
+          },
+        };
+        assertGoogleBoundMessage(
+          "toolCall",
+          sanitizedToolCall,
+          `$.tinfoilToolCall(${fnName})`,
+        );
+        assertContentFree(sanitizedToolCall, `$.tinfoilToolCall(${fnName})`);
+        validatedToolCallsForTurn.push({
+          safeTcId,
+          fnName,
+          validatedArgs,
+          sanitizedToolCall,
+        });
+      }
+
+      messages.push({
+        role: "assistant",
+        content: finalText || null,
+        tool_calls: validatedToolCallsForTurn.map((v) => v.sanitizedToolCall),
+      });
+
+      const digestHandleState = createDigestHandleMapState();
+      for (const {
+        safeTcId,
+        fnName,
+        validatedArgs,
+      } of validatedToolCallsForTurn) {
         stepCount += 1;
         toolCallsExecuted.push(fnName);
 
@@ -2743,15 +3167,23 @@ export async function callTinfoilPlannerToolLoop(params: {
           wallClockBudgetMs,
         );
         assertOutboundPrivacyInvariant(rawToolResult, sensitiveOriginals);
-        const toolResult = replaceDigestsWithOpaqueHandles(rawToolResult);
+        const toolResult = replaceDigestsWithOpaqueHandles(
+          rawToolResult,
+          digestHandleState,
+        );
         assertOutboundPrivacyInvariant(toolResult, sensitiveOriginals);
+        assertGoogleBoundMessage(
+          `tinfoilToolResult:${fnName}`,
+          toolResult,
+          `$.tinfoilToolResult(${fnName})`,
+        );
         assertContentFree(toolResult, `$.tinfoilToolResult(${fnName})`);
 
         const toolMsg: Record<string, unknown> = {
           role: "tool",
-          tool_call_id: tc.id || `call-${turn + 1}-${fnName}`,
+          tool_call_id: safeTcId,
           name: fnName,
-          content: JSON.stringify(toolResult),
+          content: canonicalJson(toolResult),
         };
         assertOutboundPrivacyInvariant(toolMsg, sensitiveOriginals);
         messages.push(toolMsg);

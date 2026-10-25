@@ -10,6 +10,7 @@ import {
   ALLOWED_PLANNER_TOOLS,
   ARGON_CONFIDENTIAL_TOOLS,
   assertContentFree,
+  assertGoogleBoundMessage,
   assertValidToolCall,
   bucketTaskDescriptor,
   ContentFreeEgressError,
@@ -626,7 +627,260 @@ test("assertContentFree blocks all 5 CRITICAL-2 bypasses as well as free text an
     input: fnResults,
     tools: ARGON_CONFIDENTIAL_TOOLS,
   };
+  assert.doesNotThrow(() => assertGoogleBoundMessage("followUpRequest", followUpRequest));
   assert.doesNotThrow(() => assertContentFree(followUpRequest, "$.followUpRequest(1)"));
+
+  // =========================================================================
+  // PASS-3 ADVERSARIAL CASES & CLOSED SCHEMA GATE (assertGoogleBoundMessage)
+  // =========================================================================
+
+  // Round 3 IMPORTANT-1: handle fallthrough under non-handle keys & A1Z26 spelling in allowedTools
+  assert.throws(() => assertContentFree({ status: "$DOC_1" }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ taskKind: "$RESULT_1" }), ContentFreeEgressError);
+  assert.throws(
+    () =>
+      assertContentFree(
+        {
+          allowedTools: Array.from(
+            "PATIENTJANEDOEHASHIVSECRET",
+            (ch) => `$DOC_${ch.charCodeAt(0) - 64}`,
+          ),
+        },
+        "$.createRequest",
+      ),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () =>
+      assertContentFree({
+        allowedTools: ["scrub_and_symmetry_mask", "scrub_and_symmetry_mask"],
+      }),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () =>
+      assertContentFree({
+        allowedTools: ["invoke_attested_enclave", "scrub_and_symmetry_mask"],
+      }),
+    ContentFreeEgressError,
+  );
+  assert.throws(() => assertContentFree({ allowedTools: [] }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ required: ["inputHandle"] }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ enum: ["ok", "verified"] }), ContentFreeEgressError);
+  assert.throws(
+    () =>
+      assertContentFree({
+        input: Array(16).fill({
+          input: Array(16).fill({ enum: ["ok"] }),
+        }),
+      }),
+    ContentFreeEgressError,
+  );
+
+  // Round 3 IMPORTANT-2: multi-key numeric packing, non-power-of-two buckets, sub-object key mixing
+  const secret30 = "Patient Jane Doe SSN 123-45-67";
+  const numericKeys15 = [
+    "inputTokenEstimate",
+    "max_output_tokens",
+    "max_context_tokens",
+    "max_tokens",
+    "bucketQuantumBytes",
+    "bucketBytes",
+    "redactionCount",
+    "mechanicalRedactionCount",
+    "attestedRedactionCount",
+    "plaintextLeakCount",
+    "checksPassed",
+    "checksTotal",
+    "totalDocs",
+    "matchingReceiptsCount",
+    "outputTokenEstimate",
+  ];
+  const packedNumericPayload = {};
+  for (let i = 0; i < numericKeys15.length; i++) {
+    packedNumericPayload[numericKeys15[i]] =
+      (secret30.charCodeAt(i * 2) << 8) | secret30.charCodeAt(i * 2 + 1);
+  }
+  assert.throws(
+    () => assertContentFree(packedNumericPayload, "$.createRequest"),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () =>
+      assertValidToolCall("scrub_and_symmetry_mask", {
+        inputHandle: "$INPUT",
+        bucketQuantumBytes: 18537,
+      }),
+    ToolPolicyViolationError,
+  );
+  assert.throws(() => assertContentFree({ bucketQuantumBytes: 18537 }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ bucketBytes: 18537 }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ inputTokenEstimate: 1500 }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ outputTokenEstimate: 1500 }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ max_output_tokens: 99999 }), ContentFreeEgressError);
+  assert.throws(
+    () =>
+      assertContentFree(
+        { redactionCounts: { status: "ok", max_output_tokens: 131072 } },
+        "$.createRequest",
+      ),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () => assertContentFree({ verification: { status: "ok" } }),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () => assertContentFree({ generation_config: { status: "ok" } }),
+    ContentFreeEgressError,
+  );
+
+  // Round 3 IMPORTANT-3: replaceDigestsWithOpaqueHandles laundering & cross-prefix handles
+  assert.throws(
+    () =>
+      replaceDigestsWithOpaqueHandles({
+        status: "ok",
+        topDocSha256: "Patient Jane Doe has HIV and diabetes (SSN 123-45-6789)",
+      }),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () =>
+      replaceDigestsWithOpaqueHandles({
+        status: "ok",
+        topDocHandle: "Patient Jane Doe",
+        topDocSha256: rawToolResults.search_atlas_hybrid_kb.topDocSha256,
+      }),
+    ContentFreeEgressError,
+  );
+  const exhaustedState = createDigestHandleMapState();
+  exhaustedState.counters.DOC = 16;
+  assert.throws(
+    () =>
+      replaceDigestsWithOpaqueHandles(
+        {
+          status: "ok",
+          topDocSha256: rawToolResults.search_atlas_hybrid_kb.topDocSha256,
+        },
+        exhaustedState,
+      ),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () =>
+      assertValidToolCall("invoke_attested_enclave", {
+        inputHandle: "$DIGEST_1",
+        enclaveModel: "gemma4-31b",
+      }),
+    ToolPolicyViolationError,
+  );
+  assert.throws(
+    () =>
+      assertValidToolCall("invoke_attested_enclave", {
+        inputHandle: "$DOC_1",
+        enclaveModel: "gemma4-31b",
+      }),
+    ToolPolicyViolationError,
+  );
+  assert.throws(
+    () =>
+      assertValidToolCall("invoke_attested_enclave", {
+        inputHandle: "$RESULT_17",
+        enclaveModel: "gemma4-31b",
+      }),
+    ToolPolicyViolationError,
+  );
+  assert.throws(() => assertContentFree({ inputHandle: "$DOC_1" }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ outputHandle: "$INPUT" }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ topDocHandle: "$RESULT_1" }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ receiptHandle: "$DOC_1" }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ contentHandle: "$RESULT_1" }), ContentFreeEgressError);
+  assert.throws(() => assertContentFree({ resultHandle: "$RESULT_17" }), ContentFreeEgressError);
+
+  // Round 3 MINOR-1: short-hex ASCII smuggling, undefined values, empty objects
+  assert.throws(
+    () => assertContentFree({ contentSha256: "0x4849569a9b9c9d" }, "$.googleBound"),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () => assertContentFree({ contentSha256: "0x48490156319a9b" }, "$.googleBound"),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () => assertContentFree({ text: undefined, EMAIL: undefined }),
+    ContentFreeEgressError,
+  );
+  assert.throws(() => assertContentFree({}), ContentFreeEgressError);
+
+  // Closed schema gate: extra key, missing key, and out-of-range value rejected for every schema
+  assert.doesNotThrow(() => assertGoogleBoundMessage("taskDescriptor", descriptor));
+  assert.throws(
+    () => assertGoogleBoundMessage("taskDescriptor", { ...descriptor, extra: "ok" }),
+    ContentFreeEgressError,
+  );
+  const { taskKind: _omitTk, ...descNoTaskKind } = descriptor;
+  void _omitTk;
+  assert.throws(
+    () => assertGoogleBoundMessage("taskDescriptor", descNoTaskKind),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () => assertGoogleBoundMessage("taskDescriptor", { ...descriptor, inputTokenEstimate: 1000 }),
+    ContentFreeEgressError,
+  );
+
+  assert.doesNotThrow(() => assertGoogleBoundMessage("createRequest", createRequest));
+  assert.throws(
+    () => assertGoogleBoundMessage("createRequest", { ...createRequest, extra: "ok" }),
+    ContentFreeEgressError,
+  );
+  const { store: _omitSt, ...createNoStore } = createRequest;
+  void _omitSt;
+  assert.throws(
+    () => assertGoogleBoundMessage("createRequest", createNoStore),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () => assertGoogleBoundMessage("createRequest", { ...createRequest, store: true }),
+    ContentFreeEgressError,
+  );
+
+  for (const step of fnResults) {
+    assert.doesNotThrow(() => assertGoogleBoundMessage("functionResult", step));
+    assert.throws(
+      () => assertGoogleBoundMessage("functionResult", { ...step, extra: "ok" }),
+      ContentFreeEgressError,
+    );
+    const { call_id: _omitCid, ...stepNoCallId } = step;
+    void _omitCid;
+    assert.throws(
+      () => assertGoogleBoundMessage("functionResult", stepNoCallId),
+      ContentFreeEgressError,
+    );
+    assert.throws(
+      () => assertGoogleBoundMessage("functionResult", { ...step, call_id: "call-99" }),
+      ContentFreeEgressError,
+    );
+  }
+
+  assert.throws(
+    () => assertGoogleBoundMessage("followUpRequest", { ...followUpRequest, extra: "ok" }),
+    ContentFreeEgressError,
+  );
+  const { previous_interaction_id: _omitPrev, ...followUpNoPrev } = followUpRequest;
+  void _omitPrev;
+  assert.throws(
+    () => assertGoogleBoundMessage("followUpRequest", followUpNoPrev),
+    ContentFreeEgressError,
+  );
+  assert.throws(
+    () =>
+      assertGoogleBoundMessage("followUpRequest", {
+        ...followUpRequest,
+        previous_interaction_id: "inter-argon-turn-99",
+      }),
+    ContentFreeEgressError,
+  );
 });
 
 test("Explicit CORE_KEY_SOURCE supports 'tinfoil' and 'boot', refuses missing/unknown values, and protects secretKey", async () => {
