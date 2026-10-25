@@ -36,6 +36,7 @@ import {
   MECHANICAL_RULESET,
   type MechanicalRuleset,
 } from "@/lib/privacy/mechanical-ruleset";
+import { rehideKnownValues } from "@/lib/privacy/rehide-known";
 import { padJsonPayloadToBucket } from "@/lib/relay";
 import type { BlindCreditToken, CheckResult } from "@/lib/types";
 
@@ -271,14 +272,22 @@ export function redactConversationMessages(
   const redactString = (text: string): string => {
     const res = session.redact(text);
     redactionsCount += res.redactions.length;
-    return res.text;
+    // Earlier replies can repeat hidden values without markers (for example
+    // text first wrapped in ££), so values hidden before stay hidden.
+    return rehideKnownValues(res.text, session);
   };
 
   const out = messages.map((msg) => {
     if (!msg || typeof msg !== "object") return msg;
     const role = typeof msg.role === "string" ? msg.role.toLowerCase() : "";
+    // System and developer messages are filtered too: coding tools put
+    // folder paths, usernames and project notes there.
     const shouldRedact =
-      role === "user" || role === "assistant" || role === "tool";
+      role === "user" ||
+      role === "assistant" ||
+      role === "tool" ||
+      role === "system" ||
+      role === "developer";
     if (!shouldRedact) {
       return { ...msg };
     }

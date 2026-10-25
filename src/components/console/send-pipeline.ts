@@ -17,6 +17,7 @@ import {
 import type { MechanicalRuleset } from "@/lib/privacy/mechanical-ruleset";
 import type { SessionScrubber } from "@/lib/privacy/scrubber";
 import type { ChatMessage } from "@/components/session";
+import { rehideKnownValues } from "@/lib/privacy/rehide-known";
 
 export interface MessagePrivacyReport {
   redactions: Array<{ kind: string; placeholder: string }>;
@@ -136,19 +137,13 @@ export function prepareHistoryForWire(
 ): ChatMessage[] {
   return messages.map((m) => {
     if (m.wireContent) return m;
-    let wire = prepareHistoricalTurnText(m.content, {
+    const wire = prepareHistoricalTurnText(m.content, {
       ...opts,
       normalizeStyle: m.role === "user" && Boolean(opts?.normalizeStyle),
     });
     // Values hidden earlier in this conversation (for example text you wrapped
     // in ££) stay hidden even when a reply repeats them without markers.
-    const known = (opts?.session?.entries() ?? [])
-      .filter((e) => e.original.trim().length >= 3)
-      .sort((a, b) => b.original.length - a.original.length);
-    for (const e of known) {
-      wire = wire.split(e.original).join(e.placeholder);
-    }
-    return { ...m, wireContent: wire };
+    return { ...m, wireContent: rehideKnownValues(wire, opts?.session) };
   });
 }
 

@@ -573,6 +573,50 @@ describe("K2: deroute-proxy unit & integration tests", () => {
     }
   });
 
+  it("filters system and developer messages and keeps ££ text hidden when a later reply repeats it without markers", () => {
+    const session = createMechanicalSession();
+    const first = redactConversationMessages(
+      [
+        {
+          role: "system",
+          content:
+            "Working directory: /Users/dana/projects/acme. Contact dana.reyes@example.com for access.",
+        },
+        { role: "developer", content: "Deploy host is 10.42.7.19." },
+        { role: "user", content: "Summarise ££Project Horizon££ and ££our merger offer££ for me." },
+      ],
+      session,
+    );
+    const firstWire = JSON.stringify(first.messages);
+    for (const original of ["/Users/dana", "dana.reyes@example.com", "10.42.7.19", "Project Horizon", "merger", "££"]) {
+      expect(firstWire).not.toContain(original);
+    }
+
+    // The coding tool resends the conversation, including the reply shown to
+    // the user with hidden details put back.
+    const second = redactConversationMessages(
+      [
+        { role: "user", content: "Summarise ££Project Horizon££ and ££our merger offer££ for me." },
+        {
+          role: "assistant",
+          content: "Our merger offer is on track. I emailed dana.reyes@example.com.",
+        },
+        { role: "user", content: "Thanks, shorten it." },
+      ],
+      session,
+    );
+    const secondWire = JSON.stringify(second.messages);
+    expect(secondWire).not.toContain("Project Horizon");
+    expect(secondWire.toLowerCase()).not.toContain("merger");
+    expect(secondWire).not.toContain("dana.reyes@example.com");
+    expect(second.messages[1].content).toMatch(
+      /^\[MARKED_\d+\] is on track\. I emailed \[EMAIL_1\]\.$/,
+    );
+    expect(session.restore(String(second.messages[1].content))).toBe(
+      "our merger offer is on track. I emailed dana.reyes@example.com.",
+    );
+  });
+
   it("refuses to start on filter fingerprint mismatch and refuses requests when any of the seven checks C1-C7 fail", async () => {
     const tmpDir = makeTempDir("deroute-proxy-refusal");
     const spentPath = path.join(tmpDir, "spent.json");
