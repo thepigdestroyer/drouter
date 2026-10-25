@@ -23,11 +23,13 @@ import {
 } from "@/components/argon/argon-helpers";
 import {
   assertClosedPlanSchema,
+  assertFilterFingerprintAllowsSend,
   buildBrowserRedactedTaskAndDescriptor,
   buildGeminiCreateRequestFromDescriptor,
   clearCorpusCache,
   COMMITTED_CORE_IMAGE_DIGESTS,
   computeCorpusContentSha256,
+  FilterFingerprintMismatchError,
   geminiEgressSigningPayload,
   getExpectedCoreImageDigests,
   NEXT_SERVER_RECEIPT_LABEL,
@@ -40,6 +42,12 @@ import {
   verifyCoreAttestationForEgressKey,
   verifyEgressReceiptClient,
 } from "@/lib/agent-client";
+import {
+  setFilterFingerprintStatusForTests,
+  setFilterFingerprintVerifyOptionsForTests,
+} from "@/lib/privacy/fingerprint";
+import { MECHANICAL_RULESET } from "@/lib/privacy/mechanical-ruleset";
+import { openTinfoilSession } from "@/lib/tinfoil/client";
 import { ATLAS_SEED_DOCS } from "@/lib/atlas/knowledge-base";
 import {
   computeAttestedKeysDigest,
@@ -272,6 +280,8 @@ afterEach(() => {
   clearAttestedPiiFilterCacheForTests();
   clearCorpusCache();
   resetAnchorRateLimitState();
+  setFilterFingerprintStatusForTests(null);
+  setFilterFingerprintVerifyOptionsForTests(null);
   vi.restoreAllMocks();
 });
 
@@ -653,20 +663,23 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
         ),
     });
 
-    const openSessionSpy = vi.fn(async (_model: "gemma4-31b" | "kimi-k3") => ({
-      async *send(
-        mdl: string,
-        messages: { role: "user" | "assistant"; content: string }[],
-      ) {
-        const res = await mockFetch("/api/relay/v1/chat/completions", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ model: mdl, messages }),
-        });
-        const data = (await res.json()) as { completion: string };
-        yield data.completion;
-      },
-    }));
+    const openSessionSpy = vi.fn(async (model: "gemma4-31b" | "kimi-k3") => {
+      void model;
+      return {
+        async *send(
+          mdl: string,
+          messages: { role: "user" | "assistant"; content: string }[],
+        ) {
+          const res = await mockFetch("/api/relay/v1/chat/completions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ model: mdl, messages }),
+          });
+          const data = (await res.json()) as { completion: string };
+          yield data.completion;
+        },
+      };
+    });
 
     const outcome = await runBrowserAgentWorkflow({
       taskPrompt: privateTask,
@@ -1945,5 +1958,257 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
       "No separate seal record was published for the first sealed computer (gemma4-31b), so we switched to an alternate sealed computer (kimi-k3) whose seal check passed",
     );
     expect(findForbiddenPlainTerms(steps[1].plainResult)).toEqual([]);
+  });
+
+  it("F-05: Stage 4 refuses to open a Tinfoil session or send the prompt when C5 or C7 fails for both primary and failover models (or any of the 7 checks fails)", async () => {
+    const createMatrixFetch = (
+      mutateMatrix: (m: ReturnType<typeof buildMockEnclaveMatrix>) => void,
+      options?: { emptyCorpus?: boolean },
+    ): typeof fetch =>
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/gemini/plan") {
+          const parsedDesc = JSON.parse(String(init?.body ?? "{}"));
+          const { plan, egressReceipt } =
+            buildMockSealedComputerPlanAndReceipt(parsedDesc);
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              planner: GEMINI_4_ARGON_MODEL_ID,
+              plannerSource: "sealed-google-computer",
+              model: GEMINI_4_ARGON_MODEL_ID,
+              interactionId: "inter-argon-turn-1",
+              status: "completed",
+              dataSentToGoogle: "content-free task descriptor only",
+              egressFirewallVerified: true,
+              plan,
+              egressReceipt,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (url === "/api/core/attestation") {
+          return new Response(
+            JSON.stringify(coreAttestationFixture.attestationResponseJson),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (url === "/api/relay/enclave-matrix") {
+          const matrix = buildMockEnclaveMatrix();
+          mutateMatrix(matrix);
+          return new Response(JSON.stringify(matrix), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (url === "/api/registry") {
+          return new Response(JSON.stringify({ nodes: [] }), { status: 200 });
+        }
+        if (url === "/api/knowledge/corpus") {
+          if (options?.emptyCorpus) {
+            return new Response("unavailable", { status: 503 });
+          }
+          const corpusPayload = buildMockCorpusResponse();
+          return new Response(JSON.stringify(corpusPayload), {
+            status: 200,
+            headers: { ETag: corpusPayload.contentSha256 },
+          });
+        }
+        return new Response("{}", { status: 200 });
+      });
+
+    // 1. Both primary (gemma4-31b) and failover (kimi-k3) fail C5 (unverified hosts / confidential GPU check failed)
+    const openSessionC5Spy = vi.fn(async () => ({
+      async *send() {
+        yield "Should never be called when C5 fails";
+      },
+    }));
+    const c5Outcome = await runBrowserAgentWorkflow({
+      taskPrompt:
+        "Review agreement for Priya Natarajan at Halden & Moss LLP (contact priya.natarajan@example.org).",
+      alwaysHide: ["Halden & Moss LLP"],
+      preferredEnclaveModel: "gemma4-31b",
+      fetchFn: createMatrixFetch((m) => {
+        m.models["gemma4-31b"].ccGpuFlagsVerified = false;
+        m.models["kimi-k3"].ccGpuFlagsVerified = false;
+      }),
+      openSessionFn: openSessionC5Spy,
+      coreAttestationOptions: {
+        pinnedRootCaPem: coreAttestationFixture.pinnedRootCaPem,
+        nowSec: TEST_NOW_SEC,
+      },
+    });
+
+    expect(c5Outcome.run.stages.stage2.passed).toBe(false);
+    expect(c5Outcome.run.stages.stage3.passed).toBe(false);
+    expect(c5Outcome.run.stages.stage3.attempts).toHaveLength(2);
+    expect(c5Outcome.run.stages.stage3.attempts[0].passed).toBe(false);
+    expect(c5Outcome.run.stages.stage3.attempts[1].passed).toBe(false);
+    expect(c5Outcome.run.stages.stage4.passed).toBe(false);
+    expect(openSessionC5Spy).not.toHaveBeenCalled();
+
+    // 2. Both primary (gemma4-31b) and failover (kimi-k3) fail C7 (missing dmVerityRootHash / pinned weight manifest)
+    const openSessionC7Spy = vi.fn(async () => ({
+      async *send() {
+        yield "Should never be called when C7 fails";
+      },
+    }));
+    const c7Outcome = await runBrowserAgentWorkflow({
+      taskPrompt:
+        "Review agreement for Priya Natarajan at Halden & Moss LLP (contact priya.natarajan@example.org).",
+      alwaysHide: ["Halden & Moss LLP"],
+      preferredEnclaveModel: "gemma4-31b",
+      fetchFn: createMatrixFetch((m) => {
+        m.models["gemma4-31b"].dmVerityRootHash = "";
+        m.models["kimi-k3"].dmVerityRootHash = "";
+      }),
+      openSessionFn: openSessionC7Spy,
+      coreAttestationOptions: {
+        pinnedRootCaPem: coreAttestationFixture.pinnedRootCaPem,
+        nowSec: TEST_NOW_SEC,
+      },
+    });
+
+    expect(c7Outcome.run.stages.stage2.passed).toBe(false);
+    expect(c7Outcome.run.stages.stage3.passed).toBe(false);
+    expect(c7Outcome.run.stages.stage4.passed).toBe(false);
+    expect(openSessionC7Spy).not.toHaveBeenCalled();
+
+    // 3. Even when C5 and C7 pass, if another of the 7 checks (e.g., check-6 corpus verification) fails, Stage 4 refuses to send
+    const openSessionCheck6Spy = vi.fn(async () => ({
+      async *send() {
+        yield "Should never be called when any of the 7 checks fails";
+      },
+    }));
+    const check6Outcome = await runBrowserAgentWorkflow({
+      taskPrompt:
+        "Review agreement for Priya Natarajan at Halden & Moss LLP (contact priya.natarajan@example.org).",
+      alwaysHide: ["Halden & Moss LLP"],
+      preferredEnclaveModel: "gemma4-31b",
+      fetchFn: createMatrixFetch(() => {}, { emptyCorpus: true }),
+      openSessionFn: openSessionCheck6Spy,
+      coreAttestationOptions: {
+        pinnedRootCaPem: coreAttestationFixture.pinnedRootCaPem,
+        nowSec: TEST_NOW_SEC,
+      },
+    });
+
+    expect(check6Outcome.run.stages.stage3.passed).toBe(true);
+    expect(check6Outcome.run.stages.stage2.passed).toBe(false);
+    expect(check6Outcome.run.stages.stage4.passed).toBe(false);
+    expect(openSessionCheck6Spy).not.toHaveBeenCalled();
+  });
+
+  it("F-05 & F-08: openTinfoilSession(...).send() throws on any failed check and filter fingerprint mismatch blocks runBrowserRedactionPipeline and runBrowserAgentWorkflow before anything leaves the device", async () => {
+    // 1. openTinfoilSession(...).send() throws when session.checks contains a failed check
+    let transmitted = false;
+    const session = await openTinfoilSession("kimi-k3", {
+      origin: "https://localhost:3000",
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            ...buildMockEnclaveMatrix(),
+            models: {
+              "kimi-k3": {
+                ...buildMockEnclaveMatrix().models["kimi-k3"],
+                dmVerityRootHash: "",
+              },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      clientFactory: () => ({
+        ready: async () => {},
+        getVerificationDocument: () => ({
+          enclaveHost: "router-0.tinfoil.sh",
+          releaseTag: "v0.0.167",
+          releaseDigest:
+            "5233a27f1468f474d27c103e06c1a7a607e6a722ff4f9299ddf4e32fa87f201e",
+          codeFingerprint: "abc",
+          enclaveFingerprint: "def",
+          hpkePublicKey: "123",
+          tlsPublicKey: "456",
+          selectedRouterEndpoint: "router-0.tinfoil.sh",
+          configRepo: "tinfoilsh/confidential-model-router",
+          securityVerified: true,
+          enclaveMeasurement: {
+            measurement: {
+              type: "https://tinfoil.sh/predicate/sev-snp-guest/v2",
+              registers: ["abc"],
+            },
+          },
+          codeMeasurement: {
+            type: "https://tinfoil.sh/predicate/sev-snp-guest/v2",
+            registers: ["abc"],
+          },
+          steps: {
+            fetchDigest: { status: "success" as const },
+            verifyCode: { status: "success" as const },
+            verifyEnclave: { status: "success" as const },
+            compareMeasurements: { status: "success" as const },
+            verifyCertificate: { status: "success" as const },
+          },
+        }),
+        chat: {
+          completions: {
+            create: async () => {
+              transmitted = true;
+              return (async function* () {
+                yield { choices: [{ delta: { content: "leaked" } }] };
+              })();
+            },
+          },
+        },
+      }),
+    });
+
+    expect(session.checks.find((c) => c.id === "C7")?.status).toBe("fail");
+    await expect(
+      (async () => {
+        for await (const chunk of session.send("kimi-k3", [
+          { role: "user", content: "Hello" },
+        ])) {
+          void chunk;
+        }
+      })(),
+    ).rejects.toThrow(/Not verified: C7/);
+    expect(transmitted).toBe(false);
+
+    // 2. Filter fingerprint mismatch blocks runBrowserRedactionPipeline and runBrowserAgentWorkflow before anything leaves the device
+    setFilterFingerprintVerifyOptionsForTests({
+      published: {
+        version: MECHANICAL_RULESET.version,
+        fingerprint: `0x${"ff".repeat(32)}`,
+        anchorTx: `0x${"cd".repeat(32)}`,
+      },
+    });
+
+    const attestedRunnerSpy = vi.fn();
+    const fetchSpy = vi.fn();
+    const openSessionSpy = vi.fn();
+
+    expect(() => assertFilterFingerprintAllowsSend()).toThrow(
+      FilterFingerprintMismatchError,
+    );
+
+    await expect(
+      runBrowserRedactionPipeline({
+        taskPrompt: "Review agreement for Priya Natarajan.",
+        attestedFilterRunner: attestedRunnerSpy,
+      }),
+    ).rejects.toThrow(FilterFingerprintMismatchError);
+    expect(attestedRunnerSpy).not.toHaveBeenCalled();
+
+    await expect(
+      runBrowserAgentWorkflow({
+        taskPrompt: "Review agreement for Priya Natarajan.",
+        fetchFn: fetchSpy as unknown as typeof fetch,
+        openSessionFn: openSessionSpy,
+        attestedFilterRunner: attestedRunnerSpy,
+      }),
+    ).rejects.toThrow(FilterFingerprintMismatchError);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(openSessionSpy).not.toHaveBeenCalled();
+    expect(attestedRunnerSpy).not.toHaveBeenCalled();
   });
 });

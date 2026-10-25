@@ -372,13 +372,19 @@ async function openLocalHttpTinfoilSession(
     ...(dmVerityRoot ? { dmVerityRoot, "dm-verity root": dmVerityRoot } : {}),
   };
 
-  return {
+  const localSession: TinfoilSession = {
     checks: checksFromDocument(doc, selectedModelAttestation),
     evidence,
     relayHop: "/api/relay/v1",
     deepBundle,
     selectedModelAttestation,
     async *send(model, messages) {
+      const failed = localSession.checks.find((c) => c.status === "fail");
+      if (failed) {
+        throw new Error(
+          `Not verified: ${failed.id} (${failed.label}) failed: ${failed.detail}`,
+        );
+      }
       const reqHeaders: Record<string, string> = {
         "X-Tinfoil-Model": model,
         "X-DRouter-Cadence-Ms": "50",
@@ -397,6 +403,7 @@ async function openLocalHttpTinfoilSession(
       }
     },
   };
+  return localSession;
 }
 
 function buildHonestTinfoilEvidence(
@@ -565,6 +572,7 @@ export async function openSession(
     });
 
     checks.forEach(onCheck);
+    session.checks = checks;
     const evidence = buildHonestTinfoilEvidence(session, selectedModel);
 
     const failed = checks.find((c) => c.status === "fail");

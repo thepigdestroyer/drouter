@@ -52,7 +52,13 @@ import {
   type AttestedPiiFilterOptions,
   type AttestedPiiFilterResult,
 } from "@/lib/privacy/attested-filter";
+import * as filterFingerprintMod from "@/lib/privacy/fingerprint";
+import {
+  evaluateLocalFilterFingerprint,
+  type PublishedFilterFingerprint,
+} from "@/lib/privacy/fingerprint";
 import { mechanicalRedact as realMechanicalRedact } from "@/lib/privacy/mechanical";
+import type { MechanicalRuleset } from "@/lib/privacy/mechanical-ruleset";
 import { bucketForTokens, estimateTokens } from "@/lib/privacy/padding";
 import { CONFIDENTIAL_PROVIDERS } from "@/lib/providers/catalog";
 import { padJsonPayloadToBucket } from "@/lib/relay";
@@ -61,6 +67,7 @@ import {
   type AppliedMask,
 } from "@/lib/symmetry/homomorphism";
 import {
+  assertSessionChecksAllowSend,
   openTinfoilSession,
   type TinfoilSession,
 } from "@/lib/tinfoil/client";
@@ -103,6 +110,7 @@ import {
 export {
   assertClosedPlanSchema,
   assertNoDuplicateJsonKeys,
+  assertSessionChecksAllowSend,
   buildGeminiCreateRequestFromDescriptor,
   clearCorpusCache,
   COMMITTED_CORE_IMAGE_DIGESTS,
@@ -127,6 +135,52 @@ export {
   type CorpusPayload,
   type RankedCorpusResult,
 };
+
+export class FilterFingerprintMismatchError extends Error {
+  readonly computedFingerprint: string;
+  readonly publishedFingerprint: string | null;
+
+  constructor(
+    message: string,
+    computedFingerprint: string,
+    publishedFingerprint: string | null,
+  ) {
+    super(message);
+    this.name = "FilterFingerprintMismatchError";
+    this.computedFingerprint = computedFingerprint;
+    this.publishedFingerprint = publishedFingerprint;
+  }
+}
+
+export function assertFilterFingerprintAllowsSend(opts?: {
+  ruleset?: MechanicalRuleset;
+  published?: PublishedFilterFingerprint;
+}): void {
+  const maybeAssert = (
+    filterFingerprintMod as {
+      assertFilterFingerprintAllowsSend?: (o?: {
+        ruleset?: MechanicalRuleset;
+        published?: PublishedFilterFingerprint;
+      }) => void;
+    }
+  ).assertFilterFingerprintAllowsSend;
+  if (typeof maybeAssert === "function") {
+    maybeAssert(opts);
+    return;
+  }
+  const status = evaluateLocalFilterFingerprint({
+    ...(opts?.ruleset !== undefined ? { ruleset: opts.ruleset } : {}),
+    ...(opts?.published !== undefined ? { published: opts.published } : {}),
+  });
+  if (status.blockingSend) {
+    throw new FilterFingerprintMismatchError(
+      status.blockReason ??
+        "Sending is blocked because the personal-detail filter running in this browser does not match the published version in the public receipt book.",
+      status.computedFingerprint,
+      status.publishedFingerprint,
+    );
+  }
+}
 
 export interface ArcAnchorClientResult {
   broadcast: boolean;
@@ -178,6 +232,8 @@ export interface BrowserAgentWorkflowOptions {
     numericScaleFactor?: number;
     customEntities?: Record<string, string>;
   };
+  rulesetOverride?: MechanicalRuleset;
+  publishedFingerprintOverride?: PublishedFilterFingerprint;
 }
 
 export interface BrowserAgentWorkflowRunOutcome {
@@ -588,7 +644,18 @@ export async function runBrowserRedactionPipeline(options: {
   mechanicalRedactor?: MechanicalRedactFn;
   attestedFilterRunner?: AttestedFilterRunnerFn;
   symmetryOptions?: BrowserAgentWorkflowOptions["symmetryOptions"];
+  rulesetOverride?: MechanicalRuleset;
+  publishedFingerprintOverride?: PublishedFilterFingerprint;
 }): Promise<ReturnType<typeof buildBrowserRedactedTaskAndDescriptor>> {
+  assertFilterFingerprintAllowsSend({
+    ...(options.rulesetOverride !== undefined
+      ? { ruleset: options.rulesetOverride }
+      : {}),
+    ...(options.publishedFingerprintOverride !== undefined
+      ? { published: options.publishedFingerprintOverride }
+      : {}),
+  });
+
   const rawPrompt =
     options.taskPrompt && options.taskPrompt.trim().length > 0
       ? options.taskPrompt.trim()
@@ -957,6 +1024,15 @@ function signDigestInBrowser(digestBytes: Uint8Array): {
 export async function runBrowserAgentWorkflow(
   options: BrowserAgentWorkflowOptions = {},
 ): Promise<BrowserAgentWorkflowRunOutcome> {
+  assertFilterFingerprintAllowsSend({
+    ...(options.rulesetOverride !== undefined
+      ? { ruleset: options.rulesetOverride }
+      : {}),
+    ...(options.publishedFingerprintOverride !== undefined
+      ? { published: options.publishedFingerprintOverride }
+      : {}),
+  });
+
   const fetchImpl = options.fetchFn ?? globalThis.fetch;
   const thinkingLevel: ArgonThinkingLevel = options.thinkingLevel ?? "medium";
   const background = options.background ?? true;
@@ -977,6 +1053,8 @@ export async function runBrowserAgentWorkflow(
     mechanicalRedactor: options.mechanicalRedactor,
     attestedFilterRunner: options.attestedFilterRunner,
     symmetryOptions: options.symmetryOptions,
+    rulesetOverride: options.rulesetOverride,
+    publishedFingerprintOverride: options.publishedFingerprintOverride,
   });
 
   const {
@@ -1689,41 +1767,67 @@ export async function runBrowserAgentWorkflow(
 
   assertOutboundPrivacyInvariant(enclavePrompt, originalSensitiveTokens);
 
+  const allChecksPassedForActiveModel =
+    stage1.passed &&
+    stage2.passed &&
+    stage3.passed &&
+    allSevenChecksPassed &&
+    sevenChecks.every((c) => c.passed);
+
   let actualEnclaveText = "";
   const t0Enclave = Date.now();
-  try {
-    const openSession =
-      options.openSessionFn ??
-      ((mdl: "gemma4-31b" | "kimi-k3") => openTinfoilSession(mdl));
-    const session = await openSession(activeEnclaveModel);
-    const chunks: string[] = [];
-    for await (const delta of session.send(activeEnclaveModel, [
-      { role: "user", content: enclavePrompt },
-    ])) {
-      if (typeof delta === "string") {
-        chunks.push(delta);
-      }
-    }
-    actualEnclaveText = sanitizeUntrustedModelOutput(chunks.join(""));
-    const enclaveLatencyMs = Math.max(1, Date.now() - t0Enclave);
-    modelCalls.push({
-      model: activeEnclaveModel,
-      purpose: `Browser-to-enclave confidential execution via openTinfoilSession (${activeEnclaveModel} over RFC 9180 HPKE)`,
-      ok: actualEnclaveText.length > 0,
-      latencyMs: enclaveLatencyMs,
-    });
-  } catch (err) {
-    const enclaveLatencyMs = Math.max(1, Date.now() - t0Enclave);
+  if (!allChecksPassedForActiveModel) {
+    const failedIds = sevenChecks
+      .filter((c) => !c.passed)
+      .map((c) => c.id);
     modelCalls.push({
       model: activeEnclaveModel,
       purpose: `Browser-to-enclave confidential execution via openTinfoilSession (${activeEnclaveModel} over RFC 9180 HPKE)`,
       ok: false,
-      latencyMs: enclaveLatencyMs,
+      latencyMs: 0,
       error:
-        err instanceof Error
-          ? err.message.slice(0, 160)
-          : "Enclave session failed",
+        failedIds.length > 0
+          ? `Refused to send: verification checks failed (${failedIds.join(", ")})`
+          : "Refused to send: pre-send verification stage failed",
     });
+  } else {
+    try {
+      const openSession =
+        options.openSessionFn ??
+        ((mdl: "gemma4-31b" | "kimi-k3") => openTinfoilSession(mdl));
+      const session = await openSession(activeEnclaveModel);
+      if (Array.isArray(session.checks)) {
+        assertSessionChecksAllowSend(session.checks);
+      }
+      const chunks: string[] = [];
+      for await (const delta of session.send(activeEnclaveModel, [
+        { role: "user", content: enclavePrompt },
+      ])) {
+        if (typeof delta === "string") {
+          chunks.push(delta);
+        }
+      }
+      actualEnclaveText = sanitizeUntrustedModelOutput(chunks.join(""));
+      const enclaveLatencyMs = Math.max(1, Date.now() - t0Enclave);
+      modelCalls.push({
+        model: activeEnclaveModel,
+        purpose: `Browser-to-enclave confidential execution via openTinfoilSession (${activeEnclaveModel} over RFC 9180 HPKE)`,
+        ok: actualEnclaveText.length > 0,
+        latencyMs: enclaveLatencyMs,
+      });
+    } catch (err) {
+      const enclaveLatencyMs = Math.max(1, Date.now() - t0Enclave);
+      modelCalls.push({
+        model: activeEnclaveModel,
+        purpose: `Browser-to-enclave confidential execution via openTinfoilSession (${activeEnclaveModel} over RFC 9180 HPKE)`,
+        ok: false,
+        latencyMs: enclaveLatencyMs,
+        error:
+          err instanceof Error
+            ? err.message.slice(0, 160)
+            : "Enclave session failed",
+      });
+    }
   }
 
   const enclaveModelProducedOutput = actualEnclaveText.length > 0;

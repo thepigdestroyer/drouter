@@ -34,6 +34,7 @@ import {
   type ArgonPlannerInfo,
 } from "@/components/argon/argon-helpers";
 import {
+  assertFilterFingerprintAllowsSend,
   runBrowserAgentWorkflow,
 } from "@/lib/agent-client";
 import {
@@ -134,6 +135,7 @@ function ArgonAuthenticatedView() {
     setApiError(null);
     setLastActionKind("get");
     try {
+      assertFilterFingerprintAllowsSend();
       const alwaysHide =
         typeof window !== "undefined" ? getActiveCustomScrubTerms() : [];
       const outcome = await runBrowserAgentWorkflow({
@@ -170,6 +172,7 @@ function ArgonAuthenticatedView() {
       setHumanApproved(Boolean(outcome.run.stages.stage5.approvedByHuman));
       setUserDeclinedApproval(false);
     } catch (err) {
+      setRunResult(null);
       setApiError(
         err instanceof Error
           ? err.message
@@ -181,11 +184,30 @@ function ArgonAuthenticatedView() {
   }, []);
 
   useEffect(() => {
-    void loadInitialRun();
+    let cancelled = false;
+    void Promise.resolve().then(() => {
+      if (!cancelled) {
+        void loadInitialRun();
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [loadInitialRun]);
 
   async function handleExecuteWorkflow(overrideApproval?: boolean) {
     // A filter that does not match its published fingerprint must not prepare any task.
+    try {
+      assertFilterFingerprintAllowsSend();
+    } catch (err) {
+      setRunResult(null);
+      setApiError(
+        err instanceof Error
+          ? err.message
+          : "Sending is blocked because the personal-detail filter running in this browser does not match the published version in the public receipt book.",
+      );
+      return;
+    }
     if (filterBlocked) return;
     setIsRunning(true);
     setApiError(null);
@@ -201,6 +223,7 @@ function ArgonAuthenticatedView() {
     }
 
     try {
+      assertFilterFingerprintAllowsSend();
       const alwaysHide =
         typeof window !== "undefined" ? getActiveCustomScrubTerms() : [];
       const outcome = await runBrowserAgentWorkflow({

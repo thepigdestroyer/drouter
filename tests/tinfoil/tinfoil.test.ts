@@ -5,7 +5,12 @@ import { GET as getRelayAttestation } from "@/app/api/relay/attestation/route";
 import { GET as getHopRelayAttestation } from "@/app/api/relay/[relayId]/attestation/route";
 import { GET as getEnclaveMatrix } from "@/app/api/relay/enclave-matrix/route";
 import { RELAY_HOPS, pacedStream, padJsonPayloadToBucket } from "@/lib/relay";
-import { checksFromDocument, RELAY_HOPS as CLIENT_RELAY_HOPS } from "@/lib/tinfoil/client";
+import {
+  assertSessionChecksAllowSend,
+  checksFromDocument,
+  openTinfoilSession,
+  RELAY_HOPS as CLIENT_RELAY_HOPS,
+} from "@/lib/tinfoil/client";
 import {
   decodeSnpReportBytes,
   decodeTdxQuoteBytes,
@@ -511,5 +516,139 @@ describe("Two-Hop Enclave & GPU Trust Verifier", () => {
       if (value) out.push(...Array.from(value));
     }
     expect(out).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it("openTinfoilSession(...).send() refuses to transmit and throws a clear error when any session.checks entry is fail", async () => {
+    const baseDoc = {
+      enclaveHost: "router-0.tinfoil.sh",
+      releaseTag: "v0.0.167",
+      releaseDigest:
+        "5233a27f1468f474d27c103e06c1a7a607e6a722ff4f9299ddf4e32fa87f201e",
+      codeFingerprint: "abc",
+      enclaveFingerprint: "def",
+      hpkePublicKey: "123",
+      tlsPublicKey: "456",
+      selectedRouterEndpoint: "router-0.tinfoil.sh",
+      configRepo: "tinfoilsh/confidential-model-router",
+      securityVerified: true,
+      enclaveMeasurement: {
+        measurement: {
+          type: "https://tinfoil.sh/predicate/sev-snp-guest/v2",
+          registers: ["abc"],
+        },
+      },
+      codeMeasurement: {
+        type: "https://tinfoil.sh/predicate/sev-snp-guest/v2",
+        registers: ["abc"],
+      },
+      steps: {
+        fetchDigest: { status: "success" as const },
+        verifyCode: { status: "success" as const },
+        verifyEnclave: { status: "success" as const },
+        compareMeasurements: { status: "success" as const },
+        verifyCertificate: { status: "success" as const },
+      },
+    };
+
+    let completionsCalled = 0;
+    const sessionWithFailedC5 = await openTinfoilSession("kimi-k3", {
+      origin: "https://localhost:3000",
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            status: "verified",
+            routerHost: "router-0.tinfoil.sh",
+            routerReleaseDigest: baseDoc.releaseDigest,
+            models: {
+              "kimi-k3": buildFixtureModelAttestation({
+                configuredHosts: 2,
+                verifiedHosts: 1,
+                unverifiedHosts: 1,
+              }),
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      clientFactory: () => ({
+        ready: async () => {},
+        getVerificationDocument: () => baseDoc,
+        chat: {
+          completions: {
+            create: async () => {
+              completionsCalled += 1;
+              return (async function* () {
+                yield { choices: [{ delta: { content: "should-not-send" } }] };
+              })();
+            },
+          },
+        },
+      }),
+    });
+
+    expect(
+      sessionWithFailedC5.checks.find((c) => c.id === "C5")?.status,
+    ).toBe("fail");
+
+    const consume = async (s: Awaited<ReturnType<typeof openTinfoilSession>>) => {
+      const out: string[] = [];
+      for await (const delta of s.send("kimi-k3", [
+        { role: "user", content: "Hello" },
+      ])) {
+        out.push(delta);
+      }
+      return out;
+    };
+
+    await expect(consume(sessionWithFailedC5)).rejects.toThrow(
+      /Not verified: C5 \(Router-attested confidential GPU pool\) failed/,
+    );
+    expect(completionsCalled).toBe(0);
+
+    // Also test each check id C1..C7 failing on session.checks directly
+    for (const checkId of ["C1", "C2", "C3", "C4", "C5", "C6", "C7"]) {
+      const healthySession = await openTinfoilSession("kimi-k3", {
+        origin: "https://localhost:3000",
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({
+              status: "verified",
+              routerHost: "router-0.tinfoil.sh",
+              routerReleaseDigest: baseDoc.releaseDigest,
+              models: {
+                "kimi-k3": buildFixtureModelAttestation(),
+              },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        clientFactory: () => ({
+          ready: async () => {},
+          getVerificationDocument: () => baseDoc,
+          chat: {
+            completions: {
+              create: async () => {
+                completionsCalled += 1;
+                return (async function* () {
+                  yield { choices: [{ delta: { content: "ok" } }] };
+                })();
+              },
+            },
+          },
+        }),
+      });
+
+      healthySession.checks = healthySession.checks.map((c) =>
+        c.id === checkId
+          ? { ...c, status: "fail" as const, detail: `${checkId} check failed` }
+          : c,
+      );
+
+      expect(() => assertSessionChecksAllowSend(healthySession.checks)).toThrow(
+        new RegExp(`Not verified: ${checkId}`),
+      );
+      await expect(consume(healthySession)).rejects.toThrow(
+        new RegExp(`Not verified: ${checkId}`),
+      );
+      expect(completionsCalled).toBe(0);
+    }
   });
 });

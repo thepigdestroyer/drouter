@@ -226,6 +226,60 @@ function evidenceFromDocument(
   };
 }
 
+export interface TinfoilClientLike {
+  ready(): Promise<void>;
+  getVerificationDocument():
+    | Promise<VerificationDocument>
+    | VerificationDocument;
+  chat: {
+    completions: {
+      create(
+        body: {
+          model: string;
+          messages: { role: "user" | "assistant"; content: string }[];
+          stream: true;
+        },
+        options?: { headers?: Record<string, string> },
+      ): Promise<
+        AsyncIterable<{ choices: Array<{ delta?: { content?: string | null } }> }>
+      >;
+    };
+  };
+  secureClient?: {
+    _transport?: {
+      fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+    };
+  };
+}
+
+export interface OpenTinfoilSessionOptions {
+  relayId?: string;
+  rotateRelayPerTurn?: boolean;
+  origin?: string;
+  fetchImpl?: typeof fetch;
+  clientFactory?: (opts: {
+    bearerToken: string;
+    baseURL: string;
+    attestationBundleURL: string;
+    userCacheSecret: string;
+  }) => TinfoilClientLike;
+}
+
+/**
+ * Throws a clear error when any check in `checks` has `status === "fail"`.
+ * Matches the error format handled by `friendlyRuntimeError` and `sanitizeJargonToPlainWords`.
+ */
+export function assertSessionChecksAllowSend(
+  checks: readonly CheckResult[],
+): void {
+  const failed = checks.find((c) => c.status === "fail");
+  if (failed) {
+    throw new Error(
+      `Not verified: ${failed.id} (${failed.label}) failed: ${failed.detail}`,
+    );
+  }
+}
+
 /**
  * Verifies a Tinfoil enclave in this browser, then returns a session whose requests are encrypted
  * to that enclave and sent through the dRouter relay. The relay adds the API key but cannot read
@@ -233,9 +287,14 @@ function evidenceFromDocument(
  */
 export async function openTinfoilSession(
   selectedModel = "kimi-k3",
-  opts?: { relayId?: string; rotateRelayPerTurn?: boolean },
+  opts?: OpenTinfoilSessionOptions,
 ): Promise<TinfoilSession> {
-  const origin = window.location.origin;
+  const origin =
+    opts?.origin ??
+    (typeof window !== "undefined"
+      ? window.location.origin
+      : "https://localhost:3000");
+  const doFetch = opts?.fetchImpl ?? globalThis.fetch;
   const secretBytes = new Uint8Array(32);
   crypto.getRandomValues(secretBytes);
   const userCacheSecret = bytesToHex(secretBytes);
@@ -248,14 +307,21 @@ export async function openTinfoilSession(
     ? `${origin}/api/relay/${initialRelayId}`
     : `${origin}/api/relay`;
 
-  const client = new TinfoilAI({
-    bearerToken: "drouter-demo",
-    baseURL,
-    attestationBundleURL,
-    userCacheSecret,
-  });
+  const client: TinfoilClientLike = opts?.clientFactory
+    ? opts.clientFactory({
+        bearerToken: "drouter-demo",
+        baseURL,
+        attestationBundleURL,
+        userCacheSecret,
+      })
+    : (new TinfoilAI({
+        bearerToken: "drouter-demo",
+        baseURL,
+        attestationBundleURL,
+        userCacheSecret,
+      }) as unknown as TinfoilClientLike);
 
-  const matrixPromise: Promise<DeepAttestationBundle | undefined> = fetch(
+  const matrixPromise: Promise<DeepAttestationBundle | undefined> = doFetch(
     `${origin}/api/relay/enclave-matrix`,
   )
     .then(async (res) => (res.ok ? ((await res.json()) as DeepAttestationBundle) : undefined))
@@ -286,7 +352,7 @@ export async function openTinfoilSession(
       ? { snpChainVerification: deepBundle.routerSnpChain }
       : {}),
   };
-  const selectedModelAttestation = deepBundle?.models[selectedModel];
+  const selectedModelAttestation = deepBundle?.models?.[selectedModel];
 
   let activeRelayHop: string = initialRelayId ?? RELAY_HOPS[0].id;
   let turnCounter = Math.max(
@@ -341,6 +407,20 @@ export async function openTinfoilSession(
     deepBundle,
     selectedModelAttestation,
     async *send(model, messages) {
+      assertSessionChecksAllowSend(session.checks);
+      if (
+        session.deepBundle?.models &&
+        model !== selectedModel &&
+        model in session.deepBundle.models
+      ) {
+        assertSessionChecksAllowSend(
+          checksFromDocument(
+            doc,
+            session.deepBundle.models[model],
+            deepBundle?.routerSnpChain,
+          ),
+        );
+      }
       if (opts?.rotateRelayPerTurn) {
         turnCounter = (turnCounter + 1) % RELAY_HOPS.length;
         activeRelayHop = RELAY_HOPS[turnCounter].id;
