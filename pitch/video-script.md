@@ -314,7 +314,7 @@ for p in api/health api/registry api/relay/enclave-matrix api/accountability api
 
 ## 9. Do not say (true limits a judge could catch)
 
-- **Do not say Google Cloud Confidential Space is live.** `deroute-core` is built but not deployed: `/api/core/attestation` returns 503 `{"core":"not-deployed"}`. Today's egress receipt is labelled "Recorded by our server", not hardware-signed.
+- Google Cloud Confidential Space is live: `/api/core/attestation` returns a Google-signed token, `node scripts/gcp/verify-core.mjs` passes 11 of 11 checks, and each Gemini plan receipt is signed by the sealed Google computer's key.
 - **Do not say "mainnet".** Everything on Arc is Circle Arc **Testnet** (chain 5042002). The captions say so.
 - **Do not say "fully decentralized" or "anyone runs nodes today".** Joining the registry is open, but all six registered nodes are Tinfoil machines, and the contract owner can suspend or slash. The browser reads the registry through deRoute's `/api/registry` rather than an Arc RPC.
 - **Do not say "a seal check before every message".** The seven checks run when the chat opens and on "Check seal again". Each send is refused if any stored check failed. "Before unlocking the chat" is the accurate wording.

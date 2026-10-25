@@ -66,8 +66,8 @@ flowchart TB
     ModelEnclaves["Tinfoil Model Enclaves<br/>(kimi-k3, glm-5-3, deepseek-v4-1-flash,<br/>gpt-oss-120b, llama3-3-70b, gemma4-31b, nomic-embed-text)"]
   end
 
-  subgraph GCP["Google Cloud Confidential Space (built, not yet deployed)"]
-    DerouteCore["deroute-core Confidential VM (port 8443)<br/>built, not yet deployed<br/>(/knowledge/corpus, /agent/plan, /transparency/sign-tree-head)"]
+  subgraph GCP["Google Cloud Confidential Space (live, AMD SEV)"]
+    DerouteCore["deroute-core Confidential VM (port 8443)<br/>live, 11 of 11 checks<br/>(/knowledge/corpus, /agent/plan, /transparency/sign-tree-head)"]
   end
 
   subgraph External["External Control Plane, Storage, Ledger & Scheduler"]
@@ -88,7 +88,7 @@ flowchart TB
   RouterEnclave -->|"Verified Backend Routing"| ModelEnclaves
   AttestRoutes -->|"Fetch SEV-SNP / TDX / Sigstore Bundles"| RouterEnclave
 
-  PlanRoute -.->|"Verify-Then-Pin TLS (/api/core/agent/plan)<br/>built, not yet deployed"| DerouteCore
+  PlanRoute -.->|"Verify-Then-Pin TLS (/api/core/agent/plan)"| DerouteCore
   DerouteCore -.->|"Content-Free createRequest"| Gemini
   PlanRoute -->|"Fallback: Content-Free createRequest"| Gemini
 
@@ -108,7 +108,7 @@ flowchart TB
 
 - **Oblivious Relay and Enclave Routing (`src/lib/relay.ts`, `src/app/api/relay/**`)**: The browser verifies Tinfoil's AMD SEV-SNP router (`router-0.tinfoil.sh`) and model enclaves (`kimi-k3`, `glm-5-3`, `deepseek-v4-1-flash`, `gpt-oss-120b`, `llama3-3-70b`, `gemma4-31b`, `nomic-embed-text`, and `pii-filter`), pads JSON payloads to power-of-two byte buckets, and seals requests with RFC 9180 HPKE (`ehbp-encapsulated-key`). The Next.js relay validates the target origin (`*.tinfoil.sh`, `*.tinfoil.dev`), spends optional `x-drouter-credit` blind tokens, injects `Bearer ${TINFOIL_API_KEY}`, paces response streams, and logs only encrypted byte counts.
 - **Content-Free Gemini Planner (`src/app/api/gemini/plan/route.ts`)**: `POST /api/gemini/plan` rejects query parameters, validates the incoming `TaskDescriptor` against a closed schema (`assertGoogleBoundMessage` and `assertContentFree`), and routes planning to `deroute-core` when available or directly to `gemini-4-argon` on the Next.js server when `GEMINI_API_KEY` is configured, returning a signed `GeminiEgressReceipt` with a Merkle transparency log inclusion proof.
-- **Google Cloud Confidential Space Workload (`docs/confidential-space.md`)**: `deroute-core` (drawn dashed as built, not yet deployed) is designed to run inside a hardware-isolated Google Cloud Confidential Space VM on port `8443` with in-memory `egress-signing` and `tree-signing` Ed25519 keys bound to the PKI attestation token `eat_nonce` and reached via verify-then-pin TLS from `/api/core/[...path]`.
+- **Google Cloud Confidential Space Workload (`docs/confidential-space.md`)**: `deroute-core` runs inside a hardware-isolated Google Cloud Confidential Space VM on port `8443` with in-memory `egress-signing` and `tree-signing` Ed25519 keys bound to the PKI attestation token `eat_nonce` and reached via verify-then-pin TLS from `/api/core/[...path]`.
 - **MongoDB Atlas Knowledge Base and Telemetry (`src/lib/atlas/**`, `src/app/api/knowledge/corpus/route.ts`)**: `GET /api/knowledge/corpus` serves the identical sorted 16-document public corpus with a `contentSha256` ETag and zero query parameters so browsers can rank documents locally without leaking topic interest, while `runAtlasHybridSearch` combines 768-dimensional `$vectorSearch`, Lucene `$search`, and MongoDB 8.0 `$rankFusion` over D3/D4-redacted queries.
 - **Circle Arc Testnet Registry and Hourly Monitor (`src/lib/arc/**`, `.github/workflows/monitor.yml`)**: GitHub Actions triggers `POST /api/cron/monitor` twice per hour (`17 * * * *` and `47 * * * *`) to re-verify live Tinfoil enclaves and anchor verification records (`recordVerification`, `anchorReceipt`) on the Circle Arc Testnet contract (`chainId 5042002`).
 
@@ -590,6 +590,6 @@ flowchart TD
 
 ## Related documents
 
-- [Google Cloud Confidential Space plan for deroute-core](confidential-space.md) (built and reviewed, not deployed yet)
+- [Google Cloud Confidential Space plan for deroute-core](confidential-space.md) (live)
 - [Transparency log restart, 25 October 2026](transparency-log-restart.md)
 - [Project README](../README.md)
