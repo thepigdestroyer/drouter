@@ -241,6 +241,235 @@ function mapSingleMessageStrings(
   return next;
 }
 
+const SCHEMA_MAP_CONTAINER_KEYS = new Set([
+  "properties",
+  "patternProperties",
+  "$defs",
+  "definitions",
+  "dependentSchemas",
+]);
+
+const SCHEMA_NON_TRANSFORM_KEYS = new Set([
+  "type",
+  "required",
+  "dependentRequired",
+  "$schema",
+  "$id",
+  "$ref",
+  "$anchor",
+  "$dynamicRef",
+  "$dynamicAnchor",
+  "format",
+  "pattern",
+  "contentEncoding",
+  "contentMediaType",
+  "discriminator",
+]);
+
+function extractMarkedSpans(text: string): string[] {
+  const marker = "££";
+  const spans: string[] = [];
+  let searchFrom = 0;
+  while (searchFrom < text.length) {
+    const openIdx = text.indexOf(marker, searchFrom);
+    if (openIdx === -1) break;
+    const contentStart = openIdx + marker.length;
+    const closeIdx = text.indexOf(marker, contentStart);
+    if (closeIdx === -1) {
+      spans.push(text.slice(openIdx));
+      break;
+    }
+    const spanEnd = closeIdx + marker.length;
+    spans.push(text.slice(openIdx, spanEnd));
+    searchFrom = spanEnd;
+  }
+  return spans;
+}
+
+function transformSchemaValueLiteral(
+  val: unknown,
+  transform: (text: string) => string,
+): unknown {
+  if (typeof val === "string") {
+    return transform(val);
+  }
+  if (Array.isArray(val)) {
+    return val.map((item) => transformSchemaValueLiteral(item, transform));
+  }
+  return val;
+}
+
+function transformJsonSchema(
+  schema: unknown,
+  transform: (text: string) => string,
+): unknown {
+  if (!schema || typeof schema !== "object") {
+    return schema;
+  }
+  if (Array.isArray(schema)) {
+    return schema.map((item) => transformJsonSchema(item, transform));
+  }
+
+  const schemaObj = schema as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(schemaObj)) {
+    if (
+      (key === "description" || key === "title") &&
+      typeof value === "string"
+    ) {
+      out[key] = transform(value);
+    } else if (
+      key === "default" ||
+      key === "example" ||
+      key === "examples" ||
+      key === "enum"
+    ) {
+      out[key] = transformSchemaValueLiteral(value, transform);
+    } else if (
+      SCHEMA_MAP_CONTAINER_KEYS.has(key) &&
+      value &&
+      typeof value === "object" &&
+      !Array.isArray(value)
+    ) {
+      const mapOut: Record<string, unknown> = {};
+      for (const [propKey, propSchema] of Object.entries(
+        value as Record<string, unknown>,
+      )) {
+        mapOut[propKey] = transformJsonSchema(propSchema, transform);
+      }
+      out[key] = mapOut;
+    } else if (
+      key === "dependencies" &&
+      value &&
+      typeof value === "object" &&
+      !Array.isArray(value)
+    ) {
+      const depOut: Record<string, unknown> = {};
+      for (const [depKey, depVal] of Object.entries(
+        value as Record<string, unknown>,
+      )) {
+        depOut[depKey] = Array.isArray(depVal)
+          ? [...depVal]
+          : transformJsonSchema(depVal, transform);
+      }
+      out[key] = depOut;
+    } else if (SCHEMA_NON_TRANSFORM_KEYS.has(key)) {
+      out[key] = value;
+    } else if (Array.isArray(value)) {
+      out[key] = value.map((item) => transformJsonSchema(item, transform));
+    } else if (value && typeof value === "object") {
+      out[key] = transformJsonSchema(value, transform);
+    } else {
+      out[key] = value;
+    }
+  }
+
+  return out;
+}
+
+function transformToolDefinition(
+  tool: unknown,
+  transform: (text: string) => string,
+): unknown {
+  if (!tool || typeof tool !== "object" || Array.isArray(tool)) {
+    return tool;
+  }
+  const toolObj = tool as Record<string, unknown>;
+  const nextTool: Record<string, unknown> = { ...toolObj };
+
+  if (typeof toolObj.description === "string") {
+    nextTool.description = transform(toolObj.description);
+  }
+  if (toolObj.parameters && typeof toolObj.parameters === "object") {
+    nextTool.parameters = transformJsonSchema(toolObj.parameters, transform);
+  }
+
+  if (
+    toolObj.function &&
+    typeof toolObj.function === "object" &&
+    !Array.isArray(toolObj.function)
+  ) {
+    const fnObj = toolObj.function as Record<string, unknown>;
+    const nextFn: Record<string, unknown> = { ...fnObj };
+    if (typeof fnObj.description === "string") {
+      nextFn.description = transform(fnObj.description);
+    }
+    if (fnObj.parameters && typeof fnObj.parameters === "object") {
+      nextFn.parameters = transformJsonSchema(fnObj.parameters, transform);
+    }
+    if (fnObj.schema && typeof fnObj.schema === "object") {
+      nextFn.schema = transformJsonSchema(fnObj.schema, transform);
+    }
+    nextTool.function = nextFn;
+  }
+
+  return nextTool;
+}
+
+function transformLegacyFunctionDefinition(
+  fn: unknown,
+  transform: (text: string) => string,
+): unknown {
+  if (!fn || typeof fn !== "object" || Array.isArray(fn)) {
+    return fn;
+  }
+  const fnObj = fn as Record<string, unknown>;
+  const nextFn: Record<string, unknown> = { ...fnObj };
+
+  if (typeof fnObj.description === "string") {
+    nextFn.description = transform(fnObj.description);
+  }
+  if (fnObj.parameters && typeof fnObj.parameters === "object") {
+    nextFn.parameters = transformJsonSchema(fnObj.parameters, transform);
+  }
+  if (fnObj.schema && typeof fnObj.schema === "object") {
+    nextFn.schema = transformJsonSchema(fnObj.schema, transform);
+  }
+
+  return nextFn;
+}
+
+function transformResponseFormat(
+  responseFormat: unknown,
+  transform: (text: string) => string,
+): unknown {
+  if (
+    !responseFormat ||
+    typeof responseFormat !== "object" ||
+    Array.isArray(responseFormat)
+  ) {
+    return responseFormat;
+  }
+  const rfObj = responseFormat as Record<string, unknown>;
+  const nextRf: Record<string, unknown> = { ...rfObj };
+
+  if (typeof rfObj.description === "string") {
+    nextRf.description = transform(rfObj.description);
+  }
+  if (rfObj.schema && typeof rfObj.schema === "object") {
+    nextRf.schema = transformJsonSchema(rfObj.schema, transform);
+  }
+
+  if (
+    rfObj.json_schema &&
+    typeof rfObj.json_schema === "object" &&
+    !Array.isArray(rfObj.json_schema)
+  ) {
+    const jsObj = rfObj.json_schema as Record<string, unknown>;
+    const nextJs: Record<string, unknown> = { ...jsObj };
+    if (typeof jsObj.description === "string") {
+      nextJs.description = transform(jsObj.description);
+    }
+    if (jsObj.schema && typeof jsObj.schema === "object") {
+      nextJs.schema = transformJsonSchema(jsObj.schema, transform);
+    }
+    nextRf.json_schema = nextJs;
+  }
+
+  return nextRf;
+}
+
 export interface HostedFilterSuccess {
   ok: true;
   body: Record<string, unknown>;
@@ -325,7 +554,8 @@ export function filterHostedMessages(
  * Filters a full hosted chat completions request body:
  * - Drops top-level `user` and `metadata`
  * - Rejects any image/audio/file content parts with HTTP 400
- * - Runs two-pass mechanical redaction + `rehideKnownValues` across all messages
+ * - Runs two-pass mechanical redaction + `rehideKnownValues` across all messages,
+ *   `tools`, legacy `functions`, and `response_format` using the same per-request session
  */
 export function filterHostedChatRequest(
   rawBody: unknown,
@@ -342,10 +572,78 @@ export function filterHostedChatRequest(
   const record = rawBody as Record<string, unknown>;
   const rawMessages = Array.isArray(record.messages) ? record.messages : [];
 
-  const filteredMessages = filterHostedMessages(rawMessages, opts);
-  if (!filteredMessages.ok) {
-    return filteredMessages;
+  for (const msg of rawMessages) {
+    if (messageContainsUnsupportedMedia(msg)) {
+      return {
+        ok: false,
+        status: 400,
+        error: UNSUPPORTED_MEDIA_ERROR_MESSAGE,
+      };
+    }
   }
+
+  const session = opts?.session ?? createMechanicalSession(opts?.customTerms ?? []);
+
+  // Pre-register explicit ££...££ markers across messages, tools, functions, and response_format
+  const preRegister = (text: string): string => {
+    for (const span of extractMarkedSpans(text)) {
+      session.redact(span);
+    }
+    return text;
+  };
+  for (const rawMsg of rawMessages) {
+    if (rawMsg && typeof rawMsg === "object" && !Array.isArray(rawMsg)) {
+      mapSingleMessageStrings(rawMsg as Record<string, unknown>, preRegister);
+    }
+  }
+  if (Array.isArray(record.tools)) {
+    for (const tool of record.tools) {
+      transformToolDefinition(tool, preRegister);
+    }
+  }
+  if (Array.isArray(record.functions)) {
+    for (const fn of record.functions) {
+      transformLegacyFunctionDefinition(fn, preRegister);
+    }
+  }
+  if (record.response_format && typeof record.response_format === "object") {
+    transformResponseFormat(record.response_format, preRegister);
+  }
+
+  // Pass 1: Mechanical redaction across messages, tools, legacy functions, and response_format
+  const pass1 = (text: string): string => session.redact(text).text;
+  const pass1Messages = rawMessages.map((rawMsg) => {
+    if (!rawMsg || typeof rawMsg !== "object" || Array.isArray(rawMsg)) {
+      return {} as Record<string, unknown>;
+    }
+    return mapSingleMessageStrings(rawMsg as Record<string, unknown>, pass1);
+  });
+  const pass1Tools = Array.isArray(record.tools)
+    ? record.tools.map((tool) => transformToolDefinition(tool, pass1))
+    : record.tools;
+  const pass1Functions = Array.isArray(record.functions)
+    ? record.functions.map((fn) => transformLegacyFunctionDefinition(fn, pass1))
+    : record.functions;
+  const pass1ResponseFormat =
+    record.response_format && typeof record.response_format === "object"
+      ? transformResponseFormat(record.response_format, pass1)
+      : record.response_format;
+
+  // Pass 2: Re-hide known values across messages, tools, legacy functions, and response_format
+  const pass2 = (text: string): string => rehideKnownValues(text, session);
+  const pass2Messages = pass1Messages.map((msg) =>
+    mapSingleMessageStrings(msg, pass2),
+  );
+  const pass2Tools = Array.isArray(pass1Tools)
+    ? pass1Tools.map((tool) => transformToolDefinition(tool, pass2))
+    : pass1Tools;
+  const pass2Functions = Array.isArray(pass1Functions)
+    ? pass1Functions.map((fn) => transformLegacyFunctionDefinition(fn, pass2))
+    : pass1Functions;
+  const pass2ResponseFormat =
+    pass1ResponseFormat && typeof pass1ResponseFormat === "object"
+      ? transformResponseFormat(pass1ResponseFormat, pass2)
+      : pass1ResponseFormat;
 
   const nextBody: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(record)) {
@@ -354,15 +652,24 @@ export function filterHostedChatRequest(
     }
     nextBody[key] = value;
   }
-  nextBody.messages = filteredMessages.messages;
+  nextBody.messages = pass2Messages;
+  if (pass2Tools !== undefined) {
+    nextBody.tools = pass2Tools;
+  }
+  if (pass2Functions !== undefined) {
+    nextBody.functions = pass2Functions;
+  }
+  if (pass2ResponseFormat !== undefined) {
+    nextBody.response_format = pass2ResponseFormat;
+  }
 
   return {
     ok: true,
     body: nextBody,
-    messages: filteredMessages.messages,
-    session: filteredMessages.session,
-    redactionCount: filteredMessages.redactionCount,
-    restore: filteredMessages.restore,
+    messages: pass2Messages,
+    session,
+    redactionCount: session.entries().length,
+    restore: (text: string) => session.restore(text),
   };
 }
 

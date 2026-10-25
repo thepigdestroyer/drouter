@@ -605,4 +605,226 @@ describe("Hosted Gateway Mechanical Filter (F-02)", () => {
       expect(p1 + p2 + p3).toBe("Chunk VelvetHorizon done");
     }
   });
+
+  it("[R2-M2] filters tools[], legacy functions[], and response_format descriptions and recursive JSON Schema fields while preserving names/keys and restoring tool-call arguments", async () => {
+    tinfoilMocks.createCompletion.mockImplementationOnce(async (params: Record<string, unknown>) => {
+      const serialized = JSON.stringify(params);
+      expect(serialized).not.toContain("/Users/dana/projects/acme");
+      expect(serialized).not.toContain("/Users/dana");
+      expect(serialized).not.toContain("dana.reyes@example.com");
+      expect(serialized).not.toContain("ProjectHorizon");
+      expect(serialized).not.toContain("££");
+
+      const sentTools = params.tools as Array<{
+        type: string;
+        function: {
+          name: string;
+          description: string;
+          parameters: {
+            type: string;
+            required: string[];
+            properties: {
+              repoPath: { type: string; default: string; examples: string[]; enum: string[] };
+              description: { type: string; description: string };
+              title: { type: string; description: string };
+            };
+          };
+        };
+      }>;
+      expect(sentTools).toHaveLength(1);
+      expect(sentTools[0].type).toBe("function");
+      expect(sentTools[0].function.name).toBe("inspect_workspace");
+      expect(sentTools[0].function.parameters.type).toBe("object");
+      expect(sentTools[0].function.parameters.required).toEqual([
+        "repoPath",
+        "description",
+        "title",
+      ]);
+      expect(Object.keys(sentTools[0].function.parameters.properties)).toEqual([
+        "repoPath",
+        "description",
+        "title",
+      ]);
+
+      const rf = params.response_format as {
+        type: string;
+        json_schema: {
+          name: string;
+          description: string;
+          schema: {
+            type: string;
+            title: string;
+            description: string;
+            required: string[];
+            properties: { summary: { type: string; description: string } };
+          };
+        };
+      };
+      expect(rf.type).toBe("json_schema");
+      expect(rf.json_schema.name).toBe("audit_output");
+      expect(rf.json_schema.description).toContain("[URL_1]");
+      expect(rf.json_schema.description).toContain("[EMAIL_1]");
+      expect(rf.json_schema.description).toContain("[MARKED_1]");
+      expect(rf.json_schema.schema.title).toContain("[URL_1]");
+      expect(rf.json_schema.schema.description).toContain("[URL_1]");
+      expect(rf.json_schema.schema.properties.summary.description).toContain("[EMAIL_1]");
+
+      const pathPlaceholder = sentTools[0].function.parameters.properties.repoPath.default;
+
+      return {
+        id: "chatcmpl-hosted-r2-m2",
+        object: "chat.completion",
+        created: 1792800000,
+        model: "kimi-k3",
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: `Audited ${pathPlaceholder} for [EMAIL_1] on [MARKED_1].`,
+              tool_calls: [
+                {
+                  id: "call_hosted_r2m2",
+                  type: "function",
+                  function: {
+                    name: "inspect_workspace",
+                    arguments: JSON.stringify({
+                      repoPath: `${pathPlaceholder}/src/main.ts`,
+                      description: "Check [MARKED_1] for [EMAIL_1]",
+                      title: "Workspace [URL_1]",
+                    }),
+                  },
+                },
+              ],
+            },
+            finish_reason: "tool_calls",
+          },
+        ],
+      };
+    });
+
+    const requestPayload = {
+      model: "kimi-k3",
+      messages: [
+        {
+          role: "user",
+          content: "Please run the audit for ££ProjectHorizon££.",
+        },
+      ],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "inspect_workspace",
+            description:
+              "Reads files in /Users/dana/projects/acme for dana.reyes@example.com on ProjectHorizon.",
+            parameters: {
+              type: "object",
+              title: "Params for /Users/dana/projects/acme",
+              description:
+                "Schema for /Users/dana/projects/acme and dana.reyes@example.com",
+              properties: {
+                repoPath: {
+                  type: "string",
+                  title: "Path under /Users/dana/projects/acme",
+                  description: "Folder path in /Users/dana/projects/acme",
+                  default: "/Users/dana/projects/acme",
+                  examples: ["/Users/dana/projects/acme/package.json"],
+                  enum: [
+                    "/Users/dana/projects/acme",
+                    "/Users/dana/projects/acme/src",
+                  ],
+                },
+                description: {
+                  type: "string",
+                  description:
+                    "Description for dana.reyes@example.com and ProjectHorizon",
+                },
+                title: {
+                  type: "string",
+                  description: "Title for /Users/dana/projects/acme",
+                },
+              },
+              required: ["repoPath", "description", "title"],
+            },
+          },
+        },
+      ],
+      functions: [
+        {
+          name: "legacy_inspect",
+          description:
+            "Legacy function for /Users/dana/projects/acme and dana.reyes@example.com",
+          parameters: {
+            type: "object",
+            description: "Legacy schema for /Users/dana/projects/acme",
+            properties: {
+              path: {
+                type: "string",
+                description: "Path in /Users/dana/projects/acme",
+                default: "/Users/dana/projects/acme",
+              },
+            },
+            required: ["path"],
+          },
+        },
+      ],
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "audit_output",
+          description:
+            "Output schema for /Users/dana/projects/acme and dana.reyes@example.com on ProjectHorizon",
+          strict: true,
+          schema: {
+            type: "object",
+            title: "AuditOutput for /Users/dana/projects/acme",
+            description: "Structured output for /Users/dana/projects/acme",
+            properties: {
+              summary: {
+                type: "string",
+                description: "Summary for dana.reyes@example.com",
+              },
+            },
+            required: ["summary"],
+          },
+        },
+      },
+    };
+
+    // Direct unit check on filterHostedChatRequest (including legacy functions[])
+    const direct = filterHostedChatRequest(requestPayload);
+    expect(direct.ok).toBe(true);
+    if (direct.ok) {
+      const directJson = JSON.stringify(direct.body);
+      expect(directJson).not.toContain("/Users/dana/projects/acme");
+      expect(directJson).not.toContain("dana.reyes@example.com");
+      expect(directJson).not.toContain("ProjectHorizon");
+      const legacyFn = (direct.body.functions as Array<Record<string, unknown>>)[0];
+      expect(legacyFn.name).toBe("legacy_inspect");
+      expect(String(legacyFn.description)).toContain("[URL_1]");
+      expect(String(legacyFn.description)).toContain("[EMAIL_1]");
+    }
+
+    // Route integration check
+    const req = new Request("http://localhost/api/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestPayload),
+    });
+
+    const res = await postChatCompletions(req);
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    const msg = json.choices[0].message;
+    expect(msg.content).toBe(
+      "Audited /Users/dana/projects/acme for dana.reyes@example.com on ProjectHorizon.",
+    );
+    expect(msg.tool_calls[0].function.name).toBe("inspect_workspace");
+    expect(JSON.parse(msg.tool_calls[0].function.arguments)).toEqual({
+      repoPath: "/Users/dana/projects/acme/src/main.ts",
+      description: "Check ProjectHorizon for dana.reyes@example.com",
+      title: "Workspace /Users/dana/projects/acme",
+    });
+  });
 });

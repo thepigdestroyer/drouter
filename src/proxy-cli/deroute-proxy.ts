@@ -425,6 +425,240 @@ function transformSingleMessage(
   return nextMsg;
 }
 
+const SCHEMA_MAP_CONTAINER_KEYS = new Set([
+  "properties",
+  "patternProperties",
+  "$defs",
+  "definitions",
+  "dependentSchemas",
+]);
+
+const SCHEMA_NON_TRANSFORM_KEYS = new Set([
+  "type",
+  "required",
+  "dependentRequired",
+  "$schema",
+  "$id",
+  "$ref",
+  "$anchor",
+  "$dynamicRef",
+  "$dynamicAnchor",
+  "format",
+  "pattern",
+  "contentEncoding",
+  "contentMediaType",
+  "discriminator",
+]);
+
+function transformSchemaValueLiteral(
+  val: unknown,
+  transform: (text: string) => string,
+): unknown {
+  if (typeof val === "string") {
+    return transform(val);
+  }
+  if (Array.isArray(val)) {
+    return val.map((item) => transformSchemaValueLiteral(item, transform));
+  }
+  return val;
+}
+
+function transformJsonSchema(
+  schema: unknown,
+  transform: (text: string) => string,
+): unknown {
+  if (!schema || typeof schema !== "object") {
+    return schema;
+  }
+  if (Array.isArray(schema)) {
+    return schema.map((item) => transformJsonSchema(item, transform));
+  }
+
+  const schemaObj = schema as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(schemaObj)) {
+    if (
+      (key === "description" || key === "title") &&
+      typeof value === "string"
+    ) {
+      out[key] = transform(value);
+    } else if (
+      key === "default" ||
+      key === "example" ||
+      key === "examples" ||
+      key === "enum"
+    ) {
+      out[key] = transformSchemaValueLiteral(value, transform);
+    } else if (
+      SCHEMA_MAP_CONTAINER_KEYS.has(key) &&
+      value &&
+      typeof value === "object" &&
+      !Array.isArray(value)
+    ) {
+      const mapOut: Record<string, unknown> = {};
+      for (const [propKey, propSchema] of Object.entries(
+        value as Record<string, unknown>,
+      )) {
+        mapOut[propKey] = transformJsonSchema(propSchema, transform);
+      }
+      out[key] = mapOut;
+    } else if (
+      key === "dependencies" &&
+      value &&
+      typeof value === "object" &&
+      !Array.isArray(value)
+    ) {
+      const depOut: Record<string, unknown> = {};
+      for (const [depKey, depVal] of Object.entries(
+        value as Record<string, unknown>,
+      )) {
+        depOut[depKey] = Array.isArray(depVal)
+          ? [...depVal]
+          : transformJsonSchema(depVal, transform);
+      }
+      out[key] = depOut;
+    } else if (SCHEMA_NON_TRANSFORM_KEYS.has(key)) {
+      out[key] = value;
+    } else if (Array.isArray(value)) {
+      out[key] = value.map((item) => transformJsonSchema(item, transform));
+    } else if (value && typeof value === "object") {
+      out[key] = transformJsonSchema(value, transform);
+    } else {
+      out[key] = value;
+    }
+  }
+
+  return out;
+}
+
+function transformToolDefinition(
+  tool: unknown,
+  transform: (text: string) => string,
+): unknown {
+  if (!tool || typeof tool !== "object" || Array.isArray(tool)) {
+    return tool;
+  }
+  const toolObj = tool as Record<string, unknown>;
+  const nextTool: Record<string, unknown> = { ...toolObj };
+
+  if (typeof toolObj.description === "string") {
+    nextTool.description = transform(toolObj.description);
+  }
+  if (toolObj.parameters && typeof toolObj.parameters === "object") {
+    nextTool.parameters = transformJsonSchema(toolObj.parameters, transform);
+  }
+
+  if (
+    toolObj.function &&
+    typeof toolObj.function === "object" &&
+    !Array.isArray(toolObj.function)
+  ) {
+    const fnObj = toolObj.function as Record<string, unknown>;
+    const nextFn: Record<string, unknown> = { ...fnObj };
+    if (typeof fnObj.description === "string") {
+      nextFn.description = transform(fnObj.description);
+    }
+    if (fnObj.parameters && typeof fnObj.parameters === "object") {
+      nextFn.parameters = transformJsonSchema(fnObj.parameters, transform);
+    }
+    if (fnObj.schema && typeof fnObj.schema === "object") {
+      nextFn.schema = transformJsonSchema(fnObj.schema, transform);
+    }
+    nextTool.function = nextFn;
+  }
+
+  return nextTool;
+}
+
+function transformLegacyFunctionDefinition(
+  fn: unknown,
+  transform: (text: string) => string,
+): unknown {
+  if (!fn || typeof fn !== "object" || Array.isArray(fn)) {
+    return fn;
+  }
+  const fnObj = fn as Record<string, unknown>;
+  const nextFn: Record<string, unknown> = { ...fnObj };
+
+  if (typeof fnObj.description === "string") {
+    nextFn.description = transform(fnObj.description);
+  }
+  if (fnObj.parameters && typeof fnObj.parameters === "object") {
+    nextFn.parameters = transformJsonSchema(fnObj.parameters, transform);
+  }
+  if (fnObj.schema && typeof fnObj.schema === "object") {
+    nextFn.schema = transformJsonSchema(fnObj.schema, transform);
+  }
+
+  return nextFn;
+}
+
+function transformResponseFormat(
+  responseFormat: unknown,
+  transform: (text: string) => string,
+): unknown {
+  if (
+    !responseFormat ||
+    typeof responseFormat !== "object" ||
+    Array.isArray(responseFormat)
+  ) {
+    return responseFormat;
+  }
+  const rfObj = responseFormat as Record<string, unknown>;
+  const nextRf: Record<string, unknown> = { ...rfObj };
+
+  if (typeof rfObj.description === "string") {
+    nextRf.description = transform(rfObj.description);
+  }
+  if (rfObj.schema && typeof rfObj.schema === "object") {
+    nextRf.schema = transformJsonSchema(rfObj.schema, transform);
+  }
+
+  if (
+    rfObj.json_schema &&
+    typeof rfObj.json_schema === "object" &&
+    !Array.isArray(rfObj.json_schema)
+  ) {
+    const jsObj = rfObj.json_schema as Record<string, unknown>;
+    const nextJs: Record<string, unknown> = { ...jsObj };
+    if (typeof jsObj.description === "string") {
+      nextJs.description = transform(jsObj.description);
+    }
+    if (jsObj.schema && typeof jsObj.schema === "object") {
+      nextJs.schema = transformJsonSchema(jsObj.schema, transform);
+    }
+    nextRf.json_schema = nextJs;
+  }
+
+  return nextRf;
+}
+
+function preRegisterBodySchemaMarkers(
+  body: Record<string, unknown>,
+  session: MechanicalSession,
+): void {
+  const preRegister = (text: string): string => {
+    for (const span of extractMarkedSpans(text)) {
+      session.redact(span);
+    }
+    return text;
+  };
+  if (Array.isArray(body.tools)) {
+    for (const tool of body.tools) {
+      transformToolDefinition(tool, preRegister);
+    }
+  }
+  if (Array.isArray(body.functions)) {
+    for (const fn of body.functions) {
+      transformLegacyFunctionDefinition(fn, preRegister);
+    }
+  }
+  if (body.response_format && typeof body.response_format === "object") {
+    transformResponseFormat(body.response_format, preRegister);
+  }
+}
+
 export function hasUnsupportedMediaPart(
   messages: readonly unknown[],
 ): boolean {
@@ -1076,19 +1310,92 @@ const DROPPED_TOP_LEVEL_BODY_FIELDS = new Set([
   "prompt_cache_key",
 ]);
 
-function buildOutboundChatBody(
+export function buildOutboundChatBody(
   body: Record<string, unknown>,
   model: string,
   messages: ProxyChatMessage[],
   stream: boolean,
+  session?: MechanicalSession,
+  onRedactionCount?: (added: number) => void,
 ): Record<string, unknown> {
+  const activeSession = session ?? createMechanicalSession();
+  let addedRedactions = 0;
+
+  preRegisterBodySchemaMarkers(body, activeSession);
+
+  const pass1Transform = (text: string): string => {
+    const beforePlaceholders = countPlaceholdersInString(text);
+    const res = activeSession.redact(text);
+    const afterPlaceholders = countPlaceholdersInString(res.text);
+    const addedPlaceholders = Math.max(
+      0,
+      afterPlaceholders - beforePlaceholders,
+    );
+    addedRedactions += Math.max(res.redactions.length, addedPlaceholders);
+    return res.text;
+  };
+
+  const pass2Transform = (text: string): string => {
+    const beforePlaceholders = countPlaceholdersInString(text);
+    const out = rehideKnownValues(text, activeSession);
+    const afterPlaceholders = countPlaceholdersInString(out);
+    if (afterPlaceholders > beforePlaceholders) {
+      addedRedactions += afterPlaceholders - beforePlaceholders;
+    }
+    return out;
+  };
+
   const clean: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(body)) {
     if (DROPPED_TOP_LEVEL_BODY_FIELDS.has(key)) continue;
     clean[key] = value;
   }
+
+  // Pass 1 on tools, legacy functions, and response_format
+  if (Array.isArray(clean.tools)) {
+    clean.tools = clean.tools.map((tool) =>
+      transformToolDefinition(tool, pass1Transform),
+    );
+  }
+  if (Array.isArray(clean.functions)) {
+    clean.functions = clean.functions.map((fn) =>
+      transformLegacyFunctionDefinition(fn, pass1Transform),
+    );
+  }
+  if (clean.response_format && typeof clean.response_format === "object") {
+    clean.response_format = transformResponseFormat(
+      clean.response_format,
+      pass1Transform,
+    );
+  }
+
+  // Pass 2 (rehideKnownValues) across tools, legacy functions, response_format, and messages
+  if (Array.isArray(clean.tools)) {
+    clean.tools = clean.tools.map((tool) =>
+      transformToolDefinition(tool, pass2Transform),
+    );
+  }
+  if (Array.isArray(clean.functions)) {
+    clean.functions = clean.functions.map((fn) =>
+      transformLegacyFunctionDefinition(fn, pass2Transform),
+    );
+  }
+  if (clean.response_format && typeof clean.response_format === "object") {
+    clean.response_format = transformResponseFormat(
+      clean.response_format,
+      pass2Transform,
+    );
+  }
+  const pass2Messages = messages.map((msg) =>
+    transformSingleMessage(msg, pass2Transform),
+  );
+
+  if (onRedactionCount && addedRedactions > 0) {
+    onRedactionCount(addedRedactions);
+  }
+
   clean.model = model;
-  clean.messages = messages;
+  clean.messages = pass2Messages;
   clean.stream = stream;
   return clean;
 }
@@ -1407,11 +1714,28 @@ export function createDerouteProxyServer(
         return;
       }
 
-      const { messages: redactedMessages, redactionsCount } =
-        redactConversationMessages(
-          body.messages as ProxyChatMessage[],
-          session,
-        );
+      preRegisterBodySchemaMarkers(body, session);
+
+      const {
+        messages: redactedMessages,
+        redactionsCount: messageRedactionsCount,
+      } = redactConversationMessages(
+        body.messages as ProxyChatMessage[],
+        session,
+      );
+
+      let schemaRedactionsCount = 0;
+      const outboundBody = buildOutboundChatBody(
+        body,
+        model,
+        redactedMessages,
+        Boolean(body.stream),
+        session,
+        (added) => {
+          schemaRedactionsCount += added;
+        },
+      );
+      const redactionsCount = messageRedactionsCount + schemaRedactionsCount;
 
       const tokenSpend = spentStore.spendNextToken();
       if (tokenSpend.usedFreeTier) {
@@ -1441,7 +1765,7 @@ export function createDerouteProxyServer(
       try {
         if (body.stream) {
           const stream = (await verifiedSession.client.chat.completions.create(
-            buildOutboundChatBody(body, model, redactedMessages, true),
+            outboundBody,
             { headers: upstreamHeaders },
           )) as AsyncIterable<Record<string, unknown>>;
 
@@ -1762,7 +2086,7 @@ export function createDerouteProxyServer(
         }
 
         const completion = (await verifiedSession.client.chat.completions.create(
-          buildOutboundChatBody(body, model, redactedMessages, false),
+          outboundBody,
           { headers: upstreamHeaders },
         )) as Record<string, unknown>;
 

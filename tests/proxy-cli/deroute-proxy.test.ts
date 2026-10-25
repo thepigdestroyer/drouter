@@ -2183,4 +2183,311 @@ describe("K2: deroute-proxy unit & integration tests", () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it("[R2-M2] filters tools[], legacy functions[], and response_format schema descriptions/titles/defaults/examples/enums across two passes while preserving tool/parameter names and restoring tool-call arguments", async () => {
+    const tmpDir = makeTempDir("deroute-proxy-r2-m2");
+    const spentPath = path.join(tmpDir, "spent.json");
+    const capturedBodies: Array<Record<string, unknown>> = [];
+
+    const mockClient: DerouteProxyClientLike = {
+      async ready() {},
+      async getVerificationDocument() {
+        return {
+          securityVerified: true,
+          enclaveHost: "router-0.tinfoil.sh",
+          checks: ALL_PASS_CHECKS,
+        };
+      },
+      chat: {
+        completions: {
+          async create(body) {
+            capturedBodies.push(structuredClone(body));
+            const sentTools = body.tools as Array<{
+              function: {
+                name: string;
+                description: string;
+                parameters: {
+                  properties: {
+                    repoPath: { default: string };
+                    description: { description: string };
+                  };
+                };
+              };
+            }>;
+            const defaultPathPlaceholder =
+              sentTools[0].function.parameters.properties.repoPath.default;
+            return {
+              id: "chatcmpl-r2-m2",
+              object: "chat.completion",
+              choices: [
+                {
+                  index: 0,
+                  message: {
+                    role: "assistant",
+                    content: `Calling ${sentTools[0].function.name} on ${defaultPathPlaceholder} for [EMAIL_1] and [MARKED_1].`,
+                    tool_calls: [
+                      {
+                        id: "call_r2m2_1",
+                        type: "function",
+                        function: {
+                          name: sentTools[0].function.name,
+                          arguments: JSON.stringify({
+                            repoPath: `${defaultPathPlaceholder}/src/index.ts`,
+                            description: "Audit [MARKED_1] for [EMAIL_1]",
+                            title: "Check [URL_1]",
+                          }),
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            };
+          },
+        },
+      },
+    };
+
+    const started = await startDerouteProxy({
+      port: 0,
+      spentFilePath: spentPath,
+      clientFactory: () => mockClient,
+      stderr: () => {},
+      stdout: () => {},
+    });
+
+    try {
+      const res = await fetch(
+        `http://127.0.0.1:${started.port}/v1/chat/completions`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "kimi-k3",
+            messages: [
+              {
+                role: "user",
+                content: "Run the workspace audit for ££Project Horizon££.",
+              },
+            ],
+            tools: [
+              {
+                type: "function",
+                function: {
+                  name: "inspect_workspace",
+                  description:
+                    "Inspects files in /Users/dana/projects/acme for dana.reyes@example.com under Project Horizon.",
+                  strict: true,
+                  parameters: {
+                    type: "object",
+                    title: "WorkspaceParams for /Users/dana/projects/acme",
+                    description:
+                      "Parameters for /Users/dana/projects/acme owned by dana.reyes@example.com",
+                    properties: {
+                      repoPath: {
+                        type: "string",
+                        title: "Repo path in /Users/dana/projects/acme",
+                        description:
+                          "Target path inside /Users/dana/projects/acme",
+                        default: "/Users/dana/projects/acme",
+                        examples: [
+                          "/Users/dana/projects/acme/README.md",
+                          "dana.reyes@example.com",
+                        ],
+                        enum: [
+                          "/Users/dana/projects/acme",
+                          "/Users/dana/projects/acme/packages/core",
+                        ],
+                      },
+                      description: {
+                        type: "string",
+                        description:
+                          "Summary note for dana.reyes@example.com regarding Project Horizon",
+                      },
+                      title: {
+                        type: "string",
+                        description: "Report title for /Users/dana/projects/acme",
+                      },
+                      nestedFilter: {
+                        anyOf: [
+                          {
+                            type: "object",
+                            properties: {
+                              ownerEmail: {
+                                type: "string",
+                                description:
+                                  "Owner email (e.g. dana.reyes@example.com)",
+                              },
+                            },
+                            required: ["ownerEmail"],
+                          },
+                          { type: "null" },
+                        ],
+                      },
+                    },
+                    required: ["repoPath", "description", "title"],
+                    additionalProperties: false,
+                  },
+                },
+              },
+            ],
+            functions: [
+              {
+                name: "legacy_scan_workspace",
+                description:
+                  "Legacy scanner for /Users/dana/projects/acme and dana.reyes@example.com (Project Horizon)",
+                parameters: {
+                  type: "object",
+                  description: "Legacy params for /Users/dana/projects/acme",
+                  properties: {
+                    targetDir: {
+                      type: "string",
+                      description: "Directory under /Users/dana/projects/acme",
+                      default: "/Users/dana/projects/acme",
+                    },
+                  },
+                  required: ["targetDir"],
+                },
+              },
+            ],
+            response_format: {
+              type: "json_schema",
+              json_schema: {
+                name: "workspace_audit_report",
+                description:
+                  "Audit report for /Users/dana/projects/acme and dana.reyes@example.com on Project Horizon",
+                strict: true,
+                schema: {
+                  type: "object",
+                  title: "AuditSchema for /Users/dana/projects/acme",
+                  description:
+                    "Report schema for /Users/dana/projects/acme and dana.reyes@example.com",
+                  properties: {
+                    verdict: {
+                      type: "string",
+                      description:
+                        "Verdict for /Users/dana/projects/acme and Project Horizon",
+                    },
+                  },
+                  required: ["verdict"],
+                  additionalProperties: false,
+                },
+              },
+            },
+          }),
+        },
+      );
+
+      expect(res.status).toBe(200);
+      expect(capturedBodies).toHaveLength(1);
+
+      const outbound = capturedBodies[0];
+      const serializedOutbound = JSON.stringify(outbound);
+
+      // 1. Sensitive path, email, and marked phrase never reach the mocked upstream
+      expect(serializedOutbound).not.toContain("/Users/dana/projects/acme");
+      expect(serializedOutbound).not.toContain("/Users/dana");
+      expect(serializedOutbound).not.toContain("dana.reyes@example.com");
+      expect(serializedOutbound).not.toContain("Project Horizon");
+      expect(serializedOutbound).not.toContain("££");
+
+      // 2. Tool names, legacy function names, response_format names, property keys, required, and types are unchanged
+      const tool0 = (outbound.tools as Array<Record<string, unknown>>)[0];
+      expect(tool0.type).toBe("function");
+      const fn0 = tool0.function as Record<string, unknown>;
+      expect(fn0.name).toBe("inspect_workspace");
+      expect(fn0.strict).toBe(true);
+      expect(String(fn0.description)).toContain("[URL_1]");
+      expect(String(fn0.description)).toContain("[EMAIL_1]");
+      expect(String(fn0.description)).toContain("[MARKED_1]");
+
+      const params0 = fn0.parameters as Record<string, unknown>;
+      expect(params0.type).toBe("object");
+      expect(params0.required).toEqual(["repoPath", "description", "title"]);
+      expect(params0.additionalProperties).toBe(false);
+      const props0 = params0.properties as Record<string, Record<string, unknown>>;
+      expect(Object.keys(props0)).toEqual([
+        "repoPath",
+        "description",
+        "title",
+        "nestedFilter",
+      ]);
+      expect(props0.repoPath.type).toBe("string");
+      expect(props0.repoPath.default).toBe("[URL_1]");
+      expect(props0.repoPath.examples).toEqual([
+        "[URL_1]/README.md",
+        "[EMAIL_1]",
+      ]);
+      expect(props0.repoPath.enum).toEqual([
+        "[URL_1]",
+        "[URL_1]/packages/core",
+      ]);
+      expect(props0.description.type).toBe("string");
+      expect(String(props0.description.description)).toContain("[EMAIL_1]");
+      expect(String(props0.description.description)).toContain("[MARKED_1]");
+
+      const legacyFn0 = (outbound.functions as Array<Record<string, unknown>>)[0];
+      expect(legacyFn0.name).toBe("legacy_scan_workspace");
+      expect(String(legacyFn0.description)).toContain("[URL_1]");
+      expect(String(legacyFn0.description)).toContain("[EMAIL_1]");
+      expect(String(legacyFn0.description)).toContain("[MARKED_1]");
+
+      const rf = outbound.response_format as {
+        type: string;
+        json_schema: {
+          name: string;
+          description: string;
+          strict: boolean;
+          schema: {
+            type: string;
+            title: string;
+            description: string;
+            required: string[];
+            properties: { verdict: { type: string; description: string } };
+          };
+        };
+      };
+      expect(rf.type).toBe("json_schema");
+      expect(rf.json_schema.name).toBe("workspace_audit_report");
+      expect(rf.json_schema.strict).toBe(true);
+      expect(rf.json_schema.description).toContain("[URL_1]");
+      expect(rf.json_schema.description).toContain("[EMAIL_1]");
+      expect(rf.json_schema.description).toContain("[MARKED_1]");
+      expect(rf.json_schema.schema.title).toContain("[URL_1]");
+      expect(rf.json_schema.schema.description).toContain("[URL_1]");
+      expect(rf.json_schema.schema.required).toEqual(["verdict"]);
+      expect(rf.json_schema.schema.properties.verdict.type).toBe("string");
+      expect(rf.json_schema.schema.properties.verdict.description).toContain(
+        "[URL_1]",
+      );
+      expect(rf.json_schema.schema.properties.verdict.description).toContain(
+        "[MARKED_1]",
+      );
+
+      // 3. Response content and tool_calls arguments are restored with original path, email, and marked phrase
+      const completion = (await res.json()) as {
+        choices: Array<{
+          message: {
+            content: string;
+            tool_calls: Array<{
+              function: { name: string; arguments: string };
+            }>;
+          };
+        }>;
+      };
+      const msg = completion.choices[0].message;
+      expect(msg.content).toBe(
+        "Calling inspect_workspace on /Users/dana/projects/acme for dana.reyes@example.com and Project Horizon.",
+      );
+      expect(msg.tool_calls[0].function.name).toBe("inspect_workspace");
+      expect(JSON.parse(msg.tool_calls[0].function.arguments)).toEqual({
+        repoPath: "/Users/dana/projects/acme/src/index.ts",
+        description: "Audit Project Horizon for dana.reyes@example.com",
+        title: "Check /Users/dana/projects/acme",
+      });
+    } finally {
+      await started.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });
