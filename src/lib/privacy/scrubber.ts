@@ -1,4 +1,8 @@
 import type { ScrubResult } from "@/lib/types";
+import { MECHANICAL_RULESET } from "./mechanical-ruleset";
+import { isValidIbanMod97, isValidLuhn } from "./mechanical";
+
+export { isValidIbanMod97, isValidLuhn };
 
 export type PiiKind = "SECRET" | "EMAIL" | "PHONE" | "IP" | "ACCT" | "ENTITY";
 
@@ -189,63 +193,7 @@ function isBase64WrappedSecret(raw: string): boolean {
   }
 }
 
-/**
- * Validates a payment card number (13..19 digits) using the ISO/IEC 7812 Luhn check.
- */
-export function isValidLuhn(raw: string): boolean {
-  const digits = raw.replace(/\D/g, "");
-  if (digits.length < 13 || digits.length > 19) return false;
-  if (/^0+$/.test(digits)) return false;
-
-  let sum = 0;
-  let shouldDouble = false;
-  for (let i = digits.length - 1; i >= 0; i--) {
-    let d = digits.charCodeAt(i) - 48;
-    if (d < 0 || d > 9) return false;
-    if (shouldDouble) {
-      d *= 2;
-      if (d > 9) d -= 9;
-    }
-    sum += d;
-    shouldDouble = !shouldDouble;
-  }
-  return sum % 10 === 0;
-}
-
-const IBAN_COUNTRY_CODES = new Set([
-  "AD", "AE", "AL", "AT", "AZ", "BA", "BE", "BG", "BH", "BI", "BR", "BY",
-  "CH", "CR", "CY", "CZ", "DE", "DK", "DO", "EE", "EG", "ES", "FI", "FO",
-  "FR", "GB", "GE", "GI", "GL", "GR", "GT", "HR", "HU", "IE", "IL", "IQ",
-  "IS", "IT", "JO", "KW", "KZ", "LB", "LC", "LI", "LT", "LU", "LV", "LY",
-  "MC", "MD", "ME", "MK", "MR", "MT", "MU", "NL", "NO", "PK", "PL", "PS",
-  "PT", "QA", "RO", "RS", "RU", "SA", "SC", "SD", "SE", "SI", "SK", "SM",
-  "SO", "ST", "SV", "TL", "TN", "TR", "UA", "VA", "VG", "XK",
-]);
-
-/**
- * Validates an IBAN string using ISO 13616 structure and ISO 7064 Mod-97-10 check.
- */
-export function isValidIbanMod97(raw: string): boolean {
-  const cleaned = raw.replace(/[\s-]/g, "").toUpperCase();
-  if (cleaned.length < 15 || cleaned.length > 34) return false;
-  if (!/^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(cleaned)) return false;
-  if (!IBAN_COUNTRY_CODES.has(cleaned.slice(0, 2))) return false;
-
-  const rearranged = cleaned.slice(4) + cleaned.slice(0, 4);
-  let remainder = 0;
-  for (let i = 0; i < rearranged.length; i++) {
-    const code = rearranged.charCodeAt(i);
-    if (code >= 48 && code <= 57) {
-      remainder = (remainder * 10 + (code - 48)) % 97;
-    } else if (code >= 65 && code <= 90) {
-      const val = code - 55;
-      remainder = (remainder * 100 + val) % 97;
-    } else {
-      return false;
-    }
-  }
-  return remainder === 1;
-}
+const IBAN_COUNTRY_CODES = new Set(MECHANICAL_RULESET.wordLists.ibanCountryCodes);
 
 const EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
 

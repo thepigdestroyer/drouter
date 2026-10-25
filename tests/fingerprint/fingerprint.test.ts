@@ -59,7 +59,7 @@ describe("E2: rulesetFingerprint stability and sensitivity", () => {
 
     // 1. Version change
     const vChanged = cloneRuleset();
-    vChanged.version = "1.0.1";
+    vChanged.version = "1.0.2";
     expect(rulesetFingerprint(vChanged)).not.toBe(baseline);
 
     // 2. Regex source change
@@ -116,20 +116,20 @@ describe("E2: rulesetFingerprint stability and sensitivity", () => {
   });
 });
 
-describe("E2: static check that mechanical.ts has no rule constants outside MECHANICAL_RULESET", () => {
-  it("contains no regex literals, no hardcoded pattern strings, no word-list sets, and no magic rule thresholds in mechanical.ts", () => {
+describe("E2: static check that mechanical.ts and its runtime imports define no regex literals or rule constants outside MECHANICAL_RULESET", () => {
+  it("contains no regex literals, no hardcoded pattern strings, no word-list sets, and no external runtime rule imports in mechanical.ts", () => {
     const mechanicalPath = resolve(ROOT, "src/lib/privacy/mechanical.ts");
     const source = readFileSync(mechanicalPath, "utf8");
 
-    // Strip comments before checking for regex literals or rule constants
-    const withoutBlockComments = source.replace(/\/\*[\s\S]*?\*\//g, "");
-    const withoutComments = withoutBlockComments.replace(/\/\/.*$/gm, "");
+    const stripComments = (code: string): string =>
+      code.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+
+    const withoutComments = stripComments(source);
 
     // 1. No regex literals `/.../flags` anywhere in mechanical.ts
-    const regexLiteralMatches = withoutComments.match(
-      /(?:^|[=(\[,:;!&|?])\s*\/(?![/*])(?:\\.|[^/\\\r\n])+\/[gimsuy]*/gm,
-    );
-    expect(regexLiteralMatches).toBeNull();
+    const regexLiteralRe =
+      /(?:^|[=(\[,:;!&|?])\s*\/(?![/*])(?:\\.|[^/\\\r\n])+\/[gimsuy]*/gm;
+    expect(withoutComments.match(regexLiteralRe)).toBeNull();
 
     // 2. Only `compileRuleSpec` may call `new RegExp(...)`
     const newRegExpMatches = withoutComments.match(/new\s+RegExp\s*\(/g) ?? [];
@@ -156,9 +156,60 @@ describe("E2: static check that mechanical.ts has no rule constants outside MECH
       expect(withoutComments).not.toContain(name);
     }
 
-    // 4. Imports MECHANICAL_RULESET from ./mechanical-ruleset
-    expect(withoutComments).toContain('from "./mechanical-ruleset"');
-    expect(withoutComments).toContain("MECHANICAL_RULESET");
+    // 4. Every non-type runtime import of mechanical.ts must come from ./mechanical-ruleset,
+    // and every imported runtime module must also have zero regex literals or `new RegExp(`.
+    const importStmtRegex =
+      /import\s+(?:(type)\s+)?([\s\S]*?)\s+from\s+["']([^"']+)["']/g;
+    const runtimeImportSpecifiers: string[] = [];
+    let impMatch: RegExpExecArray | null;
+    while ((impMatch = importStmtRegex.exec(withoutComments)) !== null) {
+      const topLevelTypeKeyword = impMatch[1];
+      const clause = impMatch[2].trim();
+      const specifier = impMatch[3];
+      if (topLevelTypeKeyword === "type") continue;
+      // Check if every named import inside `{ ... }` is prefixed with `type `
+      const bracesMatch = clause.match(/^\{([\s\S]*)\}$/);
+      if (bracesMatch) {
+        const specifiers = bracesMatch[1]
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (specifiers.every((s) => /^type\s+/.test(s))) {
+          continue;
+        }
+      }
+      runtimeImportSpecifiers.push(specifier);
+    }
+
+    expect(runtimeImportSpecifiers).toEqual(["./mechanical-ruleset"]);
+
+    for (const specifier of runtimeImportSpecifiers) {
+      const importedPath = resolve(
+        ROOT,
+        "src/lib/privacy",
+        `${specifier.replace(/^\.\//, "")}.ts`,
+      );
+      const importedClean = stripComments(readFileSync(importedPath, "utf8"));
+      expect(
+        importedClean.match(regexLiteralRe),
+        `${specifier} must not define regex literals`,
+      ).toBeNull();
+      expect(
+        importedClean.match(/new\s+RegExp\s*\(/g),
+        `${specifier} must not construct RegExp instances`,
+      ).toBeNull();
+    }
+
+    // 5. Verify homoglyphMap has no shadowed circled digits (\u2460..\u2468)
+    for (let cp = 0x2460; cp <= 0x2468; cp++) {
+      const ch = String.fromCharCode(cp);
+      expect(ch in MECHANICAL_RULESET.unicodeNormalization.homoglyphMap).toBe(
+        false,
+      );
+    }
+    expect(MECHANICAL_RULESET.unicodeNormalization.homoglyphMap["\u24ea"]).toBe(
+      "0",
+    );
   });
 });
 
@@ -205,8 +256,12 @@ describe("E2: FilterFingerprintBadge states and send blocking", () => {
     expect(turn.outboundText).toContain("[EMAIL_1]");
   });
 
-  it("handles State 2 (published & matching + confirmed Arc receipt): verifies via eth_getTransactionReceipt and shows tx link inside TechDetails", async () => {
+  it("handles State 2 (published & matching + confirmed Arc receipt with matching ReceiptAnchored topic): verifies via eth_getTransactionReceipt and shows tx link inside TechDetails", async () => {
     const fp = rulesetFingerprint();
+    const expectedAnchorHash = computeFilterAnchorReceiptHash(
+      MECHANICAL_RULESET.version,
+      fp,
+    );
     const txHash = `0x${"ab".repeat(32)}`;
     const mockFetch = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body ?? "{}")) as {
@@ -223,6 +278,16 @@ describe("E2: FilterFingerprintBadge states and send blocking", () => {
             transactionHash: txHash,
             status: "0x1",
             blockNumber: "0x1234",
+            logs: [
+              {
+                topics: [
+                  "0x9d9c8502e4b010018a5b93b896a3077b39821f6d083b5f412bc21d7e0dc6df3a",
+                  "0x0000000000000000000000001111111111111111111111111111111111111111",
+                  expectedAnchorHash,
+                ],
+                data: "0x00000000000000000000000000000000000000000000000000000000671b0000",
+              },
+            ],
           },
         }),
         { status: 200, headers: { "Content-Type": "application/json" } },
@@ -269,7 +334,7 @@ describe("E2: FilterFingerprintBadge states and send blocking", () => {
     expect(openHtml).toContain(fp);
   });
 
-  it("handles State 3 (mismatch): renders orange alert and blocks prepareOutboundTurn from sending", async () => {
+  it("handles State 3 (mismatch): renders orange alert with recovery hint and blocks prepareOutboundTurn from sending", async () => {
     const tamperedFingerprint = `0x${"ff".repeat(32)}`;
     const status = evaluateLocalFilterFingerprint({
       published: {
@@ -282,6 +347,7 @@ describe("E2: FilterFingerprintBadge states and send blocking", () => {
     expect(status.state).toBe("mismatch");
     expect(status.blockingSend).toBe(true);
     expect(status.blockReason).toContain("does not match the published version");
+    expect(status.blockReason).toContain("Reload the page to get the latest version");
 
     const html = renderToStaticMarkup(
       React.createElement(FilterFingerprintBadge, { status }),
@@ -291,6 +357,7 @@ describe("E2: FilterFingerprintBadge states and send blocking", () => {
     expect(html).toContain(
       `Personal-detail filter v${MECHANICAL_RULESET.version}: does not match the published version`,
     );
+    expect(html).toContain("Reload the page to get the latest version");
 
     // Send pipeline throws FilterFingerprintMismatchError when fingerprint mismatches
     await expect(
@@ -304,9 +371,15 @@ describe("E2: FilterFingerprintBadge states and send blocking", () => {
     ).rejects.toThrow(FilterFingerprintMismatchError);
   });
 
-  it("handles State 4 (Arc receipt missing or reverted): marks state as receipt-missing without falsely claiming receipt confirmation", async () => {
+  it("handles State 4 (Arc receipt missing, missing status, wrong log topic, or RPC outage): requires well-formed receipt with expected topic and shows 'could not be confirmed right now' without blocking send", async () => {
     const fp = rulesetFingerprint();
+    const expectedAnchorHash = computeFilterAnchorReceiptHash(
+      MECHANICAL_RULESET.version,
+      fp,
+    );
     const txHash = `0x${"ef".repeat(32)}`;
+
+    // 4a. Null receipt / RPC cannot confirm right now
     const mockNullReceiptFetch = vi.fn(async () => {
       return new Response(
         JSON.stringify({
@@ -319,6 +392,7 @@ describe("E2: FilterFingerprintBadge states and send blocking", () => {
     });
 
     const receiptCheck = await checkArcTransactionReceipt(txHash, {
+      expectedReceiptHash: expectedAnchorHash,
       fetchImpl: mockNullReceiptFetch as unknown as typeof fetch,
     });
     expect(receiptCheck.exists).toBe(false);
@@ -337,6 +411,81 @@ describe("E2: FilterFingerprintBadge states and send blocking", () => {
     expect(status.arcReceiptVerified).toBe(false);
     expect(status.blockingSend).toBe(false);
     expect(renderFilterFingerprintSummaryText(status)).toContain(
+      "public receipt could not be confirmed right now",
+    );
+
+    // 4b. Receipt missing `status` field is rejected (never defaults to "0x1")
+    const mockMissingStatusFetch = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: {
+            transactionHash: txHash,
+            blockNumber: "0x1234",
+            logs: [{ topics: [expectedAnchorHash] }],
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+
+    const missingStatusCheck = await checkArcTransactionReceipt(txHash, {
+      expectedReceiptHash: expectedAnchorHash,
+      fetchImpl: mockMissingStatusFetch as unknown as typeof fetch,
+    });
+    expect(missingStatusCheck.exists).toBe(true);
+    expect(missingStatusCheck.succeeded).toBe(false);
+
+    // 4c. Receipt with status "0x1" but wrong topic hash is rejected
+    const mockWrongTopicFetch = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: {
+            transactionHash: txHash,
+            status: "0x1",
+            blockNumber: "0x1234",
+            logs: [
+              {
+                topics: [
+                  `0x${"11".repeat(32)}`,
+                  `0x${"22".repeat(32)}`,
+                ],
+              },
+            ],
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+
+    const wrongTopicStatus = await verifyFilterFingerprint({
+      published: {
+        version: MECHANICAL_RULESET.version,
+        fingerprint: fp,
+        anchorTx: txHash,
+      },
+      fetchImpl: mockWrongTopicFetch as unknown as typeof fetch,
+    });
+    expect(wrongTopicStatus.state).toBe("receipt-missing");
+    expect(wrongTopicStatus.arcReceiptVerified).toBe(false);
+    expect(wrongTopicStatus.blockingSend).toBe(false);
+    expect(renderFilterFingerprintSummaryText(wrongTopicStatus)).toContain(
+      "public receipt could not be confirmed right now",
+    );
+
+    // 4d. Missing anchorTx shows "public receipt pending"
+    const pendingStatus = await verifyFilterFingerprint({
+      published: {
+        version: MECHANICAL_RULESET.version,
+        fingerprint: fp,
+        anchorTx: null,
+      },
+    });
+    expect(pendingStatus.state).toBe("receipt-missing");
+    expect(renderFilterFingerprintSummaryText(pendingStatus)).toContain(
       "public receipt pending",
     );
   });
@@ -429,18 +578,22 @@ describe("E2: scripts/publish-filter-fingerprint.mjs safety", () => {
 
     const states = [
       evaluateLocalFilterFingerprint({
-        published: { version: "1.0.0", fingerprint: null, anchorTx: null },
+        published: {
+          version: MECHANICAL_RULESET.version,
+          fingerprint: null,
+          anchorTx: null,
+        },
       }),
       evaluateLocalFilterFingerprint({
         published: {
-          version: "1.0.0",
+          version: MECHANICAL_RULESET.version,
           fingerprint: rulesetFingerprint(),
           anchorTx: `0x${"ab".repeat(32)}`,
         },
       }),
       evaluateLocalFilterFingerprint({
         published: {
-          version: "1.0.0",
+          version: MECHANICAL_RULESET.version,
           fingerprint: `0x${"ff".repeat(32)}`,
           anchorTx: `0x${"ab".repeat(32)}`,
         },

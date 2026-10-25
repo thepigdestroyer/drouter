@@ -38,7 +38,9 @@ export interface MechanicalRuleset {
     mathAlphaSetSize: number;
     mathAlphaUpperCount: number;
     asciiDigitZeroCode: number;
+    asciiDigitNineCode: number;
     asciiUpperACode: number;
+    asciiUpperZCode: number;
     asciiLowerACode: number;
     fullwidthAsciiRange: readonly [number, number];
     fullwidthAsciiDelta: number;
@@ -87,6 +89,7 @@ export interface MechanicalRuleset {
     ibanStripSeparators: RegexRuleSpec;
     ibanStructuralFallback: RegexRuleSpec;
     creditCardCandidate: RegexRuleSpec;
+    allZerosPattern: RegexRuleSpec;
     ip: readonly RegexRuleSpec[];
     address: readonly RegexRuleSpec[];
     date: readonly RegexRuleSpec[];
@@ -119,6 +122,14 @@ export interface MechanicalRuleset {
     ibanMinLength: number;
     ibanMaxLength: number;
     ibanMinDigits: number;
+    ibanHeaderSliceLength: number;
+    ibanLetterOffset: number;
+    ibanModulus: number;
+    ibanExpectedRemainder: number;
+    luhnMinDigits: number;
+    luhnMaxDigits: number;
+    luhnDoubleSubtract: number;
+    luhnModulus: number;
     phoneMinDigits: number;
     phoneMaxDigits: number;
     minMultiWordNameTokens: number;
@@ -137,7 +148,7 @@ const NAME_WORD_SRC =
   "(?:(?:Mc|Mac|O'|D')[A-Z][a-z]{1,25}|[A-Z][a-z]{1,25}(?:[-'][A-Z]?[a-z]{1,25})*)";
 
 export const MECHANICAL_RULESET: MechanicalRuleset = {
-  version: "1.0.0",
+  version: "1.0.1",
   placeholderPatterns: {
     existingPlaceholder: {
       source:
@@ -221,7 +232,9 @@ export const MECHANICAL_RULESET: MechanicalRuleset = {
     mathAlphaSetSize: 52,
     mathAlphaUpperCount: 26,
     asciiDigitZeroCode: 48,
+    asciiDigitNineCode: 57,
     asciiUpperACode: 65,
+    asciiUpperZCode: 90,
     asciiLowerACode: 97,
     fullwidthAsciiRange: [0xff01, 0xff5e],
     fullwidthAsciiDelta: 0xfee0,
@@ -279,15 +292,8 @@ export const MECHANICAL_RULESET: MechanicalRuleset = {
       "\u2087": "7",
       "\u2088": "8",
       "\u2089": "9",
-      // Circled digits
+      // Circled digit zero (1..9 are handled by circledDigitRange)
       "\u24ea": "0",
-      "\u2460": "1",
-      "\u2461": "2",
-      "\u2462": "3",
-      "\u2463": "4",
-      "\u2464": "5",
-      "\u2465": "6",
-      "\u2466": "8",
       // Nordic / Polish stroke letters that do not decompose via NFKD
       "\u00d8": "O",
       "\u00f8": "o",
@@ -551,6 +557,10 @@ export const MECHANICAL_RULESET: MechanicalRuleset = {
         "\\b(?:\\d{4}[ -]){3}\\d{1,7}\\b|\\b\\d{4}[ -]\\d{6}[ -]\\d{4,5}\\b|\\b\\d{13,19}\\b",
       flags: "g",
     },
+    allZerosPattern: {
+      source: "^0+$",
+      flags: "",
+    },
     ip: [
       {
         source:
@@ -738,6 +748,14 @@ export const MECHANICAL_RULESET: MechanicalRuleset = {
     ibanMinLength: 15,
     ibanMaxLength: 34,
     ibanMinDigits: 6,
+    ibanHeaderSliceLength: 4,
+    ibanLetterOffset: 55,
+    ibanModulus: 97,
+    ibanExpectedRemainder: 1,
+    luhnMinDigits: 13,
+    luhnMaxDigits: 19,
+    luhnDoubleSubtract: 9,
+    luhnModulus: 10,
     phoneMinDigits: 10,
     phoneMaxDigits: 15,
     minMultiWordNameTokens: 2,

@@ -3,11 +3,7 @@ import {
   type MechanicalRuleset,
   type RegexRuleSpec,
 } from "./mechanical-ruleset";
-import {
-  isValidIbanMod97,
-  isValidLuhn,
-  type SessionScrubber,
-} from "./scrubber";
+import type { SessionScrubber } from "./scrubber";
 
 export type MechanicalRedactionKind =
   | "SECRET"
@@ -357,6 +353,100 @@ function isBase64WrappedSecret(
   }
 }
 
+/**
+ * Validates a payment card number using the ISO/IEC 7812 Luhn check.
+ * Every regex and numeric bound is read from `ruleset`.
+ */
+export function isValidLuhn(
+  raw: string,
+  ruleset: MechanicalRuleset = MECHANICAL_RULESET,
+): boolean {
+  const digits = raw.replace(compileRuleSpec(ruleset.patterns.nonDigitsStrip), "");
+  const {
+    luhnMinDigits,
+    luhnMaxDigits,
+    luhnDoubleSubtract,
+    luhnModulus,
+  } = ruleset.thresholds;
+  if (digits.length < luhnMinDigits || digits.length > luhnMaxDigits) {
+    return false;
+  }
+  if (compileRuleSpec(ruleset.patterns.allZerosPattern).test(digits)) {
+    return false;
+  }
+
+  const zeroCode = ruleset.unicodeNormalization.asciiDigitZeroCode;
+  const maxDigit =
+    ruleset.unicodeNormalization.asciiDigitNineCode - zeroCode;
+  let sum = 0;
+  let shouldDouble = false;
+  for (let i = digits.length - 1; i >= 0; i--) {
+    let d = digits.charCodeAt(i) - zeroCode;
+    if (d < 0 || d > maxDigit) return false;
+    if (shouldDouble) {
+      d *= 2;
+      if (d > maxDigit) d -= luhnDoubleSubtract;
+    }
+    sum += d;
+    shouldDouble = !shouldDouble;
+  }
+  return sum % luhnModulus === 0;
+}
+
+/**
+ * Validates an IBAN string using ISO 13616 structure and ISO 7064 Mod-97-10 check.
+ * Every regex, country code list, and numeric bound is read from `ruleset`.
+ */
+export function isValidIbanMod97(
+  raw: string,
+  ruleset: MechanicalRuleset = MECHANICAL_RULESET,
+): boolean {
+  const cleaned = raw
+    .replace(compileRuleSpec(ruleset.patterns.ibanStripSeparators), "")
+    .toUpperCase();
+  const {
+    ibanMinLength,
+    ibanMaxLength,
+    ibanHeaderSliceLength,
+    ibanLetterOffset,
+    ibanModulus,
+    ibanExpectedRemainder,
+  } = ruleset.thresholds;
+  if (cleaned.length < ibanMinLength || cleaned.length > ibanMaxLength) {
+    return false;
+  }
+  if (!compileRuleSpec(ruleset.patterns.ibanStructuralFallback).test(cleaned)) {
+    return false;
+  }
+  if (!ruleset.wordLists.ibanCountryCodes.includes(cleaned.slice(0, 2))) {
+    return false;
+  }
+
+  const {
+    asciiDigitZeroCode,
+    asciiDigitNineCode,
+    asciiUpperACode,
+    asciiUpperZCode,
+  } = ruleset.unicodeNormalization;
+  const rearranged =
+    cleaned.slice(ibanHeaderSliceLength) +
+    cleaned.slice(0, ibanHeaderSliceLength);
+  let remainder = 0;
+  for (let i = 0; i < rearranged.length; i++) {
+    const code = rearranged.charCodeAt(i);
+    if (code >= asciiDigitZeroCode && code <= asciiDigitNineCode) {
+      remainder =
+        (remainder * 10 + (code - asciiDigitZeroCode)) % ibanModulus;
+    } else if (code >= asciiUpperACode && code <= asciiUpperZCode) {
+      const val = code - ibanLetterOffset;
+      remainder = (remainder * 100 + val) % ibanModulus;
+    } else {
+      return false;
+    }
+  }
+  return remainder === ibanExpectedRemainder;
+}
+
 function escapeRegExp(str: string, ruleset: MechanicalRuleset): string {
   return str.replace(
     compileRuleSpec(ruleset.patterns.regexSpecialCharsEscape),
@@ -625,12 +715,12 @@ export function mechanicalRedact(
       if (!ibanCountries.has(country)) return false;
       const digitCount = (cleaned.match(digitsGlobalRe) ?? []).length;
       if (digitCount < ruleset.thresholds.ibanMinDigits) return false;
-      if (isValidIbanMod97(cleaned)) return true;
+      if (isValidIbanMod97(cleaned, ruleset)) return true;
       return ibanFallbackRe.test(cleaned);
     },
   });
   addMatches(ruleset.patterns.creditCardCandidate, "ACCT", {
-    validate: (normRaw) => isValidLuhn(normRaw),
+    validate: (normRaw) => isValidLuhn(normRaw, ruleset),
   });
 
   // 6. IP addresses (IPv4 and IPv6)

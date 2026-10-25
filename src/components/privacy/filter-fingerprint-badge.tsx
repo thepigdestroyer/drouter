@@ -65,6 +65,9 @@ export interface FilterFingerprintBadgeProps {
 export function renderFilterFingerprintSummaryText(
   status: FilterFingerprintStatus,
 ): string {
+  if (typeof status.plainSummary === "string" && status.plainSummary.trim().length > 0) {
+    return status.plainSummary;
+  }
   if (status.state === "not-published") {
     return `Personal-detail filter v${status.version}: not yet published`;
   }
@@ -105,7 +108,7 @@ export function FilterFingerprintBadge({
           <div className="font-semibold">{summaryText}</div>
           <p>
             {status.blockReason ??
-              "Sending is blocked because the personal-detail filter running in this browser does not match the published version in the public receipt book."}
+              "Sending is blocked because the personal-detail filter running in this browser does not match the published version in the public receipt book. Reload the page to get the latest version; if this keeps happening, wait until the public receipt book is updated."}
           </p>
         </div>
       ) : (
@@ -134,17 +137,22 @@ export function FilterFingerprintBadge({
       >
         <div className="space-y-1.5 font-mono text-[11px] text-ink-2">
           <div>Rule-set version: {status.version}</div>
-          <div className="break-all">
+          <div>
             Browser SHA-256 fingerprint:{" "}
-            {status.computedFingerprint || "Computing..."}
+            <span className={status.computedFingerprint ? "break-all" : undefined}>
+              {status.computedFingerprint || "Computing..."}
+            </span>
           </div>
-          <div className="break-all">
+          <div>
             Published SHA-256 fingerprint:{" "}
-            {status.publishedFingerprint ?? "Not yet published"}
+            <span className={status.publishedFingerprint ? "break-all" : undefined}>
+              {status.publishedFingerprint ?? "Not yet published"}
+            </span>
           </div>
           {status.anchorReceiptHash && (
-            <div className="break-all">
-              Arc anchor digest (keccak256): {status.anchorReceiptHash}
+            <div>
+              Arc anchor digest (keccak256):{" "}
+              <span className="break-all">{status.anchorReceiptHash}</span>
             </div>
           )}
           <div>

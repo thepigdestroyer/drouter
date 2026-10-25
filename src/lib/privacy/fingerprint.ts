@@ -123,18 +123,22 @@ export function arcExplorerTxUrl(txHash: string): string {
 }
 
 /**
- * Checks that `txHash` exists and succeeded (`status === "0x1"`) on the public Arc RPC
- * using a read-only `eth_getTransactionReceipt` JSON-RPC call.
+ * Checks that `txHash` exists, succeeded (`status === "0x1"`), and (when
+ * `expectedReceiptHash` is provided) emitted a log whose `topics` include
+ * `expectedReceiptHash` (`keccak256("deroute-filter:" + version + ":" + fingerprint)`)
+ * on the public Arc RPC using a read-only `eth_getTransactionReceipt` JSON-RPC call.
  */
 export async function checkArcTransactionReceipt(
   txHash: string,
   opts?: {
+    expectedReceiptHash?: string;
     rpcUrl?: string;
     fetchImpl?: typeof fetch;
   },
 ): Promise<{
   exists: boolean;
   succeeded: boolean;
+  hashMatched: boolean | null;
   blockNumber: string | null;
   rawReceipt: Record<string, unknown> | null;
   error?: string;
@@ -143,6 +147,7 @@ export async function checkArcTransactionReceipt(
     return {
       exists: false,
       succeeded: false,
+      hashMatched: null,
       blockNumber: null,
       rawReceipt: null,
       error: "Invalid transaction hash format",
@@ -154,6 +159,7 @@ export async function checkArcTransactionReceipt(
     return {
       exists: false,
       succeeded: false,
+      hashMatched: null,
       blockNumber: null,
       rawReceipt: null,
       error: "fetch is not available",
@@ -180,6 +186,7 @@ export async function checkArcTransactionReceipt(
       return {
         exists: false,
         succeeded: false,
+        hashMatched: null,
         blockNumber: null,
         rawReceipt: null,
         error: `Arc RPC returned HTTP ${res.status}`,
@@ -195,6 +202,7 @@ export async function checkArcTransactionReceipt(
       return {
         exists: false,
         succeeded: false,
+        hashMatched: null,
         blockNumber: null,
         rawReceipt: null,
         error: json.error.message || "Arc RPC error",
@@ -206,6 +214,7 @@ export async function checkArcTransactionReceipt(
       return {
         exists: false,
         succeeded: false,
+        hashMatched: null,
         blockNumber: null,
         rawReceipt: null,
       };
@@ -214,21 +223,47 @@ export async function checkArcTransactionReceipt(
     const statusHex =
       typeof receipt.status === "string"
         ? receipt.status.toLowerCase()
-        : "0x1";
-    const succeeded = statusHex === "0x1" || statusHex === "1";
+        : null;
+    const statusOk = statusHex === "0x1" || statusHex === "1";
+
+    let hashMatched: boolean | null = null;
+    if (opts?.expectedReceiptHash) {
+      const targetTopic = opts.expectedReceiptHash.toLowerCase();
+      if (Array.isArray(receipt.logs) && receipt.logs.length > 0) {
+        hashMatched = receipt.logs.some((log) => {
+          if (!log || typeof log !== "object") return false;
+          const topics = (log as { topics?: unknown }).topics;
+          if (!Array.isArray(topics)) return false;
+          return topics.some(
+            (t) => typeof t === "string" && t.toLowerCase() === targetTopic,
+          );
+        });
+      } else {
+        hashMatched = false;
+      }
+    }
+
+    const succeeded = statusOk && (hashMatched === null ? true : hashMatched);
     const blockNumber =
       typeof receipt.blockNumber === "string" ? receipt.blockNumber : null;
 
     return {
       exists: true,
       succeeded,
+      hashMatched,
       blockNumber,
       rawReceipt: receipt,
+      ...(statusOk && hashMatched === false
+        ? { error: "Arc receipt logs do not contain the expected filter anchor hash" }
+        : !statusOk
+          ? { error: "Arc transaction receipt status is not successful" }
+          : {}),
     };
   } catch (e) {
     return {
       exists: false,
       succeeded: false,
+      hashMatched: null,
       blockNumber: null,
       rawReceipt: null,
       error: (e as Error).message || "Arc RPC request failed",
@@ -298,7 +333,7 @@ export function evaluateLocalFilterFingerprint(
       blockingSend: true,
       plainSummary: `Personal-detail filter v${version}: does not match the published version`,
       blockReason:
-        "Sending is blocked because the personal-detail filter running in this browser does not match the published version in the public receipt book.",
+        "Sending is blocked because the personal-detail filter running in this browser does not match the published version in the public receipt book. Reload the page to get the latest version; if this keeps happening, wait until the public receipt book is updated.",
     };
   }
 
@@ -347,6 +382,7 @@ export async function verifyFilterFingerprint(
   }
 
   const receiptCheck = await checkArcTransactionReceipt(local.anchorTx, {
+    expectedReceiptHash: local.anchorReceiptHash,
     rpcUrl: mergedOpts.rpcUrl,
     fetchImpl: mergedOpts.fetchImpl,
   });

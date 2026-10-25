@@ -356,11 +356,18 @@ export function Console() {
     setInput("");
     setError(null);
 
-    const turnPrepared = await prepareOutboundTurn(text, {
-      scrubEnabled,
-      normalizeStyle,
-      scrubber: scrubberRef.current,
-    });
+    let turnPrepared;
+    try {
+      turnPrepared = await prepareOutboundTurn(text, {
+        scrubEnabled,
+        normalizeStyle,
+        scrubber: scrubberRef.current,
+      });
+    } catch (e) {
+      setError((e as Error).message || "Could not prepare your message right now.");
+      setInput(text);
+      return;
+    }
 
     setCreditBalance(turnPrepared.creditBalanceAfter);
     if (turnPrepared.report.creditNullifier) {
@@ -821,8 +828,7 @@ export function Console() {
             data-testid="console-filter-mismatch-block"
             className="border-t border-accent bg-accent-soft px-4 py-2.5 text-xs text-accent"
           >
-            {filterFingerprintStatus.blockReason ??
-              "Sending is blocked because the personal-detail filter running in this browser does not match the published version in the public receipt book."}
+            Sending is paused right now because this browser&apos;s personal-detail filter does not match the published version. Reload the page to get the latest version; see the filter card below for details.
           </div>
         )}
         <form
