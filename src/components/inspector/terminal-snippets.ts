@@ -1,3 +1,9 @@
+import {
+  CHAT_GATEWAY_MODEL_IDS,
+  filterChatCapableModelIds,
+  isChatCapableGatewayModel,
+} from "@/lib/gateway/harness-config";
+
 export type TerminalTabId = "opencode" | "proxy" | "env" | "curl" | "sdk";
 
 export interface TerminalSnippets {
@@ -12,19 +18,11 @@ export interface TerminalSnippets {
 export const PRODUCTION_BASE_URL = "https://drouter-demo.vercel.app";
 export const REPO_CLONE_URL = "https://github.com/thepigdestroyer/drouter";
 
-export const DEFAULT_LIVE_MODEL_IDS = [
-  "kimi-k3",
-  "glm-5-3",
-  "deepseek-v4-1-flash",
-  "gpt-oss-120b",
-  "llama3-3-70b",
-  "gemma4-31b",
-  "voxtral-small-24b",
-] as const;
+export const DEFAULT_LIVE_MODEL_IDS = CHAT_GATEWAY_MODEL_IDS;
 
 export function sanitizeLiveModelId(model?: string): string {
   const trimmed = (model || "").trim();
-  if (!trimmed || trimmed.toLowerCase().startsWith("sim-")) {
+  if (!trimmed || !isChatCapableGatewayModel(trimmed)) {
     return "kimi-k3";
   }
   return trimmed;
@@ -56,9 +54,7 @@ export function buildTerminalSnippets(
 ): TerminalSnippets {
   const cleanBase = normalizeBaseUrl(baseUrl);
   const resolvedModel = sanitizeLiveModelId(defaultModel);
-  const modelList = (
-    liveModelIds.length > 0 ? liveModelIds : DEFAULT_LIVE_MODEL_IDS
-  ).filter((id) => id && !id.toLowerCase().startsWith("sim-"));
+  const modelList = filterChatCapableModelIds(liveModelIds);
   const gatewayV1 = `${cleanBase}/v1`;
   const prodV1 = `${PRODUCTION_BASE_URL}/v1`;
   const cliUpstream = resolveCliUpstreamUrl(cleanBase);
@@ -73,7 +69,7 @@ export function buildTerminalSnippets(
       "name": "deRoute Confidential TEE (Attested)",
       "options": {
         "baseURL": "${prodV1}",
-        "apiKey": "any-value"
+        "apiKey": "drk_YOUR_ACCESS_KEY"
       },
       "models": {
         "kimi-k3": {
@@ -93,9 +89,6 @@ export function buildTerminalSnippets(
         },
         "gemma4-31b": {
           "name": "Gemma 4 31B (AMD SEV-SNP / Intel TDX + NVIDIA CC GPUs)"
-        },
-        "voxtral-small-24b": {
-          "name": "Voxtral Small 24B (Intel TDX + NVIDIA CC GPU)"
         }
       }
     }
@@ -105,7 +98,7 @@ export function buildTerminalSnippets(
 
   const opencodeRemoteComment = `// Recommended: create an access key (drk_...) on your Account page (${PRODUCTION_BASE_URL}/account)
 // and run the local proxy: node deroute-proxy.mjs --key drk_...
-// Then set "baseURL": "http://127.0.0.1:4141/v1" (or use "apiKey": "drk_..." in hosted mode).`;
+// Then set "baseURL": "http://127.0.0.1:4141/v1" (or use "apiKey": "drk_YOUR_ACCESS_KEY" in hosted mode; any non-empty string falls back to the free tier).`;
 
   const proxySnippet = `# Recommended: create an access key (drk_...) on your Account page (${PRODUCTION_BASE_URL}/account)
 # Download the single-file local proxy and verify its checksum:

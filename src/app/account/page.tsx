@@ -21,17 +21,23 @@ import {
   type VaultSession,
 } from "@/lib/auth/vault";
 import {
+  CREDITS_STORAGE_KEY,
+  PENDING_ACCESS_KEY_STORAGE_KEY,
   claimPaidCredits,
+  clearPendingAccessKey,
   getStoredCredits,
   mintCredits,
   moveCreditsToAccessKey,
+  readPendingAccessKey,
   requestCreditInvoice,
   storedCreditBalance,
   type CreditInvoiceClientHandle,
 } from "@/lib/credits/client";
 import {
-  SUPPORTED_GATEWAY_MODEL_IDS,
+  CHAT_GATEWAY_MODEL_IDS,
+  LOCAL_PROXY_FALLBACK_COMMAND,
   buildCodingToolSnippets,
+  filterChatCapableModelIds,
   type CodingToolId,
   type CodingToolMode,
 } from "@/lib/gateway/harness-config";
@@ -79,6 +85,7 @@ export default function AccountPage() {
     key: string;
     creditsMoved: number;
     tokenCount: number;
+    uncopied: boolean;
   } | null>(null);
   const [mintingFree, setMintingFree] = useState<boolean>(false);
   const [showBuyPanel, setShowBuyPanel] = useState<boolean>(false);
@@ -88,8 +95,9 @@ export default function AccountPage() {
   const [codingMode, setCodingMode] = useState<CodingToolMode>("private");
   const [activeToolTab, setActiveToolTab] = useState<CodingToolId>("opencode");
   const [liveModelIds, setLiveModelIds] = useState<readonly string[]>(
-    SUPPORTED_GATEWAY_MODEL_IDS,
+    CHAT_GATEWAY_MODEL_IDS,
   );
+  const [proxyBundleAvailable, setProxyBundleAvailable] = useState<boolean>(true);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const copyTimerRef = useRef<number | null>(null);
 
@@ -97,6 +105,15 @@ export default function AccountPage() {
     const syncWallet = () => {
       setWalletBalance(storedCreditBalance());
       setWalletTokenCount(getStoredCredits().length);
+      const pending = readPendingAccessKey();
+      if (pending) {
+        setCreatedKeyInfo({
+          key: pending.key,
+          creditsMoved: pending.creditsMoved,
+          tokenCount: pending.tokenCount,
+          uncopied: true,
+        });
+      }
     };
     const sync = () => {
       const current = getCurrentVaultSession();
@@ -107,8 +124,23 @@ export default function AccountPage() {
       }
       syncWallet();
     };
+    const handleStorage = (event: StorageEvent) => {
+      if (
+        !event.key ||
+        event.key === CREDITS_STORAGE_KEY ||
+        event.key === PENDING_ACCESS_KEY_STORAGE_KEY ||
+        event.key === VAULT_STORAGE_KEY
+      ) {
+        syncWallet();
+      }
+    };
     sync();
-    return subscribeVaultSession(sync);
+    window.addEventListener("storage", handleStorage);
+    const unsubVault = subscribeVaultSession(sync);
+    return () => {
+      window.removeEventListener("storage", handleStorage);
+      unsubVault();
+    };
   }, []);
 
   useEffect(() => {
@@ -130,14 +162,32 @@ export default function AccountPage() {
       )
       .then((payload) => {
         if (cancelled) return;
-        const ids = (payload?.data ?? [])
+        const rawIds = (payload?.data ?? [])
           .map((m) => (typeof m?.id === "string" ? m.id.trim() : ""))
-          .filter((id) => id.length > 0 && !id.toLowerCase().startsWith("sim-"));
-        if (ids.length > 0) {
-          setLiveModelIds(ids);
+          .filter((id) => id.length > 0);
+        const chatIds = filterChatCapableModelIds(rawIds);
+        if (chatIds.length > 0) {
+          setLiveModelIds(chatIds);
         }
       })
       .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof fetch !== "function") return;
+    let cancelled = false;
+    fetch("/downloads/deroute-proxy.mjs", { method: "HEAD" })
+      .then((res) => {
+        if (cancelled) return;
+        setProxyBundleAvailable(res.ok);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setProxyBundleAvailable(false);
+      });
     return () => {
       cancelled = true;
     };
@@ -245,6 +295,7 @@ export default function AccountPage() {
         key: moved.key,
         creditsMoved: moved.creditsMoved,
         tokenCount: moved.tokens.length,
+        uncopied: true,
       });
       refreshWalletState();
       setStatusBanner({
@@ -262,14 +313,20 @@ export default function AccountPage() {
     }
   };
 
+  const handleConfirmCopiedAccessKey = () => {
+    clearPendingAccessKey();
+    setCreatedKeyInfo((prev) => (prev ? { ...prev, uncopied: false } : null));
+  };
+
   const codingSnippets = useMemo(
     () =>
       buildCodingToolSnippets({
         mode: codingMode,
         accessKey: createdKeyInfo?.key ?? null,
         modelIds: liveModelIds,
+        proxyBundleAvailable,
       }),
-    [codingMode, createdKeyInfo?.key, liveModelIds],
+    [codingMode, createdKeyInfo?.key, liveModelIds, proxyBundleAvailable],
   );
 
   const activeCustomTerms = session?.payload.customScrubTerms ?? [];
@@ -913,15 +970,34 @@ export default function AccountPage() {
                     data-testid="created-access-key-box"
                     className="ep-inset space-y-2.5 border-ink p-4"
                   >
+                    {createdKeyInfo.uncopied && (
+                      <div
+                        data-testid="uncopied-access-key-banner"
+                        className="rounded border border-accent bg-accent-soft px-3 py-2 text-xs text-ink flex flex-wrap items-center justify-between gap-2"
+                      >
+                        <span>
+                          <strong>You have an uncopied access key.</strong> Copy and save it before closing this tab.
+                        </span>
+                        <button
+                          type="button"
+                          onClick={handleConfirmCopiedAccessKey}
+                          data-testid="confirm-copied-access-key-button"
+                          className="ep-btn-ghost text-xs py-1 px-2.5"
+                        >
+                          I have saved this key
+                        </button>
+                      </div>
+                    )}
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <span className="font-mono text-xs font-medium text-ink">
                         Your new access key ({createdKeyInfo.creditsMoved} credits, shown once)
                       </span>
                       <button
                         type="button"
-                        onClick={() =>
-                          triggerCopyFeedback("access-key", createdKeyInfo.key)
-                        }
+                        onClick={() => {
+                          triggerCopyFeedback("access-key", createdKeyInfo.key);
+                          handleConfirmCopiedAccessKey();
+                        }}
                         data-testid="copy-access-key-button"
                         className="ep-btn text-xs py-1 px-3"
                       >
@@ -1004,9 +1080,19 @@ export default function AccountPage() {
 
                 {codingMode === "private" ? (
                   <div className="ep-inset space-y-2 p-3.5">
+                    {!proxyBundleAvailable && (
+                      <div
+                        data-testid="proxy-bundle-fallback-note"
+                        className="rounded border border-rule bg-paper-2 px-3 py-2 text-xs text-ink-2"
+                      >
+                        The single-file download (<code className="font-mono text-ink">/downloads/deroute-proxy.mjs</code>) is not built on this server yet. Run the local proxy from a repository checkout with <code className="font-mono text-ink">{LOCAL_PROXY_FALLBACK_COMMAND}</code> instead.
+                      </div>
+                    )}
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <span className="font-mono text-xs text-ink">
-                        Start the single-file local proxy on your computer (Node 20 or later):
+                        {proxyBundleAvailable
+                          ? "Start the single-file local proxy on your computer (Node 20 or later):"
+                          : "Start the local proxy from your repository checkout (Node 20 or later):"}
                       </span>
                       <button
                         type="button"

@@ -258,7 +258,10 @@ describe("Terminal modal verbatim commands & snippets", () => {
     ).toBe(`${PRODUCTION_BASE_URL}/v1`);
     expect(
       parsedOpencode.provider["drouter-confidential"].options.apiKey,
-    ).toBe("any-value");
+    ).toBe("drk_YOUR_ACCESS_KEY");
+    expect(
+      parsedOpencode.provider["drouter-confidential"].models["voxtral-small-24b"],
+    ).toBeUndefined();
     expect(parsedOpencode.provider["drouter-confidential"].name).toBe(
       "deRoute Confidential TEE (Attested)",
     );

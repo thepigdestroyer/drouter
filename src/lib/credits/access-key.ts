@@ -313,3 +313,34 @@ export function decodeAccessKey(
     tokens: checked.normalized,
   };
 }
+
+const spentAccessKeyNullifiers = new Set<string>();
+
+export function markAccessKeyNullifierSpent(nullifier: string): void {
+  if (typeof nullifier === "string" && nullifier.length > 0) {
+    spentAccessKeyNullifiers.add(nullifier);
+  }
+}
+
+export function resetAccessKeyNullifiersForTests(): void {
+  spentAccessKeyNullifiers.clear();
+}
+
+/**
+ * Counts how many tokens in `tokens` are unspent, checking all token positions
+ * (including indices after `spentIndex` that may have been spent out of order or concurrently).
+ */
+export function countUnspentTokens(
+  tokens: readonly BlindCreditToken[],
+  extraSpentNullifiers?: Iterable<string>,
+): number {
+  const extraSet = extraSpentNullifiers ? new Set(extraSpentNullifiers) : null;
+  let unspent = 0;
+  for (const tok of tokens) {
+    const nullifier = nullifierFor(tok.token);
+    if (spentAccessKeyNullifiers.has(nullifier)) continue;
+    if (extraSet && extraSet.has(nullifier)) continue;
+    unspent++;
+  }
+  return unspent;
+}

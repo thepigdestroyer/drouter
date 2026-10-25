@@ -2,7 +2,11 @@ import { gcm } from "@noble/ciphers/aes.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
 import type { BlindCreditToken, Hex } from "@/lib/types";
-import { getCurrentVaultSession } from "@/lib/auth/vault";
+import {
+  getCurrentVaultSession,
+  openVaultBundle,
+  sealVaultBundle,
+} from "@/lib/auth/vault";
 import {
   blindToken,
   formatCreditHeader,
@@ -11,11 +15,20 @@ import {
 } from "./blind";
 import { encodeAccessKey } from "./access-key";
 
-const STORAGE_KEY = "drouter.credits.v1";
-const PENDING_ACCESS_KEY_STORAGE_KEY = "drouter.credits.pending-access-key.v1";
+export const CREDITS_STORAGE_KEY = "drouter.credits.v1";
+const STORAGE_KEY = CREDITS_STORAGE_KEY;
+export const PENDING_ACCESS_KEY_STORAGE_KEY = "drouter.credits.pending-access-key.v1";
 const CREDITS_STORAGE_AAD = utf8ToBytes("drouter/v1/credits-wallet");
 
+export interface PendingAccessKeyRecord {
+  key: string;
+  creditsMoved: number;
+  tokenCount: number;
+  createdAt: number;
+}
+
 let memoryStore: BlindCreditToken[] = [];
+let pendingAccessKeyMemory: PendingAccessKeyRecord | null = null;
 let ephemeralWalletKey: Uint8Array | null = null;
 
 function getWalletStorageKey(): Uint8Array {
@@ -36,7 +49,7 @@ function readStorage(): BlindCreditToken[] {
   }
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [...memoryStore];
+    if (!raw) return [];
     const parsed = JSON.parse(raw);
     let list: unknown[] = [];
     if (parsed && typeof parsed === "object" && "nonceHex" in parsed && "ciphertextHex" in parsed) {
@@ -49,7 +62,7 @@ function readStorage(): BlindCreditToken[] {
       list = parsed;
     }
     if (!Array.isArray(list)) return [];
-    return list.filter(
+    const valid = list.filter(
       (item): item is BlindCreditToken =>
         Boolean(
           item &&
@@ -58,17 +71,15 @@ function readStorage(): BlindCreditToken[] {
             typeof (item as BlindCreditToken).denomination === "number"
         )
     );
+    memoryStore = [...valid];
+    return valid;
   } catch {
-    return [...memoryStore];
+    return [];
   }
 }
 
 function writeStorage(tokens: BlindCreditToken[]): void {
-  memoryStore = [...tokens];
-  if (typeof window === "undefined" || !window.localStorage) {
-    return;
-  }
-  try {
+  if (typeof window !== "undefined" && window.localStorage) {
     const key = getWalletStorageKey();
     const nonce = new Uint8Array(12);
     globalThis.crypto.getRandomValues(nonce);
@@ -82,9 +93,8 @@ function writeStorage(tokens: BlindCreditToken[]): void {
         ciphertextHex: bytesToHex(ciphertext),
       })
     );
-  } catch {
-    // Ignore storage quota errors
   }
+  memoryStore = [...tokens];
 }
 
 function randomSecretHex(byteLength = 32): string {
@@ -140,9 +150,11 @@ export function storeCreditTokens(tokens: BlindCreditToken[]): void {
 
 export function clearStoredCredits(): void {
   memoryStore = [];
+  pendingAccessKeyMemory = null;
   if (typeof window !== "undefined" && window.localStorage) {
     try {
       window.localStorage.removeItem(STORAGE_KEY);
+      window.localStorage.removeItem(PENDING_ACCESS_KEY_STORAGE_KEY);
     } catch {
       // Ignore storage errors
     }
@@ -176,54 +188,194 @@ export interface SelectCreditsFromWalletResult {
   creditsMoved: number;
 }
 
-function selectTokensForTargetCredits(
+export function selectTokensForTargetCredits(
   wallet: readonly BlindCreditToken[],
   targetCredits: number,
 ): SelectCreditsFromWalletResult | null {
   if (!Number.isInteger(targetCredits) || targetCredits < 1) {
     return null;
   }
-  const selected: BlindCreditToken[] = [];
-  const remaining: BlindCreditToken[] = [];
-  let sum = 0;
+
+  // Pass 1: FIFO scan skipping tokens that would exceed targetCredits
+  const selectedFifo: BlindCreditToken[] = [];
+  const remainingFifo: BlindCreditToken[] = [];
+  let sumFifo = 0;
 
   for (let i = 0; i < wallet.length; i++) {
     const tok = wallet[i];
     const denom = tok.denomination || 1;
-    if (sum < targetCredits && selected.length < 50) {
-      selected.push(tok);
-      sum += denom;
+    if (sumFifo + denom <= targetCredits && selectedFifo.length < 50) {
+      selectedFifo.push(tok);
+      sumFifo += denom;
     } else {
-      remaining.push(tok);
+      remainingFifo.push(tok);
     }
   }
 
-  if (sum < targetCredits) {
+  if (sumFifo === targetCredits) {
+    return {
+      selected: selectedFifo,
+      remaining: remainingFifo,
+      creditsMoved: sumFifo,
+    };
+  }
+
+  // Pass 2: Exact subset-sum DP (never exceeding targetCredits and at most 50 tokens)
+  const dp = new Map<number, number[]>();
+  dp.set(0, []);
+
+  for (let i = 0; i < wallet.length; i++) {
+    const denom = wallet[i].denomination || 1;
+    if (denom > targetCredits) continue;
+    const entries = Array.from(dp.entries());
+    for (const [currentSum, indices] of entries) {
+      const nextSum = currentSum + denom;
+      if (nextSum <= targetCredits && indices.length + 1 <= 50 && !dp.has(nextSum)) {
+        dp.set(nextSum, [...indices, i]);
+      }
+    }
+    if (dp.has(targetCredits)) {
+      break;
+    }
+  }
+
+  const exactIndices = dp.get(targetCredits);
+  if (!exactIndices) {
     return null;
   }
-  return { selected, remaining, creditsMoved: sum };
+
+  const chosenSet = new Set<number>(exactIndices);
+  const selected: BlindCreditToken[] = [];
+  const remaining: BlindCreditToken[] = [];
+  for (let i = 0; i < wallet.length; i++) {
+    if (chosenSet.has(i)) {
+      selected.push(wallet[i]);
+    } else {
+      remaining.push(wallet[i]);
+    }
+  }
+
+  return {
+    selected,
+    remaining,
+    creditsMoved: targetCredits,
+  };
 }
 
-function writePendingAccessKey(key: string): void {
-  if (typeof window === "undefined" || !window.localStorage) {
-    return;
+function writePendingAccessKey(record: PendingAccessKeyRecord): void {
+  if (typeof window !== "undefined" && window.localStorage) {
+    const vault = getCurrentVaultSession();
+    if (vault && vault.vaultKeyHex && /^[0-9a-fA-F]{64}$/.test(vault.vaultKeyHex)) {
+      const sealed = sealVaultBundle(
+        {
+          customScrubTerms: [],
+          notes: JSON.stringify(record),
+          createdAt: record.createdAt,
+        },
+        vault.vaultKeyHex,
+      );
+      window.localStorage.setItem(
+        PENDING_ACCESS_KEY_STORAGE_KEY,
+        JSON.stringify({
+          format: "drouter-pending-access-key-v1-vault",
+          ...sealed,
+        }),
+      );
+    } else {
+      const aesKey = getWalletStorageKey();
+      const nonce = new Uint8Array(12);
+      globalThis.crypto.getRandomValues(nonce);
+      const plaintext = utf8ToBytes(JSON.stringify(record));
+      const ciphertext = gcm(aesKey, nonce, CREDITS_STORAGE_AAD).encrypt(plaintext);
+      window.localStorage.setItem(
+        PENDING_ACCESS_KEY_STORAGE_KEY,
+        JSON.stringify({
+          format: "drouter-pending-access-key-v1-gcm",
+          nonceHex: bytesToHex(nonce),
+          ciphertextHex: bytesToHex(ciphertext),
+        }),
+      );
+    }
   }
-  const aesKey = getWalletStorageKey();
-  const nonce = new Uint8Array(12);
-  globalThis.crypto.getRandomValues(nonce);
-  const plaintext = utf8ToBytes(JSON.stringify({ key }));
-  const ciphertext = gcm(aesKey, nonce, CREDITS_STORAGE_AAD).encrypt(plaintext);
-  window.localStorage.setItem(
-    PENDING_ACCESS_KEY_STORAGE_KEY,
-    JSON.stringify({
-      format: "drouter-pending-access-key-v1-gcm",
-      nonceHex: bytesToHex(nonce),
-      ciphertextHex: bytesToHex(ciphertext),
-    })
-  );
+  pendingAccessKeyMemory = { ...record };
+}
+
+function parsePendingRecord(raw: unknown): PendingAccessKeyRecord | null {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  if (typeof obj.key !== "string" || !obj.key.startsWith("drk_")) return null;
+  const creditsMoved =
+    typeof obj.creditsMoved === "number" && Number.isFinite(obj.creditsMoved)
+      ? obj.creditsMoved
+      : 0;
+  const tokenCount =
+    typeof obj.tokenCount === "number" && Number.isFinite(obj.tokenCount)
+      ? obj.tokenCount
+      : 1;
+  const createdAt =
+    typeof obj.createdAt === "number" && Number.isFinite(obj.createdAt)
+      ? obj.createdAt
+      : Date.now();
+  return {
+    key: obj.key,
+    creditsMoved,
+    tokenCount,
+    createdAt,
+  };
+}
+
+export function readPendingAccessKey(): PendingAccessKeyRecord | null {
+  if (typeof window !== "undefined" && window.localStorage) {
+    try {
+      const raw = window.localStorage.getItem(PENDING_ACCESS_KEY_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as Record<string, unknown>;
+        if (
+          parsed &&
+          parsed.format === "drouter-pending-access-key-v1-vault" &&
+          typeof parsed.nonceHex === "string" &&
+          typeof parsed.ciphertextHex === "string"
+        ) {
+          const vault = getCurrentVaultSession();
+          if (vault && vault.vaultKeyHex) {
+            const payload = openVaultBundle(
+              { nonceHex: parsed.nonceHex, ciphertextHex: parsed.ciphertextHex },
+              vault.vaultKeyHex,
+            );
+            const record = parsePendingRecord(JSON.parse(payload.notes ?? "{}"));
+            if (record) {
+              pendingAccessKeyMemory = record;
+              return { ...record };
+            }
+          }
+        } else if (
+          parsed &&
+          parsed.format === "drouter-pending-access-key-v1-gcm" &&
+          typeof parsed.nonceHex === "string" &&
+          typeof parsed.ciphertextHex === "string"
+        ) {
+          const aesKey = getWalletStorageKey();
+          const nonce = hexToBytes(parsed.nonceHex);
+          const ct = hexToBytes(parsed.ciphertextHex);
+          const pt = gcm(aesKey, nonce, CREDITS_STORAGE_AAD).decrypt(ct);
+          const record = parsePendingRecord(
+            JSON.parse(new TextDecoder().decode(pt)),
+          );
+          if (record) {
+            pendingAccessKeyMemory = record;
+            return { ...record };
+          }
+        }
+      }
+    } catch {
+      // Fall back to session-only memory if storage entry belongs to another session
+    }
+  }
+  return pendingAccessKeyMemory ? { ...pendingAccessKeyMemory } : null;
 }
 
 export function clearPendingAccessKey(): void {
+  pendingAccessKeyMemory = null;
   if (typeof window === "undefined" || !window.localStorage) {
     return;
   }
@@ -236,8 +388,8 @@ export function clearPendingAccessKey(): void {
 
 /**
  * Moves `tokenCount` (1..50) tokens out of the browser wallet into a `drk_...` access key.
- * Crash-safe ordering: encodes and writes the pending key first, then removes the tokens from the wallet,
- * so an interrupted creation never loses tokens.
+ * Crash-safe ordering: encodes and persists the pending key first, then removes the tokens from the wallet,
+ * keeping the pending key recoverable until the user confirms they copied it.
  */
 export function moveTokensToAccessKey(
   tokenCount: number,
@@ -255,23 +407,29 @@ export function moveTokensToAccessKey(
 
   const selected = wallet.slice(0, tokenCount);
   const remaining = wallet.slice(tokenCount);
+  const creditsMoved = selected.reduce((sum, t) => sum + (t.denomination || 0), 0);
+  const remainingBalance = remaining.reduce((sum, t) => sum + (t.denomination || 0), 0);
 
-  // 1. Encode and write the access key BEFORE mutating the wallet
+  // 1. Encode and persist the pending access key BEFORE mutating the wallet
   const key = encodeAccessKey(selected);
-  writePendingAccessKey(key);
+  writePendingAccessKey({
+    key,
+    creditsMoved,
+    tokenCount: selected.length,
+    createdAt: Date.now(),
+  });
 
   if (opts?.onAfterKeyWritten) {
     opts.onAfterKeyWritten(key);
   }
 
-  // 2. Remove the moved tokens from the wallet
-  writeStorage(remaining);
-
-  // 3. Clear staging record once wallet update succeeds
-  clearPendingAccessKey();
-
-  const creditsMoved = selected.reduce((sum, t) => sum + (t.denomination || 0), 0);
-  const remainingBalance = remaining.reduce((sum, t) => sum + (t.denomination || 0), 0);
+  // 2. Remove the moved tokens from the wallet (abort and roll back pending key if storage write fails)
+  try {
+    writeStorage(remaining);
+  } catch (err) {
+    clearPendingAccessKey();
+    throw err;
+  }
 
   return {
     key,
@@ -283,7 +441,9 @@ export function moveTokensToAccessKey(
 
 /**
  * Moves enough tokens from the browser wallet to cover `targetCredits` (e.g. 5, 10, or 20)
- * into a `drk_...` access key. Crash-safe: writes the key first, then updates the wallet.
+ * without exceeding `targetCredits` into a `drk_...` access key.
+ * Crash-safe: persists the pending key first, then updates the wallet, keeping the pending key
+ * until the user confirms they copied it.
  */
 export function moveCreditsToAccessKey(
   targetCredits: number,
@@ -296,20 +456,34 @@ export function moveCreditsToAccessKey(
   const selection = selectTokensForTargetCredits(wallet, targetCredits);
   if (!selection) {
     const current = wallet.reduce((s, t) => s + (t.denomination || 0), 0);
+    if (current >= targetCredits) {
+      throw new Error(
+        `Cannot select exactly ${targetCredits} credits without exceeding the requested amount from your current token denominations`
+      );
+    }
     throw new Error(
       `Not enough credits in wallet: need ${targetCredits}, have ${current}`
     );
   }
 
   const key = encodeAccessKey(selection.selected);
-  writePendingAccessKey(key);
+  writePendingAccessKey({
+    key,
+    creditsMoved: selection.creditsMoved,
+    tokenCount: selection.selected.length,
+    createdAt: Date.now(),
+  });
 
   if (opts?.onAfterKeyWritten) {
     opts.onAfterKeyWritten(key);
   }
 
-  writeStorage(selection.remaining);
-  clearPendingAccessKey();
+  try {
+    writeStorage(selection.remaining);
+  } catch (err) {
+    clearPendingAccessKey();
+    throw err;
+  }
 
   const remainingBalance = selection.remaining.reduce(
     (sum, t) => sum + (t.denomination || 0),

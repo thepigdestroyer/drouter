@@ -41,15 +41,40 @@ const KNOWN_MODEL_LABELS: Readonly<Record<string, string>> = {
   "decision-small": "Decision Small",
 };
 
-const PRIMARY_MODEL_ORDER: readonly string[] = [
+export const CHAT_GATEWAY_MODEL_IDS = [
   "kimi-k3",
   "glm-5-3",
   "deepseek-v4-1-flash",
   "gpt-oss-120b",
   "llama3-3-70b",
   "gemma4-31b",
-  "voxtral-small-24b",
-];
+] as const;
+
+const CHAT_GATEWAY_MODEL_ALLOWLIST = new Set<string>(CHAT_GATEWAY_MODEL_IDS);
+
+export function isChatCapableGatewayModel(id: string): boolean {
+  if (typeof id !== "string") return false;
+  return CHAT_GATEWAY_MODEL_ALLOWLIST.has(id.trim());
+}
+
+export function filterChatCapableModelIds(ids?: readonly string[]): string[] {
+  if (!ids || ids.length === 0) {
+    return [...CHAT_GATEWAY_MODEL_IDS];
+  }
+  const seen = new Set<string>();
+  const intersected: string[] = [];
+  for (const raw of ids) {
+    if (typeof raw !== "string") continue;
+    const trimmed = raw.trim();
+    if (isChatCapableGatewayModel(trimmed) && !seen.has(trimmed)) {
+      seen.add(trimmed);
+      intersected.push(trimmed);
+    }
+  }
+  return intersected.length > 0 ? intersected : [...CHAT_GATEWAY_MODEL_IDS];
+}
+
+const PRIMARY_MODEL_ORDER: readonly string[] = CHAT_GATEWAY_MODEL_IDS;
 
 /**
  * Production baseline of real Tinfoil enclave models.
@@ -98,13 +123,6 @@ export const SUPPORTED_GATEWAY_MODELS: readonly GatewayModelSpec[] = [
     provider: "tinfoil-tdx",
     enclave_attested: true,
     repo: "tinfoilsh/confidential-gemma4-31b",
-  },
-  {
-    id: "voxtral-small-24b",
-    label: KNOWN_MODEL_LABELS["voxtral-small-24b"],
-    provider: "tinfoil-tdx",
-    enclave_attested: true,
-    repo: "tinfoilsh/confidential-voxtral-small-24b",
   },
 ] as const;
 
@@ -406,12 +424,14 @@ export type CodingToolMode = "private" | "hosted";
 
 export const LOCAL_PROXY_BASE_URL = "http://127.0.0.1:4141/v1";
 export const HOSTED_GATEWAY_BASE_URL = "https://drouter-demo.vercel.app/api/v1";
+export const LOCAL_PROXY_FALLBACK_COMMAND = "node scripts/drouter-cli.mjs proxy --port 4141";
 
 export interface CodingToolSnippets {
   mode: CodingToolMode;
   baseUrl: string;
   apiKeyPlaceholder: string;
   proxyStartCommand: string;
+  proxyFallbackCommand: string;
   byTool: Record<CodingToolId, string>;
 }
 
@@ -427,6 +447,7 @@ export function buildCodingToolSnippets(opts?: {
   modelIds?: readonly string[];
   defaultModel?: string;
   hostedOrigin?: string;
+  proxyBundleAvailable?: boolean;
 }): CodingToolSnippets {
   const mode: CodingToolMode = opts?.mode ?? "private";
   const cleanOrigin = (opts?.hostedOrigin || "https://drouter-demo.vercel.app").replace(/\/+$/, "");
@@ -440,11 +461,7 @@ export function buildCodingToolSnippets(opts?: {
 
   const apiKeyValue = mode === "private" ? "deroute-local" : keyOrPlaceholder;
 
-  const rawModels =
-    opts?.modelIds && opts.modelIds.length > 0
-      ? opts.modelIds
-      : SUPPORTED_GATEWAY_MODEL_IDS;
-  const models = rawModels.filter((id) => id && !id.toLowerCase().startsWith("sim-"));
+  const models = filterChatCapableModelIds(opts?.modelIds);
   const primaryModel =
     opts?.defaultModel && models.includes(opts.defaultModel)
       ? opts.defaultModel
@@ -476,15 +493,21 @@ export function buildCodingToolSnippets(opts?: {
     model: `deroute/${primaryModel}`,
   };
 
-  const proxyStartCommand = [
-    `# 1. Download the single-file local proxy and its checksum:`,
-    `curl -fsSLO ${cleanOrigin}/downloads/deroute-proxy.mjs`,
-    `curl -fsSLO ${cleanOrigin}/downloads/deroute-proxy.mjs.sha256`,
-    `shasum -a 256 -c deroute-proxy.mjs.sha256`,
-    ``,
-    `# 2. Start the local proxy on http://127.0.0.1:4141/v1 (requires Node 20+):`,
-    `node deroute-proxy.mjs --key ${keyOrPlaceholder}`,
-  ].join("\n");
+  const proxyBundleAvailable = opts?.proxyBundleAvailable ?? true;
+  const proxyStartCommand = proxyBundleAvailable
+    ? [
+        `# 1. Download the single-file local proxy and its checksum:`,
+        `curl -fsSLO ${cleanOrigin}/downloads/deroute-proxy.mjs`,
+        `curl -fsSLO ${cleanOrigin}/downloads/deroute-proxy.mjs.sha256`,
+        `shasum -a 256 -c deroute-proxy.mjs.sha256`,
+        ``,
+        `# 2. Start the local proxy on http://127.0.0.1:4141/v1 (requires Node 20+):`,
+        `node deroute-proxy.mjs --key ${keyOrPlaceholder}`,
+      ].join("\n")
+    : [
+        `# Run the local proxy from your repository checkout on http://127.0.0.1:4141/v1:`,
+        LOCAL_PROXY_FALLBACK_COMMAND,
+      ].join("\n");
 
   const opencodeSnippet = JSON.stringify(opencodeConfig, null, 2);
 
@@ -577,6 +600,7 @@ export function buildCodingToolSnippets(opts?: {
     baseUrl,
     apiKeyPlaceholder: apiKeyValue,
     proxyStartCommand,
+    proxyFallbackCommand: LOCAL_PROXY_FALLBACK_COMMAND,
     byTool: {
       opencode: opencodeSnippet,
       cursor: cursorSnippet,
@@ -715,9 +739,7 @@ export function parseGatewayChatRequest(
     typeof record.model === "string" && record.model.trim()
       ? record.model.trim()
       : "kimi-k3";
-  const normalizedModel = rawModel.startsWith("drouter/")
-    ? rawModel.slice("drouter/".length)
-    : rawModel;
+  const normalizedModel = rawModel.replace(/^(?:drouter|deroute)\//i, "");
 
   const allowedSet = opts?.allowedModelIds
     ? new Set(opts.allowedModelIds)

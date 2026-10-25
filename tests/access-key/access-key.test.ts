@@ -45,27 +45,49 @@ import {
   ACCESS_KEY_ORIGIN,
   ACCESS_KEY_PREFIX,
   MAX_ACCESS_KEY_TOKENS,
+  countUnspentTokens,
   decodeAccessKey,
   encodeAccessKey,
+  markAccessKeyNullifierSpent,
+  resetAccessKeyNullifiersForTests,
 } from "@/lib/credits/access-key";
 import { formatCreditHeader, nullifierFor, parseCreditHeader } from "@/lib/credits/blind";
 import {
+  CREDITS_STORAGE_KEY,
+  PENDING_ACCESS_KEY_STORAGE_KEY,
+  clearPendingAccessKey,
   clearStoredCredits,
   getStoredCredits,
   moveCreditsToAccessKey,
   moveTokensToAccessKey,
+  readPendingAccessKey,
+  selectTokensForTargetCredits,
   storeCreditTokens,
   storedCreditBalance,
 } from "@/lib/credits/client";
 import {
+  CHAT_GATEWAY_MODEL_IDS,
   HOSTED_GATEWAY_BASE_URL,
   LOCAL_PROXY_BASE_URL,
+  LOCAL_PROXY_FALLBACK_COMMAND,
+  SUPPORTED_GATEWAY_MODEL_IDS,
   buildCodingToolSnippets,
+  filterChatCapableModelIds,
+  isChatCapableGatewayModel,
+  parseGatewayChatRequest,
 } from "@/lib/gateway/harness-config";
+import {
+  DEFAULT_LIVE_MODEL_IDS,
+  buildTerminalSnippets,
+} from "@/components/inspector/terminal-snippets";
+import { lockVault, unlockVaultWithKeyMaterial } from "@/lib/auth/vault";
+import { resetRateLimitStateForTests } from "@/lib/ratelimit";
 import { canonicalJson } from "@/lib/transparency/log";
 import type { BlindCreditToken } from "@/lib/types";
 import { POST as postChatCompletions } from "@/app/api/v1/chat/completions/route";
 import AccountPage from "@/app/account/page";
+import fs from "node:fs";
+import path from "node:path";
 
 function makeSampleToken(index: number, denomination = 1): BlindCreditToken {
   const hexByte = ((index + 1) & 0xff).toString(16).padStart(2, "0");
@@ -575,5 +597,377 @@ describe("Step 4 (K4): Coding tool snippets & Account page SSR render safety", (
     const html = renderToStaticMarkup(React.createElement(AccountPage));
     expect(html).toContain("deRoute");
     expect(html).not.toContain("—");
+  });
+});
+
+describe("Review Fixes (I1-I4, M1-M4)", () => {
+  const origApiKey = process.env.TINFOIL_API_KEY;
+
+  beforeEach(() => {
+    process.env.TINFOIL_API_KEY = "test-tinfoil-key-do-not-print";
+    clearStoredCredits();
+    clearPendingAccessKey();
+    resetAccessKeyNullifiersForTests();
+    resetRateLimitStateForTests();
+    tinfoilMocks.createCompletion.mockReset();
+    creditLedgerMocks.verifyAndSpendCreditHeader.mockReset();
+  });
+
+  afterEach(() => {
+    if (origApiKey === undefined) delete process.env.TINFOIL_API_KEY;
+    else process.env.TINFOIL_API_KEY = origApiKey;
+  });
+
+  it("I1: uses one exported chat-model allowlist (6 chat models) intersected with live list and excludes non-chat models", () => {
+    expect(CHAT_GATEWAY_MODEL_IDS).toEqual([
+      "kimi-k3",
+      "glm-5-3",
+      "deepseek-v4-1-flash",
+      "gpt-oss-120b",
+      "llama3-3-70b",
+      "gemma4-31b",
+    ]);
+    expect(SUPPORTED_GATEWAY_MODEL_IDS).toEqual([...CHAT_GATEWAY_MODEL_IDS]);
+    expect(DEFAULT_LIVE_MODEL_IDS).toEqual(CHAT_GATEWAY_MODEL_IDS);
+
+    expect(isChatCapableGatewayModel("kimi-k3")).toBe(true);
+    expect(isChatCapableGatewayModel("voxtral-small-24b")).toBe(false);
+    expect(isChatCapableGatewayModel("whisper-large-v3-turbo")).toBe(false);
+    expect(isChatCapableGatewayModel("nomic-embed-text")).toBe(false);
+    expect(isChatCapableGatewayModel("qwen3-tts")).toBe(false);
+    expect(isChatCapableGatewayModel("decision-small")).toBe(false);
+    expect(isChatCapableGatewayModel("gpt-oss-safeguard-120b")).toBe(false);
+
+    const mixedLive = [
+      "kimi-k3",
+      "voxtral-small-24b",
+      "nomic-embed-text",
+      "whisper-large-v3-turbo",
+      "gemma4-31b",
+      "decision-large",
+    ];
+    expect(filterChatCapableModelIds(mixedLive)).toEqual(["kimi-k3", "gemma4-31b"]);
+
+    const snippets = buildCodingToolSnippets({
+      mode: "private",
+      modelIds: mixedLive,
+    });
+    expect(snippets.byTool.opencode).toContain("kimi-k3");
+    expect(snippets.byTool.opencode).toContain("gemma4-31b");
+    expect(snippets.byTool.opencode).not.toContain("voxtral");
+    expect(snippets.byTool.opencode).not.toContain("nomic-embed-text");
+    expect(snippets.byTool.cursor).not.toContain("whisper-large-v3-turbo");
+    expect(snippets.byTool.continue).not.toContain("decision-large");
+  });
+
+  it("I2: persists pending key until confirmed copied, aborts on storage write failure, and never exceeds requested credit amount", () => {
+    // 1. Pending key stays recoverable via readPendingAccessKey until clearPendingAccessKey is called
+    storeCreditTokens([
+      makeSampleToken(1, 1),
+      makeSampleToken(2, 1),
+      makeSampleToken(3, 1),
+      makeSampleToken(4, 1),
+      makeSampleToken(5, 1),
+    ]);
+    const moved = moveCreditsToAccessKey(5);
+    const pending = readPendingAccessKey();
+    expect(pending).not.toBeNull();
+    expect(pending?.key).toBe(moved.key);
+    expect(pending?.creditsMoved).toBe(5);
+    expect(pending?.tokenCount).toBe(5);
+
+    clearPendingAccessKey();
+    expect(readPendingAccessKey()).toBeNull();
+
+    // 2. Token selection never exceeds targetCredits when wallet holds larger denominations
+    clearStoredCredits();
+    storeCreditTokens([makeSampleToken(10, 20)]);
+    expect(selectTokensForTargetCredits(getStoredCredits(), 5)).toBeNull();
+    expect(() => moveCreditsToAccessKey(5)).toThrow(/exceeding the requested amount/);
+    expect(storedCreditBalance()).toBe(20);
+
+    // When wallet holds [20, 1, 1, 1, 1, 1], requesting 5 skips the 20 token and selects the five 1-credit tokens
+    storeCreditTokens([
+      makeSampleToken(11, 1),
+      makeSampleToken(12, 1),
+      makeSampleToken(13, 1),
+      makeSampleToken(14, 1),
+      makeSampleToken(15, 1),
+    ]);
+    const exact5 = moveCreditsToAccessKey(5);
+    expect(exact5.creditsMoved).toBe(5);
+    expect(exact5.tokens).toHaveLength(5);
+    expect(exact5.remainingBalance).toBe(20);
+    expect(storedCreditBalance()).toBe(20);
+
+    // When wallet holds [1, 1, 5], requesting 5 finds the exact 5-credit token via subset-sum DP
+    clearStoredCredits();
+    storeCreditTokens([
+      makeSampleToken(20, 1),
+      makeSampleToken(21, 1),
+      makeSampleToken(22, 5),
+    ]);
+    const dp5 = moveCreditsToAccessKey(5);
+    expect(dp5.creditsMoved).toBe(5);
+    expect(dp5.tokens).toHaveLength(1);
+    expect(dp5.tokens[0].denomination).toBe(5);
+    expect(dp5.remainingBalance).toBe(2);
+
+    // 3. Simulated localStorage write failure on wallet update aborts move and rolls back pending key
+    clearStoredCredits();
+    clearPendingAccessKey();
+    const storageMap = new Map<string, string>();
+    let failWalletWrite = false;
+    const fakeLocalStorage = {
+      getItem: (k: string) => storageMap.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        if (failWalletWrite && k === CREDITS_STORAGE_KEY) {
+          throw new Error("QuotaExceededError: simulated storage write failure");
+        }
+        storageMap.set(k, v);
+      },
+      removeItem: (k: string) => {
+        storageMap.delete(k);
+      },
+    };
+    const origWindow = (globalThis as { window?: unknown }).window;
+    (globalThis as { window?: unknown }).window = {
+      localStorage: fakeLocalStorage,
+    };
+
+    try {
+      // Unlock vault so pending key is encrypted with sealVaultBundle
+      const ikm = new Uint8Array(32).fill(7);
+      unlockVaultWithKeyMaterial(ikm, false);
+
+      storeCreditTokens([
+        makeSampleToken(30, 5),
+      ]);
+      expect(storedCreditBalance()).toBe(5);
+
+      failWalletWrite = true;
+      expect(() => moveCreditsToAccessKey(5)).toThrow(/QuotaExceededError/);
+      // Wallet still has its 5 credits and pending key was rolled back
+      expect(storedCreditBalance()).toBe(5);
+      expect(readPendingAccessKey()).toBeNull();
+
+      // When storage write succeeds, pending key is encrypted with vault and readable via readPendingAccessKey
+      failWalletWrite = false;
+      const okMove = moveCreditsToAccessKey(5);
+      expect(storedCreditBalance()).toBe(0);
+      const vaultPending = readPendingAccessKey();
+      expect(vaultPending?.key).toBe(okMove.key);
+      const rawPendingJson = storageMap.get(PENDING_ACCESS_KEY_STORAGE_KEY) ?? "";
+      expect(rawPendingJson).toContain("drouter-pending-access-key-v1-vault");
+      expect(rawPendingJson).not.toContain(okMove.key);
+    } finally {
+      lockVault();
+      if (origWindow === undefined) {
+        delete (globalThis as { window?: unknown }).window;
+      } else {
+        (globalThis as { window?: unknown }).window = origWindow;
+      }
+    }
+  });
+
+  it("I3: checks configuration (503) and global rate limits (429) BEFORE spending a credit token", async () => {
+    const t1 = makeSampleToken(1, 1);
+    const key = encodeAccessKey([t1]);
+
+    // 1. Missing TINFOIL_API_KEY returns 503 without calling verifyAndSpendCreditHeader
+    delete process.env.TINFOIL_API_KEY;
+    const req503 = new Request("http://localhost/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${key}`,
+      },
+      body: JSON.stringify({
+        model: "kimi-k3",
+        messages: [{ role: "user", content: "Hello" }],
+      }),
+    });
+    const res503 = await postChatCompletions(req503);
+    expect(res503.status).toBe(503);
+    expect(creditLedgerMocks.verifyAndSpendCreditHeader).not.toHaveBeenCalled();
+
+    // 2. Exhausting global rate limit returns 429 without calling verifyAndSpendCreditHeader
+    process.env.TINFOIL_API_KEY = "test-tinfoil-key-do-not-print";
+    tinfoilMocks.createCompletion.mockResolvedValue({
+      id: "chatcmpl-ok",
+      object: "chat.completion",
+      created: 1792800000,
+      model: "kimi-k3",
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "ok" },
+          finish_reason: "stop",
+        },
+      ],
+    });
+    creditLedgerMocks.verifyAndSpendCreditHeader.mockResolvedValue({
+      ok: true,
+      nullifier: nullifierFor(t1.token),
+      denomination: 1,
+      remainingPoolUnredeemed: 1,
+    });
+
+    // Consume all 40 global tokens using credit headers so per-IP limiter is bypassed
+    for (let i = 0; i < 40; i++) {
+      const r = await postChatCompletions(
+        new Request("http://localhost/api/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-drouter-credit": formatCreditHeader(makeSampleToken(i + 50, 1)),
+          },
+          body: JSON.stringify({
+            model: "kimi-k3",
+            messages: [{ role: "user", content: "hi" }],
+          }),
+        }),
+      );
+      expect(r.status).toBe(200);
+    }
+
+    const callsBefore429 = creditLedgerMocks.verifyAndSpendCreditHeader.mock.calls.length;
+
+    const req429 = new Request("http://localhost/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${key}`,
+      },
+      body: JSON.stringify({
+        model: "kimi-k3",
+        messages: [{ role: "user", content: "Hello" }],
+      }),
+    });
+    const res429 = await postChatCompletions(req429);
+    expect(res429.status).toBe(429);
+    expect(creditLedgerMocks.verifyAndSpendCreditHeader.mock.calls.length).toBe(
+      callsBefore429,
+    );
+  });
+
+  it("I4: shows fallback command node scripts/drouter-cli.mjs proxy --port 4141 when proxyBundleAvailable is false", () => {
+    const fallbackSnippets = buildCodingToolSnippets({
+      mode: "private",
+      proxyBundleAvailable: false,
+    });
+    expect(fallbackSnippets.proxyStartCommand).toContain(LOCAL_PROXY_FALLBACK_COMMAND);
+    expect(fallbackSnippets.proxyStartCommand).not.toContain("/downloads/deroute-proxy.mjs");
+  });
+
+  it("M1: adds 'unsafe-eval' to script-src only when NODE_ENV === 'development' in next.config.ts and src/proxy.ts", () => {
+    const repoRoot = path.resolve(__dirname, "../..");
+    const nextConfigSrc = fs.readFileSync(path.join(repoRoot, "next.config.ts"), "utf8");
+    const proxySrc = fs.readFileSync(path.join(repoRoot, "src/proxy.ts"), "utf8");
+
+    expect(nextConfigSrc).toContain(
+      '`script-src \'self\' \'unsafe-inline\'${process.env.NODE_ENV === "development" ? " \'unsafe-eval\'" : ""}`',
+    );
+    expect(proxySrc).toContain(
+      '`script-src \'self\' \'unsafe-inline\'${process.env.NODE_ENV === "development" ? " \'unsafe-eval\'" : ""}`',
+    );
+  });
+
+  it("M2: parseGatewayChatRequest accepts both deroute/ and drouter/ model prefixes", () => {
+    const r1 = parseGatewayChatRequest({
+      model: "deroute/kimi-k3",
+      messages: [{ role: "user", content: "hello" }],
+    });
+    expect(r1.ok).toBe(true);
+    if (r1.ok) {
+      expect(r1.model).toBe("kimi-k3");
+    }
+
+    const r2 = parseGatewayChatRequest({
+      model: "drouter/glm-5-3",
+      messages: [{ role: "user", content: "hello" }],
+    });
+    expect(r2.ok).toBe(true);
+    if (r2.ok) {
+      expect(r2.model).toBe("glm-5-3");
+    }
+  });
+
+  it("M3: counts unspent tokens accurately even when a later token index was already spent", async () => {
+    const t0 = makeSampleToken(40, 1);
+    const t1 = makeSampleToken(41, 1);
+    const t2 = makeSampleToken(42, 1);
+
+    const key = encodeAccessKey([t0, t1, t2]);
+    creditLedgerMocks.verifyAndSpendCreditHeader.mockImplementation(
+      async (rawHeader: string) => {
+        const parsed = parseCreditHeader(rawHeader);
+        if (!parsed) return { ok: false, error: "bad", status: 400 };
+        return {
+          ok: true,
+          nullifier: nullifierFor(parsed.token),
+          denomination: parsed.denomination,
+          remainingPoolUnredeemed: 1,
+        };
+      },
+    );
+
+    tinfoilMocks.createCompletion.mockResolvedValue({
+      id: "chatcmpl-m3",
+      object: "chat.completion",
+      created: 1792800000,
+      model: "kimi-k3",
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "ok" },
+          finish_reason: "stop",
+        },
+      ],
+    });
+
+    // First spend t2 (index 2) directly via x-drouter-credit header
+    const resFirst = await postChatCompletions(
+      new Request("http://localhost/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-drouter-credit": formatCreditHeader(t2),
+        },
+        body: JSON.stringify({
+          model: "kimi-k3",
+          messages: [{ role: "user", content: "Spend t2 first" }],
+        }),
+      }),
+    );
+    expect(resFirst.status).toBe(200);
+    expect(countUnspentTokens([t0, t1, t2])).toBe(2);
+
+    // Next spend via Bearer drk_ key [t0, t1, t2]; t0 (index 0) is spent now
+    const res = await postChatCompletions(
+      new Request("http://localhost/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${key}`,
+        },
+        body: JSON.stringify({
+          model: "deroute/kimi-k3",
+          messages: [{ role: "user", content: "Hello" }],
+        }),
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    // Both t0 (index 0) and t2 (index 2) are spent, so only t1 (1 token) remains unspent
+    expect(res.headers.get("X-DRouter-Credits-Remaining")).toBe("1");
+  });
+
+  it("M4: terminal snippet opencodeConfig uses drk_YOUR_ACCESS_KEY", () => {
+    const snippets = buildTerminalSnippets();
+    const parsed = JSON.parse(snippets.opencodeConfig);
+    expect(parsed.provider["drouter-confidential"].options.apiKey).toBe(
+      "drk_YOUR_ACCESS_KEY",
+    );
   });
 });

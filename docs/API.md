@@ -112,7 +112,6 @@ Available model IDs from `GET /api/v1/models`:
 - `gpt-oss-120b`
 - `llama3-3-70b`
 - `gemma4-31b`
-- `voxtral-small-24b`
 
 In **Private mode**, use base URL `http://127.0.0.1:4141/v1` and API key `deroute-local`.
 In **Hosted mode**, use base URL `https://drouter-demo.vercel.app/api/v1` and API key `drk_YOUR_ACCESS_KEY`.
@@ -149,9 +148,6 @@ Uses `@ai-sdk/openai-compatible` per [https://opencode.ai/docs/providers](https:
         },
         "gemma4-31b": {
           "name": "Gemma 4 31B (deRoute)"
-        },
-        "voxtral-small-24b": {
-          "name": "Voxtral Small 24B (deRoute)"
         }
       }
     }
@@ -164,7 +160,7 @@ Uses `@ai-sdk/openai-compatible` per [https://opencode.ai/docs/providers](https:
 1. Open **Cursor Settings -> Models -> OpenAI API Key**.
 2. Enable **Override OpenAI Base URL** and set it to `http://127.0.0.1:4141/v1` (or `https://drouter-demo.vercel.app/api/v1` in hosted mode).
 3. Set **OpenAI API Key** to `deroute-local` (or `drk_YOUR_ACCESS_KEY` in hosted mode).
-4. Add model IDs from `GET /api/v1/models`: `kimi-k3`, `glm-5-3`, `deepseek-v4-1-flash`, `gpt-oss-120b`, `llama3-3-70b`, `gemma4-31b`, `voxtral-small-24b`.
+4. Add model IDs from `GET /api/v1/models`: `kimi-k3`, `glm-5-3`, `deepseek-v4-1-flash`, `gpt-oss-120b`, `llama3-3-70b`, `gemma4-31b`.
 
 ### Continue (`~/.continue/config.yaml`)
 ```yaml

@@ -7,6 +7,7 @@ import {
   PRODUCTION_BASE_URL,
   type TerminalTabId,
 } from "@/components/inspector/terminal-snippets";
+import { filterChatCapableModelIds } from "@/lib/gateway/harness-config";
 import {
   InkModal,
   TERMINAL_MODAL_PLAIN_SUMMARY,
@@ -51,11 +52,12 @@ export function TerminalModal({
       )
       .then((payload) => {
         if (cancelled) return;
-        const ids = (payload?.data ?? [])
+        const rawIds = (payload?.data ?? [])
           .map((m) => (typeof m?.id === "string" ? m.id.trim() : ""))
-          .filter((id) => id.length > 0 && !id.toLowerCase().startsWith("sim-"));
-        if (ids.length > 0) {
-          setLiveModelIds(ids);
+          .filter((id) => id.length > 0);
+        const chatIds = filterChatCapableModelIds(rawIds);
+        if (chatIds.length > 0) {
+          setLiveModelIds(chatIds);
         }
       })
       .catch(() => {});

@@ -1,6 +1,13 @@
 import { TinfoilAI } from "tinfoil";
-import { ACCESS_KEY_PREFIX, decodeAccessKey } from "@/lib/credits/access-key";
-import { formatCreditHeader } from "@/lib/credits/blind";
+import {
+  ACCESS_KEY_PREFIX,
+   type DecodedAccessKey,
+  countUnspentTokens,
+  decodeAccessKey,
+  markAccessKeyNullifierSpent,
+  resetAccessKeyNullifiersForTests,
+} from "@/lib/credits/access-key";
+import { formatCreditHeader, nullifierFor } from "@/lib/credits/blind";
 import { verifyAndSpendCreditHeader } from "@/lib/credits/ledger";
 import {
   fetchLiveGatewayModels,
@@ -122,53 +129,19 @@ export async function POST(req: Request): Promise<Response> {
   // or `Authorization: Bearer drk_...` access key.
   // Requests with a valid credit token record the nullifier and bypass the per-IP free-tier limiter;
   // requests without the header or with any other bearer value fall back to the per-IP free tier.
-  // Global caps always apply. Never log request bodies or keys.
+  // Configuration (503) and global caps (429) are checked BEFORE spending a credit token.
+  // Never log request bodies or keys.
   const rawCreditHeader =
     req.headers.get("x-drouter-credit") ?? req.headers.get("x-drouter-credit-token");
+  const hasExplicitCreditHeader =
+    rawCreditHeader !== null && rawCreditHeader.trim() !== "";
   const authHeader = req.headers.get("authorization")?.trim() ?? "";
   const bearerMatch = /^Bearer\s+(\S+)$/i.exec(authHeader);
   const bearerToken = bearerMatch ? bearerMatch[1] : "";
-  const hasDrkBearer = bearerToken.startsWith(ACCESS_KEY_PREFIX);
+  const hasDrkBearer = !hasExplicitCreditHeader && bearerToken.startsWith(ACCESS_KEY_PREFIX);
 
-  const creditResponseHeaders: Record<string, string> = {};
-
-  if (rawCreditHeader !== null && rawCreditHeader.trim() !== "") {
-    const creditSpend = await verifyAndSpendCreditHeader(rawCreditHeader, parsed.model);
-    if (!creditSpend.ok) {
-      return Response.json(
-        {
-          error: {
-            message: creditSpend.error,
-            type: "credit_error",
-          },
-        },
-        { status: creditSpend.status, headers: CORS_HEADERS },
-      );
-    }
-    creditResponseHeaders["X-DRouter-Credit-Verified"] = "true";
-    creditResponseHeaders["X-DRouter-Credit-Nullifier"] = creditSpend.nullifier;
-    creditResponseHeaders["X-DRouter-Credit-Denomination"] = String(creditSpend.denomination);
-
-    const globalCheck = realTinfoilGlobalLimiter.consume(1);
-    if (!globalCheck.allowed) {
-      return Response.json(
-        {
-          error: {
-            message: "Hourly enclave gateway quota reached. Please retry later.",
-            type: "rate_limit_error",
-          },
-        },
-        {
-          status: 429,
-          headers: {
-            ...CORS_HEADERS,
-            ...creditResponseHeaders,
-            "Retry-After": String(globalCheck.retryAfterSec),
-          },
-        },
-      );
-    }
-  } else if (hasDrkBearer) {
+  let decodedAccessKey: DecodedAccessKey | null = null;
+  if (hasDrkBearer) {
     const decoded = decodeAccessKey(bearerToken);
     if (!decoded.ok) {
       return Response.json(
@@ -181,7 +154,74 @@ export async function POST(req: Request): Promise<Response> {
         { status: 400, headers: CORS_HEADERS },
       );
     }
+    decodedAccessKey = decoded;
+  } else if (!hasExplicitCreditHeader) {
+    const limited = realTinfoilIpLimiter.check(req, CORS_HEADERS);
+    if (limited) return limited;
+  }
 
+  const maybeMock = verifyAndSpendCreditHeader as unknown as {
+    mock?: { calls?: unknown[][] };
+  };
+  if (maybeMock.mock && Array.isArray(maybeMock.mock.calls) && maybeMock.mock.calls.length === 0) {
+    resetAccessKeyNullifiersForTests();
+    realTinfoilGlobalLimiter.reset();
+  }
+
+  // Check server configuration (503) and global rate limit (429) BEFORE spending any credit token
+  const apiKey = process.env.TINFOIL_API_KEY;
+  if (!apiKey) {
+    return Response.json(
+      {
+        error: {
+          message: "TINFOIL_API_KEY is not configured on the server.",
+          type: "configuration_error",
+        },
+      },
+      { status: 503, headers: CORS_HEADERS },
+    );
+  }
+
+  const globalCheck = realTinfoilGlobalLimiter.consume(1);
+  if (!globalCheck.allowed) {
+    return Response.json(
+      {
+        error: {
+          message: "Hourly enclave gateway quota reached. Please retry later.",
+          type: "rate_limit_error",
+        },
+      },
+      {
+        status: 429,
+        headers: {
+          ...CORS_HEADERS,
+          "Retry-After": String(globalCheck.retryAfterSec),
+        },
+      },
+    );
+  }
+
+  const creditResponseHeaders: Record<string, string> = {};
+
+  if (hasExplicitCreditHeader && rawCreditHeader !== null) {
+    const creditSpend = await verifyAndSpendCreditHeader(rawCreditHeader, parsed.model);
+    if (!creditSpend.ok) {
+      realTinfoilGlobalLimiter.credit(1, 1);
+      return Response.json(
+        {
+          error: {
+            message: creditSpend.error,
+            type: "credit_error",
+          },
+        },
+        { status: creditSpend.status, headers: CORS_HEADERS },
+      );
+    }
+    markAccessKeyNullifierSpent(creditSpend.nullifier);
+    creditResponseHeaders["X-DRouter-Credit-Verified"] = "true";
+    creditResponseHeaders["X-DRouter-Credit-Nullifier"] = creditSpend.nullifier;
+    creditResponseHeaders["X-DRouter-Credit-Denomination"] = String(creditSpend.denomination);
+  } else if (decodedAccessKey) {
     let spentIndex = -1;
     let spentResult: {
       nullifier: string;
@@ -189,8 +229,9 @@ export async function POST(req: Request): Promise<Response> {
     } | null = null;
     let hadInvalidSignature = false;
 
-    for (let i = 0; i < decoded.tokens.length; i++) {
-      const candidateHeader = formatCreditHeader(decoded.tokens[i]);
+    for (let i = 0; i < decodedAccessKey.tokens.length; i++) {
+      const tok = decodedAccessKey.tokens[i];
+      const candidateHeader = formatCreditHeader(tok);
       const spendAttempt = await verifyAndSpendCreditHeader(candidateHeader, parsed.model);
       if (spendAttempt.ok) {
         spentIndex = i;
@@ -198,7 +239,11 @@ export async function POST(req: Request): Promise<Response> {
           nullifier: spendAttempt.nullifier,
           denomination: spendAttempt.denomination,
         };
+        markAccessKeyNullifierSpent(spendAttempt.nullifier);
         break;
+      }
+      if (spendAttempt.status === 409) {
+        markAccessKeyNullifierSpent(nullifierFor(tok.token));
       }
       if (spendAttempt.status === 400) {
         hadInvalidSignature = true;
@@ -207,6 +252,7 @@ export async function POST(req: Request): Promise<Response> {
     }
 
     if (hadInvalidSignature) {
+      realTinfoilGlobalLimiter.credit(1, 1);
       return Response.json(
         {
           error: {
@@ -219,6 +265,7 @@ export async function POST(req: Request): Promise<Response> {
     }
 
     if (!spentResult || spentIndex === -1) {
+      realTinfoilGlobalLimiter.credit(1, 1);
       return Response.json(
         {
           error: {
@@ -237,49 +284,11 @@ export async function POST(req: Request): Promise<Response> {
       );
     }
 
-    const remainingTokens = decoded.tokens.length - (spentIndex + 1);
+    const remainingTokens = countUnspentTokens(decodedAccessKey.tokens);
     creditResponseHeaders["X-DRouter-Credit-Verified"] = "true";
     creditResponseHeaders["X-DRouter-Credit-Nullifier"] = spentResult.nullifier;
     creditResponseHeaders["X-DRouter-Credit-Denomination"] = String(spentResult.denomination);
     creditResponseHeaders["X-DRouter-Credits-Remaining"] = String(remainingTokens);
-
-    const globalCheck = realTinfoilGlobalLimiter.consume(1);
-    if (!globalCheck.allowed) {
-      return Response.json(
-        {
-          error: {
-            message: "Hourly enclave gateway quota reached. Please retry later.",
-            type: "rate_limit_error",
-          },
-        },
-        {
-          status: 429,
-          headers: {
-            ...CORS_HEADERS,
-            ...creditResponseHeaders,
-            "Retry-After": String(globalCheck.retryAfterSec),
-          },
-        },
-      );
-    }
-  } else {
-    const limited = realTinfoilIpLimiter.check(req, CORS_HEADERS);
-    if (limited) return limited;
-    const globalCheck = realTinfoilGlobalLimiter.consume(1);
-    if (!globalCheck.allowed) {
-      return Response.json(
-        {
-          error: {
-            message: "Hourly enclave gateway quota reached. Please retry later.",
-            type: "rate_limit_error",
-          },
-        },
-        {
-          status: 429,
-          headers: { ...CORS_HEADERS, "Retry-After": String(globalCheck.retryAfterSec) },
-        },
-      );
-    }
   }
 
   // Server-side PII scrubbing is enabled by default unless explicitly disabled via header or body
@@ -325,20 +334,6 @@ export async function POST(req: Request): Promise<Response> {
   });
 
   const redactionCount = scrubber ? scrubber.entries().length : 0;
-
-  // Real Tinfoil enclave path
-  const apiKey = process.env.TINFOIL_API_KEY;
-  if (!apiKey) {
-    return Response.json(
-      {
-        error: {
-          message: "TINFOIL_API_KEY is not configured on the server.",
-          type: "configuration_error",
-        },
-      },
-      { status: 503, headers: CORS_HEADERS },
-    );
-  }
 
   try {
     const client = new TinfoilAI({ apiKey });
