@@ -1,15 +1,16 @@
 import type { Metadata } from "next";
+import { JsonLd } from "@/components/json-ld";
+import { pageMetadata, subPageJsonLd } from "@/lib/seo";
 
-export const metadata: Metadata = {
-  title: "Sign in",
-  description:
-    "Sign in to deRoute with your fingerprint, face, device, or 6 secret words. No email. No password. We never learn who you are.",
-};
+const PATH = "/login";
 
-export default function LoginLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
-  return children;
+export const metadata: Metadata = pageMetadata(PATH);
+
+export default function Layout({ children }: { children: React.ReactNode }) {
+  return (
+    <>
+      <JsonLd data={subPageJsonLd(PATH)} />
+      {children}
+    </>
+  );
 }

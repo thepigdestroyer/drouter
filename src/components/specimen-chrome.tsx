@@ -10,6 +10,7 @@ import {
   lockVault,
   subscribeVaultSession,
 } from "@/lib/auth/vault";
+import { MORE_BY_MRINAL, PERSON_URL } from "@/lib/seo";
 
 export type SpecimenRoutePath =
   | "/"
@@ -414,6 +415,28 @@ export function SpecimenFooter() {
           >
             Source on GitHub
           </a>
+        </nav>
+      </div>
+      <div className="mx-auto flex max-w-5xl flex-col items-start gap-2 border-t border-rule px-4 py-4 text-xs sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-5 sm:px-6">
+        <p className="text-ink-2">
+          Built by{" "}
+          <a href={PERSON_URL} rel="author" className="ep-link text-xs">
+            Mrinal Joshi
+          </a>
+          . Winner, Agents That Ship track, Encode London 2026.
+        </p>
+        <nav
+          aria-label="More by Mrinal"
+          className="flex flex-wrap items-center gap-x-4 gap-y-1"
+        >
+          <span className="ep-label">More by Mrinal</span>
+          {MORE_BY_MRINAL.filter((site) => site.href !== PERSON_URL).map(
+            (site) => (
+              <a key={site.href} href={site.href} className="ep-link text-xs">
+                {site.label}
+              </a>
+            ),
+          )}
         </nav>
       </div>
     </footer>

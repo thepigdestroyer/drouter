@@ -1,58 +1,11 @@
 import type { MetadataRoute } from "next";
-
-const BASE_URL = "https://drouter-demo.vercel.app";
+import { SEO_PAGES, canonicalUrl } from "@/lib/seo";
 
 export default function sitemap(): MetadataRoute.Sitemap {
-  return [
-    {
-      url: BASE_URL,
-      changeFrequency: "weekly",
-      priority: 1.0,
-    },
-    {
-      url: `${BASE_URL}/explain`,
-      changeFrequency: "weekly",
-      priority: 0.9,
-    },
-    {
-      url: `${BASE_URL}/about`,
-      changeFrequency: "monthly",
-      priority: 0.85,
-    },
-    {
-      url: `${BASE_URL}/partners`,
-      changeFrequency: "monthly",
-      priority: 0.85,
-    },
-    {
-      url: `${BASE_URL}/app`,
-      changeFrequency: "weekly",
-      priority: 0.85,
-    },
-    {
-      url: `${BASE_URL}/argon`,
-      changeFrequency: "weekly",
-      priority: 0.8,
-    },
-    {
-      url: `${BASE_URL}/audit`,
-      changeFrequency: "weekly",
-      priority: 0.8,
-    },
-    {
-      url: `${BASE_URL}/network`,
-      changeFrequency: "hourly",
-      priority: 0.75,
-    },
-    {
-      url: `${BASE_URL}/login`,
-      changeFrequency: "monthly",
-      priority: 0.65,
-    },
-    {
-      url: `${BASE_URL}/account`,
-      changeFrequency: "monthly",
-      priority: 0.6,
-    },
-  ];
+  return SEO_PAGES.map((page) => ({
+    url: canonicalUrl(page.path),
+    lastModified: page.lastModified,
+    changeFrequency: page.changeFrequency,
+    priority: page.priority,
+  }));
 }

@@ -1,4 +1,3 @@
-import type { Metadata } from "next";
 import Link from "next/link";
 import { AuthPill } from "@/components/auth-pill";
 import { EnclaveGauntlet } from "@/components/game/enclave-gauntlet";
@@ -7,12 +6,6 @@ import { InkReveal } from "@/components/ink/ink-reveal";
 import { TechDetails } from "@/components/ink/tech-details";
 import { PacketSniffer } from "@/components/packet-sniffer";
 import { SpecimenFooter, SpecimenHeader } from "@/components/specimen-chrome";
-
-export const metadata: Metadata = {
-  title: "How it works · deRoute",
-  description:
-    "A short story in four scenes showing how deRoute checks the seal on a distant computer, hides your personal details, locks your message, and dissolves the key when you finish.",
-};
 
 export default function ExplainPage() {
   return (

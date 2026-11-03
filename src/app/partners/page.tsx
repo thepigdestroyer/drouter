@@ -1,4 +1,3 @@
-import type { Metadata } from "next";
 import { AuthPill } from "@/components/auth-pill";
 import { InkReveal } from "@/components/ink/ink-reveal";
 import { TechDetails } from "@/components/ink/tech-details";
@@ -21,11 +20,6 @@ export {
   CONFIDENTIAL_SPACE_DOCS_GITHUB_URL,
   GOOGLE_EGRESS_CAPACITY_TABLE,
   SPLIT_KNOWLEDGE_EXPLAINER,
-};
-
-export const metadata: Metadata = {
-  title: "Backend partners · deRoute",
-  description: BACKEND_PARTNERS_INTRO.lead,
 };
 
 const GEMINI_PARTNER = BACKEND_PARTNERS[0];

@@ -1,10 +1,31 @@
 <!doctype html>
-<html lang="en">
+<html lang="en-GB">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="deRoute pitch deck: a privacy-preserving, verifiable AI router.">
-<title>deRoute · Private AI you can verify</title>
+<title>deRoute detailed technical deck: private AI routing</title>
+<meta name="description" content="The detailed technical deck for deRoute: seven building blocks, the life of one request, and the public proof behind private AI routing. Built by Mrinal Joshi.">
+<meta name="robots" content="noindex, follow">
+<meta name="author" content="Mrinal Joshi">
+<meta name="theme-color" content="#f3f1ec">
+<link rel="canonical" href="https://deroute-deck.vercel.app/detailed.html">
+<link rel="author" href="https://mrinal.is-a.dev/">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="deRoute">
+<meta property="og:locale" content="en_GB">
+<meta property="og:url" content="https://deroute-deck.vercel.app/detailed.html">
+<meta property="og:title" content="deRoute detailed technical deck: private AI routing">
+<meta property="og:description" content="The detailed technical deck for deRoute: seven building blocks, the life of one request, and the public proof behind private AI routing. Built by Mrinal Joshi.">
+<meta property="og:image" content="https://deroute-deck.vercel.app/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="deRoute private AI routing diagram: your browser checks the sealed computer, hides personal details and sends only a locked message">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="deRoute detailed technical deck: private AI routing">
+<meta name="twitter:description" content="The detailed technical deck for deRoute: seven building blocks, the life of one request, and the public proof behind private AI routing. Built by Mrinal Joshi.">
+<meta name="twitter:image" content="https://deroute-deck.vercel.app/og.png">
 <style>
 :root{
   --paper:#f3f1ec; --paper-2:#ebe8e1; --ink:#151515; --ink-2:#3a3936; --muted:#595752; --rule:#d6d2c8; --accent:#d9531e;
@@ -16,6 +37,11 @@
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;overflow:hidden;background:#d8d4ca;color:var(--ink);
   -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+.credit{position:absolute;left:150px;right:150px;bottom:3px;height:16px;display:flex;justify-content:center;gap:26px;z-index:6;
+  font-family:var(--mono);font-size:14px;letter-spacing:.08em;color:var(--muted);white-space:nowrap}
+.credit a{color:var(--muted);text-decoration:none;border-bottom:1.5px solid var(--rule)}
+.credit a:hover,.credit a:focus-visible{color:var(--ink);border-color:var(--ink)}
+@media print{.credit{position:static;height:auto;padding:8px 0}}
 .defs{position:absolute;width:0;height:0;overflow:hidden}
 .stage{position:absolute;left:50%;top:50%;width:1920px;height:1080px;transform:translate(-50%,-50%) scale(var(--s));
   transform-origin:50% 50%;background:var(--paper);overflow:hidden;
@@ -612,6 +638,7 @@ code,.code{font-family:var(--mono)}
 
 <footer class="foot"><span class="src">deroute-core image sha256:220578e0…f03207, pinned in src/lib/attestation/expected-core-digests.json · /api/core/health live</span><span class="num">05 / 05</span></footer>
 </section>
+<p class="credit">Built by <a href="https://mrinal.is-a.dev/" rel="author">Mrinal Joshi</a><span>Live product: <a href="https://drouter-demo.vercel.app/">drouter-demo.vercel.app</a></span></p>
 </main>
 <nav class="ctrl" aria-label="Slide navigation"><button class="prev" aria-label="Previous slide">&#8249;</button><span class="count">1 / 5</span><button class="next" aria-label="Next slide">&#8250;</button></nav>
 <div id="live" class="sr" aria-live="polite"></div>

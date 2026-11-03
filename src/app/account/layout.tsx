@@ -1,15 +1,16 @@
 import type { Metadata } from "next";
+import { JsonLd } from "@/components/json-ld";
+import { pageMetadata, subPageJsonLd } from "@/lib/seo";
 
-export const metadata: Metadata = {
-  title: "Account settings",
-  description:
-    "Manage words to always hide before messages leave your device, export or import your locked deRoute backup, and sign out.",
-};
+const PATH = "/account";
 
-export default function AccountLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
-  return children;
+export const metadata: Metadata = pageMetadata(PATH);
+
+export default function Layout({ children }: { children: React.ReactNode }) {
+  return (
+    <>
+      <JsonLd data={subPageJsonLd(PATH)} />
+      {children}
+    </>
+  );
 }

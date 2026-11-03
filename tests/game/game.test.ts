@@ -282,7 +282,11 @@ describe("The Enclave Gauntlet · 4 Interactive Security Exhibits", () => {
         path.resolve(process.cwd(), "src/app/explain/page.tsx"),
         "utf8"
       );
-      expect(explainSrc).toContain("How it works · deRoute");
+      const seoSrc = fs.readFileSync(
+        path.resolve(process.cwd(), "src/lib/seo.ts"),
+        "utf8"
+      );
+      expect(seoSrc).toContain("How Private AI Routing Works, Step by Step | deRoute");
       expect(explainSrc).toContain("Scene One");
       expect(explainSrc).toContain("Scene Two");
       expect(explainSrc).toContain("Scene Three");

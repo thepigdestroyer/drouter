@@ -20,43 +20,34 @@ export const metadata: Metadata = {
   },
   description: DEFAULT_DESCRIPTION,
   applicationName: "deRoute",
-  alternates: {
-    canonical: SITE_URL,
-  },
   openGraph: {
     title: DEFAULT_TITLE,
     description: DEFAULT_DESCRIPTION,
     url: SITE_URL,
     siteName: "deRoute",
-    locale: "en_US",
+    locale: "en_GB",
     type: "website",
-    images: [
-      {
-        url: "/opengraph-image",
-        width: 1200,
-        height: 630,
-        alt: "deRoute private AI routing diagram",
-      },
-    ],
   },
   twitter: {
     card: "summary_large_image",
     title: DEFAULT_TITLE,
     description: DEFAULT_DESCRIPTION,
-    images: ["/twitter-image"],
   },
   icons: {
     icon: [
       { url: "/icon.svg", type: "image/svg+xml", sizes: "any" },
       { url: "/favicon.ico", sizes: "any" },
     ],
+    apple: [{ url: "/apple-icon.png", sizes: "180x180", type: "image/png" }],
   },
+  authors: [{ name: "Mrinal Joshi", url: "https://mrinal.is-a.dev/" }],
+  creator: "Mrinal Joshi",
   manifest: "/manifest.webmanifest",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="en" className="h-full antialiased">
+    <html lang="en-GB" className="h-full antialiased">
       <body className="relative min-h-full flex flex-col bg-paper text-ink">
         <InkField />
         <div className="relative z-10 flex min-h-full flex-1 flex-col">

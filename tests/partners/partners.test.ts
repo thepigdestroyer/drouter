@@ -9,8 +9,8 @@ import {
   CONFIDENTIAL_SPACE_DOCS_GITHUB_URL,
   GOOGLE_EGRESS_CAPACITY_TABLE,
   SPLIT_KNOWLEDGE_EXPLAINER,
-  metadata as partnersMetadata,
 } from "@/app/partners/page";
+import { metadata as partnersMetadata } from "@/app/partners/layout";
 import sitemap from "@/app/sitemap";
 import {
   SIGNED_IN_NAV_ITEMS,
@@ -127,7 +127,9 @@ describe("Backend partners page (/partners), navigation, and cross-links", () =>
       "utf8",
     );
 
-    expect(partnersMetadata.title).toBe("Backend partners · deRoute");
+    expect(partnersMetadata.title).toEqual({
+      absolute: "Confidential AI Backend Partners | deRoute",
+    });
     expect(partnersSource).toContain('activePath="/partners"');
     expect(partnersSource).toContain('id="backend-partners"');
     expect(partnersSource).toContain('aria-label="Backend partners"');
