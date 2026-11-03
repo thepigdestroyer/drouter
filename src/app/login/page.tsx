@@ -600,8 +600,11 @@ export default function LoginPage() {
             tabIndex={-1}
             className="mx-auto w-full max-w-4xl flex-1 px-4 py-10 sm:px-6"
           >
-            <div className="ep-card p-6 text-sm text-ink-2">
-              Loading sign-in...
+            <div className="ep-card space-y-2 p-6 text-sm text-ink-2">
+              <h1 className="ep-display text-3xl text-ink sm:text-4xl">
+                Sign in to deRoute
+              </h1>
+              <p>No email. No password. Loading sign-in...</p>
             </div>
           </main>
         }

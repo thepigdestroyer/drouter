@@ -10,8 +10,15 @@ import {
   type VaultSession,
 } from "@/lib/auth/vault";
 
+export interface AuthGateIntro {
+  heading: string;
+  body: string;
+}
+
 export interface AuthGateProps {
   children: React.ReactNode;
+  /** Page heading and lead shown to signed-out visitors and crawlers above the sign-in card. */
+  intro?: AuthGateIntro;
 }
 
 function isUnsafePathCandidate(candidate: string): boolean {
@@ -62,7 +69,7 @@ export function buildLoginRedirectHref(pathname: string | null | undefined): str
   return `/login?next=${safePath}`;
 }
 
-export function AuthGate({ children }: AuthGateProps): React.JSX.Element {
+export function AuthGate({ children, intro }: AuthGateProps): React.JSX.Element {
   const pathname = usePathname();
   const [session, setSession] = useState<VaultSession | null>(null);
 
@@ -81,6 +88,12 @@ export function AuthGate({ children }: AuthGateProps): React.JSX.Element {
 
   return (
     <div className="mx-auto w-full max-w-xl px-4 py-12 sm:px-6">
+      {intro && (
+        <header className="mb-8 space-y-2">
+          <h1 className="ep-display text-3xl sm:text-4xl">{intro.heading}</h1>
+          <p className="text-base leading-relaxed text-ink-2">{intro.body}</p>
+        </header>
+      )}
       <InkReveal>
         <section
           aria-labelledby="auth-gate-heading"

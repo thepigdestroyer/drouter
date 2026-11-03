@@ -580,7 +580,12 @@ export default function NetworkPage() {
       <SpecimenHeader activePath="/network" rightSlot={<AuthPill />} />
 
       <main className="mx-auto w-full max-w-5xl flex-1 min-w-0 px-4 py-10 sm:px-6">
-        <AuthGate>
+        <AuthGate
+          intro={{
+            heading: "Who runs deRoute and the public receipt book",
+            body: "See the sealed computers that answer your chats and the public receipt book where every seal check is recorded.",
+          }}
+        >
           <div className="space-y-12">
             <section className="space-y-3 border-b border-rule pb-6">
               <div className="ep-label">Network</div>

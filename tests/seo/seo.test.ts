@@ -70,6 +70,23 @@ describe("page metadata", () => {
   });
 });
 
+describe("signed-out content", () => {
+  it("renders a server-side heading and lead on every sign-in gated page", () => {
+    for (const route of ["argon", "audit", "network", "account"]) {
+      const source = fs.readFileSync(
+        path.join(REPO_ROOT, "src/app", route, "page.tsx"),
+        "utf8",
+      );
+      expect(source, route).toMatch(/<AuthGate\s+intro=/);
+    }
+    const gate = fs.readFileSync(
+      path.join(REPO_ROOT, "src/components/auth/auth-gate.tsx"),
+      "utf8",
+    );
+    expect(gate).toContain("<h1");
+  });
+});
+
 describe("JSON-LD", () => {
   it("parses on the home page and references the person @id", () => {
     const raw = serializeJsonLd(homeJsonLd());

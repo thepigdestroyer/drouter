@@ -518,7 +518,12 @@ export default function AccountPage() {
         tabIndex={-1}
         className="mx-auto w-full max-w-4xl flex-1 space-y-8 px-4 py-10 sm:px-6"
       >
-        <AuthGate>
+        <AuthGate
+          intro={{
+            heading: "Your deRoute account",
+            body: "Choose words you always want hidden before anything leaves your device, save a backup file, or sign out.",
+          }}
+        >
           <div className="space-y-8">
             {/* Hero */}
             <InkReveal>

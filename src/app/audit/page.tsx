@@ -446,7 +446,12 @@ export default function AuditLabPage() {
       <SpecimenHeader activePath="/audit" rightSlot={<AuthPill />} />
 
       <main className="flex-1 w-full min-w-0">
-        <AuthGate>
+        <AuthGate
+          intro={{
+            heading: "Why you can trust deRoute",
+            body: "You do not have to take our word for it. Every chat goes to a sealed computer whose lock and public receipt book you can check for yourself in one click.",
+          }}
+        >
           <div className="mx-auto w-full max-w-5xl px-4 pt-10 pb-12 sm:px-6 space-y-12">
             {/* Header */}
             <header className="space-y-3 border-b border-rule pb-8">
