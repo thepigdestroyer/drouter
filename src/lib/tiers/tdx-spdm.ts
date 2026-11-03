@@ -437,6 +437,7 @@ async function getOrFetchRawLiveQuotes(): Promise<RawLiveQuoteCache> {
       models?: Record<
         string,
         {
+          repo?: string;
           tag?: string;
           measurement?: { registers?: string[] };
           enclaves?: Record<string, { predicate?: string }>;
@@ -463,29 +464,52 @@ async function getOrFetchRawLiveQuotes(): Promise<RawLiveQuoteCache> {
   const glmEntry = proxy?.models?.["glm-5-3"];
   const glmHost = glmEntry?.enclaves ? Object.keys(glmEntry.enclaves)[0] ?? "" : "";
 
+  // Tinfoil runs deepseek-v4-1-flash on a mixed fleet: some hosts serve AMD SEV-SNP reports, others
+  // Intel TDX quotes, and during a rolling release some still run the previous build. Fetch every
+  // host and use one that really serves a TDX quote, preferring hosts on the current release.
   const dsEntry = proxy?.models?.["deepseek-v4-1-flash"];
-  const dsHost = dsEntry?.enclaves
-    ? (Object.keys(dsEntry.enclaves).find(
-        (h) => dsEntry.verification?.hosts?.[h]?.code_tag === dsEntry.tag,
-      ) ??
-        Object.keys(dsEntry.enclaves)[0] ??
-        "")
-    : "";
+  const dsCandidates = dsEntry?.enclaves
+    ? Object.keys(dsEntry.enclaves).sort(
+        (a, b) =>
+          Number(dsEntry.verification?.hosts?.[b]?.code_tag === dsEntry.tag) -
+          Number(dsEntry.verification?.hosts?.[a]?.code_tag === dsEntry.tag),
+      )
+    : [];
 
-  const [glmAtt, dsAtt] = await Promise.all([
+  const [glmAtt, dsAtts] = await Promise.all([
     glmHost
       ? fetchJsonWithTimeout<{ format?: string; body?: string }>(
           `https://${glmHost}/.well-known/tinfoil-attestation`,
           3500,
         )
       : Promise.resolve(null),
-    dsHost
-      ? fetchJsonWithTimeout<{ format?: string; body?: string }>(
-          `https://${dsHost}/.well-known/tinfoil-attestation`,
+    Promise.all(
+      dsCandidates.map((h) =>
+        fetchJsonWithTimeout<{ format?: string; body?: string }>(
+          `https://${h}/.well-known/tinfoil-attestation`,
           3500,
-        )
-      : Promise.resolve(null),
+        ),
+      ),
+    ),
   ]);
+  const dsIndex = dsAtts.findIndex((a) => Boolean(a?.body) && String(a?.format ?? "").includes("tdx"));
+  const dsHost = dsIndex >= 0 ? dsCandidates[dsIndex] : (dsCandidates[0] ?? "");
+  const dsAtt = dsIndex >= 0 ? dsAtts[dsIndex] : null;
+
+  // RTMRs must match the signed release the chosen host actually runs, which can lag the model tag.
+  let tdxRtmr1Hex = dsEntry?.measurement?.registers?.[1];
+  let tdxRtmr2Hex = dsEntry?.measurement?.registers?.[2];
+  const dsHostTag = dsHost ? dsEntry?.verification?.hosts?.[dsHost]?.code_tag : undefined;
+  if (dsAtt && dsEntry?.repo && dsHostTag && dsHostTag !== dsEntry.tag) {
+    const hostRelease = await fetchJsonWithTimeout<{ tdx_measurement?: { rtmr1?: string; rtmr2?: string } }>(
+      `https://github.com/${dsEntry.repo}/releases/download/${encodeURIComponent(dsHostTag)}/tinfoil-deployment.json`,
+      3500,
+    );
+    if (hostRelease?.tdx_measurement?.rtmr1 && hostRelease.tdx_measurement.rtmr2) {
+      tdxRtmr1Hex = hostRelease.tdx_measurement.rtmr1;
+      tdxRtmr2Hex = hostRelease.tdx_measurement.rtmr2;
+    }
+  }
 
   let turinRawBytes: Uint8Array | null = null;
   let turinVcekDer: Uint8Array | null = null;
@@ -526,8 +550,8 @@ async function getOrFetchRawLiveQuotes(): Promise<RawLiveQuoteCache> {
     tdxModelId: "deepseek-v4-1-flash",
     tdxHost: dsHost,
     tdxRawBytes,
-    tdxRtmr1Hex: dsEntry?.measurement?.registers?.[1],
-    tdxRtmr2Hex: dsEntry?.measurement?.registers?.[2],
+    tdxRtmr1Hex,
+    tdxRtmr2Hex,
   };
 
   if (routerRawBytes || turinRawBytes || tdxRawBytes) {
@@ -565,14 +589,22 @@ export async function measureLiveTinfoilQuoteVerifications(): Promise<LiveQuoteV
   let turinVerification: SnpChainVerificationResult | null = null;
   let turinVerifyMs: number | null = null;
   if (raw.turinRawBytes && raw.turinVcekDer && raw.turinChainPem) {
-    const t0 = performance.now();
-    turinReport = decodeSnpReportBytes(raw.turinRawBytes);
-    turinVerification = await verifyAmdSevSnpChainEndToEnd(
-      raw.turinRawBytes,
-      raw.turinVcekDer,
-      raw.turinChainPem,
-    );
-    turinVerifyMs = Number(Math.max(0.01, performance.now() - t0).toFixed(3));
+    // A host that changes hardware or report format must not take the whole endpoint down:
+    // leave this tier unmeasured instead of throwing.
+    try {
+      const t0 = performance.now();
+      turinReport = decodeSnpReportBytes(raw.turinRawBytes);
+      turinVerification = await verifyAmdSevSnpChainEndToEnd(
+        raw.turinRawBytes,
+        raw.turinVcekDer,
+        raw.turinChainPem,
+      );
+      turinVerifyMs = Number(Math.max(0.01, performance.now() - t0).toFixed(3));
+    } catch {
+      turinReport = null;
+      turinVerification = null;
+      turinVerifyMs = null;
+    }
   }
 
   // 3. Measure live Tier B Intel TDX Quote v4 model enclave verification
@@ -580,13 +612,19 @@ export async function measureLiveTinfoilQuoteVerifications(): Promise<LiveQuoteV
   let tdxVerification: TdxQuoteVerificationResult | null = null;
   let tdxVerifyMs: number | null = null;
   if (raw.tdxRawBytes) {
-    const t0 = performance.now();
-    tdxParsed = decodeTdxQuoteBytes(raw.tdxRawBytes);
-    tdxVerification = await verifyTdxQuoteEndToEnd(raw.tdxRawBytes, {
-      rtmr1Hex: raw.tdxRtmr1Hex,
-      rtmr2Hex: raw.tdxRtmr2Hex,
-    });
-    tdxVerifyMs = Number(Math.max(0.01, performance.now() - t0).toFixed(3));
+    try {
+      const t0 = performance.now();
+      tdxParsed = decodeTdxQuoteBytes(raw.tdxRawBytes);
+      tdxVerification = await verifyTdxQuoteEndToEnd(raw.tdxRawBytes, {
+        rtmr1Hex: raw.tdxRtmr1Hex,
+        rtmr2Hex: raw.tdxRtmr2Hex,
+      });
+      tdxVerifyMs = Number(Math.max(0.01, performance.now() - t0).toFixed(3));
+    } catch {
+      tdxParsed = null;
+      tdxVerification = null;
+      tdxVerifyMs = null;
+    }
   }
 
   return {

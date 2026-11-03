@@ -475,7 +475,7 @@ describe("D7 Continuous Enclave Monitoring & Real Accountability", () => {
         fetchImpl: createMockUpstreamFetch({
           genoaCertChainPem,
           hostHpkeOverrides: { "kimi-k3": "ff".repeat(32) },
-          tagOverrides: { "glm-5-3": "v0.0.8" },
+          tagOverrides: { "glm-5-3": "v0.0.99" },
         }),
         nowSec: 1761357600,
       });
@@ -488,8 +488,8 @@ describe("D7 Continuous Enclave Monitoring & Real Accountability", () => {
 
       const glm3 = run3.run.enclaves.find((e) => e.nodeId === "glm-5-3")!;
       expect(glm3.releaseChange.kind).toBe("release-upgrade");
-      expect(glm3.releaseChange.previousTag).toBe("v0.0.7");
-      expect(glm3.releaseChange.currentTag).toBe("v0.0.8");
+      expect(glm3.releaseChange.previousTag).toBe(OPEN_MODEL_CATALOG["glm-5-3"].tinfoilTag);
+      expect(glm3.releaseChange.currentTag).toBe("v0.0.99");
       expect(run3.rampStates["glm-5-3"].phase).toBe("linear-ramp");
       expect(run3.rampStates["glm-5-3"].weightBps).toBe(5000);
 

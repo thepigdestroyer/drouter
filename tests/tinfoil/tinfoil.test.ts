@@ -434,22 +434,46 @@ describe("Two-Hop Enclave & GPU Trust Verifier", () => {
         (r) => r.json(),
       );
       const dsModel = proxy.models["deepseek-v4-1-flash"];
-      const dsHost =
-        Object.keys(dsModel.enclaves).find(
-          (h) => dsModel.verification?.hosts?.[h]?.code_tag === dsModel.tag,
-        ) ?? Object.keys(dsModel.enclaves)[0];
-      const dsAtt = await fetch(`https://${dsHost}/.well-known/tinfoil-attestation`).then((r) =>
-        r.json(),
+      // Tinfoil runs this model on a mixed fleet (some hosts serve AMD SEV-SNP reports), so pick a
+      // host on the current release that actually serves a TDX quote, instead of the first host.
+      const dsHosts = Object.keys(dsModel.enclaves).sort(
+        (a, b) =>
+          Number(dsModel.verification?.hosts?.[b]?.code_tag === dsModel.tag) -
+          Number(dsModel.verification?.hosts?.[a]?.code_tag === dsModel.tag),
       );
-      const dsQuoteBytes = new Uint8Array(gunzipSync(Buffer.from(dsAtt.body, "base64")));
+      let dsAtt: { format?: string; body: string } | undefined;
+      let dsHostTag: string = dsModel.tag;
+      for (const host of dsHosts) {
+        const att = await fetch(`https://${host}/.well-known/tinfoil-attestation`)
+          .then((r) => r.json())
+          .catch(() => undefined);
+        if (att && String(att.format ?? "").includes("tdx")) {
+          dsAtt = att;
+          dsHostTag = dsModel.verification?.hosts?.[host]?.code_tag ?? dsModel.tag;
+          break;
+        }
+      }
+      expect(dsAtt, "no deepseek-v4-1-flash host currently serves a TDX quote").toBeDefined();
+      const dsQuoteBytes = new Uint8Array(gunzipSync(Buffer.from(dsAtt!.body, "base64")));
+      // During a rolling release a host can still run the previous build. Its RTMRs must match the
+      // signed release it actually runs, so read them from that release rather than the model's tag.
+      let dsRtmr1: string = dsModel.measurement.registers[1];
+      let dsRtmr2: string = dsModel.measurement.registers[2];
+      if (dsHostTag !== dsModel.tag) {
+        const hostRelease = await fetch(
+          `https://github.com/${dsModel.repo}/releases/download/${encodeURIComponent(dsHostTag)}/tinfoil-deployment.json`,
+        ).then((r) => r.json());
+        dsRtmr1 = hostRelease.tdx_measurement.rtmr1;
+        dsRtmr2 = hostRelease.tdx_measurement.rtmr2;
+      }
       const parsedTdx = decodeTdxQuoteBytes(dsQuoteBytes);
       expect(parsedTdx.version).toBe(4);
       expect(parsedTdx.teeType).toBe(0x81);
       expect(parsedTdx.pckCertChainPems.length).toBe(3);
 
       const tdxVerified = await verifyTdxQuoteEndToEnd(dsQuoteBytes, {
-        rtmr1Hex: dsModel.measurement.registers[1],
-        rtmr2Hex: dsModel.measurement.registers[2],
+        rtmr1Hex: dsRtmr1,
+        rtmr2Hex: dsRtmr2,
       });
       expect(tdxVerified.verified).toBe(true);
       expect(tdxVerified.pckChainVerified).toBe(true);

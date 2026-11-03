@@ -307,7 +307,7 @@ export function buildVerifiableClaims(params: {
 
   const kimiDmVerity =
     kimiModel?.dmVerityRootHash ??
-    "41068e0738e14ee74d5b987586bdfc261d7bdd59e156dd6818154fd188b8ee7b";
+    "b1902527b8cd0b9be8753052b9c28a114cabe57286ed2b65928e78647afd7936";
   const kimiSigstoreUrl =
     kimiModel?.sigstoreSearchUrl ??
     `https://search.sigstore.dev/?hash=${kimiDmVerity}`;
