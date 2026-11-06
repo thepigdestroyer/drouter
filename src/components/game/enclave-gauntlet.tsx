@@ -253,49 +253,49 @@ export function EnclaveGauntlet({ compact = false }: EnclaveGauntletProps) {
           <p className="text-sm font-medium text-ink">{progressMessage}</p>
         </div>
 
-        <div
+        <ul
           className="flex flex-wrap items-center gap-3"
           role="list"
           aria-label="Game rounds progress"
         >
           {progressDrops.map((item) => (
-            <a
-              key={item.id}
-              href={`#${item.id}`}
-              role="listitem"
-              className={`group inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs transition-all ${
-                item.done
-                  ? "border-ink bg-ink text-paper"
-                  : "border-rule bg-paper-2 text-ink-2 hover:border-ink hover:text-ink"
-              }`}
-            >
-              <svg
-                viewBox="0 0 20 24"
-                className={`h-4 w-3.5 transition-transform duration-300 ${
-                  item.done ? "scale-110" : "group-hover:scale-105"
+            <li key={item.id}>
+              <a
+                href={`#${item.id}`}
+                className={`group flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs transition-all ${
+                  item.done
+                    ? "border-ink bg-ink text-paper"
+                    : "border-rule bg-paper-2 text-ink-2 hover:border-ink hover:text-ink"
                 }`}
-                aria-hidden="true"
               >
-                <path
-                  d="M10 2 C10 2 3 10.5 3 15.5 C3 19.4 6.1 22.5 10 22.5 C13.9 22.5 17 19.4 17 15.5 C17 10.5 10 2 10 2 Z"
-                  fill={item.done ? "currentColor" : "none"}
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                  strokeLinejoin="round"
-                />
-                {item.done && (
-                  <circle
-                    cx="7.5"
-                    cy="15"
-                    r="1.4"
-                    fill="var(--color-paper)"
+                <svg
+                  viewBox="0 0 20 24"
+                  className={`h-4 w-3.5 transition-transform duration-300 ${
+                    item.done ? "scale-110" : "group-hover:scale-105"
+                  }`}
+                  aria-hidden="true"
+                >
+                  <path
+                    d="M10 2 C10 2 3 10.5 3 15.5 C3 19.4 6.1 22.5 10 22.5 C13.9 22.5 17 19.4 17 15.5 C17 10.5 10 2 10 2 Z"
+                    fill={item.done ? "currentColor" : "none"}
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinejoin="round"
                   />
-                )}
-              </svg>
-              <span className="font-medium">{item.label}</span>
-            </a>
+                  {item.done && (
+                    <circle
+                      cx="7.5"
+                      cy="15"
+                      r="1.4"
+                      fill="var(--color-paper)"
+                    />
+                  )}
+                </svg>
+                <span className="font-medium">{item.label}</span>
+              </a>
+            </li>
           ))}
-        </div>
+        </ul>
       </div>
 
       <div className={compact ? "space-y-4" : "space-y-6"}>

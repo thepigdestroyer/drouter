@@ -18,6 +18,9 @@
   --color-rule-2: #b9b4a8;
   --color-accent: #d9531e;
   --color-accent-soft: #f6e3d8;
+  /* Text-only orange: the accent darkened until small text reaches 4.5:1 on
+     accent-soft (4.64:1). Fills, borders and graphics keep --color-accent. */
+  --color-accent-text: #af4318;
 
   --font-serif: "Iowan Old Style", "Charter", "Palatino Linotype", "Book Antiqua", Georgia, serif;
   --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
@@ -376,7 +379,7 @@ div.min-h-screen.bg-paper {
     font-size: 11px;
     letter-spacing: 0.06em;
     text-transform: uppercase;
-    color: var(--color-accent);
+    color: var(--color-accent-text);
     border: 1px solid var(--color-accent);
     background: var(--color-accent-soft);
     border-radius: 999px;
