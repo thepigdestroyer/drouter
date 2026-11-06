@@ -579,7 +579,11 @@ export default function NetworkPage() {
     <div className="min-h-screen flex flex-col bg-paper text-ink overflow-x-hidden">
       <SpecimenHeader activePath="/network" rightSlot={<AuthPill />} />
 
-      <main className="mx-auto w-full max-w-5xl flex-1 min-w-0 px-4 py-10 sm:px-6">
+      <main
+        id="main-content"
+        tabIndex={-1}
+        className="mx-auto w-full max-w-5xl flex-1 min-w-0 px-4 py-10 sm:px-6"
+      >
         <AuthGate
           intro={{
             heading: "Who runs deRoute and the public receipt book",

@@ -445,7 +445,7 @@ export default function AuditLabPage() {
     <div className="min-h-screen flex flex-col bg-paper text-ink overflow-x-hidden">
       <SpecimenHeader activePath="/audit" rightSlot={<AuthPill />} />
 
-      <main className="flex-1 w-full min-w-0">
+      <main id="main-content" tabIndex={-1} className="flex-1 w-full min-w-0">
         <AuthGate
           intro={{
             heading: "Why you can trust deRoute",

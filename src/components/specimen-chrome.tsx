@@ -387,23 +387,23 @@ export function SpecimenFooter() {
           deRoute. Private AI chat where nobody, including us, can read what you ask.
         </p>
         <nav aria-label="Footer links" className="flex flex-wrap items-center gap-4">
-          <Link href="/explain" className="ep-link text-xs">
+          <Link href="/explain" className="ep-link ep-footer-link text-xs">
             How it works
           </Link>
-          <Link href="/network" className="ep-link text-xs">
+          <Link href="/network" className="ep-link ep-footer-link text-xs">
             Network
           </Link>
-          <Link href="/about" className="ep-link text-xs">
+          <Link href="/about" className="ep-link ep-footer-link text-xs">
             About
           </Link>
-          <Link href="/partners" className="ep-link text-xs">
+          <Link href="/partners" className="ep-link ep-footer-link text-xs">
             Backend partners
           </Link>
           <a
             href="https://testnet.arcscan.app/address/0xbc8085c2b6fe6e0db05f169925c0b841828f4481"
             target="_blank"
             rel="noreferrer"
-            className="ep-link text-xs"
+            className="ep-link ep-footer-link text-xs"
           >
             Public receipt book
           </a>
@@ -411,7 +411,7 @@ export function SpecimenFooter() {
             href="https://github.com/thepigdestroyer/drouter"
             target="_blank"
             rel="noreferrer"
-            className="ep-link text-xs"
+            className="ep-link ep-footer-link text-xs"
           >
             Source on GitHub
           </a>
@@ -427,12 +427,16 @@ export function SpecimenFooter() {
         </p>
         <nav
           aria-label="More by Mrinal"
-          className="flex flex-wrap items-center gap-x-4 gap-y-1"
+          className="flex flex-wrap items-center gap-x-4 gap-y-2"
         >
           <span className="ep-label">More by Mrinal</span>
           {MORE_BY_MRINAL.filter((site) => site.href !== PERSON_URL).map(
             (site) => (
-              <a key={site.href} href={site.href} className="ep-link text-xs">
+              <a
+                key={site.href}
+                href={site.href}
+                className="ep-link ep-footer-link text-xs"
+              >
                 {site.label}
               </a>
             ),

@@ -1553,7 +1553,7 @@ export default function ArgonShowcasePage() {
     <div className="min-h-screen flex flex-col bg-paper text-ink overflow-x-hidden">
       <SpecimenHeader activePath="/argon" rightSlot={<AuthPill />} />
 
-      <main id="main-content" className="flex-1 w-full min-w-0">
+      <main id="main-content" tabIndex={-1} className="flex-1 w-full min-w-0">
         <AuthGate
           intro={{ heading: "Private AI agent", body: AGENT_INTRO_SENTENCE }}
         >

@@ -277,7 +277,7 @@ export function ProviderCatalogClient({
                   </td>
 
                   <td className="py-3.5 px-4 min-w-[100px] font-mono text-[11px]">
-                    <div className="flex flex-col gap-1">
+                    <div className="flex flex-col gap-2.5">
                       <a
                         href={provider.url}
                         target="_blank"

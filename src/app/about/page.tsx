@@ -128,7 +128,11 @@ export default function AboutArchitecturePage() {
     <div className="min-h-screen flex flex-col bg-paper text-ink overflow-x-hidden">
       <SpecimenHeader activePath="/about" rightSlot={<AuthPill />} />
 
-      <main className="mx-auto w-full max-w-5xl flex-1 min-w-0 space-y-12 px-4 py-10 sm:px-6">
+      <main
+        id="main-content"
+        tabIndex={-1}
+        className="mx-auto w-full max-w-5xl flex-1 min-w-0 space-y-12 px-4 py-10 sm:px-6"
+      >
         {/* 1. What deRoute is & What the name means */}
         <InkReveal>
           <section className="space-y-6 border-b border-rule pb-8">
