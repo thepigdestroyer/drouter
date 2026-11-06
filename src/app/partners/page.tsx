@@ -58,9 +58,9 @@ export default function BackendPartnersPage() {
                   <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2 border-b border-rule pb-3">
                     <div className="min-w-0">
                       <div className="ep-label">{GEMINI_PARTNER.roleLabel}</div>
-                      <h3 className="font-serif text-xl font-medium text-ink">
+                      <h2 className="font-serif text-xl font-medium text-ink">
                         {GEMINI_PARTNER.name}
-                      </h3>
+                      </h2>
                     </div>
                     <span className="ep-pass self-start shrink-0">
                       Content-free planner
@@ -136,9 +136,9 @@ export default function BackendPartnersPage() {
                   <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2 border-b border-rule pb-3">
                     <div className="min-w-0">
                       <div className="ep-label">{ATLAS_PARTNER.roleLabel}</div>
-                      <h3 className="font-serif text-xl font-medium text-ink">
+                      <h2 className="font-serif text-xl font-medium text-ink">
                         {ATLAS_PARTNER.name}
-                      </h3>
+                      </h2>
                     </div>
                     <span className="ep-pass self-start shrink-0">
                       Public facts &amp; receipts
@@ -212,9 +212,9 @@ export default function BackendPartnersPage() {
             {/* Split knowledge explainer */}
             <div className="ep-inset p-5 space-y-2">
               <div className="ep-label">{SPLIT_KNOWLEDGE_EXPLAINER.eyebrow}</div>
-              <h3 className="font-serif text-lg sm:text-xl font-medium text-ink">
+              <h2 className="font-serif text-lg sm:text-xl font-medium text-ink">
                 {SPLIT_KNOWLEDGE_EXPLAINER.heading}
-              </h3>
+              </h2>
               <p className="max-w-[72ch] text-sm sm:text-base leading-relaxed text-ink-2">
                 {SPLIT_KNOWLEDGE_EXPLAINER.body}
               </p>
