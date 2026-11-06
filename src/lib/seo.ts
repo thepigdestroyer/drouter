@@ -24,15 +24,31 @@ export const MORE_BY_MRINAL: ReadonlyArray<{ label: string; href: string }> = [
   { label: "FLAIR-AD", href: "https://flair-ad.netlify.app/" },
 ];
 
-export interface SeoPage {
+interface SeoPageBase {
   path: string;
   title: string;
   description: string;
   breadcrumb: string;
+}
+
+/** A public page that serves its full content to a crawler: indexable and in the sitemap. */
+export interface IndexablePage extends SeoPageBase {
+  indexable: true;
   lastModified: string;
   changeFrequency: "hourly" | "weekly" | "monthly";
   priority: number;
 }
+
+/**
+ * A sign-in gated or account screen. A crawler gets only a heading and a
+ * sign-in card because the real page needs a passkey session, so it is left
+ * out of the sitemap and served with `noindex, follow`.
+ */
+export interface NoindexPage extends SeoPageBase {
+  indexable: false;
+}
+
+export type SeoPage = IndexablePage | NoindexPage;
 
 export const SEO_PAGES: ReadonlyArray<SeoPage> = [
   {
@@ -41,6 +57,7 @@ export const SEO_PAGES: ReadonlyArray<SeoPage> = [
     description:
       "deRoute is private AI routing you can check. Your browser verifies the sealed hardware first and hides your personal details, so nobody reads your prompt.",
     breadcrumb: "Home",
+    indexable: true,
     lastModified: "2026-11-03",
     changeFrequency: "weekly",
     priority: 1.0,
@@ -51,6 +68,7 @@ export const SEO_PAGES: ReadonlyArray<SeoPage> = [
     description:
       "A short story in four scenes: how deRoute checks the seal on a distant computer, hides your personal details, locks your message and dissolves the key after.",
     breadcrumb: "How it works",
+    indexable: true,
     lastModified: "2026-11-03",
     changeFrequency: "weekly",
     priority: 0.9,
@@ -61,6 +79,7 @@ export const SEO_PAGES: ReadonlyArray<SeoPage> = [
     description:
       "What deRoute protects today and its honest limits: personal details hidden on your device, equal-sized messages and one sealed computer that opens your prompt.",
     breadcrumb: "About",
+    indexable: true,
     lastModified: "2026-11-03",
     changeFrequency: "monthly",
     priority: 0.85,
@@ -71,6 +90,7 @@ export const SEO_PAGES: ReadonlyArray<SeoPage> = [
     description:
       "How Google Gemini and MongoDB Atlas work inside deRoute without receiving your plain messages, personal details or IP address, and what each partner can see.",
     breadcrumb: "Backend partners",
+    indexable: true,
     lastModified: "2026-11-03",
     changeFrequency: "monthly",
     priority: 0.85,
@@ -81,9 +101,7 @@ export const SEO_PAGES: ReadonlyArray<SeoPage> = [
     description:
       "Chat with frontier AI models privately. deRoute checks the hardware seal in your browser, hides personal details on your device and sends only a locked message.",
     breadcrumb: "Private chat",
-    lastModified: "2026-11-03",
-    changeFrequency: "weekly",
-    priority: 0.85,
+    indexable: false,
   },
   {
     path: "/argon",
@@ -91,9 +109,7 @@ export const SEO_PAGES: ReadonlyArray<SeoPage> = [
     description:
       "A private AI agent that plans multi-step tasks over scrubbed metadata with Google Gemini 4 Argon, while your words stay locked for the sealed computer alone.",
     breadcrumb: "Private AI agent",
-    lastModified: "2026-11-03",
-    changeFrequency: "weekly",
-    priority: 0.8,
+    indexable: false,
   },
   {
     path: "/audit",
@@ -101,9 +117,7 @@ export const SEO_PAGES: ReadonlyArray<SeoPage> = [
     description:
       "Do not take our word for it. Check the lock on the sealed computer and the public receipt book behind every deRoute chat, and verify the claims yourself.",
     breadcrumb: "Proof",
-    lastModified: "2026-11-03",
-    changeFrequency: "weekly",
-    priority: 0.8,
+    indexable: false,
   },
   {
     path: "/network",
@@ -111,9 +125,7 @@ export const SEO_PAGES: ReadonlyArray<SeoPage> = [
     description:
       "See the sealed computers that answer deRoute chats and the public receipt book recording every hardware seal check, so AI prompt privacy can be verified.",
     breadcrumb: "Network",
-    lastModified: "2026-11-03",
-    changeFrequency: "hourly",
-    priority: 0.75,
+    indexable: false,
   },
   {
     path: "/login",
@@ -121,9 +133,7 @@ export const SEO_PAGES: ReadonlyArray<SeoPage> = [
     description:
       "Sign in to deRoute with your fingerprint, face, device or six secret words. No email and no password, so we never learn who you are. Nothing else to remember.",
     breadcrumb: "Sign in",
-    lastModified: "2026-11-03",
-    changeFrequency: "monthly",
-    priority: 0.65,
+    indexable: false,
   },
   {
     path: "/account",
@@ -131,11 +141,13 @@ export const SEO_PAGES: ReadonlyArray<SeoPage> = [
     description:
       "Manage the words deRoute always hides before messages leave your device, export or import your locked backup, and sign out of your private AI chat in one place.",
     breadcrumb: "Account",
-    lastModified: "2026-11-03",
-    changeFrequency: "monthly",
-    priority: 0.6,
+    indexable: false,
   },
 ];
+
+export const INDEXABLE_PAGES: ReadonlyArray<IndexablePage> = SEO_PAGES.filter(
+  (page): page is IndexablePage => page.indexable,
+);
 
 export function pageForPath(path: string): SeoPage {
   const page = SEO_PAGES.find((p) => p.path === path);
@@ -157,6 +169,7 @@ export function pageMetadata(path: string): Metadata {
     title: { absolute: page.title },
     description: page.description,
     alternates: { canonical: url },
+    ...(page.indexable ? {} : { robots: { index: false, follow: true } }),
     openGraph: {
       type: "website",
       url,

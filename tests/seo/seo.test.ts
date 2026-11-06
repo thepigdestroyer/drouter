@@ -3,7 +3,9 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import robots from "@/app/robots";
 import sitemap from "@/app/sitemap";
+import { SIGNED_OUT_NAV_ITEMS } from "@/components/specimen-chrome";
 import {
+  INDEXABLE_PAGES,
   INDEXNOW_KEY,
   PERSON_ID,
   SEO_PAGES,
@@ -16,6 +18,15 @@ import {
 } from "@/lib/seo";
 
 const REPO_ROOT = path.resolve(__dirname, "../..");
+
+function isNoindex(pagePath: string): boolean {
+  const robotsMeta = pageMetadata(pagePath).robots;
+  return (
+    typeof robotsMeta === "object" &&
+    robotsMeta !== null &&
+    robotsMeta.index === false
+  );
+}
 
 describe("page metadata", () => {
   it("gives every route a unique title and description inside the limits", () => {
@@ -123,11 +134,73 @@ describe("JSON-LD", () => {
   });
 });
 
+describe("indexing hygiene", () => {
+  // What each route serves to a crawler (live HTML, no JavaScript, 5 Nov 2026):
+  // the public pages carry their full content; every other route serves a
+  // heading and a sign-in card, because the real page needs a passkey session.
+  const PUBLIC_PATHS = ["/", "/explain", "/about", "/partners"];
+  const NOINDEX_PATHS = [
+    "/app",
+    "/argon",
+    "/audit",
+    "/network",
+    "/login",
+    "/account",
+  ];
+
+  it("accounts for every route exactly once", () => {
+    expect([...PUBLIC_PATHS, ...NOINDEX_PATHS].sort()).toEqual(
+      SEO_PAGES.map((p) => p.path).sort(),
+    );
+  });
+
+  it("lists only the public pages in the sitemap", () => {
+    expect(sitemap().map((e) => e.url)).toEqual(
+      PUBLIC_PATHS.map((p) => canonicalUrl(p)),
+    );
+    expect(INDEXABLE_PAGES.map((p) => p.path)).toEqual(PUBLIC_PATHS);
+  });
+
+  it("serves noindex, follow on every sign-in gated and account screen", () => {
+    for (const route of NOINDEX_PATHS) {
+      expect(pageMetadata(route).robots, route).toEqual({
+        index: false,
+        follow: true,
+      });
+    }
+  });
+
+  it("leaves the public pages indexable", () => {
+    for (const route of PUBLIC_PATHS) {
+      expect(isNoindex(route), route).toBe(false);
+      expect(pageMetadata(route).robots, route).toBeUndefined();
+    }
+  });
+
+  it("never lists a noindex page in the sitemap", () => {
+    const listed = new Set(sitemap().map((e) => e.url));
+    for (const page of SEO_PAGES) {
+      if (isNoindex(page.path)) {
+        expect(listed.has(canonicalUrl(page.path)), page.path).toBe(false);
+      }
+    }
+  });
+
+  it("links every sitemap page from the header navigation every crawler gets", () => {
+    const navPaths = new Set<string>(
+      SIGNED_OUT_NAV_ITEMS.map((item) => item.href),
+    );
+    for (const page of INDEXABLE_PAGES) {
+      expect(navPaths.has(page.path), page.path).toBe(true);
+    }
+  });
+});
+
 describe("crawl files", () => {
   it("lists every indexable route in the sitemap with a lastmod", () => {
     const entries = sitemap();
     expect(entries.map((e) => e.url)).toEqual(
-      SEO_PAGES.map((p) => canonicalUrl(p.path)),
+      INDEXABLE_PAGES.map((p) => canonicalUrl(p.path)),
     );
     for (const entry of entries) {
       expect(String(entry.lastModified)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
