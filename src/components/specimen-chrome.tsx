@@ -5,7 +5,6 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { AuthPill } from "@/components/auth-pill";
 import { InkButton } from "@/components/ink/ink-button";
-import { InkMotionButton } from "@/components/ink/ink-field";
 import {
   getCurrentVaultSession,
   lockVault,
@@ -221,7 +220,6 @@ export function SpecimenHeader({
         </div>
 
         <div className="flex items-center gap-2">
-          <InkMotionButton />
           {onOpenTerminalModal && (
             <InkButton
               type="button"

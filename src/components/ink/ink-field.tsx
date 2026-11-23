@@ -1,64 +1,306 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef } from "react";
+import {
+  clamp,
+  createInitialInkBlots,
+  createTapDrop,
+  createTrailDrop,
+  renderInkFrame,
+  stepInkBlotPosition,
+  stepTransientDrops,
+  type InkTransientDrop,
+  type PointerState,
+  type PositionedInkBlot,
+} from "./ink-math";
 
-const key = "deroute.ink-motion";
-const pref = "(prefers-reduced-motion: reduce)";
+const BASE_GRID_WIDTH = 320;
+const BASE_GRID_HEIGHT = 220;
+const MAX_TRANSIENT_DROPS = 32;
+const FRAME_INTERVAL_MS = 33; // ~30 fps, < 0.8 ms CPU per frame
 
-export function InkMotionButton() {
-  const [moving, setMoving] = useState<boolean | null>(null);
+function computeCanvasGridSize(vw: number, vh: number): { width: number; height: number } {
+  const aspect = vw / Math.max(1, vh);
+  if (aspect >= 1) {
+    const width = clamp(Math.round(vw / 2.6), 280, 560);
+    const height = clamp(Math.round(width / aspect), 220, 540);
+    return { width, height };
+  }
+  const height = clamp(Math.round(vh / 2.6), 280, 620);
+  const width = clamp(Math.round(height * aspect), 200, 540);
+  return { width, height };
+}
+
+function isInteractiveTarget(target: EventTarget | null): boolean {
+  if (!target || !(target instanceof Element)) return false;
+  return Boolean(
+    target.closest(
+      "a, button, input, textarea, select, summary, label, [role='button'], [role='tab'], [role='dialog'], [contenteditable='true']",
+    ),
+  );
+}
+
+export function InkField(): React.JSX.Element {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
   useEffect(() => {
-    const mq = matchMedia(pref);
-    function sync() {
-      let mode = document.documentElement.dataset.inkMotion;
-      try { mode = localStorage.getItem(key) ?? mode; } catch { /* Storage is optional. */ }
-      if (mode === "playing" || mode === "paused") document.documentElement.dataset.inkMotion = mode;
-      setMoving(mode === "playing" || (mode !== "paused" && !mq.matches));
-    }
-    sync(); mq.addEventListener("change", sync); window.addEventListener("storage", sync);
-    return () => { mq.removeEventListener("change", sync); window.removeEventListener("storage", sync); };
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    let gridWidth = BASE_GRID_WIDTH;
+    let gridHeight = BASE_GRID_HEIGHT;
+    canvas.width = gridWidth;
+    canvas.height = gridHeight;
+
+    const blots = createInitialInkBlots();
+    const positioned: PositionedInkBlot[] = new Array(blots.length);
+    let imageData = ctx.createImageData(gridWidth, gridHeight);
+    let buffer = imageData.data;
+
+    const pointer: PointerState = {
+      x: 0.5,
+      y: 0.5,
+      active: false,
+    };
+
+    let transientDrops: InkTransientDrop[] = [];
+    let dropSeedCounter = 1;
+    let lastTrailX = -1;
+    let lastTrailY = -1;
+    let lastElapsedSec = 0;
+
+    let scrollOffsetNorm = 0;
+    let lastScrollOffsetNorm = 0;
+    let scrollVelocity = 0;
+    let viewportAspect =
+      typeof window !== "undefined" && window.innerHeight > 0
+        ? window.innerWidth / window.innerHeight
+        : 1.5;
+
+    const syncCanvasResolution = (vw: number, vh: number) => {
+      const next = computeCanvasGridSize(vw, vh);
+      if (next.width !== gridWidth || next.height !== gridHeight) {
+        gridWidth = next.width;
+        gridHeight = next.height;
+        canvas.width = gridWidth;
+        canvas.height = gridHeight;
+        imageData = ctx.createImageData(gridWidth, gridHeight);
+        buffer = imageData.data;
+      }
+    };
+
+    const updateScrollAndViewport = () => {
+      if (typeof window === "undefined") return;
+      const vh = Math.max(1, window.innerHeight);
+      const vw = Math.max(1, window.innerWidth);
+      viewportAspect = vw / vh;
+      syncCanvasResolution(vw, vh);
+      const nextScroll = window.scrollY / vh;
+      const delta = nextScroll - lastScrollOffsetNorm;
+      lastScrollOffsetNorm = nextScroll;
+      scrollOffsetNorm = nextScroll;
+      scrollVelocity = clamp(scrollVelocity * 0.6 + delta * 3.2, -1.6, 1.6);
+    };
+
+    const drawAtTime = (timeSec: number) => {
+      lastElapsedSec = timeSec;
+      scrollVelocity *= 0.86;
+      if (Math.abs(scrollVelocity) < 0.005) {
+        scrollVelocity = 0;
+      }
+
+      if (transientDrops.length > 0) {
+        transientDrops = stepTransientDrops(transientDrops, timeSec);
+      }
+
+      for (let i = 0; i < blots.length; i++) {
+        positioned[i] = stepInkBlotPosition(
+          blots[i],
+          timeSec,
+          pointer,
+          scrollOffsetNorm,
+          scrollVelocity,
+          viewportAspect,
+        );
+      }
+
+      renderInkFrame(buffer, gridWidth, gridHeight, positioned, viewportAspect, {
+        timeSec,
+        transientDrops,
+        includePeriodicBlooms: true,
+      });
+      ctx.putImageData(imageData, 0, 0);
+    };
+
+    updateScrollAndViewport();
+    drawAtTime(0);
+
+    const motionQuery =
+      typeof window !== "undefined" && typeof window.matchMedia === "function"
+        ? window.matchMedia("(prefers-reduced-motion: reduce)")
+        : null;
+
+    let reducedMotion = Boolean(motionQuery?.matches);
+    let rafId: number | null = null;
+    let startTimestamp: number | null = null;
+    let lastFrameTimestamp = 0;
+
+    const loop = (timestamp: number) => {
+      if (reducedMotion || (typeof document !== "undefined" && document.hidden)) {
+        rafId = null;
+        return;
+      }
+
+      if (startTimestamp === null) {
+        startTimestamp = timestamp;
+      }
+
+      if (timestamp - lastFrameTimestamp >= FRAME_INTERVAL_MS) {
+        lastFrameTimestamp = timestamp;
+        const elapsedSec = (timestamp - startTimestamp) * 0.001;
+        drawAtTime(elapsedSec);
+      }
+
+      rafId = window.requestAnimationFrame(loop);
+    };
+
+    const startLoopIfAllowed = () => {
+      if (reducedMotion) {
+        if (rafId !== null) {
+          window.cancelAnimationFrame(rafId);
+          rafId = null;
+        }
+        transientDrops = [];
+        scrollVelocity = 0;
+        drawAtTime(0);
+        return;
+      }
+      if (typeof document !== "undefined" && document.hidden) {
+        if (rafId !== null) {
+          window.cancelAnimationFrame(rafId);
+          rafId = null;
+        }
+        return;
+      }
+      if (rafId === null) {
+        rafId = window.requestAnimationFrame(loop);
+      }
+    };
+
+    const onPointerMove = (e: PointerEvent) => {
+      const vw = Math.max(1, window.innerWidth);
+      const vh = Math.max(1, window.innerHeight);
+      const nx = e.clientX / vw;
+      const ny = e.clientY / vh;
+      pointer.x = nx;
+      pointer.y = ny;
+      pointer.active = true;
+
+      if (!reducedMotion) {
+        const dx = nx - lastTrailX;
+        const dy = ny - lastTrailY;
+        if (lastTrailX < 0 || dx * dx + dy * dy >= 0.00028) {
+          lastTrailX = nx;
+          lastTrailY = ny;
+          dropSeedCounter = (dropSeedCounter + 1) % 10000;
+          transientDrops.push(
+            createTrailDrop(nx, ny, lastElapsedSec, dropSeedCounter),
+          );
+          if (transientDrops.length > MAX_TRANSIENT_DROPS) {
+            transientDrops.shift();
+          }
+        }
+      }
+    };
+
+    const onPointerDown = (e: PointerEvent) => {
+      if (reducedMotion || e.button !== 0) return;
+      if (isInteractiveTarget(e.target)) return;
+
+      const vw = Math.max(1, window.innerWidth);
+      const vh = Math.max(1, window.innerHeight);
+      const nx = e.clientX / vw;
+      const ny = e.clientY / vh;
+      dropSeedCounter = (dropSeedCounter + 1) % 10000;
+      transientDrops.push(
+        createTapDrop(nx, ny, lastElapsedSec, dropSeedCounter),
+      );
+      if (transientDrops.length > MAX_TRANSIENT_DROPS) {
+        transientDrops.shift();
+      }
+    };
+
+    const onPointerLeave = () => {
+      pointer.active = false;
+      lastTrailX = -1;
+      lastTrailY = -1;
+    };
+
+    const onScroll = () => {
+      updateScrollAndViewport();
+      if (reducedMotion) {
+        drawAtTime(0);
+      }
+    };
+
+    const onResize = () => {
+      updateScrollAndViewport();
+      if (reducedMotion) {
+        drawAtTime(0);
+      }
+    };
+
+    const onVisibilityChange = () => {
+      startLoopIfAllowed();
+    };
+
+    const onMotionChange = (e: MediaQueryListEvent) => {
+      reducedMotion = e.matches;
+      startLoopIfAllowed();
+    };
+
+    window.addEventListener("pointermove", onPointerMove, { passive: true });
+    window.addEventListener("pointerdown", onPointerDown, { passive: true });
+    window.addEventListener("pointerleave", onPointerLeave, { passive: true });
+    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onResize, { passive: true });
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    motionQuery?.addEventListener?.("change", onMotionChange);
+
+    startLoopIfAllowed();
+
+    return () => {
+      if (rafId !== null) {
+        window.cancelAnimationFrame(rafId);
+      }
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointerleave", onPointerLeave);
+      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onResize);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      motionQuery?.removeEventListener?.("change", onMotionChange);
+    };
   }, []);
-  return <button type="button" aria-label={moving ? "Pause ink animation" : "Play ink animation"} title={moving ? "Pause ink animation" : "Play ink animation"}
-    disabled={moving === null} className="ep-btn-ghost rounded border border-rule px-2.5 py-1 text-xs"
-    onClick={() => { const mode = moving ? "paused" : "playing"; document.documentElement.dataset.inkMotion = mode; try { localStorage.setItem(key, mode); } catch { /* Session only. */ } setMoving(!moving); }}>
-    <span aria-hidden="true">{moving ? "Ⅱ" : "▷"} Ink</span></button>;
-}
 
-function Blot({ side }: { side: string }) {
-  return <svg className={`ep-ink-drift ep-ink-${side}`} viewBox="0 0 220 240" fill="currentColor" focusable="false">
-    <path opacity=".12" d="M34 48C62 15 116 25 132 57S146 91 176 91 211 121 192 141 163 143 154 182 97 237 67 208 47 174 26 152 6 82 34 48Z" />
-    <path opacity=".69" d="M41 64C57 36 95 26 117 46S119 90 144 101 189 93 187 117 149 141 145 162 131 202 107 205 70 191 65 169 50 150 36 138 19 102 41 64Z" />
-    <path opacity=".72" d="M48 74C61 47 97 38 107 55S113 95 127 103 132 132 118 145 120 177 100 182 77 158 59 148 27 114 48 74Z" />
-    <path opacity=".48" d="M158 66c7-6 18-1 15 7s-15 11-18 3c-1-4 0-7 3-10Z" /><circle cx="186" cy="81" r="3.4" opacity=".65"/><circle cx="150" cy="205" r="4.7" opacity=".38"/>
-  </svg>;
-}
-
-export function InkField() {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const mq = matchMedia(pref);
-    const pool = Array.from(ref.current!.querySelectorAll<HTMLElement>(".ep-ink-speck"));
-    let i=0, last=-Infinity, lastX=-100, lastY=-100;
-    function emit(e: PointerEvent) {
-      if (document.hidden || !e.isPrimary || (e.type === "pointermove" && e.pointerType === "touch")) return;
-      const mode = document.documentElement.dataset.inkMotion;
-      if (mode === "paused" || (mq.matches && mode !== "playing")) return;
-      if ((e.target as Element | null)?.closest?.("button,a,summary,input,textarea,select,[contenteditable=true],[role=button]")) return;
-      const tap=e.type === "pointerdown";
-      if (tap && e.button!==0) return;
-      if (!tap && (e.timeStamp-last<35 || Math.hypot(e.clientX-lastX,e.clientY-lastY)<9)) return;
-      last=e.timeStamp; lastX=e.clientX; lastY=e.clientY;
-      const el=pool[i++%pool.length]; el.getAnimations().forEach(a=>a.cancel());
-      const x=e.clientX-6,y=e.clientY-5, dx=Math.sin(i*2.4)*9;
-      el.animate([{transform:`translate(${x}px,${y}px) scale(${tap?1.5:.78})`,opacity:.57}, {transform:`translate(${x+dx}px,${y+12}px) scale(${tap?3:.22})`,opacity:0}],{duration:tap?740:480,easing:"ease-out"});
-    }
-    window.addEventListener("pointermove",emit,{passive:true}); window.addEventListener("pointerdown",emit,{passive:true});
-    return ()=>{window.removeEventListener("pointermove",emit); window.removeEventListener("pointerdown",emit); pool.forEach(el=>el.getAnimations().forEach(a=>a.cancel()));};
-  },[]);
-  return <div ref={ref} aria-hidden="true" data-ink-field="true" className="ep-ink-field">
-    <Blot side="west"/><Blot side="east"/><Blot side="south"/>
-    {Array.from({length:12},(_,i)=><span className="ep-ink-speck" key={i}/>)}
-  </div>;
+  return (
+    <div
+      aria-hidden="true"
+      data-ink-field="true"
+      className="pointer-events-none fixed inset-0 z-0 overflow-hidden select-none"
+    >
+      <canvas
+        ref={canvasRef}
+        className="block h-full w-full"
+        style={{
+          imageRendering: "auto",
+        }}
+      />
+    </div>
+  );
 }
 
 export default InkField;
