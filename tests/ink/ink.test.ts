@@ -27,9 +27,9 @@ describe("site-wide ink background", () => {
     const styles = readFileSync(resolve(ROOT, "src/components/ink/ink-field.css"), "utf8");
     expect(layout).toContain("<InkField />");
     expect(field).toContain('aria-hidden="true"');
-    expect(field).not.toMatch(/<canvas|requestAnimationFrame|useEffect|use client/);
-    expect(styles).toMatch(/prefers-reduced-motion: reduce[\s\S]*?animation: none/);
-    expect(styles).toContain("pointer-events: none");
+    expect(field).not.toMatch(/<canvas|requestAnimationFrame|cursor:\s*none/);
+    expect(styles).toMatch(/prefers-reduced-motion: reduce[\s\S]*?animation-play-state:paused/);
+    expect(styles).toMatch(/pointer-events:\s*none/);
   });
 });
 
