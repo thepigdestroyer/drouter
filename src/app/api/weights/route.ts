@@ -26,7 +26,7 @@ export async function GET(request?: Request) {
     if (limited) return limited;
   }
 
-  let requestedModel = "kimi-k3";
+  let requestedModel = "kimi-k3-1-pro";
   let requestedShardIndex = 0;
   if (request?.url) {
     try {
@@ -48,7 +48,7 @@ export async function GET(request?: Request) {
   }
 
   const models = listModelRegistry();
-  const sampleModel = OPEN_MODEL_CATALOG[requestedModel] ?? OPEN_MODEL_CATALOG["kimi-k3"];
+  const sampleModel = OPEN_MODEL_CATALOG[requestedModel] ?? OPEN_MODEL_CATALOG["kimi-k3-1-pro"];
   const safeShardIndex =
     requestedShardIndex < sampleModel.shardHashes.length ? requestedShardIndex : 0;
   const sampleProof = proveShardMembership(sampleModel.shardHashes, safeShardIndex);

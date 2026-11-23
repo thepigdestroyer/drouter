@@ -19,6 +19,15 @@ import {
 
 const REPO_ROOT = path.resolve(__dirname, "../..");
 
+it("lets top-level pages use passkeys without enabling cross-origin credential access", () => {
+  for (const file of ["next.config.ts", "src/proxy.ts"]) {
+    const source = fs.readFileSync(path.join(REPO_ROOT, file), "utf8");
+    expect(source).toContain('"publickey-credentials-get=(self)"');
+    expect(source).toContain('"publickey-credentials-create=(self)"');
+    expect(source).not.toContain('"publickey-credentials-get=()"');
+  }
+});
+
 function isNoindex(pagePath: string): boolean {
   const robotsMeta = pageMetadata(pagePath).robots;
   return (

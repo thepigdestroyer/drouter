@@ -143,9 +143,9 @@ function buildSampleLiveView(): LiveVerificationView {
       measurement: "9134838da8aa4e1792566b2988820340356517c4db0c94261eb8154843e0357554ba72fcf185f950d9301fbede574c90",
     },
     models: {
-      "kimi-k3": {
-        id: "kimi-k3",
-        repo: "tinfoilsh/confidential-kimi-k3",
+      "kimi-k3-1-pro": {
+        id: "kimi-k3-1-pro",
+        repo: "tinfoilsh/confidential-kimi-k3-1-pro",
         tag: "v0.0.15",
         measurement: "69c029108ac795b767e972858e926186c0e7b6a61f6c7fa9ce70ce1a6ee87f2c980bb51973cdf396404412ebb7c1a7b7",
         dmVerityRootHash: "41068e0738e14ee74d5b987586bdfc261d7bdd59e156dd6818154fd188b8ee7b",
@@ -179,7 +179,7 @@ function buildValidClaim(epochHourSec = coarsenEpochSecToHour()): VerifierSubmis
     domain: VERIFICATION_CLAIM_DOMAIN,
     epochHourSec,
     router: { ...live.router },
-    models: [live.models["glm-5-3"], live.models["kimi-k3"]],
+    models: [live.models["glm-5-3"], live.models["kimi-k3-1-pro"]],
     checks: live.checks.map((c) => ({ ...c })),
     overallOk: true,
   };
@@ -358,7 +358,7 @@ describe("MongoDB Persistence (`transparency_log`), Real Tinfoil Leaves & Hourly
 
     // Next hour window: anchors again
     const appended2 = await appendVerificationEventToLog({
-      nodeId: "kimi-k3",
+      nodeId: "kimi-k3-1-pro",
       nodeKind: "tinfoil",
       ok: true,
       measurement: "cc".repeat(48),
@@ -653,7 +653,7 @@ describe("Permissionless Independent Verification (D8: CLI Key Gen, Canonical C1
     const wrongModelSigned = signVerificationClaim(
       {
         ...validClaim,
-        models: validClaim.models.map((m) => (m.id === "kimi-k3" ? { ...m, tag: "v9.9.9-backdoor" } : m)),
+        models: validClaim.models.map((m) => (m.id === "kimi-k3-1-pro" ? { ...m, tag: "v9.9.9-backdoor" } : m)),
       },
       sk,
     );
@@ -670,7 +670,7 @@ describe("Permissionless Independent Verification (D8: CLI Key Gen, Canonical C1
     );
     expect(wrongModelRes.status).toBe(422);
     const wrongModelBody = await wrongModelRes.json();
-    expect(wrongModelBody.mismatches.join(" ")).toContain('Model "kimi-k3" tag mismatch');
+    expect(wrongModelBody.mismatches.join(" ")).toContain('Model "kimi-k3-1-pro" tag mismatch');
 
     // 4. Valid signature over mismatched C4 check status -> HTTP 422
     const wrongCheckSigned = signVerificationClaim(
@@ -720,12 +720,12 @@ describe("Permissionless Independent Verification (D8: CLI Key Gen, Canonical C1
       },
       matrix: {
         models: {
-          "kimi-k3": {
-            repo: liveView.models["kimi-k3"].repo,
-            tag: liveView.models["kimi-k3"].tag,
-            measurementRegisters: [liveView.models["kimi-k3"].measurement],
-            dmVerityRootHash: liveView.models["kimi-k3"].dmVerityRootHash,
-            weightRepoCommit: liveView.models["kimi-k3"].weightRepoCommit,
+          "kimi-k3-1-pro": {
+            repo: liveView.models["kimi-k3-1-pro"].repo,
+            tag: liveView.models["kimi-k3-1-pro"].tag,
+            measurementRegisters: [liveView.models["kimi-k3-1-pro"].measurement],
+            dmVerityRootHash: liveView.models["kimi-k3-1-pro"].dmVerityRootHash,
+            weightRepoCommit: liveView.models["kimi-k3-1-pro"].weightRepoCommit,
             healthyHosts: 1,
             configuredHosts: 1,
             status: "router-attested",

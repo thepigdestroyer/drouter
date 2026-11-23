@@ -4,7 +4,7 @@
  *
  * Subcommands:
  *   node scripts/drouter-cli.mjs verify [--submit] [--key-path ~/.config/deroute/verifier-key] [--upstream https://drouter-demo.vercel.app]
- *   node scripts/drouter-cli.mjs ask "<prompt>" [--model kimi-k3] [--upstream https://drouter-demo.vercel.app]
+ *   node scripts/drouter-cli.mjs ask "<prompt>" [--model kimi-k3-1-pro] [--upstream https://deroute.is-an.ai]
  *   node scripts/drouter-cli.mjs proxy [--port 4141] [--key drk_...] [--upstream https://drouter-demo.vercel.app]
  *   node scripts/drouter-cli.mjs config [--upstream https://drouter-demo.vercel.app]
  */
@@ -24,7 +24,7 @@ const REPO_ROOT = path.resolve(__dirname, "..");
 
 export const DEFAULT_PORT = 4141;
 export const DEFAULT_UPSTREAM = "https://drouter-demo.vercel.app";
-export const DEFAULT_MODEL = "kimi-k3";
+export const DEFAULT_MODEL = "kimi-k3-1-pro";
 export const TINFOIL_PROXY_WELL_KNOWN_URL =
   "https://inference.tinfoil.sh/.well-known/tinfoil-proxy";
 
@@ -44,7 +44,7 @@ export const PROXY_SHA256_PATH = path.join(
 export const VERIFICATION_CLAIM_DOMAIN = "drouter/transparency/verification-claim/v1";
 export const VERIFIER_CHECK_IDS = ["C1", "C2", "C3", "C4", "C5", "C6", "C7"];
 export const PRIMARY_MODEL_IDS = [
-  "kimi-k3",
+  "kimi-k3-1-pro",
   "glm-5-3",
   "deepseek-v4-1-flash",
   "gpt-oss-120b",
@@ -452,7 +452,7 @@ export function buildCanonicalVerificationClaim({
   models.sort((a, b) => a.id.localeCompare(b.id));
 
   const primaryGpuModel =
-    matrix?.models?.["kimi-k3"] ??
+    matrix?.models?.[DEFAULT_MODEL] ??
     (models[0]
       ? {
           repo: models[0].repo,
@@ -563,7 +563,7 @@ export function buildCliHarnessConfigs(baseUrl) {
           },
         },
         models: {
-          "kimi-k3": { name: "Kimi K3 (Attested Enclave)" },
+          [DEFAULT_MODEL]: { name: "Kimi K3.1 Pro (Attested Enclave)" },
           "glm-5-3": { name: "GLM-5.3 (Attested Enclave)" },
           "deepseek-v4-1-flash": { name: "DeepSeek V4.1 Flash (Attested Enclave)" },
           "gpt-oss-120b": { name: "GPT-OSS 120B (Attested Enclave)" },
@@ -572,14 +572,14 @@ export function buildCliHarnessConfigs(baseUrl) {
         },
       },
     },
-    model: "drouter/kimi-k3",
+    model: `drouter/${DEFAULT_MODEL}`,
   };
 
   return {
     opencodeJson: JSON.stringify(opencodeConfig, null, 2),
     curlCommand: [
       `# Note: any Bearer apiKey value works (required by OpenAI SDKs); auth is the blind credit header (x-drouter-credit)`,
-      `curl -sS ${gatewayUrl}/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer drouter-anonymous" -H "x-drouter-credit: \${DROUTER_CREDIT_TOKEN:-}" -d '{"model":"kimi-k3","messages":[{"role":"user","content":"Verify enclave connectivity in one sentence."}]}'`,
+      `curl -sS ${gatewayUrl}/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer drouter-anonymous" -H "x-drouter-credit: \${DROUTER_CREDIT_TOKEN:-}" -d '{"model":"${DEFAULT_MODEL}","messages":[{"role":"user","content":"Verify enclave connectivity in one sentence."}]}'`,
     ].join("\n"),
     openaiEnvExports: [
       `# Any OPENAI_API_KEY value works; auth is the blind credit header (x-drouter-credit) or per-IP free tier`,
@@ -750,7 +750,7 @@ async function runCli() {
 
     const gpuModelInfo =
       matrix?.models?.[args.model] ??
-      matrix?.models?.["kimi-k3"] ??
+      matrix?.models?.[DEFAULT_MODEL] ??
       (claim.models[0]
         ? {
             repo: claim.models[0].repo,
@@ -807,7 +807,7 @@ async function runCli() {
 
   if (args.command === "ask") {
     if (!args.prompt) {
-      console.error('Usage: node scripts/drouter-cli.mjs ask "<prompt>" [--model kimi-k3] [--upstream <url>]');
+      console.error('Usage: node scripts/drouter-cli.mjs ask "<prompt>" [--model kimi-k3-1-pro] [--upstream <url>]');
       process.exit(1);
     }
     const session = await loadMechanicalSessionForCli();
@@ -857,7 +857,7 @@ async function runCli() {
       "",
       "Commands:",
       "  node scripts/drouter-cli.mjs verify [--submit] [--key-path ~/.config/deroute/verifier-key] [--upstream https://drouter-demo.vercel.app]",
-      '  node scripts/drouter-cli.mjs ask "<prompt>" [--model kimi-k3] [--upstream https://drouter-demo.vercel.app]',
+      '  node scripts/drouter-cli.mjs ask "<prompt>" [--model kimi-k3-1-pro] [--upstream https://deroute.is-an.ai]',
       "  node scripts/drouter-cli.mjs proxy [--port 4141] [--key drk_...] [--upstream https://drouter-demo.vercel.app]",
       "  node scripts/drouter-cli.mjs config [--upstream https://drouter-demo.vercel.app]",
     ].join("\n"),

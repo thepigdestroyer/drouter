@@ -1,8 +1,7 @@
 import type { Metadata, Viewport } from "next";
-import { InkField } from "@/components/ink/ink-field";
+import { SITE_URL } from "@/lib/seo";
 import "./globals.css";
 
-const SITE_URL = "https://drouter-demo.vercel.app";
 const DEFAULT_TITLE = "deRoute | Private AI Routing";
 const DEFAULT_DESCRIPTION =
   "Ask frontier AI models without anyone, including us, reading what you write. Your device checks the seal on a locked computer and hides your personal details before anything leaves your screen.";
@@ -49,7 +48,6 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html lang="en-GB" className="h-full antialiased">
       <body className="relative min-h-full flex flex-col bg-paper text-ink">
-        <InkField />
         <div className="relative z-10 flex min-h-full flex-1 flex-col">
           {children}
         </div>

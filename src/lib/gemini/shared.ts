@@ -23,7 +23,7 @@ export const ARGON_COMPANION_MODELS = {
   confidentialOpenCloud: "gemma-4-31b-it",
   confidentialOnDevice: "gemma-4-e4b",
   tinfoilEnclaveGemma: "gemma4-31b",
-  tinfoilEnclaveKimi: "kimi-k3",
+  tinfoilEnclaveKimi: "kimi-k3-1-pro",
 } as const;
 
 export type ArgonThinkingLevel = "low" | "medium" | "high";
@@ -204,12 +204,12 @@ export const ARGON_TOOLKIT_MANIFEST: readonly ArgonToolkitModelSpec[] = [
     id: ARGON_COMPANION_MODELS.confidentialOpenCloud,
     role: "Open-Weight Confidential Enclave Planner and Inference Model (Tinfoil Live Attested)",
     stageUsed:
-      "Stage 4 (Attested Tinfoil Enclave Planner and Content Execution via gemma4-31b or kimi-k3)",
+      "Stage 4 (Attested Tinfoil Enclave Planner and Content Execution via gemma4-31b or kimi-k3-1-pro)",
     statusInDemo: "live-enclave",
     trustBoundary: "attested-tee-enclave",
     tinfoilEnclaveAlias: ARGON_COMPANION_MODELS.tinfoilEnclaveGemma,
     description:
-      "Maps to Tinfoil's live attested gemma4-31b and kimi-k3 enclaves (Intel TDX + NVIDIA CC GPUs) routed via router-0.tinfoil.sh (AMD SEV-SNP). Executes all content work on server-resolved handles.",
+      "Maps to Tinfoil's live attested gemma4-31b and kimi-k3-1-pro enclaves routed via router-0.tinfoil.sh. Executes all content work on server-resolved handles.",
   },
   {
     id: "pii-filter",
@@ -402,8 +402,8 @@ export const ARGON_CONFIDENTIAL_TOOLS: readonly ArgonInteractionToolDeclaration[
           enclaveModel: {
             type: "STRING",
             description:
-              "Target attested enclave model identifier (gemma4-31b or kimi-k3).",
-            enum: ["gemma4-31b", "kimi-k3"],
+              "Target attested enclave model identifier (gemma4-31b or kimi-k3-1-pro).",
+            enum: ["gemma4-31b", "kimi-k3-1-pro"],
           },
         },
         required: ["providerId", "enclaveModel"],
@@ -442,7 +442,7 @@ export const ARGON_CONFIDENTIAL_TOOLS: readonly ArgonInteractionToolDeclaration[
       type: "function",
       name: "invoke_attested_enclave",
       description:
-        "Dispatches the server-resolved handle to the verified Tinfoil confidential enclave (gemma4-31b or kimi-k3) over RFC 9180 HPKE Encrypted HTTP Body and stores the enclave output in a new server handle.",
+        "Dispatches the server-resolved handle to the verified Tinfoil confidential enclave (gemma4-31b or kimi-k3-1-pro) over RFC 9180 HPKE Encrypted HTTP Body and stores the enclave output in a new server handle.",
       parameters: {
         type: "OBJECT",
         properties: {
@@ -454,8 +454,8 @@ export const ARGON_CONFIDENTIAL_TOOLS: readonly ArgonInteractionToolDeclaration[
           enclaveModel: {
             type: "STRING",
             description:
-              "Attested Tinfoil enclave model identifier (gemma4-31b or kimi-k3).",
-            enum: ["gemma4-31b", "kimi-k3"],
+              "Attested Tinfoil enclave model identifier (gemma4-31b or kimi-k3-1-pro).",
+            enum: ["gemma4-31b", "kimi-k3-1-pro"],
           },
           taskKind: {
             type: "STRING",
@@ -1079,7 +1079,7 @@ export const DEMO_PERSONA: NamedUserPersona = {
   assayProtocol:
     "Phase II trial survival analysis: protocol, de-identified case notes, and R analysis code",
   contextWindowScale:
-    "Up to 1,000,000 tokens in Gemini 4 Argon control plane (content-free TaskDescriptor only); 262,144 tokens max context in Tinfoil Kimi K3 enclave",
+    "Up to 1,000,000 tokens in Gemini 4 Argon control plane (content-free TaskDescriptor only); 262,144 tokens max context in Tinfoil Kimi K3.1 Pro enclave",
   confidentialityMandate:
     "Run a multi-step AI analysis and code review without exposing patient identifiers, unpublished trial results, or API credentials to any cloud provider.",
 };
@@ -1207,7 +1207,7 @@ export interface Stage2SubagentSwarmResult {
 export interface SandboxAttemptRecord {
   attemptNumber: number;
   candidateNodeId: string;
-  candidateModelId?: "gemma4-31b" | "kimi-k3";
+  candidateModelId?: "gemma4-31b" | "kimi-k3-1-pro";
   enclaveAttestationVerified: boolean;
   verifiedHosts: number;
   configuredHosts: number;
@@ -1260,7 +1260,7 @@ export interface Stage4ArgonSynthesisResult {
   background: boolean;
   unifiedContextTokens: number;
   enclaveMaxContextTokens: number;
-  routedEnclaveModel: "gemma4-31b" | "kimi-k3";
+  routedEnclaveModel: "gemma4-31b" | "kimi-k3-1-pro";
   routedEnclaveHost: string;
   taskDescriptor: TaskDescriptor;
   dataSentToGoogle: typeof DATA_SENT_TO_GOOGLE | "none (planner unavailable)";

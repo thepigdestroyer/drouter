@@ -57,7 +57,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ ok: false, error: auth.error }, { status: auth.status });
   }
 
-  let requestedModel = "kimi-k3";
+  let requestedModel = "kimi-k3-1-pro";
   try {
     const url = new URL(request.url, "http://localhost");
     const modelParam = url.searchParams.get("model");

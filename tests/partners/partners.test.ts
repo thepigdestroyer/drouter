@@ -333,7 +333,7 @@ describe("Backend partners page (/partners), navigation, and cross-links", () =>
     const entries = sitemap();
     expect(
       entries.some(
-        (entry) => entry.url === "https://drouter-demo.vercel.app/partners",
+        (entry) => entry.url === "https://deroute.is-an.ai/partners",
       ),
     ).toBe(true);
   });

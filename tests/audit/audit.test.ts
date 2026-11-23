@@ -148,9 +148,9 @@ describe("buildVerifiableClaims and buildPlainTrustPoints live record links", ()
       "https://kdsintf.amd.com/vcek/v1/Genoa/cfdce31f5c40fc4e6eef803f6b5ed77e88b22603a91337bacab58446ab05fb8ef7bb5221611dced98dfa01d1eac114ca9a7952c262705977a36d81b0a53f856e?blSPL=10&teeSPL=0&snpSPL=27&ucodeSPL=88",
     proxyWellKnownUrl: "https://inference.tinfoil.sh/.well-known/tinfoil-proxy",
     models: {
-      "kimi-k3": {
-        modelId: "kimi-k3",
-        repo: "tinfoilsh/confidential-kimi-k3",
+      "kimi-k3-1-pro": {
+        modelId: "kimi-k3-1-pro",
+        repo: "tinfoilsh/confidential-kimi-k3-1-pro",
         tag: "v0.0.15",
         hardwarePredicate: "https://tinfoil.sh/predicate/tdx-guest/v2",
         tierClassification: "Tier B (Intel TDX + 8x Confidential GPU)",
@@ -160,7 +160,7 @@ describe("buildVerifiableClaims and buildPlainTrustPoints live record links", ()
         unverifiedHosts: 0,
         enclaveHosts: [
           {
-            host: "kimi-k3-inf14.tinfoil.containers.tinfoil.dev",
+            host: "kimi-k3-1-pro-inf4.tinfoil.containers.tinfoil.dev",
             hpkeKey: "5df270bc",
             predicate: "https://tinfoil.sh/predicate/tdx-guest/v2",
             tlsKeyFp: "6758bad9",
@@ -179,7 +179,7 @@ describe("buildVerifiableClaims and buildPlainTrustPoints live record links", ()
         weightMpkHash: "58d5e74b",
         ccGpuFlagsVerified: true,
         releaseUrl:
-          "https://github.com/tinfoilsh/confidential-kimi-k3/releases/tag/v0.0.15",
+          "https://github.com/tinfoilsh/confidential-kimi-k3-1-pro/releases/tag/v0.0.15",
         sigstoreSearchUrl:
           "https://search.sigstore.dev/?hash=41068e0738e14ee74d5b987586bdfc261d7bdd59e156dd6818154fd188b8ee7b",
         huggingFaceUrl:
@@ -223,7 +223,7 @@ describe("buildVerifiableClaims and buildPlainTrustPoints live record links", ()
       "https://github.com/tinfoilsh/confidential-model-router/releases/tag/v0.0.167",
     );
     expect(claims[0].secondaryHref).toBe(
-      "https://github.com/tinfoilsh/confidential-kimi-k3/releases/tag/v0.0.15",
+      "https://github.com/tinfoilsh/confidential-kimi-k3-1-pro/releases/tag/v0.0.15",
     );
     expect(claims[1].href).toBe(
       "https://search.sigstore.dev/?hash=5233a27f1468f474d27c103e06c1a7a607e6a722ff4f9299ddf4e32fa87f201e",

@@ -426,7 +426,7 @@ describe("RFC 9458 Oblivious HTTP (OHTTP) Binary KeyConfig & Framing", () => {
     expect(parsedModelsRes.status).toBe(200);
     expect(parsedModelsRes.forwardedTo).toBe("/api/v1/models");
     expect(parsedModelsRes.body.object).toBe("list");
-    expect(parsedModelsRes.body.data.some((m) => m.id === "kimi-k3")).toBe(true);
+    expect(parsedModelsRes.body.data.some((m) => m.id === "kimi-k3-1-pro")).toBe(true);
 
     // 5. POST /api/ohttp rejects non-allowlisted inner path with encapsulated 403
     // Re-fetch current gateway key after SIM_HARDWARE_SEED may have been initialized by chatCompletionsPost

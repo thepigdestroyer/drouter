@@ -270,7 +270,7 @@ export const THREAT_SCENARIOS: ThreatScenario[] = [
       {
         filePath: "tests/tinfoil/tinfoil.test.ts",
         testName:
-          "parseDeploymentConfigYaml extracts weightRepoCommit, weightMpkHash, containerImageDigest, and ccGpuFlagsVerified from Kimi K3 YAML",
+          "parseDeploymentConfigYaml extracts weightRepoCommit, weightMpkHash, containerImageDigest, and ccGpuFlagsVerified from Kimi K3.1 Pro YAML",
         githubUrl: githubBlobUrl("tests/tinfoil/tinfoil.test.ts"),
         codePath: "src/lib/tinfoil/deep-inspect.ts",
         codeUrl: githubBlobUrl("src/lib/tinfoil/deep-inspect.ts"),

@@ -117,11 +117,11 @@ describe("ASHI Tier C Cryptographic FHE Engine", () => {
       expect(decrypted.maxScoreAbsError!).toBeLessThan(1e-2);
     });
 
-    it("returns live FHE measurements and sourced 262,144 Kimi K3 context in GET /api/ashi without analytical simulation fields", async () => {
+    it("returns live FHE measurements and sourced 262,144 Kimi K3.1 Pro context in GET /api/ashi without analytical simulation fields", async () => {
       const res = await getAshi();
       expect(res.status).toBe(200);
       const data = (await res.json()) as {
-        kimiK3MaxContextTokens: number;
+        kimiK31ProMaxContextTokens: number;
         fheScopeDisclosure: string;
         isAnalyticalSimulation?: boolean;
         liveFhe: Awaited<ReturnType<typeof runLiveFheLinearRoundTrip>>;
@@ -133,7 +133,7 @@ describe("ASHI Tier C Cryptographic FHE Engine", () => {
         }>;
       };
 
-      expect(data.kimiK3MaxContextTokens).toBe(262_144);
+      expect(data.kimiK31ProMaxContextTokens).toBe(262_144);
       expect(data.fheScopeDisclosure).toBe(FHE_SCOPE_DISCLOSURE);
       expect(data.isAnalyticalSimulation).toBeUndefined();
       expect(data.liveFhe.verification.maxScoreAbsError!).toBeLessThan(1e-2);

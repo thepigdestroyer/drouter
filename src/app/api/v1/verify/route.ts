@@ -125,7 +125,7 @@ export async function GET(req: Request): Promise<Response> {
   if (limited) return limited;
 
   let baseUrl = "https://drouter-demo.vercel.app";
-  let requestedModel = "kimi-k3";
+  let requestedModel = "kimi-k3-1-pro";
   try {
     const url = new URL(req.url);
     if (
@@ -152,7 +152,7 @@ export async function GET(req: Request): Promise<Response> {
   ]);
 
   const modelAttestation =
-    deepBundle?.models?.[requestedModel] ?? deepBundle?.models?.["kimi-k3"];
+    deepBundle?.models?.[requestedModel] ?? deepBundle?.models?.["kimi-k3-1-pro"];
 
   const checks: CheckResult[] | null = doc
     ? checksFromDocument(doc, modelAttestation).map((c) =>

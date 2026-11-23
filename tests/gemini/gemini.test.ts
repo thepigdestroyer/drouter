@@ -477,13 +477,13 @@ describe("Gemini 4 Argon Config Contract, TaskDescriptor & Content-Free Egress F
     // Valid handle-based tool calls pass
     const validInvoke = validateToolCallArguments("invoke_attested_enclave", {
       inputHandle: "$RESULT_1",
-      enclaveModel: "kimi-k3",
+      enclaveModel: "kimi-k3-1-pro",
       taskKind: "review",
     });
     expect(validInvoke.valid).toBe(true);
     expect(validInvoke.sanitizedArgs).toEqual({
       inputHandle: "$RESULT_1",
-      enclaveModel: "kimi-k3",
+      enclaveModel: "kimi-k3-1-pro",
       taskKind: "review",
     });
   });
@@ -715,10 +715,10 @@ function buildMockEnclaveMatrix(opts?: { breakGemma?: boolean }) {
           "https://github.com/tinfoilsh/confidential-gemma4-31b/releases/tag/v0.0.12",
         sigstoreSearchUrl: `https://search.sigstore.dev/?hash=${dmVerityGemma}`,
       },
-      "kimi-k3": {
-        modelId: "kimi-k3",
+      "kimi-k3-1-pro": {
+        modelId: "kimi-k3-1-pro",
         status: "router-attested",
-        repo: "tinfoilsh/confidential-kimi-k3",
+        repo: "tinfoilsh/confidential-kimi-k3-1-pro",
         tag: "v0.0.15",
         hardwarePredicate: "https://tinfoil.sh/predicate/tdx-guest/v2",
         tierClassification: "Tier B (Intel TDX + 8x Confidential GPU)",
@@ -728,7 +728,7 @@ function buildMockEnclaveMatrix(opts?: { breakGemma?: boolean }) {
         unverifiedHosts: 0,
         enclaveHosts: [
           {
-            host: "kimi-k3-inf14.tinfoil.containers.tinfoil.dev",
+            host: "kimi-k3-1-pro-inf4.tinfoil.containers.tinfoil.dev",
             hpkeKey:
               "5df270bc5c4329725ce4a4a37dac06977355db702ee2de3e834803f825ea492d",
             predicate: "https://tinfoil.sh/predicate/tdx-guest/v2",
@@ -747,11 +747,11 @@ function buildMockEnclaveMatrix(opts?: { breakGemma?: boolean }) {
         initrdHash:
           "2c23dba70e90589414b334be5b648fab4ead1d5b17ef355f04fd7ede2a9e2e7",
         containerImageDigest: `sha256:${dmVerityKimi}`,
-        weightRepoCommit: "tinfoilsh/confidential-kimi-k3@v0.0.15",
+        weightRepoCommit: "tinfoilsh/confidential-kimi-k3-1-pro@v0.0.2",
         weightMpkHash: dmVerityKimi,
         ccGpuFlagsVerified: true,
         releaseUrl:
-          "https://github.com/tinfoilsh/confidential-kimi-k3/releases/tag/v0.0.15",
+          "https://github.com/tinfoilsh/confidential-kimi-k3-1-pro/releases/tag/v0.0.15",
         sigstoreSearchUrl: `https://search.sigstore.dev/?hash=${dmVerityKimi}`,
       },
     },
@@ -932,7 +932,7 @@ function createMockBrowserFetch(opts?: {
 }
 
 function createEchoPlaceholderSession(prefixText: string) {
-  return async (_model: "gemma4-31b" | "kimi-k3") => ({
+  return async (_model: "gemma4-31b" | "kimi-k3-1-pro") => ({
     async *send(
       _mdl: string,
       messages: { role: "user" | "assistant"; content: string }[],
@@ -1020,7 +1020,7 @@ describe("Autonomous 6-Stage Split-Knowledge Browser Agent & Control Plane (Wave
       thinkingLevel: "high",
       background: true,
       humanApprovedExternalAction: false,
-      preferredEnclaveModel: "kimi-k3",
+      preferredEnclaveModel: "kimi-k3-1-pro",
       fetchFn: createMockBrowserFetch(),
       openSessionFn: createEchoPlaceholderSession(
         "Code review completed with zero secret leaks.",
@@ -1114,11 +1114,11 @@ describe("Autonomous 6-Stage Split-Knowledge Browser Agent & Control Plane (Wave
       "Real verification of gemma4-31b",
     );
     expect(run.stages.stage3.attempts[0].remediationApplied).toContain(
-      "Failed over to alternate Tinfoil enclave model kimi-k3",
+      "Failed over to alternate Tinfoil enclave model kimi-k3-1-pro",
     );
-    expect(run.stages.stage3.attempts[1].candidateModelId).toBe("kimi-k3");
+    expect(run.stages.stage3.attempts[1].candidateModelId).toBe("kimi-k3-1-pro");
     expect(run.stages.stage3.attempts[1].passed).toBe(true);
-    expect(run.stages.stage4.routedEnclaveModel).toBe("kimi-k3");
+    expect(run.stages.stage4.routedEnclaveModel).toBe("kimi-k3-1-pro");
     expect(run.overallPassed).toBe(true);
 
     const plannerBadgeText = resolvePlannerModeBadgeText({
@@ -1132,7 +1132,7 @@ describe("Autonomous 6-Stage Split-Knowledge Browser Agent & Control Plane (Wave
     });
     expect(steps[1].passed).toBe(true);
     expect(steps[1].plainResult).toContain(
-      "The seal check on the first sealed computer (gemma4-31b) failed, so we switched to an alternate sealed computer (kimi-k3) whose seal check passed",
+      "The seal check on the first sealed computer (gemma4-31b) failed, so we switched to an alternate sealed computer (kimi-k3-1-pro) whose seal check passed",
     );
 
     const serialized = JSON.stringify({ run, steps });
@@ -1301,7 +1301,7 @@ describe("Autonomous 6-Stage Split-Knowledge Browser Agent & Control Plane (Wave
                 type: "function_call",
                 id: "call-2",
                 name: "verify_two_hop_enclave_and_quorum",
-                arguments: { providerId: "tinfoil", enclaveModel: "kimi-k3" },
+                arguments: { providerId: "tinfoil", enclaveModel: "kimi-k3-1-pro" },
               },
               {
                 type: "function_call",
@@ -1319,7 +1319,7 @@ describe("Autonomous 6-Stage Split-Knowledge Browser Agent & Control Plane (Wave
                 name: "invoke_attested_enclave",
                 arguments: {
                   inputHandle: "$RESULT_1",
-                  enclaveModel: "kimi-k3",
+                  enclaveModel: "kimi-k3-1-pro",
                   taskKind: "review",
                 },
               },
@@ -1356,7 +1356,7 @@ describe("Autonomous 6-Stage Split-Knowledge Browser Agent & Control Plane (Wave
       thinkingLevel: "high",
       background: true,
       humanApprovedExternalAction: true,
-      preferredEnclaveModel: "kimi-k3",
+      preferredEnclaveModel: "kimi-k3-1-pro",
       fetchFn: createMockBrowserFetch({ useExistingPlanRouteState: true }),
       openSessionFn: createEchoPlaceholderSession("Enclave review complete."),
     });
@@ -1369,7 +1369,7 @@ describe("Autonomous 6-Stage Split-Knowledge Browser Agent & Control Plane (Wave
       model: "gemini-4-argon",
     });
     expect(liveRun.overallPassed).toBe(true);
-    expect(liveRun.stages.stage4.routedEnclaveModel).toBe("kimi-k3");
+    expect(liveRun.stages.stage4.routedEnclaveModel).toBe("kimi-k3-1-pro");
     expect(liveRun.stages.stage4.liveGeminiCall.toolCallsExecuted).toEqual([
       "scrub_and_symmetry_mask",
       "verify_two_hop_enclave_and_quorum",

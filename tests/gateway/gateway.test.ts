@@ -78,11 +78,11 @@ const SAMPLE_LIVE_PROXY_TABLE = {
   updated: "2026-10-24T17:12:49Z",
   version: "v0.0.167",
   models: {
-    "kimi-k3": {
-      repo: "tinfoilsh/confidential-kimi-k3",
+    "kimi-k3-1-pro": {
+      repo: "tinfoilsh/confidential-kimi-k3-1-pro",
       tag: "v0.0.15",
       enclaves: {
-        "kimi-k3-inf14.tinfoil.containers.tinfoil.dev": {
+        "kimi-k3-1-pro-inf4.tinfoil.containers.tinfoil.dev": {
           hpke_key: "5df270bc",
           predicate: "https://tinfoil.sh/predicate/tdx-guest/v2",
           tls_key_fp: "6758bad9",
@@ -181,7 +181,7 @@ describe("Gateway harness-config & Live Model Table", () => {
 
   it("excludes sim-echo-1 from production SUPPORTED_GATEWAY_MODELS", () => {
     const ids = SUPPORTED_GATEWAY_MODELS.map((m) => m.id);
-    expect(ids).toContain("kimi-k3");
+    expect(ids).toContain("kimi-k3-1-pro");
     expect(ids).toContain("glm-5-3");
     expect(ids).toContain("gemma4-31b");
     expect(ids).not.toContain("sim-echo-1");
@@ -190,7 +190,7 @@ describe("Gateway harness-config & Live Model Table", () => {
   it("parses Tinfoil's live proxy table and filters out non-model services and 0-host entries", async () => {
     const parsed = parseTinfoilProxyModelTable(SAMPLE_LIVE_PROXY_TABLE);
     const ids = parsed.map((m) => m.id);
-    expect(ids).toEqual(["kimi-k3", "glm-5-3", "gemma4-31b"]);
+    expect(ids).toEqual(["kimi-k3-1-pro", "glm-5-3", "gemma4-31b"]);
     expect(ids).not.toContain("doc-upload");
     expect(ids).not.toContain("glm-5-3-flash");
     expect(ids).not.toContain("sim-echo-1");
@@ -199,7 +199,7 @@ describe("Gateway harness-config & Live Model Table", () => {
     const liveProd = await fetchLiveGatewayModels({
       fetchImpl: mockFetch as unknown as typeof fetch,
     });
-    expect(liveProd.map((m) => m.id)).toEqual(["kimi-k3", "glm-5-3", "gemma4-31b"]);
+    expect(liveProd.map((m) => m.id)).toEqual(["kimi-k3-1-pro", "glm-5-3", "gemma4-31b"]);
   });
 
   it("normalizes string content and applies defaults in parseGatewayChatRequest", () => {
@@ -211,7 +211,7 @@ describe("Gateway harness-config & Live Model Table", () => {
     });
     expect(res.ok).toBe(true);
     if (res.ok) {
-      expect(res.model).toBe("kimi-k3");
+      expect(res.model).toBe("kimi-k3-1-pro");
       expect(res.stream).toBe(false);
       expect(res.scrubPii).toBe(false);
       expect(res.messages).toEqual([
@@ -302,7 +302,7 @@ describe("Gateway harness-config & Live Model Table", () => {
     ).toBe(false);
     expect(
       parseGatewayChatRequest({
-        model: "kimi-k3",
+        model: "kimi-k3-1-pro",
         messages: [{ role: "invalid-role", content: "hi" }],
       }).ok,
     ).toBe(false);
@@ -324,7 +324,7 @@ describe("Gateway harness-config & Live Model Table", () => {
     expect(parsedOpencode.provider.drouter.options._authNote).toContain(
       "any apiKey value works, auth is the blind credit header",
     );
-    expect(parsedOpencode.provider.drouter.models["kimi-k3"]).toBeDefined();
+    expect(parsedOpencode.provider.drouter.models["kimi-k3-1-pro"]).toBeDefined();
     expect(parsedOpencode.provider.drouter.models["glm-5-3"]).toBeDefined();
     expect(parsedOpencode.provider.drouter.models["deepseek-v4-1-flash"]).toBeDefined();
     expect(parsedOpencode.provider.drouter.models["gpt-oss-120b"]).toBeDefined();
@@ -372,7 +372,7 @@ describe("OpenAI-Compatible Gateway Routes (/api/v1/*)", () => {
     expect(body.object).toBe("list");
     expect(body.data.length).toBeGreaterThanOrEqual(5);
     const ids = body.data.map((m: { id: string }) => m.id);
-    expect(ids).toContain("kimi-k3");
+    expect(ids).toContain("kimi-k3-1-pro");
     expect(ids).toContain("gemma4-31b");
     expect(ids).not.toContain("sim-echo-1");
     expect(body.data.every((m: { enclave_attested: boolean }) => m.enclave_attested === true)).toBe(
@@ -385,7 +385,7 @@ describe("OpenAI-Compatible Gateway Routes (/api/v1/*)", () => {
   });
 
   it("GET /api/v1/verify returns C1 to C7 with identical labels to src/lib/tinfoil/client.ts", async () => {
-    const req = new Request("http://localhost:3000/api/v1/verify?model=kimi-k3");
+    const req = new Request("http://localhost:3000/api/v1/verify?model=kimi-k3-1-pro");
     const res = await getVerify(req);
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -415,7 +415,7 @@ describe("OpenAI-Compatible Gateway Routes (/api/v1/*)", () => {
       id: "chatcmpl-credit-1",
       object: "chat.completion",
       created: 1792800000,
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       choices: [
         {
           index: 0,
@@ -435,7 +435,7 @@ describe("OpenAI-Compatible Gateway Routes (/api/v1/*)", () => {
         "x-drouter-credit": '{"token":"aa","signature":"bb","denomination":5}',
       },
       body: JSON.stringify({
-        model: "kimi-k3",
+        model: "kimi-k3-1-pro",
         stream: false,
         messages: [{ role: "user", content: "Contact dana.reyes@example.org please." }],
       }),
@@ -445,7 +445,7 @@ describe("OpenAI-Compatible Gateway Routes (/api/v1/*)", () => {
     expect(validRes.status).toBe(200);
     expect(creditLedgerMocks.verifyAndSpendCreditHeader).toHaveBeenCalledWith(
       '{"token":"aa","signature":"bb","denomination":5}',
-      "kimi-k3",
+      "kimi-k3-1-pro",
     );
     expect(validRes.headers.get("X-DRouter-Credit-Verified")).toBe("true");
     expect(validRes.headers.get("X-DRouter-Credit-Nullifier")).toBe("nullifier_abc123");
@@ -474,7 +474,7 @@ describe("OpenAI-Compatible Gateway Routes (/api/v1/*)", () => {
         "x-drouter-credit": '{"token":"aa","signature":"bb","denomination":5}',
       },
       body: JSON.stringify({
-        model: "kimi-k3",
+        model: "kimi-k3-1-pro",
         messages: [{ role: "user", content: "Replay attempt" }],
       }),
     });
@@ -493,14 +493,14 @@ describe("OpenAI-Compatible Gateway Routes (/api/v1/*)", () => {
           id: "chatcmpl-stream-1",
           object: "chat.completion.chunk",
           created: 1792800000,
-          model: "kimi-k3",
+          model: "kimi-k3-1-pro",
           choices: [{ index: 0, delta: { content: "Replying to [EMA" }, finish_reason: null }],
         };
         yield {
           id: "chatcmpl-stream-1",
           object: "chat.completion.chunk",
           created: 1792800000,
-          model: "kimi-k3",
+          model: "kimi-k3-1-pro",
           choices: [
             {
               index: 0,
@@ -527,7 +527,7 @@ describe("OpenAI-Compatible Gateway Routes (/api/v1/*)", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "kimi-k3",
+        model: "kimi-k3-1-pro",
         stream: true,
         tools: [{ type: "function", function: { name: "notify", parameters: {} } }],
         messages: [{ role: "user", content: "Notify dana.reyes@example.org immediately." }],

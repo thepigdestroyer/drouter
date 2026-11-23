@@ -23,7 +23,7 @@ export const DEFAULT_LIVE_MODEL_IDS = CHAT_GATEWAY_MODEL_IDS;
 export function sanitizeLiveModelId(model?: string): string {
   const trimmed = (model || "").trim();
   if (!trimmed || !isChatCapableGatewayModel(trimmed)) {
-    return "kimi-k3";
+    return "kimi-k3-1-pro";
   }
   return trimmed;
 }
@@ -49,7 +49,7 @@ export function resolveCliUpstreamUrl(baseUrl?: string): string {
 
 export function buildTerminalSnippets(
   baseUrl = PRODUCTION_BASE_URL,
-  defaultModel = "kimi-k3",
+  defaultModel = "kimi-k3-1-pro",
   liveModelIds: readonly string[] = DEFAULT_LIVE_MODEL_IDS,
 ): TerminalSnippets {
   const cleanBase = normalizeBaseUrl(baseUrl);
@@ -72,8 +72,8 @@ export function buildTerminalSnippets(
         "apiKey": "drk_YOUR_ACCESS_KEY"
       },
       "models": {
-        "kimi-k3": {
-          "name": "Kimi K3 (Intel TDX + NVIDIA CC GPUs, 262,144 context)"
+        "kimi-k3-1-pro": {
+          "name": "Kimi K3.1 Pro (256K context)"
         },
         "glm-5-3": {
           "name": "GLM-5.3 (AMD SEV-SNP + NVIDIA CC GPUs)"

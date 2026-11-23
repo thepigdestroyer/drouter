@@ -342,10 +342,10 @@ function buildMockEnclaveMatrix() {
           "https://github.com/tinfoilsh/confidential-gemma4-31b/releases/tag/v0.0.12",
         sigstoreSearchUrl: `https://search.sigstore.dev/?hash=${dmVerityRootHash}`,
       },
-      "kimi-k3": {
-        modelId: "kimi-k3",
+      "kimi-k3-1-pro": {
+        modelId: "kimi-k3-1-pro",
         status: "router-attested" as const,
-        repo: "tinfoilsh/confidential-kimi-k3",
+        repo: "tinfoilsh/confidential-kimi-k3-1-pro",
         tag: "v0.0.15",
         hardwarePredicate: "https://tinfoil.sh/predicate/tdx-guest/v2",
         tierClassification:
@@ -356,7 +356,7 @@ function buildMockEnclaveMatrix() {
         unverifiedHosts: 0,
         enclaveHosts: [
           {
-            host: "kimi-k3-inf14.tinfoil.containers.tinfoil.dev",
+            host: "kimi-k3-1-pro-inf4.tinfoil.containers.tinfoil.dev",
             hpkeKey:
               "5df270bc5c4329725ce4a4a37dac06977355db702ee2de3e834803f825ea492d",
             predicate: "https://tinfoil.sh/predicate/tdx-guest/v2",
@@ -373,11 +373,11 @@ function buildMockEnclaveMatrix() {
         initrdHash:
           "2c23dba70e90589414b334be5b648fab4ead1d5b17ef355f04fd7ede2a9e2e7",
         containerImageDigest: `sha256:${dmVerityRootHash}`,
-        weightRepoCommit: "tinfoilsh/confidential-kimi-k3@v0.0.15",
+        weightRepoCommit: "tinfoilsh/confidential-kimi-k3-1-pro@v0.0.2",
         weightMpkHash: dmVerityRootHash,
         ccGpuFlagsVerified: true,
         releaseUrl:
-          "https://github.com/tinfoilsh/confidential-kimi-k3/releases/tag/v0.0.15",
+          "https://github.com/tinfoilsh/confidential-kimi-k3-1-pro/releases/tag/v0.0.15",
         sigstoreSearchUrl: `https://search.sigstore.dev/?hash=${dmVerityRootHash}`,
       },
     },
@@ -663,7 +663,7 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
         ),
     });
 
-    const openSessionSpy = vi.fn(async (model: "gemma4-31b" | "kimi-k3") => {
+    const openSessionSpy = vi.fn(async (model: "gemma4-31b" | "kimi-k3-1-pro") => {
       void model;
       return {
         async *send(
@@ -1792,16 +1792,16 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
     expect(visited.size).toBeGreaterThan(15);
   });
 
-  it("maps each model (gemma4-31b and kimi-k3) to its own enclave record and never borrows another model's record when a record is missing", async () => {
+  it("maps each model (gemma4-31b and kimi-k3-1-pro) to its own enclave record and never borrows another model's record when a record is missing", async () => {
     const matrix = buildMockEnclaveMatrix();
     matrix.models["gemma4-31b"].dmVerityRootHash =
       "1111111111111111111111111111111111111111111111111111111111111111";
     matrix.models["gemma4-31b"].measurementRegisters = [
       "1111111111111111111111111111111111111111111111111111111111111111980bb51973cdf396404412ebb7c1a7b7",
     ];
-    matrix.models["kimi-k3"].dmVerityRootHash =
+    matrix.models["kimi-k3-1-pro"].dmVerityRootHash =
       "2222222222222222222222222222222222222222222222222222222222222222";
-    matrix.models["kimi-k3"].measurementRegisters = [
+    matrix.models["kimi-k3-1-pro"].measurementRegisters = [
       "2222222222222222222222222222222222222222222222222222222222222222980bb51973cdf396404412ebb7c1a7b7",
     ];
 
@@ -1819,12 +1819,12 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
       "1111111111111111111111111111111111111111111111111111111111111111",
     );
 
-    const kimiAtt = resolveModelAttestationFromMatrix("kimi-k3", matrix);
+    const kimiAtt = resolveModelAttestationFromMatrix("kimi-k3-1-pro", matrix);
     expect(kimiAtt.hasSeparateRecord).toBe(true);
-    expect(kimiAtt.modelAttestation.modelId).toBe("kimi-k3");
-    expect(kimiAtt.modelAttestation.repo).toBe("tinfoilsh/confidential-kimi-k3");
+    expect(kimiAtt.modelAttestation.modelId).toBe("kimi-k3-1-pro");
+    expect(kimiAtt.modelAttestation.repo).toBe("tinfoilsh/confidential-kimi-k3-1-pro");
     expect(kimiAtt.modelAttestation.enclaveHosts[0].host).toBe(
-      "kimi-k3-inf14.tinfoil.containers.tinfoil.dev",
+      "kimi-k3-1-pro-inf4.tinfoil.containers.tinfoil.dev",
     );
     expect(kimiAtt.modelAttestation.dmVerityRootHash).toBe(
       "2222222222222222222222222222222222222222222222222222222222222222",
@@ -1835,7 +1835,7 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
     const matrixWithoutGemma = {
       ...matrix,
       models: {
-        "kimi-k3": matrix.models["kimi-k3"],
+        "kimi-k3-1-pro": matrix.models["kimi-k3-1-pro"],
       },
     };
     const missingGemmaAtt = resolveModelAttestationFromMatrix(
@@ -1930,23 +1930,23 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
     expect(stage3.attempts[0].candidateNodeId).toContain(
       "gemma4-31b (no separate enclave record",
     );
-    expect(stage3.attempts[0].candidateNodeId).not.toContain("kimi-k3");
+    expect(stage3.attempts[0].candidateNodeId).not.toContain("kimi-k3-1-pro");
     expect(stage3.attempts[0].failedInvariants).toContain(
       "ModelEnclaveRecordMissingFromMatrix",
     );
     expect(stage3.attempts[0].remediationApplied).toContain(
       "No separate enclave attestation record for gemma4-31b",
     );
-    expect(stage3.attempts[1].candidateModelId).toBe("kimi-k3");
+    expect(stage3.attempts[1].candidateModelId).toBe("kimi-k3-1-pro");
     expect(stage3.attempts[1].candidateNodeId).toBe(
-      "kimi-k3-inf14.tinfoil.containers.tinfoil.dev",
+      "kimi-k3-1-pro-inf4.tinfoil.containers.tinfoil.dev",
     );
     expect(stage3.attempts[1].passed).toBe(true);
     expect(outcomeMissingGemma.run.stages.stage2.selectedEnclaveModel).toBe(
-      "kimi-k3",
+      "kimi-k3-1-pro",
     );
     expect(outcomeMissingGemma.run.stages.stage4.routedEnclaveModel).toBe(
-      "kimi-k3",
+      "kimi-k3-1-pro",
     );
 
     const steps = buildPlainTimelineSteps({
@@ -1955,7 +1955,7 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
     });
     expect(steps[1].passed).toBe(true);
     expect(steps[1].plainResult).toContain(
-      "No separate seal record was published for the first sealed computer (gemma4-31b), so we switched to an alternate sealed computer (kimi-k3) whose seal check passed",
+      "No separate seal record was published for the first sealed computer (gemma4-31b), so we switched to an alternate sealed computer (kimi-k3-1-pro) whose seal check passed",
     );
     expect(findForbiddenPlainTerms(steps[1].plainResult)).toEqual([]);
   });
@@ -2017,7 +2017,7 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
         return new Response("{}", { status: 200 });
       });
 
-    // 1. Both primary (gemma4-31b) and failover (kimi-k3) fail C5 (unverified hosts / confidential GPU check failed)
+    // 1. Both primary (gemma4-31b) and failover (kimi-k3-1-pro) fail C5 (unverified hosts / confidential GPU check failed)
     const openSessionC5Spy = vi.fn(async () => ({
       async *send() {
         yield "Should never be called when C5 fails";
@@ -2030,7 +2030,7 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
       preferredEnclaveModel: "gemma4-31b",
       fetchFn: createMatrixFetch((m) => {
         m.models["gemma4-31b"].ccGpuFlagsVerified = false;
-        m.models["kimi-k3"].ccGpuFlagsVerified = false;
+        m.models["kimi-k3-1-pro"].ccGpuFlagsVerified = false;
       }),
       openSessionFn: openSessionC5Spy,
       coreAttestationOptions: {
@@ -2047,7 +2047,7 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
     expect(c5Outcome.run.stages.stage4.passed).toBe(false);
     expect(openSessionC5Spy).not.toHaveBeenCalled();
 
-    // 2. Both primary (gemma4-31b) and failover (kimi-k3) fail C7 (missing dmVerityRootHash / pinned weight manifest)
+    // 2. Both primary (gemma4-31b) and failover (kimi-k3-1-pro) fail C7 (missing dmVerityRootHash / pinned weight manifest)
     const openSessionC7Spy = vi.fn(async () => ({
       async *send() {
         yield "Should never be called when C7 fails";
@@ -2060,7 +2060,7 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
       preferredEnclaveModel: "gemma4-31b",
       fetchFn: createMatrixFetch((m) => {
         m.models["gemma4-31b"].dmVerityRootHash = "";
-        m.models["kimi-k3"].dmVerityRootHash = "";
+        m.models["kimi-k3-1-pro"].dmVerityRootHash = "";
       }),
       openSessionFn: openSessionC7Spy,
       coreAttestationOptions: {
@@ -2102,15 +2102,15 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
   it("F-05 & F-08: openTinfoilSession(...).send() throws on any failed check and filter fingerprint mismatch blocks runBrowserRedactionPipeline and runBrowserAgentWorkflow before anything leaves the device", async () => {
     // 1. openTinfoilSession(...).send() throws when session.checks contains a failed check
     let transmitted = false;
-    const session = await openTinfoilSession("kimi-k3", {
+    const session = await openTinfoilSession("kimi-k3-1-pro", {
       origin: "https://localhost:3000",
       fetchImpl: async () =>
         new Response(
           JSON.stringify({
             ...buildMockEnclaveMatrix(),
             models: {
-              "kimi-k3": {
-                ...buildMockEnclaveMatrix().models["kimi-k3"],
+              "kimi-k3-1-pro": {
+                ...buildMockEnclaveMatrix().models["kimi-k3-1-pro"],
                 dmVerityRootHash: "",
               },
             },
@@ -2165,7 +2165,7 @@ describe("W6-A Browser Agent Client & POST /api/gemini/plan", () => {
     expect(session.checks.find((c) => c.id === "C7")?.status).toBe("fail");
     await expect(
       (async () => {
-        for await (const chunk of session.send("kimi-k3", [
+        for await (const chunk of session.send("kimi-k3-1-pro", [
           { role: "user", content: "Hello" },
         ])) {
           void chunk;

@@ -235,7 +235,7 @@ describe("Frontier Confidential Provider Directory & Spec v2 Roadmap", () => {
     expect(Object.keys(allStatuses)).toHaveLength(10);
   });
 
-  it("includes accurate HONEST_LIMITS covering small CKKS FHE linear classifier, Vercel Sandbox Firecracker microVM, Kimi K3 262,144 limit, Tinfoil sidecars, and passkey sync visibility", () => {
+  it("includes accurate HONEST_LIMITS covering small CKKS FHE linear classifier, Vercel Sandbox Firecracker microVM, Kimi K3.1 Pro 262,144 limit, Tinfoil sidecars, and passkey sync visibility", () => {
     expect(HONEST_LIMITS.length).toBeGreaterThanOrEqual(8);
     const combinedText = HONEST_LIMITS.map(
       (l) => `${l.title} ${l.detail}`,

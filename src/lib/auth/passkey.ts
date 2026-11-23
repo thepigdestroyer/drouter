@@ -122,31 +122,19 @@ export async function isPasskeyPrfSupported(): Promise<boolean> {
 
     const pkc = globalThis.PublicKeyCredential as unknown as {
       getClientCapabilities?: () => Promise<Record<string, boolean>>;
-      isUserVerifyingPlatformAuthenticatorAvailable?: () => Promise<boolean>;
     };
 
     if (typeof pkc.getClientCapabilities === "function") {
-      const capabilities = await pkc.getClientCapabilities();
+      const capabilities = await pkc.getClientCapabilities().catch(() => undefined);
       if (capabilities && typeof capabilities === "object") {
         if ("extension:prf" in capabilities) {
           return Boolean(capabilities["extension:prf"]);
         }
-        if (
-          capabilities.passkeyPlatformAuthenticator === false &&
-          capabilities.userVerifyingPlatformAuthenticator === false
-        ) {
-          return false;
-        }
       }
     }
 
-    if (typeof pkc.isUserVerifyingPlatformAuthenticatorAvailable === "function") {
-      const uvpa = await pkc.isUserVerifyingPlatformAuthenticatorAvailable();
-      if (!uvpa) {
-        return false;
-      }
-    }
-
+    // No platform authenticator does not rule out another device or security key.
+    // The actual assertion still has to supply PRF output before the vault can open.
     return true;
   } catch {
     return false;

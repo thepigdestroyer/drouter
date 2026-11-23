@@ -17,7 +17,7 @@ export type EnrichedVerificationDocument = VerificationDocument & {
 
 /** Models served inside Tinfoil's attested enclaves that the demo offers. */
 export const TINFOIL_MODELS = [
-  { id: "kimi-k3", label: "Kimi K3 (2.8T MoE)" },
+  { id: "kimi-k3-1-pro", label: "Kimi K3.1 Pro (2.8T MoE)" },
   { id: "glm-5-3", label: "GLM-5.3" },
   { id: "deepseek-v4-1-flash", label: "DeepSeek V4.1 Flash" },
   { id: "gpt-oss-120b", label: "GPT-OSS 120B" },
@@ -286,7 +286,7 @@ export function assertSessionChecksAllowSend(
  * prompts or completions.
  */
 export async function openTinfoilSession(
-  selectedModel = "kimi-k3",
+  selectedModel = "kimi-k3-1-pro",
   opts?: OpenTinfoilSessionOptions,
 ): Promise<TinfoilSession> {
   const origin =

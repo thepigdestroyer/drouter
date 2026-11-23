@@ -14,10 +14,10 @@ import {
 describe("Subsystem 9: Model Weights Registry & Live Provenance Verification", () => {
   describe("Open-weight model real HF shard Merkle tree & verifier", () => {
     it("exposes only real open models in OPEN_MODEL_CATALOG with real Hugging Face shard counts and provenance", () => {
-      expect(OPEN_MODEL_CATALOG["kimi-k3"].shardCount).toBe(96);
-      expect(OPEN_MODEL_CATALOG["kimi-k3"].totalParams).toBe("2.8T");
-      expect(OPEN_MODEL_CATALOG["kimi-k3"].weightRepoCommit).toBe(
-        "moonshotai/Kimi-K3@a590ce090cb049c93a33dfe8c208ec652aa20503",
+      expect(OPEN_MODEL_CATALOG["kimi-k3-1-pro"].shardCount).toBe(96);
+      expect(OPEN_MODEL_CATALOG["kimi-k3-1-pro"].totalParams).toBe("2.8T");
+      expect(OPEN_MODEL_CATALOG["kimi-k3-1-pro"].weightRepoCommit).toBe(
+        "moonshotai/Kimi-K3.1-Pro@6d0a0202956796543364d666ab19c6ad1a494ee1",
       );
       expect(OPEN_MODEL_CATALOG["glm-5-3"].shardCount).toBe(88);
       expect(OPEN_MODEL_CATALOG["deepseek-v4-1-flash"].shardCount).toBe(48);
@@ -29,7 +29,7 @@ describe("Subsystem 9: Model Weights Registry & Live Provenance Verification", (
       const registry = listModelRegistry();
       const ids = registry.map((r) => r.modelId);
       expect(ids).toEqual([
-        "kimi-k3",
+        "kimi-k3-1-pro",
         "glm-5-3",
         "deepseek-v4-1-flash",
         "gpt-oss-120b",
@@ -55,7 +55,7 @@ describe("Subsystem 9: Model Weights Registry & Live Provenance Verification", (
     });
 
     it("rejects corrupted shard hashes, tampered proof steps, or wrong committed roots", () => {
-      const model = OPEN_MODEL_CATALOG["kimi-k3"];
+      const model = OPEN_MODEL_CATALOG["kimi-k3-1-pro"];
       const proof = proveShardMembership(model.shardHashes, 17);
 
       const corruptedShardHash = bytesToHex(sha256(utf8ToBytes("corrupted-shard-payload")));
@@ -78,14 +78,14 @@ describe("Subsystem 9: Model Weights Registry & Live Provenance Verification", (
 
   describe("Live Tinfoil, GitHub release & Hugging Face provenance verification", () => {
     it("fetches live Tinfoil proxy table, GitHub tinfoil-deployment.json, and Hugging Face API and verifies cross-source match", async () => {
-      const result = await verifyLiveModelWeightProvenance("kimi-k3", {
+      const result = await verifyLiveModelWeightProvenance("kimi-k3-1-pro", {
         bypassCache: true,
       });
 
-      expect(result.modelId).toBe("kimi-k3");
-      expect(result.proxyTable.repo).toBe("tinfoilsh/confidential-kimi-k3");
+      expect(result.modelId).toBe("kimi-k3-1-pro");
+      expect(result.proxyTable.repo).toBe("tinfoilsh/confidential-kimi-k3-1-pro");
       expect(result.deploymentManifest.weightRepoCommit).toBe(
-        "moonshotai/Kimi-K3@a590ce090cb049c93a33dfe8c208ec652aa20503",
+        "moonshotai/Kimi-K3.1-Pro@6d0a0202956796543364d666ab19c6ad1a494ee1",
       );
       expect(result.comparisons.hfRepoCommitMatchesAcrossSources).toBe(true);
       expect(result.comparisons.weightMpkHashMatchesAcrossSources).toBe(true);
@@ -102,18 +102,18 @@ describe("Subsystem 9: Model Weights Registry & Live Provenance Verification", (
     });
 
     it("detects tampered dm-verity root, tampered MPK hash, or missing Hugging Face commit across sources", async () => {
-      const spec = OPEN_MODEL_CATALOG["kimi-k3"];
+      const spec = OPEN_MODEL_CATALOG["kimi-k3-1-pro"];
       const validYaml = [
         "cpus: 32",
         "memory: 524288",
         "gpus: 8",
         "models:",
-        `  - name: "kimi-k3"`,
+        `  - name: "kimi-k3-1-pro"`,
         `    repo: "${spec.weightRepoCommit}"`,
         `    mpk: "${spec.weightMpkHash}"`,
         "containers:",
-        `  - name: "kimi-k3"`,
-        `    image: "ghcr.io/tinfoilsh/confidential-kimi-k3@${spec.containerImageDigest}"`,
+        `  - name: "kimi-k3-1-pro"`,
+        `    image: "ghcr.io/tinfoilsh/confidential-kimi-k3-1-pro@${spec.containerImageDigest}"`,
         "    runtime: nvidia",
         "    gpus: all",
         "    env:",
@@ -121,7 +121,7 @@ describe("Subsystem 9: Model Weights Registry & Live Provenance Verification", (
         '      - VLLM_ALLREDUCE_USE_SYMM_MEM: "0"',
         "    command:",
         '      - "--model"',
-        '      - "/tinfoil/mpk/mpk-58d5e74ba6c814d4cc4511df093ede786bfbc95f766eee7a96379687ce455792"',
+        `      - "/tinfoil/mpk/mpk-${spec.weightMpkHash?.split('_')[0]}"`,
       ].join("\n");
       const validConfigB64 = Buffer.from(validYaml, "utf8").toString("base64");
       const validConfigSha256 = bytesToHex(sha256(utf8ToBytes(validYaml)));
@@ -133,7 +133,7 @@ describe("Subsystem 9: Model Weights Registry & Live Provenance Verification", (
           return new Response(
             JSON.stringify({
               models: {
-                "kimi-k3": {
+                "kimi-k3-1-pro": {
                   repo: spec.tinfoilRepo,
                   tag: spec.tinfoilTag,
                   measurement: {
@@ -141,7 +141,7 @@ describe("Subsystem 9: Model Weights Registry & Live Provenance Verification", (
                     registers: spec.measurementRegisters,
                   },
                   enclaves: {
-                    "kimi-k3-inf14.tinfoil.containers.tinfoil.dev": {
+                    "kimi-k3-1-pro-inf4.tinfoil.containers.tinfoil.dev": {
                       hpke_key: "aa".repeat(32),
                       predicate: "https://tinfoil.sh/predicate/tdx-guest/v2",
                       tls_key_fp: "bb".repeat(32),
@@ -153,7 +153,7 @@ describe("Subsystem 9: Model Weights Registry & Live Provenance Verification", (
                     healthy: 1,
                     unverified: 0,
                     hosts: {
-                      "kimi-k3-inf14.tinfoil.containers.tinfoil.dev": {
+                      "kimi-k3-1-pro-inf4.tinfoil.containers.tinfoil.dev": {
                         code_tag: spec.tinfoilTag,
                       },
                     },
@@ -198,7 +198,7 @@ describe("Subsystem 9: Model Weights Registry & Live Provenance Verification", (
         return new Response("Not found", { status: 404 });
       };
 
-      const cleanRes = await verifyLiveModelWeightProvenance("kimi-k3", {
+      const cleanRes = await verifyLiveModelWeightProvenance("kimi-k3-1-pro", {
         fetchImpl: matchingFetch,
       });
       expect(cleanRes.verified).toBe(true);
@@ -236,7 +236,7 @@ describe("Subsystem 9: Model Weights Registry & Live Provenance Verification", (
         return matchingFetch(input, init);
       };
 
-      const tamperedRes = await verifyLiveModelWeightProvenance("kimi-k3", {
+      const tamperedRes = await verifyLiveModelWeightProvenance("kimi-k3-1-pro", {
         fetchImpl: tamperedFetch,
       });
       expect(tamperedRes.verified).toBe(false);
@@ -246,7 +246,7 @@ describe("Subsystem 9: Model Weights Registry & Live Provenance Verification", (
     });
 
     it("GET /api/weights returns real provenance comparisons and real HF shard Merkle proofs", async () => {
-      const getRes = await getWeightsRoute(new Request("http://localhost:3000/api/weights?model=kimi-k3"));
+      const getRes = await getWeightsRoute(new Request("http://localhost:3000/api/weights?model=kimi-k3-1-pro"));
       expect(getRes.status).toBe(200);
       const getJson = (await getRes.json()) as {
         models: Array<{ modelId: string; shardCount: number }>;
@@ -254,13 +254,13 @@ describe("Subsystem 9: Model Weights Registry & Live Provenance Verification", (
         provenance: { modelId: string; comparisons: Record<string, boolean> };
         allModelsProvenance: Record<string, { modelId: string }>;
       };
-      expect(getJson.sampleProof.modelId).toBe("kimi-k3");
+      expect(getJson.sampleProof.modelId).toBe("kimi-k3-1-pro");
       expect(getJson.sampleProof.verified).toBe(true);
-      expect(getJson.sampleProof.shardHash).toBe(OPEN_MODEL_CATALOG["kimi-k3"].shardHashes[0]);
-      expect(getJson.provenance.modelId).toBe("kimi-k3");
+      expect(getJson.sampleProof.shardHash).toBe(OPEN_MODEL_CATALOG["kimi-k3-1-pro"].shardHashes[0]);
+      expect(getJson.provenance.modelId).toBe("kimi-k3-1-pro");
       expect(getJson.provenance.comparisons.dmVerityRootMatchesAcrossSources).toBe(true);
       expect(getJson.provenance.comparisons.weightMpkHashMatchesAcrossSources).toBe(true);
-      expect(Object.keys(getJson.allModelsProvenance)).toContain("kimi-k3");
+      expect(Object.keys(getJson.allModelsProvenance)).toContain("kimi-k3-1-pro");
       expect(Object.keys(getJson.allModelsProvenance)).toContain("glm-5-3");
     });
   });

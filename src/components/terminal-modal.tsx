@@ -24,7 +24,7 @@ export function TerminalModal({
   open,
   onClose,
   baseUrl = PRODUCTION_BASE_URL,
-  defaultModel = "kimi-k3",
+  defaultModel = "kimi-k3-1-pro",
 }: TerminalModalProps) {
   const [activeTab, setActiveTab] = useState<TerminalTabId>("opencode");
   const [copied, setCopied] = useState<string | null>(null);

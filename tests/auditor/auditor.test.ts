@@ -26,7 +26,7 @@ vi.mock("next/server", async (importOriginal) => {
 
 function createMockTinfoilClient(
   mode: "honest" | "downgraded-wrong-answer" | "downgraded-wrong-model",
-  model = "kimi-k3",
+  model = "kimi-k3-1-pro",
 ): { client: TinfoilAuditClient; calls: number } {
   let calls = 0;
 
@@ -160,7 +160,7 @@ describe("Mystery-Shopper Statistical Model Auditor (SPRT & Live Scoring)", () =
     const spec = CANARY_BATTERY[0];
     const goodScore = scoreCanaryResponse(
       spec,
-      "kimi-k3",
+      "kimi-k3-1-pro",
       {
         model: "kimi-k3-0711",
         choices: [{ message: { content: '{"answer":"53"}' } }],
@@ -178,9 +178,9 @@ describe("Mystery-Shopper Statistical Model Auditor (SPRT & Live Scoring)", () =
     // Wrong answer fails
     const badAnswer = scoreCanaryResponse(
       spec,
-      "kimi-k3",
+      "kimi-k3-1-pro",
       {
-        model: "kimi-k3",
+        model: "kimi-k3-1-pro",
         choices: [{ message: { content: '{"answer":"52"}' } }],
         usage: { prompt_tokens: 45, completion_tokens: 8 },
       },
@@ -192,9 +192,9 @@ describe("Mystery-Shopper Statistical Model Auditor (SPRT & Live Scoring)", () =
     // Markdown fence fails strict format check
     const badFormat = scoreCanaryResponse(
       spec,
-      "kimi-k3",
+      "kimi-k3-1-pro",
       {
-        model: "kimi-k3",
+        model: "kimi-k3-1-pro",
         choices: [{ message: { content: '```json\n{"answer":"53"}\n```' } }],
         usage: { prompt_tokens: 45, completion_tokens: 8 },
       },
@@ -206,7 +206,7 @@ describe("Mystery-Shopper Statistical Model Auditor (SPRT & Live Scoring)", () =
     // Swapped model ID echo fails
     const badModel = scoreCanaryResponse(
       spec,
-      "kimi-k3",
+      "kimi-k3-1-pro",
       {
         model: "llama-3-8b-instruct",
         choices: [{ message: { content: '{"answer":"53"}' } }],
@@ -219,25 +219,25 @@ describe("Mystery-Shopper Statistical Model Auditor (SPRT & Live Scoring)", () =
   });
 
   it("matches advertised model families accurately", () => {
-    expect(matchesAdvertisedModel("kimi-k3", "kimi-k3")).toBe(true);
-    expect(matchesAdvertisedModel("kimi-k3", "moonshotai/Kimi-K3-Instruct")).toBe(true);
+    expect(matchesAdvertisedModel("kimi-k3-1-pro", "kimi-k3-1-pro")).toBe(true);
+    expect(matchesAdvertisedModel("kimi-k3-1-pro", "moonshotai/Kimi-K3-Instruct")).toBe(true);
     expect(matchesAdvertisedModel("llama3-3-70b", "meta-llama/Llama-3.3-70B-Instruct")).toBe(true);
-    expect(matchesAdvertisedModel("kimi-k3", "qwen-2.5-7b")).toBe(false);
+    expect(matchesAdvertisedModel("kimi-k3-1-pro", "qwen-2.5-7b")).toBe(false);
   });
 
   it("executes a 3-call battery with a mocked Tinfoil SDK and stores only coarsened aggregate results", async () => {
-    const mock = createMockTinfoilClient("honest", "kimi-k3");
+    const mock = createMockTinfoilClient("honest", "kimi-k3-1-pro");
     const exactNow = new Date("2026-10-24T14:37:42.987Z");
 
     const result = await executeMysteryShopperAudit({
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       client: mock.client,
       now: exactNow,
     });
 
     expect(mock.calls).toBe(MAX_CALLS_PER_AUDIT);
     expect(mock.calls).toBeLessThanOrEqual(3);
-    expect(result.run.model).toBe("kimi-k3");
+    expect(result.run.model).toBe("kimi-k3-1-pro");
     expect(result.run.passed).toBe(true);
     expect(result.run.probesCount).toBe(3);
     expect(result.run.passedCount).toBe(3);
@@ -251,10 +251,10 @@ describe("Mystery-Shopper Statistical Model Auditor (SPRT & Live Scoring)", () =
   });
 
   it("crosses SLASH_MODEL_DOWNGRADE_DETECTED after sequential failed batteries", async () => {
-    const badMock = createMockTinfoilClient("downgraded-wrong-answer", "kimi-k3");
+    const badMock = createMockTinfoilClient("downgraded-wrong-answer", "kimi-k3-1-pro");
 
     const batch1 = await executeMysteryShopperAudit({
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       client: badMock.client,
       initialLlr: 0,
     });
@@ -264,7 +264,7 @@ describe("Mystery-Shopper Statistical Model Auditor (SPRT & Live Scoring)", () =
 
     // Second sequential 3-call battery starting from batch1 cumulative LLR crosses upperBoundA
     const batch2 = await executeMysteryShopperAudit({
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       client: badMock.client,
       initialLlr: batch1.run.cumulativeSprtStatistic,
     });
@@ -290,7 +290,7 @@ describe("Mystery-Shopper Statistical Model Auditor (SPRT & Live Scoring)", () =
 
   it("GET /api/cron/auditor enforces Authorization: Bearer ${CRON_SECRET} and saves aggregate run", async () => {
     process.env.CRON_SECRET = "test-cron-secret-999";
-    const mock = createMockTinfoilClient("honest", "kimi-k3");
+    const mock = createMockTinfoilClient("honest", "kimi-k3-1-pro");
     setCronAuditorTestClient(mock.client);
 
     // Reject missing header
@@ -311,7 +311,7 @@ describe("Mystery-Shopper Statistical Model Auditor (SPRT & Live Scoring)", () =
 
     // Accept valid Bearer token
     const okRes = await getCronAuditorRoute(
-      new Request("http://localhost/api/cron/auditor?model=kimi-k3", {
+      new Request("http://localhost/api/cron/auditor?model=kimi-k3-1-pro", {
         headers: { authorization: "Bearer test-cron-secret-999" },
       }),
     );
@@ -323,14 +323,14 @@ describe("Mystery-Shopper Statistical Model Auditor (SPRT & Live Scoring)", () =
       run: { model: string; passed: boolean; probesCount: number };
     };
     expect(cronBody.ok).toBe(true);
-    expect(cronBody.run.model).toBe("kimi-k3");
+    expect(cronBody.run.model).toBe("kimi-k3-1-pro");
     expect(cronBody.run.passed).toBe(true);
     expect(cronBody.run.probesCount).toBe(3);
 
     // Verify /api/auditor now returns the real recorded run
     const historyState = await getAuditorRunsHistory();
     expect(historyState.hasRun).toBe(true);
-    expect(historyState.latestRun?.model).toBe("kimi-k3");
+    expect(historyState.latestRun?.model).toBe("kimi-k3-1-pro");
     expect(historyState.history.length).toBe(1);
 
     await saveAuditorRun(cronBody.run as never);

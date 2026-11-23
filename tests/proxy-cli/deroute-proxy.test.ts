@@ -148,7 +148,7 @@ describe("K2: deroute-proxy unit & integration tests", () => {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            model: "kimi-k3",
+            model: "kimi-k3-1-pro",
             messages: [{ role: "user", content: "First turn" }],
           }),
         },
@@ -189,7 +189,7 @@ describe("K2: deroute-proxy unit & integration tests", () => {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            model: "kimi-k3",
+            model: "kimi-k3-1-pro",
             messages: [{ role: "user", content: "Second turn" }],
           }),
         },
@@ -208,7 +208,7 @@ describe("K2: deroute-proxy unit & integration tests", () => {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            model: "kimi-k3",
+            model: "kimi-k3-1-pro",
             messages: [{ role: "user", content: "Third turn on free tier" }],
           }),
         },
@@ -321,7 +321,7 @@ describe("K2: deroute-proxy unit & integration tests", () => {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            model: "kimi-k3",
+            model: "kimi-k3-1-pro",
             messages: turn1Messages,
           }),
         },
@@ -464,7 +464,7 @@ describe("K2: deroute-proxy unit & integration tests", () => {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            model: "kimi-k3",
+            model: "kimi-k3-1-pro",
             stream: true,
             messages: [
               {
@@ -548,7 +548,7 @@ describe("K2: deroute-proxy unit & integration tests", () => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "kimi-k3",
+          model: "kimi-k3-1-pro",
           stream: true,
           messages: [{ role: "user", content: "Email dana.reyes@example.com" }],
         }),
@@ -696,7 +696,7 @@ describe("K2: deroute-proxy unit & integration tests", () => {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            model: "kimi-k3",
+            model: "kimi-k3-1-pro",
             messages: [{ role: "user", content: "Hello" }],
           }),
         },
@@ -768,8 +768,8 @@ describe("K2: deroute-proxy unit & integration tests", () => {
       new Response(
         JSON.stringify({
           models: {
-            "kimi-k3": {
-              repo: "tinfoilsh/confidential-kimi-k3",
+            "kimi-k3-1-pro": {
+              repo: "tinfoilsh/confidential-kimi-k3-1-pro",
               tag: "v1",
               enclaves: { h1: { predicate: "tdx" } },
               verification: { configured: 1, verified: 1, healthy: 1 },
@@ -807,7 +807,7 @@ describe("K2: deroute-proxy unit & integration tests", () => {
       fetchImpl: mockFetchImpl as unknown as typeof fetch,
       forceRefresh: true,
     });
-    expect(intersected.map((m) => m.id)).toEqual(["kimi-k3", "gemma4-31b"]);
+    expect(intersected.map((m) => m.id)).toEqual(["kimi-k3-1-pro", "gemma4-31b"]);
 
     const handle = createDerouteProxyServer({
       spentFilePath: spentPath,
@@ -860,7 +860,7 @@ describe("K2: deroute-proxy unit & integration tests", () => {
         data: Array<{ id: string }>;
       };
       expect(modelsBody.data.map((m) => m.id)).toEqual([
-        "kimi-k3",
+        "kimi-k3-1-pro",
         "gemma4-31b",
       ]);
       for (const m of modelsBody.data) {
@@ -886,7 +886,7 @@ describe("K2: deroute-proxy unit & integration tests", () => {
       matrix: null,
       proxyTable: null,
       registry: null,
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
     });
     for (const c of missingStepsChecks) {
       expect(c.status).toBe("fail");
@@ -902,7 +902,7 @@ describe("K2: deroute-proxy unit & integration tests", () => {
       matrix: null,
       proxyTable: null,
       registry: null,
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
     });
     expect(nullFetchChecks.find((c) => c.id === "C5")?.status).toBe("fail");
     expect(nullFetchChecks.find((c) => c.id === "C6")?.status).toBe("fail");
@@ -913,8 +913,8 @@ describe("K2: deroute-proxy unit & integration tests", () => {
       doc: { securityVerified: true, steps: validSteps },
       matrix: {
         models: {
-          "kimi-k3": {
-            repo: "tinfoilsh/confidential-kimi-k3",
+          "kimi-k3-1-pro": {
+            repo: "tinfoilsh/confidential-kimi-k3-1-pro",
             healthyHosts: 2,
             configuredHosts: 2,
             dmVerityRootHash: "abcdef1234567890abcdef1234567890",
@@ -923,8 +923,8 @@ describe("K2: deroute-proxy unit & integration tests", () => {
       },
       proxyTable: {
         models: {
-          "kimi-k3": {
-            repo: "tinfoilsh/confidential-kimi-k3",
+          "kimi-k3-1-pro": {
+            repo: "tinfoilsh/confidential-kimi-k3-1-pro",
             tag: "v1",
             measurement: { registers: ["abcdef1234567890"] },
             verification: { configured: 2, verified: 2, healthy: 2 },
@@ -994,7 +994,7 @@ describe("K2: deroute-proxy unit & integration tests", () => {
             Origin: "http://localhost:3000",
           },
           body: JSON.stringify({
-            model: "kimi-k3",
+            model: "kimi-k3-1-pro",
             messages: [{ role: "user", content: "hi" }],
           }),
         },
@@ -1011,7 +1011,7 @@ describe("K2: deroute-proxy unit & integration tests", () => {
             "Sec-Fetch-Site": "cross-site",
           },
           body: JSON.stringify({
-            model: "kimi-k3",
+            model: "kimi-k3-1-pro",
             messages: [{ role: "user", content: "hi" }],
           }),
         },
@@ -1036,7 +1036,7 @@ describe("K2: deroute-proxy unit & integration tests", () => {
             "Content-Type": "text/plain",
           },
           body: JSON.stringify({
-            model: "kimi-k3",
+            model: "kimi-k3-1-pro",
             messages: [{ role: "user", content: "hi" }],
           }),
         },
@@ -1211,7 +1211,7 @@ describe("K2: deroute-proxy unit & integration tests", () => {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            model: "kimi-k3",
+            model: "kimi-k3-1-pro",
             messages: inputMessages,
           }),
         },
@@ -1713,7 +1713,7 @@ describe("K2: deroute-proxy unit & integration tests", () => {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            model: "kimi-k3",
+            model: "kimi-k3-1-pro",
             stream: true,
             messages: [
               {
@@ -1762,7 +1762,7 @@ describe("K2: deroute-proxy unit & integration tests", () => {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            model: "kimi-k3",
+            model: "kimi-k3-1-pro",
             stream: true,
             messages: [
               {
@@ -2053,7 +2053,7 @@ describe("K2: deroute-proxy unit & integration tests", () => {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              model: "kimi-k3",
+              model: "kimi-k3-1-pro",
               messages: [{ role: "user", content: [unsupportedPart] }],
             }),
           },
@@ -2075,7 +2075,7 @@ describe("K2: deroute-proxy unit & integration tests", () => {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            model: "kimi-k3",
+            model: "kimi-k3-1-pro",
             user: "dana.reyes@example.com",
             metadata: { owner: "dana.reyes@example.com", secret: "Project Falcon" },
             prediction: { type: "content", content: "Project Falcon" },
@@ -2133,7 +2133,7 @@ describe("K2: deroute-proxy unit & integration tests", () => {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            model: "kimi-k3",
+            model: "kimi-k3-1-pro",
             stream: true,
             messages: [
               {
@@ -2263,7 +2263,7 @@ describe("K2: deroute-proxy unit & integration tests", () => {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            model: "kimi-k3",
+            model: "kimi-k3-1-pro",
             messages: [
               {
                 role: "user",

@@ -18,7 +18,7 @@ import {
  * Zero invented or unsourced throughput, latency, or context-length numbers.
  */
 
-export const KIMI_K3_ENCLAVE_MAX_CONTEXT_TOKENS = 262_144 as const;
+export const KIMI_K3_1_PRO_ENCLAVE_MAX_CONTEXT_TOKENS = 262_144 as const;
 export const GEMINI_4_ARGON_MAX_CONTEXT_TOKENS = 1_000_000 as const;
 
 export interface SourcedTierCatalogEntry {
@@ -54,13 +54,13 @@ export interface BuildTiersCatalogOptions {
  * and sourced deployment manifests:
  * - Tier A: AMD SEV-SNP (`router-0.tinfoil.sh`) + GLM-5.3 / SEV-SNP model enclave (`tinfoilsh/confidential-glm5-3-nvfp4@v0.0.7`).
  * - Tier A+: AMD EPYC 9005 Turin SEV-SNP + 4x B200 Confidential GPU enclave (`glm-5-3`) + Riser-proof on-package/soldered memory allowlist + SPDM 1.2 / TEE-IO binding.
- * - Tier B: Intel TDX Quote v4 (`deepseek-v4-1-flash` / `kimi-k3`) + Confidential GPU enclave.
+ * - Tier B: Intel TDX Quote v4 on a TDX host + Confidential GPU enclave.
  * - Tier C: Real `node-seal` 7.0.0 (Microsoft SEAL 4.1.2 WASM) CKKS homomorphic linear classifier (N=4096, 128-d vector, 4 classes).
  */
 export async function buildMeasuredTiersCatalog(
   opts?: BuildTiersCatalogOptions,
 ): Promise<{
-  kimiK3MaxContextTokens: typeof KIMI_K3_ENCLAVE_MAX_CONTEXT_TOKENS;
+  kimiK31ProMaxContextTokens: typeof KIMI_K3_1_PRO_ENCLAVE_MAX_CONTEXT_TOKENS;
   gemini4ArgonMaxContextTokens: typeof GEMINI_4_ARGON_MAX_CONTEXT_TOKENS;
   fheScopeDisclosure: string;
   liveFheMeasurement: LiveFheRoundTripMeasurement;
@@ -109,9 +109,9 @@ export async function buildMeasuredTiersCatalog(
       physicalInterposerResistant: false,
       routingPrivacy:
         "End-to-end HPKE encrypted to enclave; socketed DDR5 DIMM bus remains exposed to physical interposers (TEE.fail)",
-      maxContextTokens: KIMI_K3_ENCLAVE_MAX_CONTEXT_TOKENS,
+      maxContextTokens: KIMI_K3_1_PRO_ENCLAVE_MAX_CONTEXT_TOKENS,
       maxContextSource:
-        "Tinfoil signed enclave manifest (tinfoilsh/confidential-kimi-k3@v0.0.15 max-model-len=262,144; Gemini 4 Argon outer orchestrator supports 1,000,000 tokens)",
+        "Tinfoil signed enclave manifest (tinfoilsh/confidential-kimi-k3-1-pro@v0.0.2 max-model-len=262,144; Gemini 4 Argon outer orchestrator supports 1,000,000 tokens)",
       measuredEvalLatencyMs: tierAVerifyMs,
       throughputOpsPerSec:
         tierAVerifyMs && tierAVerifyMs > 0
@@ -136,7 +136,7 @@ export async function buildMeasuredTiersCatalog(
       physicalInterposerResistant: true,
       routingPrivacy:
         "Eliminates exposed socketed DDR5 DIMM risers and closes the PCIe GPU attestation relay gap via TEE-IO VM binding",
-      maxContextTokens: KIMI_K3_ENCLAVE_MAX_CONTEXT_TOKENS,
+      maxContextTokens: KIMI_K3_1_PRO_ENCLAVE_MAX_CONTEXT_TOKENS,
       maxContextSource:
         "Matches 262,144-token enclave limit when backed by GH200/GB200 or Turin-X on-package memory nodes",
       measuredEvalLatencyMs: tierAPlusVerifyMs,
@@ -158,15 +158,15 @@ export async function buildMeasuredTiersCatalog(
       name: "Intel TDX + 8x Confidential GPU Enclave (Opt-In Tier)",
       status: "live-enclave",
       architecture:
-        "Intel TDX Quote v4 (teeType=0x81) + NVIDIA H100/B200 CC (deepseek-v4-1-flash / kimi-k3)",
+        "Intel TDX Quote v4 (teeType=0x81) + NVIDIA H100/B200 confidential computing on supported hosts",
       trustBoundary:
         "Intel TDX Module + PCK P-256 ECDSA attestation; host VMM excluded, client opt-in required",
       physicalInterposerResistant: false,
       routingPrivacy:
         "HPKE encrypted to TDX model enclave after AMD SEV-SNP router hop; standard DIMM topology",
-      maxContextTokens: KIMI_K3_ENCLAVE_MAX_CONTEXT_TOKENS,
+      maxContextTokens: KIMI_K3_1_PRO_ENCLAVE_MAX_CONTEXT_TOKENS,
       maxContextSource:
-        "Sourced from tinfoilsh/confidential-kimi-k3@v0.0.15 deployment manifest (vLLM --max-model-len 262144 on 8x GPU VM with 524,288 MB RAM)",
+        "Sourced from tinfoilsh/confidential-kimi-k3-1-pro@v0.0.2 deployment manifest (vLLM --max-model-len 262144 on 8x GPU VM with 524,288 MB RAM)",
       measuredEvalLatencyMs: tierBVerifyMs,
       throughputOpsPerSec:
         tierBVerifyMs && tierBVerifyMs > 0
@@ -177,7 +177,7 @@ export async function buildMeasuredTiersCatalog(
       metricsSource:
         tierBVerifyMs !== null
           ? `Measured live Intel TDX Quote v4 (PCK chain + QE report + TD Quote Body + RTMR1/RTMR2) verification on Tinfoil enclave: ${tierBVerifyMs} ms`
-          : "Sourced from tinfoilsh/confidential-kimi-k3@v0.0.15 manifest; unmeasured tok/s and $/M claims removed",
+          : "Sourced from tinfoilsh/confidential-kimi-k3-1-pro@v0.0.2 manifest; unmeasured tok/s and $/M claims removed",
       sessionStateFootprint:
         "72.53 GB CVM KV cache @ 262,144 tokens (512 GB VM RAM + 8x Confidential GPUs)",
     },
@@ -204,7 +204,7 @@ export async function buildMeasuredTiersCatalog(
   ];
 
   return {
-    kimiK3MaxContextTokens: KIMI_K3_ENCLAVE_MAX_CONTEXT_TOKENS,
+    kimiK31ProMaxContextTokens: KIMI_K3_1_PRO_ENCLAVE_MAX_CONTEXT_TOKENS,
     gemini4ArgonMaxContextTokens: GEMINI_4_ARGON_MAX_CONTEXT_TOKENS,
     fheScopeDisclosure: FHE_SCOPE_DISCLOSURE,
     liveFheMeasurement: fheMeasurement,

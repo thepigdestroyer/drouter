@@ -219,10 +219,10 @@ export interface BrowserAgentWorkflowOptions {
   thinkingLevel?: ArgonThinkingLevel;
   background?: boolean;
   humanApprovedExternalAction?: boolean;
-  preferredEnclaveModel?: "gemma4-31b" | "kimi-k3";
+  preferredEnclaveModel?: "gemma4-31b" | "kimi-k3-1-pro";
   fetchFn?: typeof fetch;
   openSessionFn?: (
-    model: "gemma4-31b" | "kimi-k3",
+    model: "gemma4-31b" | "kimi-k3-1-pro",
   ) => Promise<BrowserAgentSessionLike>;
   mechanicalRedactor?: MechanicalRedactFn;
   attestedFilterRunner?: AttestedFilterRunnerFn;
@@ -865,11 +865,11 @@ export async function requestAgentPlanFromBrowser(
 
 const MODEL_ID_ALIASES: Readonly<Record<string, readonly string[]>> = {
   "gemma4-31b": ["gemma4-31b", "gemma-4-31b", "gemma-4-31b-it"],
-  "kimi-k3": ["kimi-k3"],
+  "kimi-k3-1-pro": ["kimi-k3-1-pro"],
 };
 
 export function resolveModelAttestationFromMatrix(
-  modelId: "gemma4-31b" | "kimi-k3",
+  modelId: "gemma4-31b" | "kimi-k3-1-pro",
   bundle: DeepAttestationBundle | null,
 ): {
   routerHost: string;
@@ -894,8 +894,8 @@ export function resolveModelAttestationFromMatrix(
     }
     if (!matchedRecord) {
       const defaultRepo =
-        modelId === "kimi-k3"
-          ? "tinfoilsh/confidential-kimi-k3"
+        modelId === "kimi-k3-1-pro"
+          ? "tinfoilsh/confidential-kimi-k3-1-pro"
           : "tinfoilsh/confidential-gemma4-31b";
       matchedRecord = Object.values(bundle.models).find(
         (m) =>
@@ -925,8 +925,8 @@ export function resolveModelAttestationFromMatrix(
   // Never borrow another model's attestation record when the requested model
   // has no separate record in the matrix or its record is unavailable.
   const defaultRepo =
-    modelId === "kimi-k3"
-      ? "tinfoilsh/confidential-kimi-k3"
+    modelId === "kimi-k3-1-pro"
+      ? "tinfoilsh/confidential-kimi-k3-1-pro"
       : "tinfoilsh/confidential-gemma4-31b";
   const routerAttested = Boolean(routerReleaseDigest);
   const missingReason = matchedRecord?.unavailableReason
@@ -1037,10 +1037,10 @@ export async function runBrowserAgentWorkflow(
   const thinkingLevel: ArgonThinkingLevel = options.thinkingLevel ?? "medium";
   const background = options.background ?? true;
   const humanApproved = Boolean(options.humanApprovedExternalAction);
-  const initialEnclaveModel: "gemma4-31b" | "kimi-k3" =
+  const initialEnclaveModel: "gemma4-31b" | "kimi-k3-1-pro" =
     options.preferredEnclaveModel ?? "gemma4-31b";
-  const alternateEnclaveModel: "gemma4-31b" | "kimi-k3" =
-    initialEnclaveModel === "gemma4-31b" ? "kimi-k3" : "gemma4-31b";
+  const alternateEnclaveModel: "gemma4-31b" | "kimi-k3-1-pro" =
+    initialEnclaveModel === "gemma4-31b" ? "kimi-k3-1-pro" : "gemma4-31b";
 
   const modelCalls: ArgonModelCallRecord[] = [];
 
@@ -1141,7 +1141,7 @@ export async function runBrowserAgentWorkflow(
   ]);
   const attElapsedMs = Math.max(1, Date.now() - t0Att);
 
-  const evaluateCandidateModel = (candidateModel: "gemma4-31b" | "kimi-k3") => {
+  const evaluateCandidateModel = (candidateModel: "gemma4-31b" | "kimi-k3-1-pro") => {
     const att = resolveModelAttestationFromMatrix(
       candidateModel,
       matrixRes,
@@ -1794,7 +1794,7 @@ export async function runBrowserAgentWorkflow(
     try {
       const openSession =
         options.openSessionFn ??
-        ((mdl: "gemma4-31b" | "kimi-k3") => openTinfoilSession(mdl));
+        ((mdl: "gemma4-31b" | "kimi-k3-1-pro") => openTinfoilSession(mdl));
       const session = await openSession(activeEnclaveModel);
       if (Array.isArray(session.checks)) {
         assertSessionChecksAllowSend(session.checks);

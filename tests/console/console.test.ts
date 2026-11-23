@@ -590,9 +590,9 @@ describe("honest registry & quorum checks and failure handling", () => {
     const kimiNode: RegistryNodeRecord = {
       ...SAMPLE_NODE,
       id: "0x37c6b00064a5e5043631e41357f5500152a68198204c336745d6ba7fa0a0bb61",
-      key: "tinfoil-kimi-k3",
-      modelId: "kimi-k3",
-      name: "Tinfoil Kimi K3 enclave",
+      key: "tinfoil-kimi-k3-1-pro",
+      modelId: "kimi-k3-1-pro",
+      name: "Tinfoil Kimi K3.1 Pro enclave",
     };
     const glmNode: RegistryNodeRecord = {
       ...SAMPLE_NODE,
@@ -637,7 +637,7 @@ describe("honest registry & quorum checks and failure handling", () => {
     };
 
     await expect(
-      openSession(legacySimNode, registry, () => {}, "kimi-k3"),
+      openSession(legacySimNode, registry, () => {}, "kimi-k3-1-pro"),
     ).rejects.toThrow();
 
     for (const call of fetchSpy.mock.calls) {
@@ -661,7 +661,7 @@ describe("forensics proof export action", () => {
     const exported = exportSessionProof(
       {
         node: SAMPLE_NODE,
-        model: "kimi-k3",
+        model: "kimi-k3-1-pro",
         checks: ALL_PASS_CHECKS,
         evidence: {
           "Enclave host": "router-0.tinfoil.sh",
@@ -722,7 +722,7 @@ describe("resending earlier messages", () => {
     const turn1 = await executeSendTurn({
       text: "Please review ££Project Falcon££ with Dana Reyes before Friday.",
       messages: [],
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       mechanicalSession: session,
       scrubEnabled: true,
       activeSession: {
@@ -744,7 +744,7 @@ describe("resending earlier messages", () => {
     const turn2 = await executeSendTurn({
       text: "Can we move Project Falcon and project falcon launch notes to Monday?",
       messages: turn1.messages,
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       mechanicalSession: session,
       scrubEnabled: true,
       activeSession: {
@@ -776,7 +776,7 @@ describe("resending earlier messages", () => {
     const turn1 = await executeSendTurn({
       text: "Draft a short note about our merger offer.",
       messages: [],
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       mechanicalSession: session,
       scrubEnabled: true,
       activeSession: {
@@ -792,7 +792,7 @@ describe("resending earlier messages", () => {
     const turn2 = await executeSendTurn({
       text: "Revise ££our merger offer££ to be more concise.",
       messages: turn1.messages,
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       mechanicalSession: session,
       scrubEnabled: true,
       activeSession: {
@@ -822,7 +822,7 @@ describe("resending earlier messages", () => {
     const turn1 = await executeSendTurn({
       text: "Check ££Project Falcon££ status.",
       messages: [],
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       mechanicalSession: session1,
       scrubEnabled: true,
       activeSession: {
@@ -858,7 +858,7 @@ describe("resending earlier messages", () => {
     const turn2 = await executeSendTurn({
       text: "Ask Marcus Vance and Dana Reyes about Project Falcon at bob@example.com.",
       messages: frozenMessages,
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       mechanicalSession: resumedSession,
       scrubEnabled: true,
       normalizeStyle: true,
@@ -888,7 +888,7 @@ describe("resending earlier messages", () => {
     const itemHtml = renderToStaticMarkup(
       React.createElement(ConsoleMessageItem, {
         message: resumedUserMsgAfterPrepare,
-        modelName: "Kimi K3",
+        modelName: "Kimi K3.1 Pro",
         isStreamingLast: false,
       }),
     );
@@ -949,7 +949,7 @@ describe("resending earlier messages", () => {
     const turn1 = await executeSendTurn({
       text: "Hello Elena Rostova.",
       messages: [],
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       mechanicalSession: session,
       scrubEnabled: true,
       activeSession: {
@@ -969,7 +969,7 @@ describe("resending earlier messages", () => {
     const failedTurn2 = await executeSendTurn({
       text: "Contact Marcus Vance at marcus@example.com for ££Project Titan££.",
       messages: turn1.messages,
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       mechanicalSession: session,
       scrubEnabled: true,
       activeSession: {
@@ -997,7 +997,7 @@ describe("resending earlier messages", () => {
     const retryTurn2 = await executeSendTurn({
       text: "Contact Clara Oswald.",
       messages: turn1.messages,
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       mechanicalSession: session,
       scrubEnabled: true,
       activeSession: {
@@ -1019,7 +1019,7 @@ describe("resending earlier messages", () => {
     const turn1 = await executeSendTurn({
       text: "How does your privacy filter work?",
       messages: [],
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       mechanicalSession: session,
       scrubEnabled: true,
       activeSession: {
@@ -1037,7 +1037,7 @@ describe("resending earlier messages", () => {
     const turn2 = await executeSendTurn({
       text: "Email Dana Reyes at dana.reyes@example.com.",
       messages: turn1.messages,
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       mechanicalSession: session,
       scrubEnabled: true,
       activeSession: {
@@ -1074,7 +1074,7 @@ describe("resending earlier messages", () => {
     const turn1 = await executeSendTurn({
       text: "We are reviewing codename zephyr with Dana Reyes today.",
       messages: [],
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       mechanicalSession: session,
       scrubEnabled: true,
       activeSession: {
@@ -1103,7 +1103,7 @@ describe("resending earlier messages", () => {
     const turn2 = await executeSendTurn({
       text: "What are the next steps for Dana Reyes?",
       messages: turn1.messages,
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       mechanicalSession: session,
       scrubEnabled: true,
       onStreamDelta: ({ restoredReply }) => {
@@ -1140,7 +1140,7 @@ describe("resending earlier messages", () => {
     const turn1Html = renderToStaticMarkup(
       React.createElement(ConsoleMessageItem, {
         message: turn2.messages[0],
-        modelName: "Kimi K3",
+        modelName: "Kimi K3.1 Pro",
         isStreamingLast: false,
       }),
     );
@@ -1169,7 +1169,7 @@ describe("resending earlier messages", () => {
     const turn1 = await executeSendTurn({
       text: "Write to dana.reyes@example.com about the schedule.",
       messages: [],
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       mechanicalSession: session,
       scrubEnabled: true,
       activeSession: {
@@ -1188,7 +1188,7 @@ describe("resending earlier messages", () => {
     const turn2 = await executeSendTurn({
       text: "Should I copy that escalation address too?",
       messages: turn1.messages,
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       mechanicalSession: session,
       scrubEnabled: true,
       activeSession: {
@@ -1226,7 +1226,7 @@ describe("resending earlier messages", () => {
     const turn1 = await executeSendTurn({
       text: "Contact Elena Rostova at elena@example.com about ££Project Horizon££ on 2026-10-25.",
       messages: [],
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       mechanicalSession: session,
       scrubEnabled: true,
       activeSession: {
@@ -1245,7 +1245,7 @@ describe("resending earlier messages", () => {
     const turn2 = await executeSendTurn({
       text: "Add Marcus Vance at marcus@example.com to ££Backup Plan££.",
       messages: turn1.messages,
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       mechanicalSession: session,
       scrubEnabled: true,
       activeSession: {
@@ -1260,7 +1260,7 @@ describe("resending earlier messages", () => {
     const turn3 = await executeSendTurn({
       text: "Confirm both with Elena Rostova and Marcus Vance.",
       messages: turn2.messages,
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       mechanicalSession: session,
       scrubEnabled: true,
       activeSession: {

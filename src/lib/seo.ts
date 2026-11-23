@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 
-export const SITE_URL = "https://drouter-demo.vercel.app";
+export const SITE_URL = "https://deroute.is-an.ai";
 export const SITE_NAME = "deRoute";
 export const INDEXNOW_KEY = "b3e3066c7789b0706e31f432ae6f20bf";
 export const AWARD = "Winner, Agents That Ship track, Encode London 2026";

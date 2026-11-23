@@ -42,7 +42,7 @@ import type { BlindCreditToken, CheckResult } from "@/lib/types";
 
 export const DEFAULT_PORT = 4141;
 export const DEFAULT_UPSTREAM = "https://drouter-demo.vercel.app";
-export const DEFAULT_MODEL = "kimi-k3";
+export const DEFAULT_MODEL = "kimi-k3-1-pro";
 export const CHAT_MODEL_ALLOWLIST = CHAT_GATEWAY_MODEL_IDS;
 export const MAX_REQUEST_BODY_BYTES = 262_144;
 

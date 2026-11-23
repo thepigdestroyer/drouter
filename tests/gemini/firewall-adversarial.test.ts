@@ -1114,7 +1114,7 @@ describe("Shared Content-Free Egress Firewall: Round 1 & Round 2 Adversarial Sui
       },
       invoke_attested_enclave: {
         inputHandle: "$RESULT_1",
-        enclaveModel: "kimi-k3",
+        enclaveModel: "kimi-k3-1-pro",
         taskKind: "review",
       },
       anchor_arc_settlement_with_human_gate: {
@@ -1138,7 +1138,7 @@ describe("Shared Content-Free Egress Firewall: Round 1 & Round 2 Adversarial Sui
       },
       invoke_attested_enclave: {
         inputHandle: "$RESULT_17",
-        enclaveModel: "kimi-k3",
+        enclaveModel: "kimi-k3-1-pro",
       },
       anchor_arc_settlement_with_human_gate: {
         actionKind: "anchor_receipt",

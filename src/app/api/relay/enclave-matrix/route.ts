@@ -27,7 +27,7 @@ const NVIDIA_NRAS_JWKS_URL = "https://nras.attestation.nvidia.com/.well-known/jw
 const ROUTER_CONFIG_REPO = "tinfoilsh/confidential-model-router";
 
 const CHAT_MODEL_IDS = [
-  "kimi-k3",
+  "kimi-k3-1-pro",
   "glm-5-3",
   "deepseek-v4-1-flash",
   "gpt-oss-120b",
@@ -35,6 +35,12 @@ const CHAT_MODEL_IDS = [
 ] as const;
 
 const CACHE_TTL_MS = 60_000;
+// This response contains only public attestation evidence. Never cache failures
+// or serve stale evidence while revalidating.
+const verifiedBundleHeaders = { "Vercel-CDN-Cache-Control": "public, s-maxage=15, must-revalidate" };
+function matrixResponse(bundle: DeepAttestationBundle): Response {
+  return NextResponse.json(bundle, bundle.status === "verified" ? { headers: verifiedBundleHeaders } : undefined);
+}
 let cachedBundle: { bundle: DeepAttestationBundle; expiresAt: number } | null = null;
 const kdsCertChainCache = new Map<string, string>();
 
@@ -152,6 +158,9 @@ interface ProxyModelEntry {
   measurement?: {
     type?: string;
     registers?: string[];
+    Launch?: string;
+    RTMR1?: string;
+    RTMR2?: string;
   };
   enclaves?: Record<
     string,
@@ -392,11 +401,17 @@ async function buildModelAttestation(
     predicate.tdx_measurement?.rtmr2,
   ].filter((r): r is string => Boolean(r));
 
-  const proxyRegisters = proxyEntry.measurement?.registers ?? [];
-  const registersMatchSigstore =
-    sigstoreRegisters.length > 0 &&
-    proxyRegisters.length === sigstoreRegisters.length &&
-    proxyRegisters.every((r, idx) => r.toLowerCase() === sigstoreRegisters[idx].toLowerCase());
+  const reported = proxyEntry.measurement;
+  const pairs = reported?.Launch !== undefined
+    ? [[reported.Launch, predicate.snp_measurement]]
+    : reported?.RTMR1 !== undefined || reported?.RTMR2 !== undefined
+      ? [[reported.RTMR1, predicate.tdx_measurement?.rtmr1], [reported.RTMR2, predicate.tdx_measurement?.rtmr2]]
+      : sigstoreRegisters.length === reported?.registers?.length
+        ? reported.registers.map((value, index) => [value, sigstoreRegisters[index]])
+        : [];
+  const registersMatchSigstore = pairs.length > 0 && pairs.every(([actual, expected]) =>
+    typeof actual === "string" && /^[a-f0-9]{96}$/i.test(actual) &&
+    typeof expected === "string" && actual.toLowerCase() === expected.toLowerCase());
 
   // 4. Attempt direct live hardware attestation verification on a model enclave host running the target tag
   const candidateHostEntry =
@@ -625,7 +640,7 @@ async function buildModelAttestation(
     healthyHosts,
     unverifiedHosts,
     enclaveHosts,
-    measurementRegisters: proxyRegisters,
+    measurementRegisters: pairs.flatMap(([actual]) => typeof actual === "string" ? [actual] : []),
     vmShape,
     dmVerityRootHash,
     kernelHash,
@@ -693,7 +708,7 @@ export async function GET(request?: Request): Promise<Response> {
 
   const now = Date.now();
   if (cachedBundle && cachedBundle.expiresAt > now) {
-    return NextResponse.json(cachedBundle.bundle);
+    return matrixResponse(cachedBundle.bundle);
   }
 
   const [atc, proxy, nvidiaJwks] = await Promise.all([
@@ -828,5 +843,5 @@ export async function GET(request?: Request): Promise<Response> {
   };
 
   cachedBundle = { bundle, expiresAt: now + CACHE_TTL_MS };
-  return NextResponse.json(bundle);
+  return matrixResponse(bundle);
 }

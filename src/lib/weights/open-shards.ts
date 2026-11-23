@@ -322,26 +322,26 @@ function buildRealOpenModelSpec(params: {
 }
 
 export const OPEN_MODEL_CATALOG: Record<string, OpenModelSpec> = {
-  "kimi-k3": buildRealOpenModelSpec({
-    modelId: "kimi-k3",
+  "kimi-k3-1-pro": buildRealOpenModelSpec({
+    modelId: "kimi-k3-1-pro",
     totalParams: "2.8T",
-    activeParams: "88B",
+    activeParams: "104B",
     quantization: "MXFP4",
-    tokenizerHash: HF_TOKENIZER_SHA256["kimi-k3"],
-    shardHashes: HF_SAFETENSORS_SHARD_SHA256["kimi-k3"],
-    tinfoilRepo: "tinfoilsh/confidential-kimi-k3",
-    tinfoilTag: "v0.0.16",
-    weightRepoCommit: "moonshotai/Kimi-K3@a590ce090cb049c93a33dfe8c208ec652aa20503",
+    tokenizerHash: HF_TOKENIZER_SHA256["kimi-k3-1-pro"],
+    shardHashes: HF_SAFETENSORS_SHARD_SHA256["kimi-k3-1-pro"],
+    tinfoilRepo: "tinfoilsh/confidential-kimi-k3-1-pro",
+    tinfoilTag: "v0.0.2",
+    weightRepoCommit: "moonshotai/Kimi-K3.1-Pro@6d0a0202956796543364d666ab19c6ad1a494ee1",
     weightMpkHash:
-      "58d5e74ba6c814d4cc4511df093ede786bfbc95f766eee7a96379687ce455792_1560999034880_b59ef1dc-a9a1-5af6-8210-988d9d9d610c",
+      "8d9c355a94e60f43598713759028328bbe795336f2700799d0ff4f3898e785e0_1561355993088_97fb42e4-45a9-5745-813b-61cb6ddb043d",
     dmVerityRootHash: "b1902527b8cd0b9be8753052b9c28a114cabe57286ed2b65928e78647afd7936",
     containerImageDigest:
-      "sha256:c6d77e02dd1dba6fd81124ac5c5cbfb470d9ab0298d225c9ae83021dc79393ac",
-    configSha256: "333d6f2d7b5e982f757b95d5c10bf88dd85af61ead6f135f41053d1c645c8c09",
+      "sha256:0a81868bb275945f23e0e71d53524dd9a416bfcde3acb14903af0c2139495bc0",
+    configSha256: "4766e0aba2c4530cacf3081b29d96fac937354e4c6b6966634d84e5f3457bd7a",
     measurementRegisters: [
-      "7fb2b796a4b31bf1c60585dcac994b2c3c920cf8a3519a69259bb5fd1a81e6e2e9d023f6706e55de15fae88609a7e5c4",
+      "9f051992910e2a902bac599a658f64473a07e45994e418eb13ef7f4f05db3f53205cc3ea81bdba3f083138e6fe5b9d7b",
       "758adac43a82a5f3146342660caefea0a7714414dd9055c4a56d1502273d85bbad86d625096a206c9335c23d05df3f99",
-      "c872566644f962ee4061f629187f2650b7b423a8311a4f823ae7913f924359fec10548f9c86736c198b3727c383642b7",
+      "638a1b741bd718897b3a2238312c17a167fe6c7a14a7a260f8491022ae941092b14d0f34ae6b23d482b43170d8120412",
     ],
     vmShape: { cpus: 32, memoryMb: 524288, gpus: 8, disks: 5 },
   }),
@@ -587,14 +587,14 @@ const provenanceCache = new Map<
  * dm-verity root hash match across sources, and that the commit exists on Hugging Face.
  */
 export async function verifyLiveModelWeightProvenance(
-  modelId = "kimi-k3",
+  modelId = "kimi-k3-1-pro",
   options?: {
     fetchImpl?: typeof fetch;
     timeoutMs?: number;
     bypassCache?: boolean;
   },
 ): Promise<LiveWeightProvenanceComparison> {
-  const normalizedId = OPEN_MODEL_CATALOG[modelId]?.tinfoilRepo ? modelId : "kimi-k3";
+  const normalizedId = OPEN_MODEL_CATALOG[modelId]?.tinfoilRepo ? modelId : "kimi-k3-1-pro";
   const catalogSpec = OPEN_MODEL_CATALOG[normalizedId];
   const useDefaultFetch = !options?.fetchImpl;
   const now = Date.now();
@@ -618,8 +618,8 @@ export async function verifyLiveModelWeightProvenance(
   const proxyEntry = proxyResponse?.models?.[normalizedId];
   const fetchedProxyLive = Boolean(proxyEntry?.repo && proxyEntry?.tag);
 
-  const repo = proxyEntry?.repo ?? catalogSpec.tinfoilRepo ?? "tinfoilsh/confidential-kimi-k3";
-  const tag = proxyEntry?.tag ?? catalogSpec.tinfoilTag ?? "v0.0.15";
+  const repo = proxyEntry?.repo ?? catalogSpec.tinfoilRepo ?? "tinfoilsh/confidential-kimi-k3-1-pro";
+  const tag = proxyEntry?.tag ?? catalogSpec.tinfoilTag ?? "v0.0.2";
   const proxyRegisters =
     proxyEntry?.measurement?.registers && proxyEntry.measurement.registers.length > 0
       ? proxyEntry.measurement.registers

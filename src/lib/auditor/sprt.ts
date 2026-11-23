@@ -14,7 +14,7 @@ export interface MysteryShopperProbe extends AuditProbeInput {
 }
 
 export interface SprtAuditOptions {
-  /** Baseline pass rate of the genuine frontier model (kimi-k3 2.8T MoE). Default: 0.90 */
+  /** Baseline pass rate of the genuine frontier model (kimi-k3-1-pro 2.8T MoE). Default: 0.90 */
   p0?: number;
   /** Degraded pass rate of a cheaper substitute/distill model (e.g. 8B/70B). Default: 0.45 */
   p1?: number;

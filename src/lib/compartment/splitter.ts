@@ -49,7 +49,7 @@ export interface CompartmentOutput {
 
 export const DEFAULT_COMPARTMENT_NODES = [
   // Chat models listed in Tinfoil's live model table (inference.tinfoil.sh/.well-known/tinfoil-proxy).
-  "tinfoil-kimi-k3",
+  "tinfoil-kimi-k3-1-pro",
   "tinfoil-gemma4-31b",
   "tinfoil-llama3-3-70b",
   "tinfoil-deepseek-v4-1-flash",

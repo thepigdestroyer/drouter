@@ -24,7 +24,7 @@ export async function GET(request?: Request) {
   return NextResponse.json({
     protocol: "mystery-shopper-sprt-v1",
     parameters: {
-      frontierModel: "kimi-k3",
+      frontierModel: "kimi-k3-1-pro",
       baselinePassRateP0: 0.9,
       substitutePassRateP1: 0.45,
       falsePositiveAlpha: 0.001,

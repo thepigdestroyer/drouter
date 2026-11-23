@@ -407,7 +407,7 @@ describe("Step 3 (K3): Hosted /api/v1/chat/completions Bearer drk_ support", () 
       id: "chatcmpl-drk-1",
       object: "chat.completion",
       created: 1792800000,
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       choices: [
         {
           index: 0,
@@ -430,7 +430,7 @@ describe("Step 3 (K3): Hosted /api/v1/chat/completions Bearer drk_ support", () 
           Authorization: `Bearer ${key}`,
         },
         body: JSON.stringify({
-          model: "kimi-k3",
+          model: "kimi-k3-1-pro",
           messages: [{ role: "user", content: secretPrompt }],
         }),
       });
@@ -441,12 +441,12 @@ describe("Step 3 (K3): Hosted /api/v1/chat/completions Bearer drk_ support", () 
       expect(creditLedgerMocks.verifyAndSpendCreditHeader).toHaveBeenNthCalledWith(
         1,
         formatCreditHeader(t1),
-        "kimi-k3",
+        "kimi-k3-1-pro",
       );
       expect(creditLedgerMocks.verifyAndSpendCreditHeader).toHaveBeenNthCalledWith(
         2,
         formatCreditHeader(t2),
-        "kimi-k3",
+        "kimi-k3-1-pro",
       );
 
       expect(res.headers.get("X-DRouter-Credit-Verified")).toBe("true");
@@ -488,7 +488,7 @@ describe("Step 3 (K3): Hosted /api/v1/chat/completions Bearer drk_ support", () 
         Authorization: `Bearer ${key}`,
       },
       body: JSON.stringify({
-        model: "kimi-k3",
+        model: "kimi-k3-1-pro",
         messages: [{ role: "user", content: "Hello" }],
       }),
     });
@@ -512,7 +512,7 @@ describe("Step 3 (K3): Hosted /api/v1/chat/completions Bearer drk_ support", () 
         Authorization: "Bearer drk_malformed_not_json",
       },
       body: JSON.stringify({
-        model: "kimi-k3",
+        model: "kimi-k3-1-pro",
         messages: [{ role: "user", content: "Hello" }],
       }),
     });
@@ -527,7 +527,7 @@ describe("Step 3 (K3): Hosted /api/v1/chat/completions Bearer drk_ support", () 
       id: "chatcmpl-free-1",
       object: "chat.completion",
       created: 1792800000,
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       choices: [
         {
           index: 0,
@@ -544,7 +544,7 @@ describe("Step 3 (K3): Hosted /api/v1/chat/completions Bearer drk_ support", () 
         Authorization: "Bearer any-value",
       },
       body: JSON.stringify({
-        model: "kimi-k3",
+        model: "kimi-k3-1-pro",
         messages: [{ role: "user", content: "Hello" }],
       }),
     });
@@ -573,8 +573,8 @@ describe("Step 4 (K4): Coding tool snippets & Account page SSR render safety", (
     expect(parsedPrivOpencode.provider.deroute.options.baseURL).toBe(
       "http://127.0.0.1:4141/v1",
     );
-    expect(parsedPrivOpencode.provider.deroute.models["kimi-k3"]).toBeDefined();
-    expect(parsedPrivOpencode.model).toBe("deroute/kimi-k3");
+    expect(parsedPrivOpencode.provider.deroute.models["kimi-k3-1-pro"]).toBeDefined();
+    expect(parsedPrivOpencode.model).toBe("deroute/kimi-k3-1-pro");
 
     expect(priv.byTool.cursor).toContain("http://127.0.0.1:4141/v1");
     expect(priv.byTool.continue).toContain("schema: v1");
@@ -624,7 +624,7 @@ describe("Review Fixes (I1-I4, M1-M4)", () => {
 
   it("I1: uses one exported chat-model allowlist (6 chat models) intersected with live list and excludes non-chat models", () => {
     expect(CHAT_GATEWAY_MODEL_IDS).toEqual([
-      "kimi-k3",
+      "kimi-k3-1-pro",
       "glm-5-3",
       "deepseek-v4-1-flash",
       "gpt-oss-120b",
@@ -634,7 +634,7 @@ describe("Review Fixes (I1-I4, M1-M4)", () => {
     expect(SUPPORTED_GATEWAY_MODEL_IDS).toEqual([...CHAT_GATEWAY_MODEL_IDS]);
     expect(DEFAULT_LIVE_MODEL_IDS).toEqual(CHAT_GATEWAY_MODEL_IDS);
 
-    expect(isChatCapableGatewayModel("kimi-k3")).toBe(true);
+    expect(isChatCapableGatewayModel("kimi-k3-1-pro")).toBe(true);
     expect(isChatCapableGatewayModel("voxtral-small-24b")).toBe(false);
     expect(isChatCapableGatewayModel("whisper-large-v3-turbo")).toBe(false);
     expect(isChatCapableGatewayModel("nomic-embed-text")).toBe(false);
@@ -643,20 +643,20 @@ describe("Review Fixes (I1-I4, M1-M4)", () => {
     expect(isChatCapableGatewayModel("gpt-oss-safeguard-120b")).toBe(false);
 
     const mixedLive = [
-      "kimi-k3",
+      "kimi-k3-1-pro",
       "voxtral-small-24b",
       "nomic-embed-text",
       "whisper-large-v3-turbo",
       "gemma4-31b",
       "decision-large",
     ];
-    expect(filterChatCapableModelIds(mixedLive)).toEqual(["kimi-k3", "gemma4-31b"]);
+    expect(filterChatCapableModelIds(mixedLive)).toEqual(["kimi-k3-1-pro", "gemma4-31b"]);
 
     const snippets = buildCodingToolSnippets({
       mode: "private",
       modelIds: mixedLive,
     });
-    expect(snippets.byTool.opencode).toContain("kimi-k3");
+    expect(snippets.byTool.opencode).toContain("kimi-k3-1-pro");
     expect(snippets.byTool.opencode).toContain("gemma4-31b");
     expect(snippets.byTool.opencode).not.toContain("voxtral");
     expect(snippets.byTool.opencode).not.toContain("nomic-embed-text");
@@ -787,7 +787,7 @@ describe("Review Fixes (I1-I4, M1-M4)", () => {
         Authorization: `Bearer ${key}`,
       },
       body: JSON.stringify({
-        model: "kimi-k3",
+        model: "kimi-k3-1-pro",
         messages: [{ role: "user", content: "Hello" }],
       }),
     });
@@ -801,7 +801,7 @@ describe("Review Fixes (I1-I4, M1-M4)", () => {
       id: "chatcmpl-ok",
       object: "chat.completion",
       created: 1792800000,
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       choices: [
         {
           index: 0,
@@ -827,7 +827,7 @@ describe("Review Fixes (I1-I4, M1-M4)", () => {
             "x-drouter-credit": formatCreditHeader(makeSampleToken(i + 50, 1)),
           },
           body: JSON.stringify({
-            model: "kimi-k3",
+            model: "kimi-k3-1-pro",
             messages: [{ role: "user", content: "hi" }],
           }),
         }),
@@ -844,7 +844,7 @@ describe("Review Fixes (I1-I4, M1-M4)", () => {
         Authorization: `Bearer ${key}`,
       },
       body: JSON.stringify({
-        model: "kimi-k3",
+        model: "kimi-k3-1-pro",
         messages: [{ role: "user", content: "Hello" }],
       }),
     });
@@ -926,12 +926,12 @@ describe("Review Fixes (I1-I4, M1-M4)", () => {
 
   it("M2: parseGatewayChatRequest accepts both deroute/ and drouter/ model prefixes", () => {
     const r1 = parseGatewayChatRequest({
-      model: "deroute/kimi-k3",
+      model: "deroute/kimi-k3-1-pro",
       messages: [{ role: "user", content: "hello" }],
     });
     expect(r1.ok).toBe(true);
     if (r1.ok) {
-      expect(r1.model).toBe("kimi-k3");
+      expect(r1.model).toBe("kimi-k3-1-pro");
     }
 
     const r2 = parseGatewayChatRequest({
@@ -967,7 +967,7 @@ describe("Review Fixes (I1-I4, M1-M4)", () => {
       id: "chatcmpl-m3",
       object: "chat.completion",
       created: 1792800000,
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       choices: [
         {
           index: 0,
@@ -986,7 +986,7 @@ describe("Review Fixes (I1-I4, M1-M4)", () => {
           "x-drouter-credit": formatCreditHeader(t2),
         },
         body: JSON.stringify({
-          model: "kimi-k3",
+          model: "kimi-k3-1-pro",
           messages: [{ role: "user", content: "Spend t2 first" }],
         }),
       }),
@@ -1003,7 +1003,7 @@ describe("Review Fixes (I1-I4, M1-M4)", () => {
           Authorization: `Bearer ${key}`,
         },
         body: JSON.stringify({
-          model: "deroute/kimi-k3",
+          model: "deroute/kimi-k3-1-pro",
           messages: [{ role: "user", content: "Hello" }],
         }),
       }),

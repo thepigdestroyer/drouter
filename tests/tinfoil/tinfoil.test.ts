@@ -29,7 +29,7 @@ memory: 524288
 gpus: 8
 
 models:
-  - name: "kimi-k3"
+  - name: "kimi-k3-1-pro"
     repo: "moonshotai/Kimi-K3@a590ce090cb049c93a33dfe8c208ec652aa20503"
     mpk: "58d5e74ba6c814d4cc4511df093ede786bfbc95f766eee7a96379687ce455792_1560999034880_b59ef1dc-a9a1-5af6-8210-988d9d9d610c"
   - name: kimi-k3-dspark
@@ -38,8 +38,8 @@ models:
     schema: 1
 
 containers:
-  - name: "kimi-k3"
-    image: "ghcr.io/tinfoilsh/confidential-kimi-k3@sha256:748f5dee73f5d2c15dcc3eb0f6200139b871b23a909b42f95aacc509d9cdc238" # v0.0.15
+  - name: "kimi-k3-1-pro"
+    image: "ghcr.io/tinfoilsh/confidential-kimi-k3-1-pro@sha256:748f5dee73f5d2c15dcc3eb0f6200139b871b23a909b42f95aacc509d9cdc238" # v0.0.15
     runtime: nvidia
     gpus: all
     restart: always
@@ -93,8 +93,8 @@ function buildFixtureModelAttestation(
   overrides: Partial<ModelEnclaveAttestation> = {},
 ): ModelEnclaveAttestation {
   return {
-    modelId: "kimi-k3",
-    repo: "tinfoilsh/confidential-kimi-k3",
+    modelId: "kimi-k3-1-pro",
+    repo: "tinfoilsh/confidential-kimi-k3-1-pro",
     tag: "v0.0.15",
     hardwarePredicate: "https://tinfoil.sh/predicate/tdx-guest/v2",
     tierClassification: "Tier B (Intel TDX + 8x Confidential GPU)",
@@ -104,7 +104,7 @@ function buildFixtureModelAttestation(
     unverifiedHosts: 0,
     enclaveHosts: [
       {
-        host: "kimi-k3-inf14.tinfoil.containers.tinfoil.dev",
+        host: "kimi-k3-1-pro-inf4.tinfoil.containers.tinfoil.dev",
         hpkeKey: "5df270bc5c4329725ce4a4a37dac06977355db702ee2de3e834803f825ea492d",
         predicate: "https://tinfoil.sh/predicate/tdx-guest/v2",
         tlsKeyFp: "6758bad98341283b96ddfe1a7db25b270dc26ae789de9dbb17d66566c9b2aa2d",
@@ -128,7 +128,7 @@ function buildFixtureModelAttestation(
     weightMpkHash:
       "58d5e74ba6c814d4cc4511df093ede786bfbc95f766eee7a96379687ce455792_1560999034880_b59ef1dc-a9a1-5af6-8210-988d9d9d610c",
     ccGpuFlagsVerified: true,
-    releaseUrl: "https://github.com/tinfoilsh/confidential-kimi-k3/releases/tag/v0.0.15",
+    releaseUrl: "https://github.com/tinfoilsh/confidential-kimi-k3-1-pro/releases/tag/v0.0.15",
     sigstoreSearchUrl:
       "https://search.sigstore.dev/?hash=41068e0738e14ee74d5b987586bdfc261d7bdd59e156dd6818154fd188b8ee7b",
     huggingFaceUrl: "https://huggingface.co/moonshotai/Kimi-K3/tree/a590ce090cb049c93a33dfe8c208ec652aa20503",
@@ -163,7 +163,7 @@ describe("Two-Hop Enclave & GPU Trust Verifier", () => {
     expect(decoded.reportDataHex).toBe(toHex(new Uint8Array(64).fill(0xaa)));
   });
 
-  it("parseDeploymentConfigYaml extracts weightRepoCommit, weightMpkHash, containerImageDigest, and ccGpuFlagsVerified from Kimi K3 YAML fixture", () => {
+  it("parseDeploymentConfigYaml extracts weightRepoCommit, weightMpkHash, containerImageDigest, and ccGpuFlagsVerified from Kimi K3.1 Pro YAML fixture", () => {
     const parsed = parseDeploymentConfigYaml(FIXTURE_KIMI_K3_DEPLOYMENT_YAML);
     expect(parsed.weightRepoCommit).toBe(
       "moonshotai/Kimi-K3@a590ce090cb049c93a33dfe8c208ec652aa20503",
@@ -364,8 +364,8 @@ describe("Two-Hop Enclave & GPU Trust Verifier", () => {
       expect(matrixJson.unavailableReason).toContain("DROUTER_STUB_UPSTREAM=1");
       expect(matrixJson.routerHost).toBe("");
       expect(matrixJson.routerReleaseDigest).toBe("");
-      expect(matrixJson.models["kimi-k3"].status).toBe("unavailable");
-      expect(matrixJson.models["kimi-k3"].enclaveHosts).toEqual([]);
+      expect(matrixJson.models["kimi-k3-1-pro"].status).toBe("unavailable");
+      expect(matrixJson.models["kimi-k3-1-pro"].enclaveHosts).toEqual([]);
 
       const attRes = await getRelayAttestation(new Request("http://localhost:3000/api/relay/attestation"));
       expect(attRes.status).toBe(503);
@@ -488,9 +488,9 @@ describe("Two-Hop Enclave & GPU Trust Verifier", () => {
 
   it("padJsonPayloadToBucket pads a 180-byte JSON payload to 4,096 B and a 5,000-byte payload to 8,192 B while preserving JSON.parse equivalence", () => {
     const baseObj = {
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       stream: true,
-      messages: [{ role: "user", content: "x".repeat(105) }],
+      messages: [{ role: "user", content: "x".repeat(99) }],
     };
     const json180 = JSON.stringify(baseObj);
     expect(new TextEncoder().encode(json180).byteLength).toBe(180);
@@ -502,9 +502,9 @@ describe("Two-Hop Enclave & GPU Trust Verifier", () => {
     expect(JSON.parse(padded180.paddedJson)).toEqual(baseObj);
 
     const largeObj = {
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       stream: true,
-      messages: [{ role: "user", content: "y".repeat(4925) }],
+      messages: [{ role: "user", content: "y".repeat(4919) }],
     };
     const json5000 = JSON.stringify(largeObj);
     expect(new TextEncoder().encode(json5000).byteLength).toBe(5000);
@@ -575,7 +575,7 @@ describe("Two-Hop Enclave & GPU Trust Verifier", () => {
     };
 
     let completionsCalled = 0;
-    const sessionWithFailedC5 = await openTinfoilSession("kimi-k3", {
+    const sessionWithFailedC5 = await openTinfoilSession("kimi-k3-1-pro", {
       origin: "https://localhost:3000",
       fetchImpl: async () =>
         new Response(
@@ -584,7 +584,7 @@ describe("Two-Hop Enclave & GPU Trust Verifier", () => {
             routerHost: "router-0.tinfoil.sh",
             routerReleaseDigest: baseDoc.releaseDigest,
             models: {
-              "kimi-k3": buildFixtureModelAttestation({
+              "kimi-k3-1-pro": buildFixtureModelAttestation({
                 configuredHosts: 2,
                 verifiedHosts: 1,
                 unverifiedHosts: 1,
@@ -615,7 +615,7 @@ describe("Two-Hop Enclave & GPU Trust Verifier", () => {
 
     const consume = async (s: Awaited<ReturnType<typeof openTinfoilSession>>) => {
       const out: string[] = [];
-      for await (const delta of s.send("kimi-k3", [
+      for await (const delta of s.send("kimi-k3-1-pro", [
         { role: "user", content: "Hello" },
       ])) {
         out.push(delta);
@@ -630,7 +630,7 @@ describe("Two-Hop Enclave & GPU Trust Verifier", () => {
 
     // Also test each check id C1..C7 failing on session.checks directly
     for (const checkId of ["C1", "C2", "C3", "C4", "C5", "C6", "C7"]) {
-      const healthySession = await openTinfoilSession("kimi-k3", {
+      const healthySession = await openTinfoilSession("kimi-k3-1-pro", {
         origin: "https://localhost:3000",
         fetchImpl: async () =>
           new Response(
@@ -639,7 +639,7 @@ describe("Two-Hop Enclave & GPU Trust Verifier", () => {
               routerHost: "router-0.tinfoil.sh",
               routerReleaseDigest: baseDoc.releaseDigest,
               models: {
-                "kimi-k3": buildFixtureModelAttestation(),
+                "kimi-k3-1-pro": buildFixtureModelAttestation(),
               },
             }),
             { status: 200, headers: { "Content-Type": "application/json" } },

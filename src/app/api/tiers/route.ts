@@ -4,7 +4,7 @@ import { createTokenBucketLimiter } from "@/lib/ratelimit";
 import {
   buildMeasuredTiersCatalog,
   GEMINI_4_ARGON_MAX_CONTEXT_TOKENS,
-  KIMI_K3_ENCLAVE_MAX_CONTEXT_TOKENS,
+  KIMI_K3_1_PRO_ENCLAVE_MAX_CONTEXT_TOKENS,
 } from "@/lib/tiers/catalog";
 import {
   applyOperatorShareCaps,
@@ -68,9 +68,9 @@ export async function GET(request?: Request) {
     host: liveQuotes.tierASevSnpRouter.host,
     measuredVerifyLatencyMs: tierASevSnpVerifyMs,
     snpChainVerification: liveQuotes.tierASevSnpRouter.verification,
-    maxContextTokens: KIMI_K3_ENCLAVE_MAX_CONTEXT_TOKENS,
+    maxContextTokens: KIMI_K3_1_PRO_ENCLAVE_MAX_CONTEXT_TOKENS,
     maxContextSource:
-      "tinfoilsh/confidential-kimi-k3@v0.0.15 vLLM max-model-len=262,144 (Gemini 4 Argon outer orchestrator has 1,000,000 tokens)",
+      "tinfoilsh/confidential-kimi-k3-1-pro@v0.0.2 vLLM max-model-len=262,144 (Gemini 4 Argon outer orchestrator has 1,000,000 tokens)",
     detail:
       "Baseline hardware root of trust: live AMD SEV-SNP VCEK (router-0.tinfoil.sh) + NVIDIA GPU CC attestation.",
   };
@@ -109,7 +109,7 @@ export async function GET(request?: Request) {
       unverifiedOperatorCapBps: UNVERIFIED_OPERATOR_CAP_BPS,
       unbondingPeriodDays: OPERATOR_UNBONDING_PERIOD_DAYS,
       riserProofCpuAllowlist: RISER_PROOF_CPU_ALLOWLIST,
-      kimiK3MaxContextTokens: KIMI_K3_ENCLAVE_MAX_CONTEXT_TOKENS,
+      kimiK31ProMaxContextTokens: KIMI_K3_1_PRO_ENCLAVE_MAX_CONTEXT_TOKENS,
       gemini4ArgonMaxContextTokens: GEMINI_4_ARGON_MAX_CONTEXT_TOKENS,
     },
     tiers: {
@@ -120,14 +120,14 @@ export async function GET(request?: Request) {
         assuranceWarning: TIER_B_ASSURANCE_WARNING,
         liveQuoteVerification: liveQuotes.tierBTdxEnclave.verification,
         measuredVerifyLatencyMs: tierBTdxQuoteVerifyMs,
-        maxContextTokens: KIMI_K3_ENCLAVE_MAX_CONTEXT_TOKENS,
+        maxContextTokens: KIMI_K3_1_PRO_ENCLAVE_MAX_CONTEXT_TOKENS,
       },
       tierAPlus: {
         modelId: liveQuotes.tierAPlusTurinEnclave.modelId,
         host: liveQuotes.tierAPlusTurinEnclave.host,
         liveTurinSnpVerification: liveQuotes.tierAPlusTurinEnclave.verification,
         measuredVerifyLatencyMs: tierAPlusTurinVerifyMs,
-        maxContextTokens: KIMI_K3_ENCLAVE_MAX_CONTEXT_TOKENS,
+        maxContextTokens: KIMI_K3_1_PRO_ENCLAVE_MAX_CONTEXT_TOKENS,
       },
       tierC: {
         scopeDisclosure: catalog.fheScopeDisclosure,

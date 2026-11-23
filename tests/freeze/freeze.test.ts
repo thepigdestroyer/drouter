@@ -498,7 +498,7 @@ describe("Subsystem 2: Encrypted Session Freeze, Resume & Crypto-Shredding", () 
   it("stress-tests 200 randomized freeze/resume round-trips and boundary payload sizes (0 turns, 1B, 1MB)", () => {
     const largeContent = "Z".repeat(1024 * 1024);
     const largeState: FrozenSessionState = {
-      modelId: "kimi-k3",
+      modelId: "kimi-k3-1-pro",
       nodeKind: "tinfoil",
       messages: [{ role: "user", content: largeContent }],
       simContextTokens: 262144,
@@ -511,7 +511,7 @@ describe("Subsystem 2: Encrypted Session Freeze, Resume & Crypto-Shredding", () 
 
     for (let i = 0; i < 200; i++) {
       const state: FrozenSessionState = {
-        modelId: "kimi-k3",
+        modelId: "kimi-k3-1-pro",
         nodeKind: i % 2 === 0 ? "tinfoil" : "sim",
         messages:
           i === 0

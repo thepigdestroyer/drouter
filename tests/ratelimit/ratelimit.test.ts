@@ -144,7 +144,7 @@ describe("Relay SSRF, Path Traversal, Header Injection & Open-Proxy Defenses", (
   it("isAllowedEnclave blocks SSRF vectors (non-HTTPS, custom ports, credentials, paths, query strings, foreign hosts)", () => {
     expect(isAllowedEnclave("https://inference.tinfoil.sh")).toBe(true);
     expect(isAllowedEnclave("https://router-0.tinfoil.sh")).toBe(true);
-    expect(isAllowedEnclave("https://kimi-k3-inf14.tinfoil.containers.tinfoil.dev")).toBe(true);
+    expect(isAllowedEnclave("https://kimi-k3-1-pro-inf4.tinfoil.containers.tinfoil.dev")).toBe(true);
 
     // Blocked SSRF attempts
     expect(isAllowedEnclave("http://inference.tinfoil.sh")).toBe(false);
@@ -182,7 +182,7 @@ describe("Relay SSRF, Path Traversal, Header Injection & Open-Proxy Defenses", (
     expect(isValidRelayId("relay/evil")).toBe(false);
     expect(isValidRelayId("a".repeat(40))).toBe(false);
 
-    expect(isAllowedRelayModel("kimi-k3")).toBe(true);
+    expect(isAllowedRelayModel("kimi-k3-1-pro")).toBe(true);
     expect(isAllowedRelayModel("glm-5-3")).toBe(true);
     expect(isAllowedRelayModel(null)).toBe(true);
     expect(isAllowedRelayModel("evil-model-9000")).toBe(false);
@@ -192,11 +192,11 @@ describe("Relay SSRF, Path Traversal, Header Injection & Open-Proxy Defenses", (
   it("pickHeaders strips headers with control characters or oversized values", () => {
     const src = new Headers();
     src.set("content-type", "application/octet-stream");
-    src.set("x-tinfoil-model", "kimi-k3");
+    src.set("x-tinfoil-model", "kimi-k3-1-pro");
     src.set("accept", "x".repeat(600)); // exceeds 512 chars
     const picked = pickHeaders(src, ["content-type", "x-tinfoil-model", "accept"]);
     expect(picked.get("content-type")).toBe("application/octet-stream");
-    expect(picked.get("x-tinfoil-model")).toBe("kimi-k3");
+    expect(picked.get("x-tinfoil-model")).toBe("kimi-k3-1-pro");
     expect(picked.get("accept")).toBeNull();
   });
 
@@ -219,7 +219,7 @@ describe("Relay SSRF, Path Traversal, Header Injection & Open-Proxy Defenses", (
       headers: {
         "x-tinfoil-enclave-url": "https://inference.tinfoil.sh",
       },
-      body: JSON.stringify({ model: "kimi-k3", messages: [{ role: "user", content: "free tokens" }] }),
+      body: JSON.stringify({ model: "kimi-k3-1-pro", messages: [{ role: "user", content: "free tokens" }] }),
     });
     const res2 = await postRelay(noEhbpReq, { params: Promise.resolve({ path: ["chat", "completions"] }) });
     expect(res2.status).toBe(400);

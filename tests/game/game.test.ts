@@ -172,7 +172,7 @@ describe("The Enclave Gauntlet · 4 Interactive Security Exhibits", () => {
 
       const { paddedJson, bucketBytes } = padJsonPayloadToBucket(
         JSON.stringify({
-          model: "kimi-k3",
+          model: "kimi-k3-1-pro",
           stream: true,
           messages: [{ role: "user", content: prepared.outboundText }],
         }),

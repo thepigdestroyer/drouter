@@ -453,38 +453,38 @@ describe("D7 Continuous Enclave Monitoring & Real Accountability", () => {
         nowSec: 1761350400,
       });
       expect(run1.run.ok).toBe(true);
-      const kimi1 = run1.run.enclaves.find((e) => e.nodeId === "kimi-k3")!;
+      const kimi1 = run1.run.enclaves.find((e) => e.nodeId === "kimi-k3-1-pro")!;
       expect(kimi1.releaseChange.kind).toBe("initial");
       expect(kimi1.releaseChange.changed).toBe(false);
-      expect(run1.rampStates["kimi-k3"].phase).toBe("steady");
-      expect(run1.rampStates["kimi-k3"].weightBps).toBe(10000);
+      expect(run1.rampStates["kimi-k3-1-pro"].phase).toBe("steady");
+      expect(run1.rampStates["kimi-k3-1-pro"].weightBps).toBe(10000);
 
       // Run 2: Unchanged
       const run2 = await executeContinuousMonitorRun({
         fetchImpl: createMockUpstreamFetch({ genoaCertChainPem }),
         nowSec: 1761354000,
       });
-      const kimi2 = run2.run.enclaves.find((e) => e.nodeId === "kimi-k3")!;
+      const kimi2 = run2.run.enclaves.find((e) => e.nodeId === "kimi-k3-1-pro")!;
       expect(kimi2.releaseChange.kind).toBe("unchanged");
       expect(kimi2.releaseChange.changed).toBe(false);
-      expect(run2.rampStates["kimi-k3"].phase).toBe("steady");
-      expect(run2.rampStates["kimi-k3"].weightBps).toBe(10000);
+      expect(run2.rampStates["kimi-k3-1-pro"].phase).toBe("steady");
+      expect(run2.rampStates["kimi-k3-1-pro"].weightBps).toBe(10000);
 
       // Run 3: Unannounced host HPKE key rotation on kimi-k3 and release upgrade on glm-5-3
       const run3 = await executeContinuousMonitorRun({
         fetchImpl: createMockUpstreamFetch({
           genoaCertChainPem,
-          hostHpkeOverrides: { "kimi-k3": "ff".repeat(32) },
+          hostHpkeOverrides: { "kimi-k3-1-pro": "ff".repeat(32) },
           tagOverrides: { "glm-5-3": "v0.0.99" },
         }),
         nowSec: 1761357600,
       });
-      const kimi3 = run3.run.enclaves.find((e) => e.nodeId === "kimi-k3")!;
+      const kimi3 = run3.run.enclaves.find((e) => e.nodeId === "kimi-k3-1-pro")!;
       expect(kimi3.releaseChange.kind).toBe("unannounced-restart");
       expect(kimi3.releaseChange.changed).toBe(true);
       expect(kimi3.releaseChange.unannounced).toBe(true);
-      expect(run3.rampStates["kimi-k3"].phase).toBe("canary-only");
-      expect(run3.rampStates["kimi-k3"].weightBps).toBe(0);
+      expect(run3.rampStates["kimi-k3-1-pro"].phase).toBe("canary-only");
+      expect(run3.rampStates["kimi-k3-1-pro"].weightBps).toBe(0);
 
       const glm3 = run3.run.enclaves.find((e) => e.nodeId === "glm-5-3")!;
       expect(glm3.releaseChange.kind).toBe("release-upgrade");
@@ -495,7 +495,7 @@ describe("D7 Continuous Enclave Monitoring & Real Accountability", () => {
 
       // Direct unit check for unannounced measurement change without tag change
       const unannouncedMeas = evaluateEnclaveReleaseChange({
-        nodeId: "kimi-k3",
+        nodeId: "kimi-k3-1-pro",
         currentTag: kimi1.releaseTag,
         currentMeasurement: "deadbeef".repeat(12),
         currentDmVerityRoot: kimi1.dmVerityRootHash,
@@ -555,7 +555,7 @@ describe("D7 Continuous Enclave Monitoring & Real Accountability", () => {
         fetchImpl: createMockUpstreamFetch({
           genoaCertChainPem,
           tamperRouterReport: true,
-          tamperModelHfCommit: { "kimi-k3": "00".repeat(20) },
+          tamperModelHfCommit: { "kimi-k3-1-pro": "00".repeat(20) },
           unverifiedHostCountOverrides: { "glm-5-3": 1 },
         }),
         nowSec: 1761350400,
@@ -583,7 +583,7 @@ describe("D7 Continuous Enclave Monitoring & Real Accountability", () => {
       expect(writeCalls[1]).toEqual({
         functionName: "recordVerification",
         args: [
-          resolveRegistryNodeId("kimi-k3"),
+          resolveRegistryNodeId("kimi-k3-1-pro"),
           false,
           res.run.failures[1].evidenceHash,
         ],
@@ -719,7 +719,7 @@ describe("D7 Continuous Enclave Monitoring & Real Accountability", () => {
         ),
       ).toBe(true);
       expect(Object.keys(data.rampStates)).toContain("tinfoil-router");
-      expect(Object.keys(data.rampStates)).toContain("kimi-k3");
+      expect(Object.keys(data.rampStates)).toContain("kimi-k3-1-pro");
       expect(Object.keys(data.rampStates).some((k) => k.startsWith("sim-"))).toBe(false);
 
       // Practice fields must be absent
@@ -776,7 +776,7 @@ describe("D7 Continuous Enclave Monitoring & Real Accountability", () => {
         expect(router.measurementMatchesRelease).toBe(true);
         expect(router.ok).toBe(true);
 
-        const kimi = result.run.enclaves.find((e) => e.nodeId === "kimi-k3")!;
+        const kimi = result.run.enclaves.find((e) => e.nodeId === "kimi-k3-1-pro")!;
         expect(kimi.attestationChainOk).toBe(true);
         expect(kimi.measurementMatchesRelease).toBe(true);
         expect(kimi.modelProvenanceOk).toBe(true);

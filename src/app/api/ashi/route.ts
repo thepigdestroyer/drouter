@@ -14,7 +14,7 @@ import {
 } from "@/lib/ratelimit";
 import {
   buildMeasuredTiersCatalog,
-  KIMI_K3_ENCLAVE_MAX_CONTEXT_TOKENS,
+  KIMI_K3_1_PRO_ENCLAVE_MAX_CONTEXT_TOKENS,
   type SourcedTierCatalogEntry,
 } from "@/lib/tiers/catalog";
 
@@ -105,7 +105,7 @@ export async function GET(request?: NextRequest) {
         bias: c.bias,
       })),
     },
-    kimiK3MaxContextTokens: KIMI_K3_ENCLAVE_MAX_CONTEXT_TOKENS,
+    kimiK31ProMaxContextTokens: KIMI_K3_1_PRO_ENCLAVE_MAX_CONTEXT_TOKENS,
     tierComparison,
   });
 }

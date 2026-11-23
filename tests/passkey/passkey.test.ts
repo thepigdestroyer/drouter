@@ -112,6 +112,15 @@ describe("deRoute WebAuthn PRF Passkeys & AuthGate helpers", () => {
     );
   });
 
+  it("allows a roaming authenticator when the device has no platform authenticator", async () => {
+    (globalThis as { window?: unknown }).window = { location: { hostname: "deroute.is-an.ai" } };
+    setMockNavigator({ credentials: { create: vi.fn(), get: vi.fn() } });
+    (globalThis as { PublicKeyCredential?: unknown }).PublicKeyCredential = {
+      isUserVerifyingPlatformAuthenticatorAvailable: async () => false,
+    };
+    expect(await isPasskeyPrfSupported()).toBe(true);
+  });
+
   it("creates a passkey account with exact privacy-first WebAuthn parameters and restores custom hidden words on signInWithPasskey", async () => {
     const fakeStorage = new Map<string, string>();
     const prfOutput = new Uint8Array(32);

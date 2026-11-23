@@ -7,7 +7,7 @@ import { GET as getTiers } from "@/app/api/tiers/route";
 import {
   buildMeasuredTiersCatalog,
   GEMINI_4_ARGON_MAX_CONTEXT_TOKENS,
-  KIMI_K3_ENCLAVE_MAX_CONTEXT_TOKENS,
+  KIMI_K3_1_PRO_ENCLAVE_MAX_CONTEXT_TOKENS,
 } from "@/lib/tiers/catalog";
 import {
   applyOperatorShareCaps,
@@ -395,7 +395,7 @@ describe("Subsystem 11: Platform Tiers (Live Quote Verification, Operator Share 
   });
 
   describe("Tiers Catalog & GET /api/tiers Ground Truth (Live Tinfoil Quotes & Real SEAL FHE Tier C)", () => {
-    it("sources Kimi K3 max context at 262,144 tokens, removes invented tok/s numbers, and measures live Tier C SEAL FHE latency", async () => {
+    it("sources Kimi K3.1 Pro max context at 262,144 tokens, removes invented tok/s numbers, and measures live Tier C SEAL FHE latency", async () => {
       const catalog = await buildMeasuredTiersCatalog({
         cryptoVerifyLatencyMs: {
           tierASevSnpVerifyMs: 2.1,
@@ -404,9 +404,9 @@ describe("Subsystem 11: Platform Tiers (Live Quote Verification, Operator Share 
         },
       });
 
-      expect(catalog.kimiK3MaxContextTokens).toBe(262_144);
+      expect(catalog.kimiK31ProMaxContextTokens).toBe(262_144);
       expect(catalog.gemini4ArgonMaxContextTokens).toBe(1_000_000);
-      expect(KIMI_K3_ENCLAVE_MAX_CONTEXT_TOKENS).toBe(262_144);
+      expect(KIMI_K3_1_PRO_ENCLAVE_MAX_CONTEXT_TOKENS).toBe(262_144);
       expect(GEMINI_4_ARGON_MAX_CONTEXT_TOKENS).toBe(1_000_000);
 
       const tierA = catalog.entries.find((e) => e.tier === "Tier A");
@@ -449,7 +449,7 @@ describe("Subsystem 11: Platform Tiers (Live Quote Verification, Operator Share 
         const res = await getTiers();
         expect(res.status).toBe(200);
         const json = (await res.json()) as {
-          parameters: { kimiK3MaxContextTokens: number };
+          parameters: { kimiK31ProMaxContextTokens: number };
           tiers: {
             tierA: { maxContextTokens: number; measuredVerifyLatencyMs: number | null };
             tierB: { measuredVerifyLatencyMs: number | null; maxContextTokens: number };
@@ -465,7 +465,7 @@ describe("Subsystem 11: Platform Tiers (Live Quote Verification, Operator Share 
           catalog: Array<{ tier: string; maxContextTokens: number }>;
         };
 
-        expect(json.parameters.kimiK3MaxContextTokens).toBe(262_144);
+        expect(json.parameters.kimiK31ProMaxContextTokens).toBe(262_144);
         expect(json.tiers.tierA.maxContextTokens).toBe(262_144);
         expect(json.tiers.tierB.maxContextTokens).toBe(262_144);
         expect(json.tiers.tierC.liveFheMeasurement.serverSawPlaintext).toBe(false);

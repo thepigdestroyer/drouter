@@ -23,7 +23,7 @@ const NON_INFERENCE_TINFOIL_SERVICES = new Set<string>([
 ]);
 
 const KNOWN_MODEL_LABELS: Readonly<Record<string, string>> = {
-  "kimi-k3": "Kimi K3 (2.8T MoE, 256K ctx)",
+  "kimi-k3-1-pro": "Kimi K3.1 Pro (2.8T MoE, 256K ctx)",
   "glm-5-3": "GLM-5.3",
   "deepseek-v4-1-flash": "DeepSeek V4.1 Flash",
   "gpt-oss-120b": "GPT-OSS 120B",
@@ -42,7 +42,7 @@ const KNOWN_MODEL_LABELS: Readonly<Record<string, string>> = {
 };
 
 export const CHAT_GATEWAY_MODEL_IDS = [
-  "kimi-k3",
+  "kimi-k3-1-pro",
   "glm-5-3",
   "deepseek-v4-1-flash",
   "gpt-oss-120b",
@@ -83,11 +83,11 @@ const PRIMARY_MODEL_ORDER: readonly string[] = CHAT_GATEWAY_MODEL_IDS;
  */
 export const SUPPORTED_GATEWAY_MODELS: readonly GatewayModelSpec[] = [
   {
-    id: "kimi-k3",
-    label: KNOWN_MODEL_LABELS["kimi-k3"],
+    id: "kimi-k3-1-pro",
+    label: KNOWN_MODEL_LABELS["kimi-k3-1-pro"],
     provider: "tinfoil-tdx",
     enclave_attested: true,
-    repo: "tinfoilsh/confidential-kimi-k3",
+    repo: "tinfoilsh/confidential-kimi-k3-1-pro",
   },
   {
     id: "glm-5-3",
@@ -342,7 +342,7 @@ export function buildHarnessConfigs(baseUrl: string): HarnessConfigs {
           },
         },
         models: {
-          "kimi-k3": { name: "Kimi K3 (Attested Enclave)" },
+          "kimi-k3-1-pro": { name: "Kimi K3.1 Pro (Attested Enclave)" },
           "glm-5-3": { name: "GLM-5.3 (Attested Enclave)" },
           "deepseek-v4-1-flash": { name: "DeepSeek V4.1 Flash (Attested Enclave)" },
           "gpt-oss-120b": { name: "GPT-OSS 120B (Attested Enclave)" },
@@ -351,14 +351,14 @@ export function buildHarnessConfigs(baseUrl: string): HarnessConfigs {
         },
       },
     },
-    model: "drouter/kimi-k3",
+    model: "drouter/kimi-k3-1-pro",
   };
 
   const opencodeJson = JSON.stringify(opencodeConfig, null, 2);
 
   const curlCommand = [
     `# Note: any Bearer apiKey value works (required by OpenAI SDKs); auth is the blind credit header (x-drouter-credit)`,
-    `curl -sS ${gatewayUrl}/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer drouter-anonymous" -H "x-drouter-credit: \${DROUTER_CREDIT_TOKEN:-}" -d '{"model":"kimi-k3","messages":[{"role":"user","content":"Verify enclave connectivity in one sentence."}]}'`,
+    `curl -sS ${gatewayUrl}/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer drouter-anonymous" -H "x-drouter-credit: \${DROUTER_CREDIT_TOKEN:-}" -d '{"model":"kimi-k3-1-pro","messages":[{"role":"user","content":"Verify enclave connectivity in one sentence."}]}'`,
   ].join("\n");
 
   const openaiEnvExports = [
@@ -377,7 +377,7 @@ export function buildHarnessConfigs(baseUrl: string): HarnessConfigs {
     `    api_key="drouter-anonymous",`,
     `)`,
     `resp = client.chat.completions.create(`,
-    `    model="kimi-k3",`,
+    `    model="kimi-k3-1-pro",`,
     `    messages=[{"role": "user", "content": "Hello from deRoute enclave!"}],`,
     `)`,
     `print(resp.choices[0].message.content)`,
@@ -393,7 +393,7 @@ export function buildHarnessConfigs(baseUrl: string): HarnessConfigs {
     `  apiKey: "drouter-anonymous",`,
     `});`,
     `const resp = await client.chat.completions.create({`,
-    `  model: "kimi-k3",`,
+    `  model: "kimi-k3-1-pro",`,
     `  messages: [{ role: "user", content: "Hello from deRoute enclave!" }],`,
     `});`,
     `console.log(resp.choices[0]?.message?.content);`,
@@ -467,7 +467,7 @@ export function buildCodingToolSnippets(opts?: {
   const primaryModel =
     opts?.defaultModel && models.includes(opts.defaultModel)
       ? opts.defaultModel
-      : models[0] ?? "kimi-k3";
+      : models[0] ?? "kimi-k3-1-pro";
 
   const opencodeModelsObj: Record<string, { name: string }> = {};
   for (const id of models) {
@@ -733,7 +733,7 @@ export function parseGatewayChatRequest(
   const rawModel =
     typeof record.model === "string" && record.model.trim()
       ? record.model.trim()
-      : "kimi-k3";
+      : "kimi-k3-1-pro";
   const normalizedModel = rawModel.replace(/^(?:drouter|deroute)\//i, "");
 
   const allowedSet = opts?.allowedModelIds

@@ -689,7 +689,7 @@ export function assertToolCallArgumentsSchema(
           `${path}.providerId`,
         );
       }
-      if (obj.enclaveModel !== "gemma4-31b" && obj.enclaveModel !== "kimi-k3") {
+      if (obj.enclaveModel !== "gemma4-31b" && obj.enclaveModel !== "kimi-k3-1-pro") {
         throw new ContentFreeEgressError(
           String(obj.enclaveModel),
           `${path}.enclaveModel`,
@@ -748,7 +748,7 @@ export function assertToolCallArgumentsSchema(
           `${path}.inputHandle`,
         );
       }
-      if (obj.enclaveModel !== "gemma4-31b" && obj.enclaveModel !== "kimi-k3") {
+      if (obj.enclaveModel !== "gemma4-31b" && obj.enclaveModel !== "kimi-k3-1-pro") {
         throw new ContentFreeEgressError(
           String(obj.enclaveModel),
           `${path}.enclaveModel`,
@@ -1035,7 +1035,7 @@ export function assertToolResultSchema(
           `${path}.providerId`,
         );
       }
-      if (obj.enclaveModel !== "gemma4-31b" && obj.enclaveModel !== "kimi-k3") {
+      if (obj.enclaveModel !== "gemma4-31b" && obj.enclaveModel !== "kimi-k3-1-pro") {
         throw new ContentFreeEgressError(
           String(obj.enclaveModel),
           `${path}.enclaveModel`,
@@ -1193,7 +1193,7 @@ export function assertToolResultSchema(
           `${path}.outputHandle`,
         );
       }
-      if (obj.enclaveModel !== "gemma4-31b" && obj.enclaveModel !== "kimi-k3") {
+      if (obj.enclaveModel !== "gemma4-31b" && obj.enclaveModel !== "kimi-k3-1-pro") {
         throw new ContentFreeEgressError(
           String(obj.enclaveModel),
           `${path}.enclaveModel`,
@@ -2597,7 +2597,7 @@ export const TOOL_ARGUMENT_SCHEMAS: Record<
     enclaveModel: {
       type: "STRING",
       required: true,
-      enum: ["gemma4-31b", "kimi-k3"],
+      enum: ["gemma4-31b", "kimi-k3-1-pro"],
     },
   },
   search_atlas_hybrid_kb: {
@@ -2618,7 +2618,7 @@ export const TOOL_ARGUMENT_SCHEMAS: Record<
     enclaveModel: {
       type: "STRING",
       required: true,
-      enum: ["gemma4-31b", "kimi-k3"],
+      enum: ["gemma4-31b", "kimi-k3-1-pro"],
     },
     taskKind: { type: "STRING", required: false, enum: VALID_TASK_KINDS },
   },

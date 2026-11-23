@@ -303,7 +303,7 @@ async function extractHpkeKeyFromAttestationBundle(
 
 export function PacketSniffer({
   samplePrompt = DEFAULT_PROMPT,
-  modelId = "kimi-k3",
+  modelId = "kimi-k3-1-pro",
   enclaveHost = "router-0.tinfoil.sh",
 }: PacketSnifferProps) {
   const [promptText, setPromptText] = useState<string>(

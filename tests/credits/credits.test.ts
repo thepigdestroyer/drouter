@@ -321,7 +321,7 @@ describe("Subsystem 1: Unlinkable Blind-Signed Credits & One-Time Deposit Invoic
           headers: {
             "x-forwarded-for": ip,
             "x-tinfoil-enclave-url": "https://inference.tinfoil.sh",
-            "x-tinfoil-model": "kimi-k3",
+            "x-tinfoil-model": "kimi-k3-1-pro",
             "ehbp-encapsulated-key": "11".repeat(32),
           },
           body: "encrypted-payload",
@@ -335,7 +335,7 @@ describe("Subsystem 1: Unlinkable Blind-Signed Credits & One-Time Deposit Invoic
         headers: {
           "x-forwarded-for": ip,
           "x-tinfoil-enclave-url": "https://inference.tinfoil.sh",
-          "x-tinfoil-model": "kimi-k3",
+          "x-tinfoil-model": "kimi-k3-1-pro",
           "ehbp-encapsulated-key": "11".repeat(32),
         },
         body: "encrypted-payload",
@@ -352,7 +352,7 @@ describe("Subsystem 1: Unlinkable Blind-Signed Credits & One-Time Deposit Invoic
         headers: {
           "x-forwarded-for": ip,
           "x-tinfoil-enclave-url": "https://inference.tinfoil.sh",
-          "x-tinfoil-model": "kimi-k3",
+          "x-tinfoil-model": "kimi-k3-1-pro",
           "ehbp-encapsulated-key": "11".repeat(32),
           "x-drouter-credit": validHeader,
         },
@@ -370,7 +370,7 @@ describe("Subsystem 1: Unlinkable Blind-Signed Credits & One-Time Deposit Invoic
         headers: {
           "x-forwarded-for": ip,
           "x-tinfoil-enclave-url": "https://inference.tinfoil.sh",
-          "x-tinfoil-model": "kimi-k3",
+          "x-tinfoil-model": "kimi-k3-1-pro",
           "ehbp-encapsulated-key": "11".repeat(32),
         },
         body: "encrypted-payload",
@@ -385,7 +385,7 @@ describe("Subsystem 1: Unlinkable Blind-Signed Credits & One-Time Deposit Invoic
         headers: {
           "x-forwarded-for": ip,
           "x-tinfoil-enclave-url": "https://inference.tinfoil.sh",
-          "x-tinfoil-model": "kimi-k3",
+          "x-tinfoil-model": "kimi-k3-1-pro",
           "ehbp-encapsulated-key": "11".repeat(32),
           "x-drouter-credit": validHeader,
         },
@@ -401,7 +401,7 @@ describe("Subsystem 1: Unlinkable Blind-Signed Credits & One-Time Deposit Invoic
         headers: {
           "x-forwarded-for": ip,
           "x-tinfoil-enclave-url": "https://inference.tinfoil.sh",
-          "x-tinfoil-model": "kimi-k3",
+          "x-tinfoil-model": "kimi-k3-1-pro",
           "ehbp-encapsulated-key": "11".repeat(32),
           "x-drouter-credit": JSON.stringify({
             token: "ff".repeat(32),

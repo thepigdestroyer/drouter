@@ -92,6 +92,8 @@ export function pickNode(
         n.key === `tinfoil-${targetModel}`,
     );
     if (exact) return exact;
+    const router = eligible.find((n) => n.key === "tinfoil-router");
+    if (router) return router;
   }
   const weights = eligible.map((n) => Math.max(Number(n.stake) || 0, 0.0001));
   const total = weights.reduce((a, b) => a + b, 0);
@@ -247,7 +249,7 @@ function ensureFetchInterceptorInstalled(origin: string): void {
  * non-HTTPS attestationBundleURL values. Routes attestation via local relay.
  */
 async function openLocalHttpTinfoilSession(
-  selectedModel = "kimi-k3",
+  selectedModel = "kimi-k3-1-pro",
 ): Promise<TinfoilSession> {
   const origin = window.location.origin;
   ensureFetchInterceptorInstalled(origin);
@@ -520,7 +522,7 @@ export async function openSession(
   node: NodeRecord,
   registry: RegistryResponse,
   onCheck: (c: CheckResult) => void,
-  selectedModel = "kimi-k3",
+  selectedModel = "kimi-k3-1-pro",
 ): Promise<ActiveSession> {
   if (typeof window !== "undefined") {
     ensureFetchInterceptorInstalled(window.location.origin);

@@ -154,7 +154,7 @@ export const GOOGLE_EGRESS_CAPACITY_TABLE: readonly GoogleEgressCapacityRow[] = 
   {
     messageKind: "toolCall:verify_two_hop_enclave_and_quorum",
     variableFields:
-      "providerId (1: 'tinfoil') x enclaveModel (2: 'gemma4-31b' | 'kimi-k3')",
+      "providerId (1: 'tinfoil') x enclaveModel (2: 'gemma4-31b' | 'kimi-k3-1-pro')",
     maxCardinality: "2",
     maxCapacity: "1.00 bit (0.13 B)",
   },

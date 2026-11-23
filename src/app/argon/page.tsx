@@ -103,8 +103,8 @@ function ArgonAuthenticatedView() {
   const [thinkingLevel, setThinkingLevel] =
     useState<ArgonThinkingLevel>("high");
   const [backgroundDecode] = useState<boolean>(true);
-  const [enclaveModel, setEnclaveModel] = useState<"gemma4-31b" | "kimi-k3">(
-    "kimi-k3",
+  const [enclaveModel, setEnclaveModel] = useState<"gemma4-31b" | "kimi-k3-1-pro">(
+    "kimi-k3-1-pro",
   );
   const [humanApproved, setHumanApproved] = useState<boolean>(false);
   const [userDeclinedApproval, setUserDeclinedApproval] =
@@ -144,7 +144,7 @@ function ArgonAuthenticatedView() {
         thinkingLevel: "medium",
         background: true,
         humanApprovedExternalAction: false,
-        preferredEnclaveModel: "kimi-k3",
+        preferredEnclaveModel: "kimi-k3-1-pro",
       });
       setRunResult(outcome.run);
       setPlannerInfo(outcome.run.planner);
@@ -1326,7 +1326,7 @@ function ArgonAuthenticatedView() {
                         role="group"
                         aria-label="Enclave model"
                       >
-                        {(["gemma4-31b", "kimi-k3"] as const).map((mdl) => (
+                        {(["gemma4-31b", "kimi-k3-1-pro"] as const).map((mdl) => (
                           <button
                             key={mdl}
                             type="button"

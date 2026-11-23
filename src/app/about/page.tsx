@@ -60,10 +60,10 @@ export const HONEST_LIMITS = [
   {
     plainTitle: "Each chat has a size limit",
     plainSummary:
-      "The main sealed AI brain (Kimi K3) can hold about 200,000 words at once (262,144 pieces of text), while the outer planner only sees safe summaries with your personal details removed.",
-    title: "Tinfoil router and Kimi K3 enclave topology (262,144 token limit)",
+      "The main sealed AI brain (Kimi K3.1 Pro) can hold about 200,000 words at once (262,144 pieces of text), while the outer planner only sees safe summaries with your personal details removed.",
+    title: "Tinfoil router and Kimi K3.1 Pro enclave topology (262,144 token limit)",
     detail:
-      "The live Tinfoil router (router-0.tinfoil.sh) attests with AMD SEV-SNP. The Kimi K3 model enclave (kimi-k3-inf14.tinfoil.containers.tinfoil.dev) runs on Intel TDX plus NVIDIA confidential-computing GPUs with a maximum context length of 262,144 tokens, not 1M. Gemini 4 Argon supports 1,000,000 tokens for outer orchestration over scrubbed metadata.",
+      "The live Tinfoil router attests with AMD SEV-SNP. Tinfoil serves Kimi K3.1 Pro in confidential GPU enclaves with a 262,144-token limit; the audit page shows the current hosts and their measured hardware. Gemini 4 Argon handles outer orchestration over scrubbed metadata.",
   },
   {
     plainTitle: "A safety filter checks for harmful misuse",
@@ -71,7 +71,7 @@ export const HONEST_LIMITS = [
       "The sealed router runs an automated safety check inside the seal to block severe misuse and reports rule violations to Tinfoil.",
     title: "Tinfoil safeguards classifier and usage sidecars",
     detail:
-      "Tinfoil's router runs a safeguards acceptable-use classifier sidecar (gpt-oss-safeguard-120b with kimi-k3 review) that reports policy violations to https://api.tinfoil.sh, plus a usage reporter.",
+      "Tinfoil's router runs a safeguards acceptable-use classifier sidecar (gpt-oss-safeguard-120b with kimi-k3-1-pro review) that reports policy violations to https://api.tinfoil.sh, plus a usage reporter.",
   },
   {
     plainTitle: "Device sign-in sync knows this website exists",

@@ -78,9 +78,9 @@ export interface FriendlyModelDescriptor {
 }
 
 export const FRIENDLY_MODELS: Record<string, FriendlyModelDescriptor> = {
-  "kimi-k3": {
-    id: "kimi-k3",
-    name: "Kimi K3",
+  "kimi-k3-1-pro": {
+    id: "kimi-k3-1-pro",
+    name: "Kimi K3.1 Pro",
     summary: "Great for writing, planning, and deep thinking.",
   },
   "glm-5-3": {

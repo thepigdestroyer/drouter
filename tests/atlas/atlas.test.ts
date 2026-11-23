@@ -297,7 +297,7 @@ describe("MongoDB Atlas Enclave Intelligence, D3/D4 Query Redaction & Hybrid Sea
 
   it("ranks queries accurately using Reciprocal Rank Fusion and reports engines truthfully in both attested-enclave and fallback modes", async () => {
     // 1. Fallback mode when Tinfoil is unreachable in unit test env
-    const fallbackSearch = await runAtlasHybridSearch("Kimi K3 8x GPU confidential enclave");
+    const fallbackSearch = await runAtlasHybridSearch("Kimi K3.1 Pro 8x GPU confidential enclave");
     expect(fallbackSearch.results.length).toBeGreaterThan(0);
     expect(fallbackSearch.embeddingFallbackUsed).toBe(true);
     expect(fallbackSearch.engines.vectorSearch).toBe("app-fallback");
@@ -411,9 +411,9 @@ describe("MongoDB Atlas Enclave Intelligence, D3/D4 Query Redaction & Hybrid Sea
         timestampIso: "2026-10-24T16:42:19.831Z",
         mode: "simulated",
         primaryModel: "gemini-4-argon",
-        enclaveModel: "kimi-k3",
+        enclaveModel: "kimi-k3-1-pro",
         routerHost: "router-0.tinfoil.sh",
-        enclaveHost: "kimi-k3-inf14.tinfoil.containers.tinfoil.dev",
+        enclaveHost: "kimi-k3-1-pro-inf4.tinfoil.containers.tinfoil.dev",
         overallPassed: true,
         faultInjected: false,
         selfHealed: false,
@@ -430,9 +430,9 @@ describe("MongoDB Atlas Enclave Intelligence, D3/D4 Query Redaction & Hybrid Sea
       timestampIso: "2026-10-24T16:42:19.831Z",
       mode: "live",
       primaryModel: "gemini-4-argon",
-      enclaveModel: "kimi-k3",
+      enclaveModel: "kimi-k3-1-pro",
       routerHost: "router-0.tinfoil.sh",
-      enclaveHost: "kimi-k3-inf14.tinfoil.containers.tinfoil.dev",
+      enclaveHost: "kimi-k3-1-pro-inf4.tinfoil.containers.tinfoil.dev",
       overallPassed: true,
       faultInjected: true,
       selfHealed: true,

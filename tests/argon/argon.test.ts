@@ -313,10 +313,10 @@ function buildMockEnclaveMatrix(opts?: { breakGemma?: boolean }) {
           "https://github.com/tinfoilsh/confidential-gemma4-31b/releases/tag/v0.0.12",
         sigstoreSearchUrl: `https://search.sigstore.dev/?hash=${dmVerityGemma}`,
       },
-      "kimi-k3": {
-        modelId: "kimi-k3",
+      "kimi-k3-1-pro": {
+        modelId: "kimi-k3-1-pro",
         status: "router-attested",
-        repo: "tinfoilsh/confidential-kimi-k3",
+        repo: "tinfoilsh/confidential-kimi-k3-1-pro",
         tag: "v0.0.15",
         hardwarePredicate: "https://tinfoil.sh/predicate/tdx-guest/v2",
         tierClassification: "Tier B (Intel TDX + 8x Confidential GPU)",
@@ -326,7 +326,7 @@ function buildMockEnclaveMatrix(opts?: { breakGemma?: boolean }) {
         unverifiedHosts: 0,
         enclaveHosts: [
           {
-            host: "kimi-k3-inf14.tinfoil.containers.tinfoil.dev",
+            host: "kimi-k3-1-pro-inf4.tinfoil.containers.tinfoil.dev",
             hpkeKey:
               "5df270bc5c4329725ce4a4a37dac06977355db702ee2de3e834803f825ea492d",
             predicate: "https://tinfoil.sh/predicate/tdx-guest/v2",
@@ -345,11 +345,11 @@ function buildMockEnclaveMatrix(opts?: { breakGemma?: boolean }) {
         initrdHash:
           "2c23dba70e90589414b334be5b648fab4ead1d5b17ef355f04fd7ede2a9e2e7",
         containerImageDigest: `sha256:${dmVerityKimi}`,
-        weightRepoCommit: "tinfoilsh/confidential-kimi-k3@v0.0.15",
+        weightRepoCommit: "tinfoilsh/confidential-kimi-k3-1-pro@v0.0.2",
         weightMpkHash: dmVerityKimi,
         ccGpuFlagsVerified: true,
         releaseUrl:
-          "https://github.com/tinfoilsh/confidential-kimi-k3/releases/tag/v0.0.15",
+          "https://github.com/tinfoilsh/confidential-kimi-k3-1-pro/releases/tag/v0.0.15",
         sigstoreSearchUrl: `https://search.sigstore.dev/?hash=${dmVerityKimi}`,
       },
     },
@@ -601,7 +601,7 @@ function createMockBrowserFetch(opts?: {
 }
 
 function createEchoPlaceholderSession(prefixText = "Completed private analysis.") {
-  return async (_model: "gemma4-31b" | "kimi-k3") => ({
+  return async (_model: "gemma4-31b" | "kimi-k3-1-pro") => ({
     async *send(
       _mdl: string,
       messages: { role: "user" | "assistant"; content: string }[],
@@ -910,7 +910,7 @@ describe("deRoute wave 6 Argon browser agent & plain-language helpers", () => {
     });
     expect(failoverSteps[1].passed).toBe(true);
     expect(failoverSteps[1].plainResult).toContain(
-      "The seal check on the first sealed computer (gemma4-31b) failed, so we switched to an alternate sealed computer (kimi-k3) whose seal check passed",
+      "The seal check on the first sealed computer (gemma4-31b) failed, so we switched to an alternate sealed computer (kimi-k3-1-pro) whose seal check passed",
     );
     expect(findForbiddenPlainTerms(failoverSteps[1].plainResult)).toEqual([]);
   });
@@ -949,7 +949,7 @@ describe("deRoute wave 6 Argon browser agent & plain-language helpers", () => {
       thinkingLevel: "high",
       background: true,
       humanApprovedExternalAction: true,
-      preferredEnclaveModel: "kimi-k3",
+      preferredEnclaveModel: "kimi-k3-1-pro",
       fetchFn: createMockBrowserFetch(),
       openSessionFn: createEchoPlaceholderSession(),
     });
@@ -1011,7 +1011,7 @@ describe("deRoute wave 6 Argon browser agent & plain-language helpers", () => {
     expect(findForbiddenPlainTerms(stepsNotNow[3].plainResult)).toEqual([]);
   });
 
-  it("shows each model's own sealed computer record (gemma4-31b vs kimi-k3) and reports a missing model record honestly without borrowing another model's record", async () => {
+  it("shows each model's own sealed computer record (gemma4-31b vs kimi-k3-1-pro) and reports a missing model record honestly without borrowing another model's record", async () => {
     // 1. gemma4-31b selected and present -> Stage 2, Stage 3, Stage 4, and timeline step 2 describe gemma4-31b
     const { run: gemmaRun } = await runBrowserAgentWorkflow({
       taskPrompt: EXAMPLE_AGENT_TASKS[0].prompt,
@@ -1043,34 +1043,34 @@ describe("deRoute wave 6 Argon browser agent & plain-language helpers", () => {
     );
     expect(findForbiddenPlainTerms(gemmaSteps[1].plainResult)).toEqual([]);
 
-    // 2. kimi-k3 selected and present -> Stage 2, Stage 3, Stage 4, and timeline step 2 describe kimi-k3
+    // 2. kimi-k3 selected and present -> Stage 2, Stage 3, Stage 4, and timeline step 2 describe kimi-k3-1-pro
     const { run: kimiRun } = await runBrowserAgentWorkflow({
       taskPrompt: EXAMPLE_AGENT_TASKS[0].prompt,
-      preferredEnclaveModel: "kimi-k3",
+      preferredEnclaveModel: "kimi-k3-1-pro",
       fetchFn: createMockBrowserFetch(),
       openSessionFn: createEchoPlaceholderSession("Kimi analysis complete."),
     });
 
-    expect(kimiRun.stages.stage2.selectedEnclaveModel).toBe("kimi-k3");
+    expect(kimiRun.stages.stage2.selectedEnclaveModel).toBe("kimi-k3-1-pro");
     expect(kimiRun.stages.stage2.selectedEnclaveHost).toBe(
-      "kimi-k3-inf14.tinfoil.containers.tinfoil.dev",
+      "kimi-k3-1-pro-inf4.tinfoil.containers.tinfoil.dev",
     );
     expect(kimiRun.stages.stage3.sandboxReceipt.sandboxId).toBe(
-      "kimi-k3-inf14.tinfoil.containers.tinfoil.dev",
+      "kimi-k3-1-pro-inf4.tinfoil.containers.tinfoil.dev",
     );
     expect(kimiRun.stages.stage3.sandboxReceipt.imageMeasurementHex).toBe(
       "69c029108ac795b767e972858e926186c0e7b6a61f6c7fa9ce70ce1a6ee87f2c",
     );
-    expect(kimiRun.stages.stage4.routedEnclaveModel).toBe("kimi-k3");
+    expect(kimiRun.stages.stage4.routedEnclaveModel).toBe("kimi-k3-1-pro");
     expect(kimiRun.stages.stage4.routedEnclaveHost).toBe(
-      "kimi-k3-inf14.tinfoil.containers.tinfoil.dev",
+      "kimi-k3-1-pro-inf4.tinfoil.containers.tinfoil.dev",
     );
     const kimiSteps = buildPlainTimelineSteps({
       run: kimiRun,
       plannerBadgeText: "Planned by Gemini 4 Argon",
     });
     expect(kimiSteps[1].plainResult).toContain(
-      "We checked the seal for kimi-k3 is intact",
+      "We checked the seal for kimi-k3-1-pro is intact",
     );
     expect(findForbiddenPlainTerms(kimiSteps[1].plainResult)).toEqual([]);
 

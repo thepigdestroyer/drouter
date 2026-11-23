@@ -60,7 +60,7 @@ export function resolveRelayUpstreamUrl(
 
 /**Allowed models that can be specified in `x-tinfoil-model`. */
 export const ALLOWED_TINFOIL_MODELS = new Set<string>([
-  "kimi-k3",
+  "kimi-k3-1-pro",
   "glm-5-3",
   "deepseek-v4-1-flash",
   "gpt-oss-120b",

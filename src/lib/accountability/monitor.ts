@@ -574,7 +574,7 @@ export interface ExecuteMonitorResult {
 
 /**
  * Discovers the real enclave model IDs to monitor:
- * - All models in `TINFOIL_MODELS` (`kimi-k3`, `glm-5-3`, `deepseek-v4-1-flash`, `gpt-oss-120b`, `llama3-3-70b`)
+ * - All models in `TINFOIL_MODELS` (`kimi-k3-1-pro`, `glm-5-3`, `deepseek-v4-1-flash`, `gpt-oss-120b`, `llama3-3-70b`)
  * - Plus any additional real `tinfoil` model enclaves registered in `src/lib/arc` that appear in the live Tinfoil proxy table.
  */
 function discoverModelEnclaveIds(

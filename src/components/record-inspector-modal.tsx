@@ -73,7 +73,7 @@ export function RecordInspectorModal({
 }: RecordInspectorModalProps) {
   const [activeTab, setActiveTab] = useState<InspectorTabId>(initialTab);
   const [selectedModelId, setSelectedModelId] = useState<string>(
-    model && TINFOIL_MODELS.some((m) => m.id === model) ? model : "kimi-k3",
+    model && TINFOIL_MODELS.some((m) => m.id === model) ? model : "kimi-k3-1-pro",
   );
   const [fetchedBundle, setFetchedBundle] =
     useState<DeepAttestationBundle | null>(null);
@@ -609,7 +609,7 @@ export function RecordInspectorModal({
                 <code className="font-mono text-ink break-all">
                   {displayValue(bundle?.proxyWellKnownUrl, loadingBundle)}
                 </code>
-                . For Kimi K3, the model enclave runs on Intel TDX with NVIDIA confidential-computing GPUs and a 262,144-token context limit.
+                . Kimi K3.1 Pro has a 262,144-token limit on Tinfoil. Check the evidence below for the selected model’s hardware.
               </p>
 
               <div className="flex flex-wrap items-center gap-2">
@@ -723,7 +723,7 @@ export function RecordInspectorModal({
                         {vmShapeDescription}
                       </dd>
                     </div>
-                    {selectedModelId === "kimi-k3" && (
+                    {selectedModelId === "kimi-k3-1-pro" && (
                       <div className="flex flex-col justify-between gap-1 sm:flex-row sm:gap-2">
                         <dt className="text-ink-3">Max context length:</dt>
                         <dd className="font-mono text-ink">
@@ -1352,13 +1352,13 @@ export function RecordInspectorModal({
                 <div className="ep-label">What this does not hide</div>
                 <ul className="mt-2 list-disc space-y-1.5 pl-4 text-xs text-ink-2">
                   <li>
-                    Tinfoil&apos;s safeguards classifier (gpt-oss-safeguard-120b with kimi-k3 review) sees prompts inside the enclave and reports policy violations to https://api.tinfoil.sh.
+                    Tinfoil&apos;s safeguards classifier (gpt-oss-safeguard-120b with kimi-k3-1-pro review) sees prompts inside the enclave and reports policy violations to https://api.tinfoil.sh.
                   </li>
                   <li>
                     Tinfoil&apos;s usage reporter counts token usage inside the enclave.
                   </li>
                   <li>
-                    Kimi K3 context here is 262,144 tokens (not 1M).
+                    Kimi K3.1 Pro context here is 262,144 tokens (not 1M).
                   </li>
                   <li>
                     The Circle Arc registry (0xbc8085c2b6fe6e0db05f169925c0b841828f4481, chain 5042002) is a testnet.

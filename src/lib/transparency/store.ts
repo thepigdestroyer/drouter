@@ -33,7 +33,7 @@ export const ANCHOR_INTERVAL_SEC = 3600; // Anchor at most once per hour
 
 const TINFOIL_PROXY_WELL_KNOWN_URL = "https://inference.tinfoil.sh/.well-known/tinfoil-proxy";
 const PRIMARY_MODEL_IDS = [
-  "kimi-k3",
+  "kimi-k3-1-pro",
   "glm-5-3",
   "deepseek-v4-1-flash",
   "gpt-oss-120b",

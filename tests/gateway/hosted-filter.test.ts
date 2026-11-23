@@ -109,7 +109,7 @@ describe("Hosted Gateway Mechanical Filter (F-02)", () => {
         id: "chatcmpl-hosted-1",
         object: "chat.completion",
         created: 1792800000,
-        model: "kimi-k3",
+        model: "kimi-k3-1-pro",
         choices: [
           {
             index: 0,
@@ -148,7 +148,7 @@ describe("Hosted Gateway Mechanical Filter (F-02)", () => {
         "X-DRouter-Scrub-PII": "false",
       },
       body: JSON.stringify({
-        model: "kimi-k3",
+        model: "kimi-k3-1-pro",
         scrubPii: false,
         user: "usr_ tracking_id_99",
         metadata: { trace: "secret_meta_val" },
@@ -251,7 +251,7 @@ describe("Hosted Gateway Mechanical Filter (F-02)", () => {
       id: "chatcmpl-rehide-1",
       object: "chat.completion",
       created: 1792800000,
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       choices: [
         {
           index: 0,
@@ -268,7 +268,7 @@ describe("Hosted Gateway Mechanical Filter (F-02)", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "kimi-k3",
+        model: "kimi-k3-1-pro",
         messages: [
           {
             role: "system",
@@ -360,7 +360,7 @@ describe("Hosted Gateway Mechanical Filter (F-02)", () => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "kimi-k3",
+          model: "kimi-k3-1-pro",
           messages: [
             {
               role: "user",
@@ -387,7 +387,7 @@ describe("Hosted Gateway Mechanical Filter (F-02)", () => {
           id: "chatcmpl-stream-mech",
           object: "chat.completion.chunk",
           created: 1792800000,
-          model: "kimi-k3",
+          model: "kimi-k3-1-pro",
           choices: [
             {
               index: 0,
@@ -403,7 +403,7 @@ describe("Hosted Gateway Mechanical Filter (F-02)", () => {
           id: "chatcmpl-stream-mech",
           object: "chat.completion.chunk",
           created: 1792800000,
-          model: "kimi-k3",
+          model: "kimi-k3-1-pro",
           choices: [
             {
               index: 0,
@@ -430,7 +430,7 @@ describe("Hosted Gateway Mechanical Filter (F-02)", () => {
           id: "chatcmpl-stream-mech",
           object: "chat.completion.chunk",
           created: 1792800000,
-          model: "kimi-k3",
+          model: "kimi-k3-1-pro",
           choices: [
             {
               index: 0,
@@ -461,7 +461,7 @@ describe("Hosted Gateway Mechanical Filter (F-02)", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: "kimi-k3",
+        model: "kimi-k3-1-pro",
         stream: true,
         messages: [
           {
@@ -493,7 +493,7 @@ describe("Hosted Gateway Mechanical Filter (F-02)", () => {
         id: "chatcmpl-ohttp-mech",
         object: "chat.completion",
         created: 1792800000,
-        model: "kimi-k3",
+        model: "kimi-k3-1-pro",
         choices: [
           {
             index: 0,
@@ -512,7 +512,7 @@ describe("Hosted Gateway Mechanical Filter (F-02)", () => {
       method: "POST",
       path: "/api/v1/chat/completions",
       body: {
-        model: "kimi-k3",
+        model: "kimi-k3-1-pro",
         messages: [
           {
             role: "user",
@@ -568,7 +568,7 @@ describe("Hosted Gateway Mechanical Filter (F-02)", () => {
 
   it("unit-tests filterHostedChatRequest, restoreHostedChatCompletion, and createHostedStreamRestorer directly", () => {
     const res = filterHostedChatRequest({
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       user: "drop-me",
       metadata: { drop: true },
       messages: [
@@ -675,7 +675,7 @@ describe("Hosted Gateway Mechanical Filter (F-02)", () => {
         id: "chatcmpl-hosted-r2-m2",
         object: "chat.completion",
         created: 1792800000,
-        model: "kimi-k3",
+        model: "kimi-k3-1-pro",
         choices: [
           {
             index: 0,
@@ -704,7 +704,7 @@ describe("Hosted Gateway Mechanical Filter (F-02)", () => {
     });
 
     const requestPayload = {
-      model: "kimi-k3",
+      model: "kimi-k3-1-pro",
       messages: [
         {
           role: "user",

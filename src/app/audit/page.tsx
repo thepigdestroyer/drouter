@@ -182,7 +182,7 @@ export default function AuditLabPage() {
     setBusyAction("live-verify");
     try {
       const [verifyRes, matrixRes] = await Promise.all([
-        fetch("/api/v1/verify?model=kimi-k3")
+        fetch("/api/v1/verify?model=kimi-k3-1-pro")
           .then((r) => (r.ok ? (r.json() as Promise<VerifyApiResponse>) : null))
           .catch(() => null),
         fetch("/api/relay/enclave-matrix")
@@ -242,7 +242,7 @@ export default function AuditLabPage() {
       setActionResult({
         title: "Live seal check completed",
         plainSummary:
-          "We checked the factory seal and software release on the live Tinfoil router and Kimi K3 sealed computer, and logged the result in the public receipt book.",
+          "We checked the factory seal and software release on the live Tinfoil router and Kimi K3.1 Pro sealed computer, and logged the result in the public receipt book.",
         verdictSummary: `Verified ${host} (${releaseTag}) with ${passCount}/${checks.length || 7} checks passing.`,
         txHash: null,
         explorerUrl: null,
@@ -681,9 +681,9 @@ export default function AuditLabPage() {
                         with AMD SEV-SNP and runs an acceptable-use safeguards
                         classifier sidecar reporting policy violations to
                         https://api.tinfoil.sh, plus an attested usage reporter.
-                        The Kimi K3 model enclave runs on Intel TDX plus NVIDIA
-                        confidential-computing GPUs with a 262,144-token maximum
-                        context length.
+                        Tinfoil serves Kimi K3.1 Pro on confidential-computing GPUs
+                        with a 262,144-token context limit. See the live evidence
+                        for the enclave’s hardware and release.
                       </p>
                     </div>
 
@@ -811,7 +811,7 @@ export default function AuditLabPage() {
                       </div>
                       <p className="text-sm text-ink-2 leading-relaxed">
                         Check the factory seal and software release on the live
-                        Tinfoil router and Kimi K3 sealed computer right now.
+                        Tinfoil router and Kimi K3.1 Pro sealed computer right now.
                       </p>
                     </div>
                     <InkButton

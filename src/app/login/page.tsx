@@ -15,7 +15,6 @@ import {
   signInWithPasskey,
 } from "@/lib/auth/passkey";
 import {
-  deriveVaultIdentity,
   generatePassphrase,
   getCurrentVaultSession,
   getPersistedVaultMetadata,
@@ -78,24 +77,6 @@ function LoginContent() {
       unsubscribe();
     };
   }, []);
-
-  const burnerPreview = useMemo(() => {
-    if (!mounted || !burnerPassphrase.trim()) return null;
-    try {
-      return deriveVaultIdentity(burnerPassphrase);
-    } catch {
-      return null;
-    }
-  }, [burnerPassphrase, mounted]);
-
-  const existingPreview = useMemo(() => {
-    if (!existingPassphrase.trim()) return null;
-    try {
-      return deriveVaultIdentity(existingPassphrase);
-    } catch {
-      return null;
-    }
-  }, [existingPassphrase]);
 
   const handlePasskeySignIn = async () => {
     setPasskeyBusy(true);
@@ -351,6 +332,11 @@ function LoginContent() {
             </p>
           </div>
 
+          <p className="text-xs leading-relaxed text-ink-2">
+            If you created your passkey on the original Vercel address, use it on that address to open your existing account. Passkeys and locally saved accounts do not move between sites.
+            {" "}<a className="underline" href="https://drouter-demo.vercel.app/login">Open the original sign-in page</a>.
+          </p>
+
           {prfSupported === false && (
             <div
               role="note"
@@ -424,11 +410,6 @@ function LoginContent() {
                   >
                     {mounted ? burnerPassphrase : "Creating in browser..."}
                   </div>
-                  {burnerPreview && (
-                    <div className="border-t border-rule pt-2 font-mono text-[11px] text-ink-3">
-                      Account ID: <span className="text-ink">{burnerPreview.vaultId}</span>
-                    </div>
-                  )}
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
@@ -511,20 +492,13 @@ function LoginContent() {
                   </div>
 
                   <div className="ep-inset p-3 font-mono text-[11px] text-ink-2">
-                    {existingPreview ? (
-                      <div>
-                        Account ID:{" "}
-                        <span className="font-semibold text-ink">
-                          {existingPreview.vaultId}
-                        </span>
-                      </div>
-                    ) : persistedMeta.exists ? (
+                    {persistedMeta.exists ? (
                       <span>
                         Locked account {persistedMeta.vaultId} is saved on this device.
                       </span>
                     ) : (
                       <span>
-                        Type your 6 words above to preview your account ID.
+                        Your account ID appears after you unlock it.
                       </span>
                     )}
                   </div>

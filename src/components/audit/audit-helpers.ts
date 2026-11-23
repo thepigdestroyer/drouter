@@ -290,9 +290,9 @@ export function buildVerifiableClaims(params: {
     `https://github.com/${routerRepo}/releases/tag/${routerTag}`;
 
   const kimiModel: ModelEnclaveAttestation | undefined =
-    matrix?.models?.["kimi-k3"];
-  const kimiRepo = kimiModel?.repo ?? "tinfoilsh/confidential-kimi-k3";
-  const kimiTag = kimiModel?.tag ?? "v0.0.15";
+    matrix?.models?.["kimi-k3-1-pro"];
+  const kimiRepo = kimiModel?.repo ?? "tinfoilsh/confidential-kimi-k3-1-pro";
+  const kimiTag = kimiModel?.tag || "v0.0.2";
   const kimiReleaseUrl =
     kimiModel?.releaseUrl ??
     `https://github.com/${kimiRepo}/releases/tag/${kimiTag}`;
@@ -330,10 +330,10 @@ export function buildVerifiableClaims(params: {
     "https://inference.tinfoil.sh/.well-known/tinfoil-proxy";
   const kimiHost =
     kimiModel?.enclaveHosts?.[0]?.host ??
-    "kimi-k3-inf14.tinfoil.containers.tinfoil.dev";
+    "host not yet verified";
   const kimiWeightUrl =
     kimiModel?.huggingFaceUrl ??
-    "https://huggingface.co/moonshotai/Kimi-K3/tree/a590ce090cb049c93a33dfe8c208ec652aa20503";
+    "https://huggingface.co/moonshotai/Kimi-K3.1-Pro/tree/6d0a0202956796543364d666ab19c6ad1a494ee1";
 
   const contractAddr = "0xbc8085c2b6fe6e0db05f169925c0b841828f4481";
   const routerNodeOnChain = acc?.registryNodes?.find(
@@ -351,7 +351,7 @@ export function buildVerifiableClaims(params: {
     {
       id: "github-release",
       title: "Enclave source and exact release tags (GitHub)",
-      claim: `Router release ${routerRepo}@${routerTag} and Kimi K3 enclave release ${kimiRepo}@${kimiTag} that produce the attested boot measurements.`,
+      claim: `Router release ${routerRepo}@${routerTag} and Kimi K3.1 Pro enclave release ${kimiRepo}@${kimiTag} that produce the attested boot measurements.`,
       href: routerReleaseUrl,
       linkLabel: `github.com/${routerRepo}/releases/tag/${routerTag}`,
       secondaryHref: kimiReleaseUrl,
@@ -362,7 +362,7 @@ export function buildVerifiableClaims(params: {
     {
       id: "sigstore-rekor",
       title: "Exact build provenance digests (Sigstore Rekor)",
-      claim: `Router measurement digest ${shortHex(routerDigest, 12, 8)} and Kimi K3 dm-verity root ${shortHex(kimiDmVerity, 12, 8)} in the public Sigstore Rekor transparency log.`,
+      claim: `Router measurement digest ${shortHex(routerDigest, 12, 8)} and Kimi K3.1 Pro dm-verity root ${shortHex(kimiDmVerity, 12, 8)} in the public Sigstore Rekor transparency log.`,
       href: routerSigstoreUrl,
       linkLabel: `search.sigstore.dev/?hash=${shortHex(routerDigest, 12, 8)}`,
       secondaryHref: kimiSigstoreUrl,
@@ -390,11 +390,11 @@ export function buildVerifiableClaims(params: {
     {
       id: "tinfoil-proxy-table",
       title: "Live enclave routing table and pinned model weights",
-      claim: `Live proxy manifest mapping ${matrix?.routerHost ?? "router-0.tinfoil.sh"} to ${kimiHost} (Intel TDX + NVIDIA CC GPUs, 262,144 max tokens) and pinned weights ${kimiModel?.weightRepoCommit ?? "moonshotai/Kimi-K3@a590ce09"}.`,
+      claim: `Live proxy manifest mapping ${matrix?.routerHost ?? "router-0.tinfoil.sh"} to ${kimiHost}, with pinned weights ${kimiModel?.weightRepoCommit || "moonshotai/Kimi-K3.1-Pro@6d0a0202"}.`,
       href: proxyUrl,
       linkLabel: "inference.tinfoil.sh/.well-known/tinfoil-proxy",
       secondaryHref: kimiWeightUrl,
-      secondaryLabel: "huggingface.co/moonshotai/Kimi-K3/tree/a590ce09...",
+      secondaryLabel: "Kimi K3.1 Pro pinned weights on Hugging Face",
       liveRecordBadge: kimiHost,
       liveSource: Boolean(matrix),
     },

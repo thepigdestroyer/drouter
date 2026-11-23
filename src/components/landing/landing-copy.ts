@@ -184,7 +184,7 @@ export const FAQ_ITEMS: ReadonlyArray<FaqItem> = [
   {
     question: "What is the AI?",
     answer:
-      "You can chat with leading open-weight AI models, including Kimi K3, DeepSeek V4.1 Flash, GLM-5.3, GPT-OSS 120B, and Llama 3.3 70B. The live models run inside Tinfoil's sealed computers, and every one is checked every hour.",
+      "You can chat with leading open-weight AI models, including Kimi K3.1 Pro, DeepSeek V4.1 Flash, GLM-5.3, GPT-OSS 120B, and Llama 3.3 70B. The live models run inside Tinfoil's sealed computers, and every one is checked every hour.",
     techDetail:
       "Live inference routes to Tinfoil attested enclaves (AMD SEV-SNP router + Intel TDX and NVIDIA H100/H200 confidential GPUs), verified against AMD KDS VCEK certificates, Sigstore Rekor transparency logs, and dm-verity root digests.",
   },

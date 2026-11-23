@@ -56,9 +56,9 @@ describe("Record Inspector live URL & record helpers", () => {
       "https://github.com/tinfoilsh/confidential-deepseek-v4-1-flash/releases/download/v0.0.8%2Bb200/tinfoil-deployment.json",
     );
     expect(
-      buildGitHubHashAssetUrl("tinfoilsh/confidential-kimi-k3", "v0.0.15"),
+      buildGitHubHashAssetUrl("tinfoilsh/confidential-kimi-k3-1-pro", "v0.0.15"),
     ).toBe(
-      "https://github.com/tinfoilsh/confidential-kimi-k3/releases/download/v0.0.15/tinfoil.hash",
+      "https://github.com/tinfoilsh/confidential-kimi-k3-1-pro/releases/download/v0.0.15/tinfoil.hash",
     );
   });
 
@@ -144,7 +144,7 @@ describe("Record Inspector live URL & record helpers", () => {
 
     const mockFetch = vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
-      if (url.includes("api.github.com/repos/tinfoilsh/confidential-kimi-k3")) {
+      if (url.includes("api.github.com/repos/tinfoilsh/confidential-kimi-k3-1-pro")) {
         return new Response(
           JSON.stringify({
             assets: [
@@ -172,7 +172,7 @@ describe("Record Inspector live URL & record helpers", () => {
     }) as unknown as typeof fetch;
 
     const prov = await resolveModelDeploymentProvenance(
-      { repo: "tinfoilsh/confidential-kimi-k3", tag: "v0.0.15" },
+      { repo: "tinfoilsh/confidential-kimi-k3-1-pro", tag: "v0.0.15" },
       mockFetch,
     );
     expect(prov.sha256Digest).toBe(digest);
@@ -229,7 +229,7 @@ describe("Terminal modal verbatim commands & snippets", () => {
   });
 
   it("builds verbatim commands that work without an npm CLI package, excludes sim-echo-1, and uses deRoute user-visible branding", () => {
-    expect(sanitizeLiveModelId("sim-echo-1")).toBe("kimi-k3");
+    expect(sanitizeLiveModelId("sim-echo-1")).toBe("kimi-k3-1-pro");
     expect(DEFAULT_LIVE_MODEL_IDS).not.toContain("sim-echo-1");
 
     const snippets = buildTerminalSnippets(
@@ -249,7 +249,7 @@ describe("Terminal modal verbatim commands & snippets", () => {
       `curl ${PRODUCTION_BASE_URL}/v1/models`,
     );
     expect(snippets.envSnippet).not.toContain("sim-echo-1");
-    expect(snippets.envSnippet).toContain("kimi-k3");
+    expect(snippets.envSnippet).toContain("kimi-k3-1-pro");
     expect(snippets.envSnippet).toContain("gemma4-31b");
     expect(snippets.sdkSnippet).toContain(
       `baseURL: "${PRODUCTION_BASE_URL}/v1"`,
@@ -271,7 +271,7 @@ describe("Terminal modal verbatim commands & snippets", () => {
     expect(parsedOpencode.provider["drouter-confidential"].name).toBe(
       "deRoute Confidential TEE (Attested)",
     );
-    expect(parsedOpencode.model).toBe("drouter-confidential/kimi-k3");
+    expect(parsedOpencode.model).toBe("drouter-confidential/kimi-k3-1-pro");
   });
 });
 
@@ -319,7 +319,7 @@ describe("Shared InkModal accessibility, layout, summary, and deRoute branding",
         initialTab: "privacy",
         onClose: () => {},
         node: null,
-        model: "kimi-k3",
+        model: "kimi-k3-1-pro",
         checks: [],
         evidence: {},
       }),

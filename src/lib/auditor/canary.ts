@@ -290,7 +290,7 @@ export async function executeMysteryShopperAudit(opts?: {
   client?: TinfoilAuditClient;
   now?: Date;
 }): Promise<LiveAuditExecutionResult> {
-  const model = opts?.model ?? "kimi-k3";
+  const model = opts?.model ?? "kimi-k3-1-pro";
   const maxCalls = Math.min(
     MAX_CALLS_PER_AUDIT,
     Math.max(1, opts?.maxCalls ?? MAX_CALLS_PER_AUDIT),
