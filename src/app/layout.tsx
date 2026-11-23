@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import { InkField } from "@/components/ink/ink-field";
 import { SITE_URL } from "@/lib/seo";
 import "./globals.css";
 
@@ -48,6 +49,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html lang="en-GB" className="h-full antialiased">
       <body className="relative min-h-full flex flex-col bg-paper text-ink">
+        <InkField />
         <div className="relative z-10 flex min-h-full flex-1 flex-col">
           {children}
         </div>

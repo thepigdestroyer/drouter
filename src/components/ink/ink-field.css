@@ -1,0 +1,70 @@
+.ep-ink-field {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  contain: strict;
+}
+
+.ep-ink-tide,
+.ep-ink-eddy,
+.ep-ink-wash {
+  position: absolute;
+  display: block;
+}
+
+/* The color stops stay static. Only the three layers move, so frames can be
+   composited without a JavaScript loop or recalculating a filter. */
+.ep-ink-tide {
+  inset: -14% 30% 24% -22%;
+  background:
+    radial-gradient(ellipse 42% 44% at 44% 45%, rgb(64 58 57 / 16%), rgb(103 90 81 / 9%) 31%, transparent 100%),
+    radial-gradient(ellipse 29% 35% at 31% 62%, rgb(120 94 78 / 11%), transparent 100%),
+    radial-gradient(ellipse 32% 28% at 63% 32%, rgb(118 112 109 / 9%), transparent 100%);
+  animation: ep-ink-tide 46s ease-in-out infinite alternate;
+}
+
+.ep-ink-eddy {
+  inset: 14% -26% -19% 32%;
+  background:
+    radial-gradient(ellipse 43% 42% at 54% 47%, rgb(63 64 65 / 15%), rgb(89 91 98 / 8%) 33%, transparent 100%),
+    radial-gradient(ellipse 31% 29% at 43% 69%, rgb(92 81 75 / 11%), transparent 100%),
+    radial-gradient(ellipse 32% 28% at 62% 31%, rgb(113 102 93 / 10%), transparent 100%);
+  animation: ep-ink-eddy 39s ease-in-out -15s infinite alternate;
+}
+
+.ep-ink-wash {
+  inset: 46% 18% -23% -17%;
+  background:
+    radial-gradient(ellipse 37% 42% at 39% 49%, rgb(161 89 56 / 15%), rgb(177 124 88 / 7%) 36%, transparent 100%),
+    radial-gradient(ellipse 38% 24% at 55% 73%, rgb(90 83 83 / 10%), transparent 100%);
+  animation: ep-ink-wash 52s ease-in-out -22s infinite alternate;
+}
+
+@keyframes ep-ink-tide {
+  from { transform: translate3d(-3%, -3%, 0) scale(1); }
+  to { transform: translate3d(14%, 11%, 0) scale(1.12); }
+}
+
+@keyframes ep-ink-eddy {
+  from { transform: translate3d(6%, 5%, 0) scale(1.05); }
+  to { transform: translate3d(-12%, -14%, 0) scale(1.16); }
+}
+
+@keyframes ep-ink-wash {
+  from { transform: translate3d(-4%, 6%, 0) scale(1.04); }
+  to { transform: translate3d(16%, -13%, 0) scale(1.18); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ep-ink-tide,
+  .ep-ink-eddy,
+  .ep-ink-wash {
+    animation: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .ep-ink-field { display: none; }
+}

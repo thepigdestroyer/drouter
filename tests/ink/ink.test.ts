@@ -20,6 +20,19 @@ import {
 
 const ROOT = resolve(__dirname, "../..");
 
+describe("site-wide ink background", () => {
+  it("mounts decorative ink without a canvas or a JavaScript render loop", () => {
+    const layout = readFileSync(resolve(ROOT, "src/app/layout.tsx"), "utf8");
+    const field = readFileSync(resolve(ROOT, "src/components/ink/ink-field.tsx"), "utf8");
+    const styles = readFileSync(resolve(ROOT, "src/components/ink/ink-field.css"), "utf8");
+    expect(layout).toContain("<InkField />");
+    expect(field).toContain('aria-hidden="true"');
+    expect(field).not.toMatch(/<canvas|requestAnimationFrame|useEffect|use client/);
+    expect(styles).toMatch(/prefers-reduced-motion: reduce[\s\S]*?animation: none/);
+    expect(styles).toContain("pointer-events: none");
+  });
+});
+
 describe("deRoute Living Ink Math", () => {
   it("computes smoothstep and clamp accurately across boundaries", () => {
     expect(clamp(5, 0, 10)).toBe(5);
