@@ -63,6 +63,7 @@ import { POST as postOhttp } from "@/app/api/ohttp/route";
 import {
   UNSUPPORTED_MEDIA_ERROR_MESSAGE,
   createHostedStreamRestorer,
+  createHostedDeltaChunkRestorer,
   filterHostedChatRequest,
   restoreHostedChatCompletion,
 } from "@/lib/gateway/hosted-filter";
@@ -77,6 +78,16 @@ import {
 import { NextRequest } from "next/server";
 
 describe("Hosted Gateway Mechanical Filter (F-02)", () => {
+  it("signals a tool handoff when the upstream ends a tool call with stop", () => {
+    const session = { restore: (text: string) => text };
+    const tool_calls = [{ index: 0, id: "call1", type: "function", function: {name: "project_info", arguments: "{}"} }];
+    const stream = createHostedDeltaChunkRestorer(session);
+    stream.restoreChunk({choices:[{index:0,delta:{tool_calls},finish_reason:null}]});
+    expect(stream.restoreChunk({choices:[{index:0,delta:{},finish_reason:"stop"},{index:1,delta:{},finish_reason:"stop"}]})).toMatchObject({choices:[{finish_reason:"tool_calls"},{finish_reason:"stop"}]});
+    const completion = restoreHostedChatCompletion({choices:[{message:{tool_calls},finish_reason:"stop"}]},session);
+    expect(completion.choices[0].finish_reason).toBe("tool_calls");
+    expect(stream.restoreChunk({choices:[{index:0,delta:{},finish_reason:"length"}]})).toMatchObject({choices:[{finish_reason:"length"}]});
+  });
   const origApiKey = process.env.TINFOIL_API_KEY;
 
   beforeEach(() => {

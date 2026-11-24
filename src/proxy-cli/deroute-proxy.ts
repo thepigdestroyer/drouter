@@ -14,6 +14,7 @@ import { pathToFileURL } from "node:url";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { TinfoilAI, type VerificationDocument } from "tinfoil";
 import { decodeAccessKey } from "@/lib/credits/access-key";
+import { hasToolCalls, trackToolFinish } from "@/lib/gateway/tool-finish";
 import { formatCreditHeader, nullifierFor } from "@/lib/credits/blind";
 import {
   CHAT_GATEWAY_MODEL_IDS,
@@ -1811,6 +1812,7 @@ export function createDerouteProxyServer(
             return r;
           };
 
+          const toolChoices = new Set<number>();
           for await (const chunk of stream) {
             lastChunkTemplate = chunk;
             const rawChoices = Array.isArray(chunk?.choices)
@@ -1835,6 +1837,7 @@ export function createDerouteProxyServer(
 
               const choiceIdx =
                 typeof choice.index === "number" ? choice.index : i;
+              trackToolFinish(choice, toolChoices, choiceIdx);
               const delta =
                 choice.delta && typeof choice.delta === "object"
                   ? (choice.delta as Record<string, unknown>)
@@ -2149,6 +2152,7 @@ export function createDerouteProxyServer(
           }
           return {
             ...choice,
+            ...(hasToolCalls(nextMessage) && choice.finish_reason === "stop" ? { finish_reason: "tool_calls" } : {}),
             message: nextMessage,
           };
         });
@@ -2301,7 +2305,7 @@ export function formatProxyHelpText(): string {
     "  node deroute-proxy.mjs [--key drk_...] [--port 4141] [--upstream https://deroute.is-an.ai]",
     "",
     "Options:",
-    `  --key <drk_...>       Access key from /account (or set DEROUTE_ACCESS_KEY)`,
+    `  --key <drk_...>       API key from /api-keys (prefer DEROUTE_ACCESS_KEY)`,
     `  --port <number>       Local port on 127.0.0.1 (default: ${DEFAULT_PORT})`,
     `  --upstream <url>      deRoute relay origin (default: ${DEFAULT_UPSTREAM})`,
     "  --spent-path <path>   Path to spent nullifier file (default: ~/.config/deroute/spent.json)",

@@ -3,6 +3,7 @@ import {
   type MechanicalSession,
 } from "@/lib/privacy/mechanical";
 import { rehideKnownValues } from "@/lib/privacy/rehide-known";
+import { hasToolCalls, trackToolFinish } from "./tool-finish";
 import { preparePrompt, type PreparedPrompt } from "@/lib/pipeline";
 
 export const UNSUPPORTED_MEDIA_ERROR_MESSAGE =
@@ -743,6 +744,7 @@ export function restoreHostedChatCompletion<T>(
       return choice;
     }
     const cObj = { ...(choice as Record<string, unknown>) };
+    if (hasToolCalls(cObj.message) && cObj.finish_reason === "stop") cObj.finish_reason = "tool_calls";
     if (cObj.message && typeof cObj.message === "object" && !Array.isArray(cObj.message)) {
       cObj.message = mapSingleMessageStrings(
         cObj.message as Record<string, unknown>,
@@ -769,6 +771,7 @@ export function createHostedDeltaChunkRestorer(
   const contentRestorer = createHostedStreamRestorer(session);
   const reasoningRestorer = createHostedStreamRestorer(session);
   const toolArgRestorers = new Map<string, HostedStreamRestorer>();
+  const toolChoices = new Set<number>();
   const fnCallRestorer = createHostedStreamRestorer(session);
 
   const getToolRestorer = (key: string): HostedStreamRestorer => {
@@ -791,7 +794,8 @@ export function createHostedDeltaChunkRestorer(
         ? (chunk.choices as Array<Record<string, unknown>>)
         : [];
 
-      for (const choice of choices) {
+      for (const [i, choice] of choices.entries()) {
+        trackToolFinish(choice, toolChoices, typeof choice.index === "number" ? choice.index : i);
         const delta =
           choice?.delta && typeof choice.delta === "object" && !Array.isArray(choice.delta)
             ? (choice.delta as Record<string, unknown>)
