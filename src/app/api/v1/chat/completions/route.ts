@@ -1,11 +1,10 @@
 import { TinfoilAI } from "tinfoil";
 import {
   ACCESS_KEY_PREFIX,
-   type DecodedAccessKey,
+  type DecodedAccessKey,
   countUnspentTokens,
   decodeAccessKey,
   markAccessKeyNullifierSpent,
-  resetAccessKeyNullifiersForTests,
 } from "@/lib/credits/access-key";
 import { formatCreditHeader, nullifierFor } from "@/lib/credits/blind";
 import { verifyAndSpendCreditHeader } from "@/lib/credits/ledger";
@@ -137,7 +136,7 @@ export async function POST(req: Request): Promise<Response> {
   // Interface I2 & K3: Verify blind-signed credit header (`x-drouter-credit` or `x-drouter-credit-token`)
   // or `Authorization: Bearer drk_...` access key.
   // Requests with a valid credit token record the nullifier and bypass the per-IP free-tier limiter;
-  // requests without the header or with any other bearer value fall back to the per-IP free tier.
+  // Only omitted credentials and the legacy anonymous sentinel select the capped free tier.
   // Configuration (503) and global caps (429) are checked BEFORE spending a credit token.
   // Never log request bodies or keys.
   const rawCreditHeader =
@@ -147,34 +146,28 @@ export async function POST(req: Request): Promise<Response> {
   const authHeader = req.headers.get("authorization")?.trim() ?? "";
   const bearerMatch = /^Bearer\s+(\S+)$/i.exec(authHeader);
   const bearerToken = bearerMatch ? bearerMatch[1] : "";
+  const authError = (message: string) => Response.json(
+    { error: { message, type: "authentication_error" } },
+    { status: 401, headers: { ...CORS_HEADERS, "WWW-Authenticate": "Bearer" } },
+  );
+  if (req.headers.has("authorization") && bearerToken !== "drouter-anonymous" && !bearerToken.startsWith(ACCESS_KEY_PREFIX)) {
+    return authError("Invalid deRoute API key. Get a key at /api-keys.");
+  }
+  if (bearerToken.startsWith(ACCESS_KEY_PREFIX) && hasExplicitCreditHeader) {
+    return authError("Use either a bearer API key or a credit header, not both.");
+  }
   const hasDrkBearer = !hasExplicitCreditHeader && bearerToken.startsWith(ACCESS_KEY_PREFIX);
 
   let decodedAccessKey: DecodedAccessKey | null = null;
   if (hasDrkBearer) {
     const decoded = decodeAccessKey(bearerToken);
     if (!decoded.ok) {
-      return Response.json(
-        {
-          error: {
-            message: "Malformed deRoute access key.",
-            type: "invalid_request_error",
-          },
-        },
-        { status: 400, headers: CORS_HEADERS },
-      );
+      return authError("Malformed deRoute access key.");
     }
     decodedAccessKey = decoded;
   } else if (!hasExplicitCreditHeader) {
     const limited = realTinfoilIpLimiter.check(req, CORS_HEADERS);
     if (limited) return limited;
-  }
-
-  const maybeMock = verifyAndSpendCreditHeader as unknown as {
-    mock?: { calls?: unknown[][] };
-  };
-  if (maybeMock.mock && Array.isArray(maybeMock.mock.calls) && maybeMock.mock.calls.length === 0) {
-    resetAccessKeyNullifiersForTests();
-    realTinfoilGlobalLimiter.reset();
   }
 
   // Check server configuration (503) and global rate limit (429) BEFORE spending any credit token
@@ -253,24 +246,19 @@ export async function POST(req: Request): Promise<Response> {
       }
       if (spendAttempt.status === 409) {
         markAccessKeyNullifierSpent(nullifierFor(tok.token));
+        continue;
       }
       if (spendAttempt.status === 400) {
         hadInvalidSignature = true;
         break;
       }
+      realTinfoilGlobalLimiter.credit(1, 1);
+      return Response.json({ error: { message: "Credit ledger unavailable. Please retry later.", type: "credit_error" } }, { status: 503, headers: CORS_HEADERS });
     }
 
     if (hadInvalidSignature) {
       realTinfoilGlobalLimiter.credit(1, 1);
-      return Response.json(
-        {
-          error: {
-            message: "Invalid credit token signature in access key.",
-            type: "credit_error",
-          },
-        },
-        { status: 400, headers: CORS_HEADERS },
-      );
+      return authError("Invalid credit token signature in access key.");
     }
 
     if (!spentResult || spentIndex === -1) {
@@ -279,7 +267,7 @@ export async function POST(req: Request): Promise<Response> {
         {
           error: {
             message:
-              "All credits in this access key have been spent. Create a new access key on your deRoute Account page (/account).",
+              "All credits in this access key have been spent. Create a new API key at /api-keys.",
             type: "credit_error",
           },
         },
@@ -307,6 +295,7 @@ export async function POST(req: Request): Promise<Response> {
     const client = new TinfoilAI({ apiKey });
     await client.ready();
     const doc = await client.getVerificationDocument();
+    if (!doc.securityVerified) throw new Error("Unverified enclave");
 
     const enclaveHeaders: Record<string, string> = {
       ...CORS_HEADERS,

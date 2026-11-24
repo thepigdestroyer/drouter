@@ -1,248 +1,80 @@
-# deRoute API & Coding Tools Guide
+# deRoute API keys for coding agents
 
-Use deRoute from OpenCode, Cursor, Continue, Aider, the OpenAI TypeScript or Python SDK, or `curl`.
+[Get an API key](https://deroute.is-an.ai/api-keys). Sign in on the site, add free credits or claim prepaid Arc Testnet USDC credits, then create and copy a key. The account passkey or six words unlock your local vault; they are never API credentials. Passkeys, vaults and wallets are origin-specific. Existing users of the original Vercel site can sign in there and use their existing keys on the canonical gateway.
 
----
+| Client setting | Value |
+| --- | --- |
+| Provider | OpenAI-compatible **Chat Completions** |
+| Base URL | `https://deroute.is-an.ai/api/v1` |
+| Model | `kimi-k3-1-pro` (discover other chat IDs at [`GET /models`](https://deroute.is-an.ai/api/v1/models)) |
+| API key | Your own `drk_…` key, sent as `Authorization: Bearer` |
 
-## 1. What each mode protects
+Direct HTTPS terminates at deRoute: the gateway can read the request and response, applies its filter, and verifies the upstream enclave. The browser chat and optional [local proxy](#local-proxy) filter and encrypt on the device. An agent or editor itself can still see the content you give it.
 
-deRoute offers two ways to connect your coding tools:
+## Clients
 
-### Private mode (recommended): local proxy (`http://127.0.0.1:4141/v1`)
-You run `node deroute-proxy.mjs --key drk_...` (or set `DEROUTE_ACCESS_KEY`) on your own computer.
+- **OpenCode v2**: the [setup page](https://deroute.is-an.ai/api-keys) generates `opencode.jsonc` using `providers.deroute`, `@opencode/ai/providers/openai-compatible`, and `env: ["DEROUTE_API_KEY"]`. Set that variable in the OpenCode server environment, merge the config and select `deroute/kimi-k3-1-pro`.
+- **Continue**: use the supplied `config.yaml` model entry with `provider: openai`, `apiBase`, `model`, and `capabilities: [tool_use]`. Set the named `DEROUTE_API_KEY` secret in Continue; do not commit a key to the config.
+- **Cline / Roo Code**: select **OpenAI Compatible**, then enter the base URL, model ID and your key in the dedicated credential field. Use text Chat Completions, not Responses. Aider and OpenAI SDKs can also use this endpoint. Clients locked to a vendor endpoint or requiring Anthropic Messages or OpenAI Responses cannot use it directly.
 
-For every request on your machine:
-1. **Local personal-detail filter**: Runs the fingerprinted mechanical filter with session-stable placeholders (`[EMAIL_1]`, `[ENTITY_1]`, etc.) before anything leaves your computer.
-2. **Seven seal checks**: Verifies all seven hardware and transparency checks on the sealed computer.
-3. **End-to-end locking**: Encrypts your prompt with RFC 9180 HPKE directly to the attested enclave key and sends only ciphertext through our relay (`/api/relay/v1/`).
-4. **One anonymous token per request**: Attaches one blind-signed credit token in `x-drouter-credit` (`formatCreditHeader(token)`) and records spent nullifiers locally in `~/.config/deroute/spent.json` so a restart never reuses a token.
-5. **Local restore**: Restores hidden placeholders inside the response stream on your machine.
-6. **Free-tier fallback**: When the access key runs out of unspent tokens, the proxy falls back to the free tier and reports this in a response header and on `stderr`.
+For a temporary shell credential in Bash, run `read -rs DEROUTE_API_KEY; export DEROUTE_API_KEY` and paste at the hidden prompt. Do not paste keys into prompts, command lines or checked-in files. Remove it with `unset DEROUTE_API_KEY`.
 
-Our server and relay never see your plaintext prompts, responses, or which wallet minted your tokens.
+### Python (`pip install openai`)
 
-### Hosted mode (convenient): direct gateway (`https://drouter-demo.vercel.app/api/v1`)
-Your coding tool sends requests directly to `POST https://drouter-demo.vercel.app/api/v1/chat/completions` with `Authorization: Bearer drk_...` (or an explicit `x-drouter-credit` header).
-
-> **Plain privacy notice**: In hosted mode our server filters your words before forwarding them to the sealed computer, so our server sees them. Use the local proxy if you do not want that.
-
-Our server never logs request bodies or access keys.
-
----
-
-## 2. Access key format (`drk_...`)
-
-An access key is created in your browser on `/account` by **moving** anonymous tokens out of your browser wallet so the browser can never spend the same token twice. The server never issues or stores access keys.
-
-- **Format**:
-  ```text
-  drk_<base64url_unpadded(utf8(canonicalJson({
-    v: 1,
-    origin: "https://drouter-demo.vercel.app",
-    tokens: [
-      { t: "<token hex>", s: "<signature hex>", d: <denomination> },
-      ...
-    ]
-  })))>
-  ```
-- **`canonicalJson`**: Deterministic sorted-key JSON serialization (`src/lib/transparency/log.ts`).
-- **Tokens**: Each entry `{ t, s, d }` corresponds to a `BlindCreditToken` (`{ token: t, signature: s, denomination: d }`). When spent individually in a request header, it is formatted via `formatCreditHeader(token)` (`src/lib/credits/blind.ts`).
-- **Strict validation (`decodeAccessKey`)**:
-  - Must start with `drk_` followed by canonical unpadded base64url bytes.
-  - Must decode to valid UTF-8 JSON with exact top-level keys `v`, `origin`, and `tokens`.
-  - `v` must be `1`.
-  - `origin` must be `"https://drouter-demo.vercel.app"`.
-  - `tokens` must contain **1 to 50** token objects, each with exact keys `t` (lowercase even-length hex), `s` (lowercase even-length hex), and `d` (`1`, `5`, or `20`), with no duplicate token nullifiers.
-  - Unknown versions, unknown keys, malformed hex, wrong origin, duplicate tokens, or more than 50 tokens are rejected with HTTP `400`.
-
-### How `Authorization: Bearer drk_...` spends credits in Hosted mode
-- On `POST /api/v1/chat/completions`, when `Authorization: Bearer drk_...` is sent (and no explicit `x-drouter-credit` header overrides it), the server decodes the key and checks each token in order until it finds the first token whose nullifier is unspent.
-- That token is spent for the request, and the response includes:
-  - `X-DRouter-Credit-Verified: true`
-  - `X-DRouter-Credit-Nullifier: <sha256 nullifier>`
-  - `X-DRouter-Credit-Denomination: <1|5|20>`
-  - `X-DRouter-Credits-Remaining: <count of unspent tokens remaining in that key>`
-- If every token in the key has already been spent, the server returns HTTP `402` (`X-DRouter-Credits-Remaining: 0`) with a plain message to create a new access key on `/account`.
-- Any other `Authorization: Bearer <value>` (for example `Bearer any-value`) falls back to the per-network free tier.
-
----
-
-## 3. Verifying and rebuilding `deroute-proxy.mjs`
-
-The local proxy is distributed as a single self-contained file requiring only **Node 20 or later**:
-
-- Proxy bundle: `https://drouter-demo.vercel.app/downloads/deroute-proxy.mjs`
-- SHA-256 checksum: `https://drouter-demo.vercel.app/downloads/deroute-proxy.mjs.sha256`
-
-### Verify the downloaded file
-```bash
-curl -fsSLO https://drouter-demo.vercel.app/downloads/deroute-proxy.mjs
-curl -fsSLO https://drouter-demo.vercel.app/downloads/deroute-proxy.mjs.sha256
-shasum -a 256 -c deroute-proxy.mjs.sha256
-```
-
-### Run the local proxy
-```bash
-node deroute-proxy.mjs --key drk_YOUR_ACCESS_KEY
-# Or via environment variable:
-DEROUTE_ACCESS_KEY=drk_YOUR_ACCESS_KEY node deroute-proxy.mjs
-```
-The proxy listens on `http://127.0.0.1:4141/v1` and serves `GET /v1/models` and `POST /v1/chat/completions` (streaming and non-streaming).
-
-### Rebuild the proxy from source
-To verify that the published bundle matches the repository source code:
-```bash
-git clone https://github.com/thepigdestroyer/drouter
-cd drouter
-npm ci
-npm run build:proxy
-shasum -a 256 public/downloads/deroute-proxy.mjs
-cat public/downloads/deroute-proxy.mjs.sha256
-```
-`npm run build:proxy` bundles the TypeScript sources and the `tinfoil` verification SDK with `esbuild` into `public/downloads/deroute-proxy.mjs` and writes its digest to `public/downloads/deroute-proxy.mjs.sha256`. Running `node scripts/drouter-cli.mjs proxy [--port 4141] [--key drk_...]` from a repository checkout verifies `public/downloads/deroute-proxy.mjs` against `public/downloads/deroute-proxy.mjs.sha256` and launches that bundle.
-
----
-
-## 4. Setup for coding tools
-
-Available model IDs from `GET /api/v1/models`:
-- `kimi-k3`
-- `glm-5-3`
-- `deepseek-v4-1-flash`
-- `gpt-oss-120b`
-- `llama3-3-70b`
-- `gemma4-31b`
-
-In **Private mode**, use base URL `http://127.0.0.1:4141/v1` and API key `deroute-local`.
-In **Hosted mode**, use base URL `https://drouter-demo.vercel.app/api/v1` and API key `drk_YOUR_ACCESS_KEY`.
-
-### OpenCode (`opencode.json`)
-Uses `@ai-sdk/openai-compatible` per [https://opencode.ai/docs/providers](https://opencode.ai/docs/providers):
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "deroute": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "deRoute (Local Private Proxy)",
-      "options": {
-        "baseURL": "http://127.0.0.1:4141/v1",
-        "apiKey": "deroute-local"
-      },
-      "models": {
-        "kimi-k3": {
-          "name": "Kimi K3 (2.8T MoE, 256K ctx) (deRoute)"
-        },
-        "glm-5-3": {
-          "name": "GLM-5.3 (deRoute)"
-        },
-        "deepseek-v4-1-flash": {
-          "name": "DeepSeek V4.1 Flash (deRoute)"
-        },
-        "gpt-oss-120b": {
-          "name": "GPT-OSS 120B (deRoute)"
-        },
-        "llama3-3-70b": {
-          "name": "Llama 3.3 70B (deRoute)"
-        },
-        "gemma4-31b": {
-          "name": "Gemma 4 31B (deRoute)"
-        }
-      }
-    }
-  },
-  "model": "deroute/kimi-k3"
-}
-```
-
-### Cursor
-1. Open **Cursor Settings -> Models -> OpenAI API Key**.
-2. Enable **Override OpenAI Base URL** and set it to `http://127.0.0.1:4141/v1` (or `https://drouter-demo.vercel.app/api/v1` in hosted mode).
-3. Set **OpenAI API Key** to `deroute-local` (or `drk_YOUR_ACCESS_KEY` in hosted mode).
-4. Add model IDs from `GET /api/v1/models`: `kimi-k3`, `glm-5-3`, `deepseek-v4-1-flash`, `gpt-oss-120b`, `llama3-3-70b`, `gemma4-31b`.
-
-### Continue (`~/.continue/config.yaml`)
-```yaml
-name: deRoute Config
-version: 1.0.0
-schema: v1
-models:
-  - name: deRoute Kimi K3
-    provider: openai
-    model: kimi-k3
-    apiBase: http://127.0.0.1:4141/v1
-    apiKey: deroute-local
-    roles:
-      - chat
-      - edit
-      - apply
-```
-
-### Aider
-```bash
-aider \
-  --openai-api-base "http://127.0.0.1:4141/v1" \
-  --openai-api-key "deroute-local" \
-  --model "openai/kimi-k3"
-```
-
-### OpenAI SDK for TypeScript
-```ts
-import OpenAI from "openai";
-
-const client = new OpenAI({
-  baseURL: "http://127.0.0.1:4141/v1",
-  apiKey: "deroute-local",
-});
-
-const completion = await client.chat.completions.create({
-  model: "kimi-k3",
-  messages: [{ role: "user", content: "Write a short unit test in TypeScript." }],
-});
-
-console.log(completion.choices[0]?.message?.content);
-```
-
-### OpenAI SDK for Python
 ```python
+import os
 from openai import OpenAI
 
-client = OpenAI(
-    base_url="http://127.0.0.1:4141/v1",
-    api_key="deroute-local",
-)
-
-completion = client.chat.completions.create(
-    model="kimi-k3",
-    messages=[{"role": "user", "content": "Write a short unit test in Python."}],
-)
-
-print(completion.choices[0].message.content)
+client = OpenAI(base_url="https://deroute.is-an.ai/api/v1",
+                api_key=os.environ["DEROUTE_API_KEY"], max_retries=0)
+for chunk in client.chat.completions.create(
+    model="kimi-k3-1-pro", stream=True, max_tokens=512,
+    messages=[{"role": "user", "content": "What does git status show?"}],
+):
+    if chunk.choices:
+        print(chunk.choices[0].delta.content or "", end="")
 ```
 
-### curl
+### TypeScript / Node.js (`npm install openai`)
+
+```ts
+import OpenAI from "openai";
+const apiKey = process.env.DEROUTE_API_KEY;
+if (!apiKey) throw new Error("Set DEROUTE_API_KEY first");
+const client = new OpenAI({ baseURL: "https://deroute.is-an.ai/api/v1", apiKey, maxRetries: 0 });
+const reply = await client.chat.completions.create({
+  model: "kimi-k3-1-pro", max_tokens: 512,
+  messages: [{ role: "user", content: "Use the project_info tool." }],
+  tools: [{ type: "function", function: { name: "project_info", parameters: { type: "object", properties: {} } } }],
+  tool_choice: "auto",
+});
+// The client validates arguments, executes approved tools, and resubmits their results.
+console.log(reply.choices[0]?.message.tool_calls?.map(call => call.type));
+```
+
+## Credits and request limits
+
+The browser packages blind-signed wallet tokens, not identity or an operator credential, into a transferable bearer key. Issuance does not create a server-side key record. The default recovery copy is in tab memory; encrypted on-device recovery is opt-in. Save the key yourself before dismissing it. There is no remote recovery, revocation or top-up. Create small keys and replace them when spent. The UI offers 1 or 5 credits so the bearer fits common HTTP header limits; the wire format still accepts legacy bundles of 1–50 tokens. Use the proxy if a client rejects a large legacy header.
+
+Hosted chat checks the signature and records the first available token’s nullifier before attempting inference. One token buys one request regardless of denomination. An upstream failure or a client retry can therefore cost a token. Successful keyed responses include `X-DRouter-Credit-Verified` and `X-DRouter-Credits-Remaining` (last-known count, not a cross-instance balance inquiry). Listing models is public and does not spend credits.
+
+- `401`: malformed, unknown, invalidly signed or conflicting bearer credentials. Never falls back to anonymous use.
+- `402`: key exhausted; create another. Free minting is also allowance-limited (10 credit units per IP per day, refilling gradually).
+- `413` / `400`: shorten the request or remove unsupported content. Hosted text JSON: 128 KiB, 64 messages, 64 tools, up to 16,384 requested output tokens. A model’s context window is not the gateway payload limit.
+- `429`: shared inference quota (40 requests/hour token bucket per running instance) or other rate limit; observe `Retry-After`.
+- `503`: server configuration or credit ledger unavailable. `502`: upstream verification or inference failed.
+
+Explicit single-token `x-drouter-credit` / `x-drouter-credit-token` remains available. Do not combine it with a `drk_` bearer. The existing capped demo tier accepts omitted credentials or exactly `Bearer drouter-anonymous`; it is not a production API key.
+
+## Local proxy
+
+Use Node 20+ on the same computer as the calling client. Some remote/cloud editors cannot reach loopback. The proxy verifies its filter fingerprint and the enclave, filters and seals prompts locally, restores responses locally and attaches individual signed tokens to the relay. Only spent nullifiers are written to `~/.config/deroute/spent.json`. With a supplied key it stops when exhausted.
+
 ```bash
-# List models:
-curl -sS "http://127.0.0.1:4141/v1/models"
-
-# Chat completion:
-curl -sS -X POST "http://127.0.0.1:4141/v1/chat/completions" \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer deroute-local" \
-  -d '{
-    "model": "kimi-k3",
-    "messages": [
-      { "role": "user", "content": "Reply with one short sentence." }
-    ]
-  }'
+curl -fsSLO https://deroute.is-an.ai/downloads/deroute-proxy.mjs && \
+curl -fsSLO https://deroute.is-an.ai/downloads/deroute-proxy.mjs.sha256 && \
+shasum -a 256 -c deroute-proxy.mjs.sha256 && \
+DEROUTE_ACCESS_KEY="${DEROUTE_API_KEY:?Set your key first}" node deroute-proxy.mjs
 ```
 
----
-
-## 5. Limits and rate tiers
-
-- **Tokens per access key**: 1 to 50 blind-signed credit tokens (`denomination` in `1`, `5`, or `20`).
-- **Request body size**: Up to 128 KB JSON (`MAX_CHAT_BODY_BYTES = 131072`), up to 64 messages per request, and up to `16384` `max_tokens`.
-- **Credit-backed requests**: Requests with a valid `x-drouter-credit` token or an unspent token inside `Authorization: Bearer drk_...` bypass the per-IP free-tier rate limiter.
-- **Free tier**: Requests without a credit header and without a `drk_...` bearer key use the per-IP free tier (5 requests per minute, burst 10). Free daily minting at `POST /api/credits` grants up to 10 free credits per UTC day per network before requiring a one-time USDC deposit invoice (`POST /api/credits/invoice`).
+Configure the client base URL as `http://127.0.0.1:4141/v1`, model `kimi-k3-1-pro`, and SDK placeholder key `deroute-local`. The real credit key belongs to the proxy process. To rebuild from this repository run `npm ci && npm run build:proxy`; the bundle and checksum are under `public/downloads/`.

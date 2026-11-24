@@ -3,10 +3,10 @@
  * deRoute Terminal CLI & Local Zero-Trust Harness Proxy Launcher
  *
  * Subcommands:
- *   node scripts/drouter-cli.mjs verify [--submit] [--key-path ~/.config/deroute/verifier-key] [--upstream https://drouter-demo.vercel.app]
+ *   node scripts/drouter-cli.mjs verify [--submit] [--key-path ~/.config/deroute/verifier-key] [--upstream https://deroute.is-an.ai]
  *   node scripts/drouter-cli.mjs ask "<prompt>" [--model kimi-k3-1-pro] [--upstream https://deroute.is-an.ai]
- *   node scripts/drouter-cli.mjs proxy [--port 4141] [--key drk_...] [--upstream https://drouter-demo.vercel.app]
- *   node scripts/drouter-cli.mjs config [--upstream https://drouter-demo.vercel.app]
+ *   node scripts/drouter-cli.mjs proxy [--port 4141] [--key drk_...] [--upstream https://deroute.is-an.ai]
+ *   node scripts/drouter-cli.mjs config [--upstream https://deroute.is-an.ai]
  */
 
 import { spawn } from "node:child_process";
@@ -23,7 +23,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
 
 export const DEFAULT_PORT = 4141;
-export const DEFAULT_UPSTREAM = "https://drouter-demo.vercel.app";
+export const DEFAULT_UPSTREAM = "https://deroute.is-an.ai";
 export const DEFAULT_MODEL = "kimi-k3-1-pro";
 export const TINFOIL_PROXY_WELL_KNOWN_URL =
   "https://inference.tinfoil.sh/.well-known/tinfoil-proxy";
@@ -549,19 +549,12 @@ export function buildCliHarnessConfigs(baseUrl) {
 
   const opencodeConfig = {
     $schema: "https://opencode.ai/config.json",
-    provider: {
-      drouter: {
-        npm: "@ai-sdk/openai-compatible",
-        name: "deRoute Attested Enclave Gateway",
-        options: {
-          baseURL: gatewayUrl,
-          apiKey: "drouter-anonymous",
-          _authNote:
-            "any apiKey value works, auth is the blind credit header (x-drouter-credit) with per-IP free-tier fallback",
-          headers: {
-            "x-drouter-credit": "${DROUTER_CREDIT_TOKEN}",
-          },
-        },
+    providers: {
+      deroute: {
+        package: "@opencode/ai/providers/openai-compatible",
+        env: ["DEROUTE_API_KEY"],
+        name: "deRoute Hosted Gateway",
+        settings: { baseURL: gatewayUrl },
         models: {
           [DEFAULT_MODEL]: { name: "Kimi K3.1 Pro (Attested Enclave)" },
           "glm-5-3": { name: "GLM-5.3 (Attested Enclave)" },
@@ -572,25 +565,18 @@ export function buildCliHarnessConfigs(baseUrl) {
         },
       },
     },
-    model: `drouter/${DEFAULT_MODEL}`,
+    model: `deroute/${DEFAULT_MODEL}`,
   };
 
   return {
     opencodeJson: JSON.stringify(opencodeConfig, null, 2),
-    curlCommand: [
-      `# Note: any Bearer apiKey value works (required by OpenAI SDKs); auth is the blind credit header (x-drouter-credit)`,
-      `curl -sS ${gatewayUrl}/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer drouter-anonymous" -H "x-drouter-credit: \${DROUTER_CREDIT_TOKEN:-}" -d '{"model":"${DEFAULT_MODEL}","messages":[{"role":"user","content":"Verify enclave connectivity in one sentence."}]}'`,
-    ].join("\n"),
-    openaiEnvExports: [
-      `# Any OPENAI_API_KEY value works; auth is the blind credit header (x-drouter-credit) or per-IP free tier`,
-      `export OPENAI_BASE_URL="${gatewayUrl}"`,
-      `export OPENAI_API_KEY="drouter-anonymous"`,
-    ].join("\n"),
+    curlCommand: `curl -sS ${gatewayUrl}/chat/completions -H "Content-Type: application/json" -H @- -d '{"model":"${DEFAULT_MODEL}","messages":[{"role":"user","content":"Say hello."}]}' <<EOF\nAuthorization: Bearer \${DEROUTE_API_KEY:?Set your deRoute API key first}\nEOF`,
+    openaiEnvExports: `export OPENAI_BASE_URL="${gatewayUrl}"\nexport OPENAI_API_KEY="\${DEROUTE_API_KEY:?Set your deRoute API key first}"`,
     localProxyCommand: [
       `curl -fsSLO ${cleanBase}/downloads/deroute-proxy.mjs`,
       `curl -fsSLO ${cleanBase}/downloads/deroute-proxy.mjs.sha256`,
-      `shasum -a 256 -c deroute-proxy.mjs.sha256`,
-      `node deroute-proxy.mjs --port 4141`,
+      `shasum -a 256 -c deroute-proxy.mjs.sha256 && \\`,
+      `DEROUTE_ACCESS_KEY="\${DEROUTE_API_KEY:?Set your deRoute API key first}" node deroute-proxy.mjs --port 4141`,
     ].join("\n"),
   };
 }
@@ -856,10 +842,10 @@ async function runCli() {
       "deRoute CLI: terminal and coding-harness enclave helper",
       "",
       "Commands:",
-      "  node scripts/drouter-cli.mjs verify [--submit] [--key-path ~/.config/deroute/verifier-key] [--upstream https://drouter-demo.vercel.app]",
+      "  node scripts/drouter-cli.mjs verify [--submit] [--key-path ~/.config/deroute/verifier-key] [--upstream https://deroute.is-an.ai]",
       '  node scripts/drouter-cli.mjs ask "<prompt>" [--model kimi-k3-1-pro] [--upstream https://deroute.is-an.ai]',
-      "  node scripts/drouter-cli.mjs proxy [--port 4141] [--key drk_...] [--upstream https://drouter-demo.vercel.app]",
-      "  node scripts/drouter-cli.mjs config [--upstream https://drouter-demo.vercel.app]",
+      "  node scripts/drouter-cli.mjs proxy [--port 4141] [--key drk_...] [--upstream https://deroute.is-an.ai]",
+      "  node scripts/drouter-cli.mjs config [--upstream https://deroute.is-an.ai]",
     ].join("\n"),
   );
 }

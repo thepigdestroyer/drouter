@@ -320,104 +320,19 @@ export interface HarnessConfigs {
   localProxyCommand: string;
 }
 
-export function buildHarnessConfigs(baseUrl: string): HarnessConfigs {
-  const cleanBase = (baseUrl || "https://drouter-demo.vercel.app").replace(/\/+$/, "");
-  const gatewayUrl = `${cleanBase}/api/v1`;
-
-  const opencodeConfig = {
-    $schema: "https://opencode.ai/config.json",
-    provider: {
-      drouter: {
-        npm: "@ai-sdk/openai-compatible",
-        name: "deRoute Attested Enclave Gateway",
-        options: {
-          baseURL: gatewayUrl,
-          // Any non-empty apiKey value works (the OpenAI SDK requires a string);
-          // actual auth is the blind-signed x-drouter-credit header (with per-IP free-tier fallback).
-          apiKey: "drouter-anonymous",
-          _authNote:
-            "any apiKey value works, auth is the blind credit header (x-drouter-credit) with per-IP free-tier fallback",
-          headers: {
-            "x-drouter-credit": "${DROUTER_CREDIT_TOKEN}",
-          },
-        },
-        models: {
-          "kimi-k3-1-pro": { name: "Kimi K3.1 Pro (Attested Enclave)" },
-          "glm-5-3": { name: "GLM-5.3 (Attested Enclave)" },
-          "deepseek-v4-1-flash": { name: "DeepSeek V4.1 Flash (Attested Enclave)" },
-          "gpt-oss-120b": { name: "GPT-OSS 120B (Attested Enclave)" },
-          "llama3-3-70b": { name: "Llama 3.3 70B (Attested Enclave)" },
-          "gemma4-31b": { name: "Gemma 4 31B (Attested Enclave)" },
-        },
-      },
-    },
-    model: "drouter/kimi-k3-1-pro",
-  };
-
-  const opencodeJson = JSON.stringify(opencodeConfig, null, 2);
-
-  const curlCommand = [
-    `# Note: any Bearer apiKey value works (required by OpenAI SDKs); auth is the blind credit header (x-drouter-credit)`,
-    `curl -sS ${gatewayUrl}/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer drouter-anonymous" -H "x-drouter-credit: \${DROUTER_CREDIT_TOKEN:-}" -d '{"model":"kimi-k3-1-pro","messages":[{"role":"user","content":"Verify enclave connectivity in one sentence."}]}'`,
-  ].join("\n");
-
-  const openaiEnvExports = [
-    `# Any OPENAI_API_KEY value works; auth is the blind credit header (x-drouter-credit) or per-IP free tier`,
-    `export OPENAI_BASE_URL="${gatewayUrl}"`,
-    `export OPENAI_API_KEY="drouter-anonymous"`,
-  ].join("\n");
-
-  const pythonSnippet = [
-    `from openai import OpenAI`,
-    ``,
-    `# Any api_key value works (OpenAI SDK requires a non-empty string);`,
-    `# auth is the blind credit header (x-drouter-credit) with per-IP free-tier fallback.`,
-    `client = OpenAI(`,
-    `    base_url="${gatewayUrl}",`,
-    `    api_key="drouter-anonymous",`,
-    `)`,
-    `resp = client.chat.completions.create(`,
-    `    model="kimi-k3-1-pro",`,
-    `    messages=[{"role": "user", "content": "Hello from deRoute enclave!"}],`,
-    `)`,
-    `print(resp.choices[0].message.content)`,
-  ].join("\n");
-
-  const typescriptSnippet = [
-    `import OpenAI from "openai";`,
-    ``,
-    `// Any apiKey value works (OpenAI SDK requires a non-empty string);`,
-    `// auth is the blind credit header (x-drouter-credit) with per-IP free-tier fallback.`,
-    `const client = new OpenAI({`,
-    `  baseURL: "${gatewayUrl}",`,
-    `  apiKey: "drouter-anonymous",`,
-    `});`,
-    `const resp = await client.chat.completions.create({`,
-    `  model: "kimi-k3-1-pro",`,
-    `  messages: [{ role: "user", content: "Hello from deRoute enclave!" }],`,
-    `});`,
-    `console.log(resp.choices[0]?.message?.content);`,
-  ].join("\n");
-
-  const localProxyCommand = [
-    `curl -fsSLO ${cleanBase}/downloads/deroute-proxy.mjs`,
-    `curl -fsSLO ${cleanBase}/downloads/deroute-proxy.mjs.sha256`,
-    `shasum -a 256 -c deroute-proxy.mjs.sha256`,
-    `node deroute-proxy.mjs --port 4141`,
-  ].join("\n");
-
+export function buildHarnessConfigs(baseUrl = GATEWAY_ORIGIN): HarnessConfigs {
+  const setup = buildCodingToolSnippets({ mode: "hosted", hostedOrigin: baseUrl });
   return {
-    opencodeJson,
-    curlCommand,
-    openaiEnvExports,
-    pythonSnippet,
-    typescriptSnippet,
-    localProxyCommand,
+    opencodeJson: setup.byTool.opencode, curlCommand: setup.byTool.curl,
+    openaiEnvExports: `export OPENAI_BASE_URL="${setup.baseUrl}"\nexport OPENAI_API_KEY="\${DEROUTE_API_KEY:?Set your deRoute API key first}"`,
+    pythonSnippet: setup.byTool.python, typescriptSnippet: setup.byTool.typescript,
+    localProxyCommand: setup.proxyStartCommand,
   };
 }
 
 export type CodingToolId =
   | "opencode"
+  | "cline"
   | "cursor"
   | "continue"
   | "aider"
@@ -428,7 +343,8 @@ export type CodingToolId =
 export type CodingToolMode = "private" | "hosted";
 
 export const LOCAL_PROXY_BASE_URL = "http://127.0.0.1:4141/v1";
-export const HOSTED_GATEWAY_BASE_URL = "https://drouter-demo.vercel.app/api/v1";
+export const GATEWAY_ORIGIN = "https://deroute.is-an.ai";
+export const HOSTED_GATEWAY_BASE_URL = `${GATEWAY_ORIGIN}/api/v1`;
 
 export interface CodingToolSnippets {
   mode: CodingToolMode;
@@ -442,26 +358,21 @@ export interface CodingToolSnippets {
  * Builds copy-paste setup snippets for every supported coding tool (OpenCode, Cursor,
  * Continue, Aider, TypeScript OpenAI SDK, Python OpenAI SDK, curl) in either
  * Private mode (local proxy at http://127.0.0.1:4141/v1) or Hosted mode
- * (https://drouter-demo.vercel.app/api/v1 with Authorization: Bearer drk_...).
+ * (https://deroute.is-an.ai/api/v1 with Authorization: Bearer drk_...).
  */
 export function buildCodingToolSnippets(opts?: {
   mode?: CodingToolMode;
-  accessKey?: string | null;
   modelIds?: readonly string[];
   defaultModel?: string;
   hostedOrigin?: string;
 }): CodingToolSnippets {
-  const mode: CodingToolMode = opts?.mode ?? "private";
-  const cleanOrigin = (opts?.hostedOrigin || "https://drouter-demo.vercel.app").replace(/\/+$/, "");
+  const mode: CodingToolMode = opts?.mode ?? "hosted";
+  const cleanOrigin = (opts?.hostedOrigin || GATEWAY_ORIGIN).replace(/\/+$/, "");
   const hostedBaseUrl = `${cleanOrigin}/api/v1`;
   const baseUrl = mode === "private" ? LOCAL_PROXY_BASE_URL : hostedBaseUrl;
 
-  const keyOrPlaceholder =
-    opts?.accessKey && opts.accessKey.trim().startsWith("drk_")
-      ? opts.accessKey.trim()
-      : "drk_YOUR_ACCESS_KEY";
-
-  const apiKeyValue = mode === "private" ? "deroute-local" : keyOrPlaceholder;
+  const local = mode === "private";
+  const apiKeyValue = local ? "deroute-local" : "your deRoute API key";
 
   const models = filterChatCapableModelIds(opts?.modelIds);
   const primaryModel =
@@ -469,25 +380,27 @@ export function buildCodingToolSnippets(opts?: {
       ? opts.defaultModel
       : models[0] ?? "kimi-k3-1-pro";
 
-  const opencodeModelsObj: Record<string, { name: string }> = {};
+  const opencodeModelsObj: Record<string, { name: string; capabilities: { tools: boolean }; limit: {context: number; output: number} }> = {};
   for (const id of models) {
     opencodeModelsObj[id] = {
       name: `${KNOWN_MODEL_LABELS[id] ?? id} (deRoute)`,
+      capabilities: { tools: true }, limit: { context: 32768, output: 8192 },
     };
   }
 
   const opencodeConfig = {
     $schema: "https://opencode.ai/config.json",
-    provider: {
+    providers: {
       deroute: {
-        npm: "@ai-sdk/openai-compatible",
+        package: "@opencode/ai/providers/openai-compatible",
+        ...(local ? {} : { env: ["DEROUTE_API_KEY"] }),
         name:
           mode === "private"
             ? "deRoute (Local Private Proxy)"
             : "deRoute (Hosted Gateway)",
-        options: {
+        settings: {
           baseURL: baseUrl,
-          apiKey: apiKeyValue,
+          ...(local ? { apiKey: "deroute-local" } : {}),
         },
         models: opencodeModelsObj,
       },
@@ -497,12 +410,10 @@ export function buildCodingToolSnippets(opts?: {
 
   const proxyStartCommand = [
     `# 1. Download the single-file local proxy and its checksum:`,
-    `curl -fsSLO ${cleanOrigin}/downloads/deroute-proxy.mjs`,
-    `curl -fsSLO ${cleanOrigin}/downloads/deroute-proxy.mjs.sha256`,
-    `shasum -a 256 -c deroute-proxy.mjs.sha256`,
-    ``,
-    `# 2. Start the local proxy on http://127.0.0.1:4141/v1 (requires Node 20+):`,
-    `node deroute-proxy.mjs --key ${keyOrPlaceholder}`,
+    `curl -fsSLO ${cleanOrigin}/downloads/deroute-proxy.mjs && \\`,
+    `curl -fsSLO ${cleanOrigin}/downloads/deroute-proxy.mjs.sha256 && \\`,
+    `shasum -a 256 -c deroute-proxy.mjs.sha256 && \\`,
+    `DEROUTE_ACCESS_KEY="\${DEROUTE_API_KEY:?Set your deRoute API key first}" node deroute-proxy.mjs`,
   ].join("\n");
 
   const opencodeSnippet = JSON.stringify(opencodeConfig, null, 2);
@@ -520,7 +431,7 @@ export function buildCodingToolSnippets(opts?: {
   const continueModelsYaml = models
     .map(
       (id) =>
-        `  - name: deRoute ${KNOWN_MODEL_LABELS[id] ?? id}\n    provider: openai\n    model: ${id}\n    apiBase: ${baseUrl}\n    apiKey: ${apiKeyValue}\n    roles:\n      - chat\n      - edit\n      - apply`,
+        `  - name: deRoute ${KNOWN_MODEL_LABELS[id] ?? id}\n    provider: openai\n    model: ${id}\n    apiBase: ${baseUrl}\n    apiKey: ${local ? "deroute-local" : "${{ secrets.DEROUTE_API_KEY }}"}\n    capabilities: [tool_use]\n    roles:\n      - chat\n      - edit\n      - apply`,
     )
     .join("\n");
 
@@ -535,9 +446,8 @@ export function buildCodingToolSnippets(opts?: {
 
   const aiderSnippet = [
     `# Run Aider with --openai-api-base and --openai-api-key:`,
-    `aider \\`,
+    `OPENAI_API_KEY="${local ? "deroute-local" : "${DEROUTE_API_KEY:?Set your deRoute API key first}"}" aider \\`,
     `  --openai-api-base "${baseUrl}" \\`,
-    `  --openai-api-key "${apiKeyValue}" \\`,
     `  --model "openai/${primaryModel}"`,
     ``,
     `# Available models: ${models.map((m) => `openai/${m}`).join(", ")}`,
@@ -545,10 +455,12 @@ export function buildCodingToolSnippets(opts?: {
 
   const typescriptSnippet = [
     `import OpenAI from "openai";`,
+    ...(local ? [] : [`if (!process.env.DEROUTE_API_KEY) throw new Error("Set DEROUTE_API_KEY first");`]),
     ``,
     `const client = new OpenAI({`,
     `  baseURL: "${baseUrl}",`,
-    `  apiKey: "${apiKeyValue}",`,
+    `  apiKey: ${local ? '"deroute-local"' : 'process.env.DEROUTE_API_KEY'},`,
+    `  maxRetries: 0,`,
     `});`,
     ``,
     `const completion = await client.chat.completions.create({`,
@@ -560,11 +472,13 @@ export function buildCodingToolSnippets(opts?: {
   ].join("\n");
 
   const pythonSnippet = [
+    `import os`,
     `from openai import OpenAI`,
     ``,
     `client = OpenAI(`,
     `    base_url="${baseUrl}",`,
-    `    api_key="${apiKeyValue}",`,
+    `    api_key=${local ? '"deroute-local"' : 'os.environ["DEROUTE_API_KEY"]'},`,
+    `    max_retries=0,`,
     `)`,
     ``,
     `completion = client.chat.completions.create(`,
@@ -582,13 +496,14 @@ export function buildCodingToolSnippets(opts?: {
     `# Send a chat completion request:`,
     `curl -sS -X POST "${baseUrl}/chat/completions" \\`,
     `  -H "Content-Type: application/json" \\`,
-    `  -H "Authorization: Bearer ${apiKeyValue}" \\`,
+    local ? `  -H "Authorization: Bearer deroute-local" \\` : `  -H @- <<EOF \\`,
     `  -d '{`,
     `    "model": "${primaryModel}",`,
     `    "messages": [`,
     `      { "role": "user", "content": "Reply with one short sentence." }`,
     `    ]`,
     `  }'`,
+    ...(local ? [] : ["Authorization: Bearer ${DEROUTE_API_KEY:?Set your deRoute API key first}", "EOF"]),
   ].join("\n");
 
   return {
@@ -598,6 +513,7 @@ export function buildCodingToolSnippets(opts?: {
     proxyStartCommand,
     byTool: {
       opencode: opencodeSnippet,
+      cline: `In Cline / Roo Code, select OpenAI Compatible (Chat Completions).\nBase URL: ${baseUrl}\nModel ID: ${primaryModel}\nAPI key field: ${apiKeyValue}\nDisable Responses API and image input. Set max output to 8192.`,
       cursor: cursorSnippet,
       continue: continueSnippet,
       aider: aiderSnippet,

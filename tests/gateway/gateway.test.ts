@@ -315,32 +315,13 @@ describe("Gateway harness-config & Live Model Table", () => {
     expect(simBlocked.ok).toBe(false);
   });
 
-  it("builds valid OpenCode JSON and explicitly documents blind-credit auth in buildHarnessConfigs", () => {
-    const configs = buildHarnessConfigs("https://drouter-demo.vercel.app/");
-    const parsedOpencode = JSON.parse(configs.opencodeJson);
-    expect(parsedOpencode.provider.drouter.options.baseURL).toBe(
-      "https://drouter-demo.vercel.app/api/v1",
-    );
-    expect(parsedOpencode.provider.drouter.options._authNote).toContain(
-      "any apiKey value works, auth is the blind credit header",
-    );
-    expect(parsedOpencode.provider.drouter.models["kimi-k3-1-pro"]).toBeDefined();
-    expect(parsedOpencode.provider.drouter.models["glm-5-3"]).toBeDefined();
-    expect(parsedOpencode.provider.drouter.models["deepseek-v4-1-flash"]).toBeDefined();
-    expect(parsedOpencode.provider.drouter.models["gpt-oss-120b"]).toBeDefined();
-    expect(parsedOpencode.provider.drouter.models["llama3-3-70b"]).toBeDefined();
-    expect(configs.curlCommand).toContain("https://drouter-demo.vercel.app/api/v1/chat/completions");
-    expect(configs.curlCommand).toContain("auth is the blind credit header");
-    expect(configs.openaiEnvExports).toContain(
-      'export OPENAI_BASE_URL="https://drouter-demo.vercel.app/api/v1"',
-    );
-    expect(configs.openaiEnvExports).toContain("auth is the blind credit header");
-    expect(configs.pythonSnippet).toContain("auth is the blind credit header");
-    expect(configs.typescriptSnippet).toContain("auth is the blind credit header");
-    expect(configs.localProxyCommand).toContain(
-      "https://drouter-demo.vercel.app/downloads/deroute-proxy.mjs",
-    );
-    expect(configs.localProxyCommand).toContain("node deroute-proxy.mjs --port 4141");
+  it("publishes bearer-based portable configs for the canonical gateway", () => {
+    const cfg = buildHarnessConfigs();
+    const provider = JSON.parse(cfg.opencodeJson).providers.deroute;
+    expect(provider.settings.baseURL).toBe("https://deroute.is-an.ai/api/v1");
+    expect(provider.env).toEqual(["DEROUTE_API_KEY"]);
+    expect(provider.models["kimi-k3-1-pro"].capabilities.tools).toBe(true);
+    for (const example of Object.values(cfg)) expect(example).toContain("DEROUTE_API_KEY");
   });
 });
 

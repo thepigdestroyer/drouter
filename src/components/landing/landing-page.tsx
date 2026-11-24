@@ -48,6 +48,7 @@ export function LandingPage() {
               <InkButton variant="ghost" href={HERO_COPY.secondaryCtaHref}>
                 {HERO_COPY.secondaryCtaLabel}
               </InkButton>
+              <InkButton variant="ghost" href="/api-keys">Get an API key</InkButton>
               <span className="text-xs text-ink-3 sm:ml-2">
                 {HERO_COPY.quickNote}
               </span>

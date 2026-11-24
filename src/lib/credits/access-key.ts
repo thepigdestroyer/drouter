@@ -5,7 +5,8 @@ import type { BlindCreditToken } from "@/lib/types";
 
 export const ACCESS_KEY_PREFIX = "drk_";
 export const ACCESS_KEY_VERSION = 1;
-export const ACCESS_KEY_ORIGIN = "https://drouter-demo.vercel.app";
+export const ACCESS_KEY_ORIGIN = "https://deroute.is-an.ai";
+const LEGACY_KEY_ORIGIN = "https://drouter-demo.vercel.app";
 export const MAX_ACCESS_KEY_TOKENS = 50;
 
 export interface CompactAccessKeyToken {
@@ -186,7 +187,7 @@ export function encodeAccessKey(
  */
 export function decodeAccessKey(
   rawKey: unknown,
-  expectedOrigin: string = ACCESS_KEY_ORIGIN,
+  expectedOrigin?: string,
 ): DecodeAccessKeyResult {
   if (typeof rawKey !== "string") {
     return { ok: false, error: "Access key must be a string" };
@@ -238,10 +239,12 @@ export function decodeAccessKey(
     return { ok: false, error: `Unsupported access key version: ${String(obj.v)}` };
   }
 
-  if (typeof obj.origin !== "string" || obj.origin !== expectedOrigin) {
+  if (typeof obj.origin !== "string" || !(expectedOrigin !== undefined
+    ? obj.origin === expectedOrigin
+    : obj.origin === ACCESS_KEY_ORIGIN || obj.origin === LEGACY_KEY_ORIGIN)) {
     return {
       ok: false,
-      error: `Wrong access key origin: expected ${expectedOrigin}`,
+      error: "Wrong access key origin",
     };
   }
 
@@ -309,7 +312,7 @@ export function decodeAccessKey(
   return {
     ok: true,
     version: ACCESS_KEY_VERSION,
-    origin: expectedOrigin,
+    origin: obj.origin,
     tokens: checked.normalized,
   };
 }

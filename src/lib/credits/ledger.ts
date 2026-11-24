@@ -275,7 +275,7 @@ async function getMongoDb(): Promise<Db | null> {
         .catch(() => null);
     }
     const db = await mongoDbPromise;
-    if (!db) return null;
+    if (!db) { mongoDbPromise = null; return null; }
     if (!mongoIndexesPromise) {
       mongoIndexesPromise = Promise.all([
         db
@@ -304,7 +304,7 @@ async function getMongoDb(): Promise<Db | null> {
           ),
       ])
         .then(() => undefined)
-        .catch(() => undefined);
+        .catch((err) => { mongoIndexesPromise = null; throw err; });
     }
     await mongoIndexesPromise;
     return db;
@@ -1207,6 +1207,8 @@ export async function spendToken(
     };
 
     const col = process.env.VITEST ? null : await getNullifierCollection();
+    const offline = { ok: false, status: 503, error: "Credit ledger unavailable. Please retry later." } as const;
+    if (!col && !process.env.VITEST) return offline;
     if (col) {
       try {
         const res = await col.updateOne(
@@ -1231,6 +1233,7 @@ export async function spendToken(
             status: 409,
           };
         }
+        return offline;
       }
     }
 

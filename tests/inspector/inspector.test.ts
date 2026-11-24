@@ -217,7 +217,7 @@ describe("Record Inspector live URL & record helpers", () => {
 
 describe("Terminal modal verbatim commands & snippets", () => {
   it("normalizes base URLs and upgrades plain HTTP localhost to HTTPS for CLI upstream", () => {
-    expect(normalizeBaseUrl("https://drouter-demo.vercel.app/")).toBe(
+    expect(normalizeBaseUrl("https://deroute.is-an.ai/")).toBe(
       PRODUCTION_BASE_URL,
     );
     expect(resolveCliUpstreamUrl("http://localhost:3000")).toBe(
@@ -246,32 +246,32 @@ describe("Terminal modal verbatim commands & snippets", () => {
       "node scripts/drouter-cli.mjs proxy",
     );
     expect(snippets.curlSnippet).toContain(
-      `curl ${PRODUCTION_BASE_URL}/v1/models`,
+      `${PRODUCTION_BASE_URL}/api/v1/models`,
     );
     expect(snippets.envSnippet).not.toContain("sim-echo-1");
     expect(snippets.envSnippet).toContain("kimi-k3-1-pro");
     expect(snippets.envSnippet).toContain("gemma4-31b");
     expect(snippets.sdkSnippet).toContain(
-      `baseURL: "${PRODUCTION_BASE_URL}/v1"`,
+      `baseURL: "${PRODUCTION_BASE_URL}/api/v1"`,
     );
-    expect(snippets.sdkSnippet).toContain("x-drouter-credit");
-    expect(snippets.sdkSnippet).toContain("deRoute accepts any value");
+    expect(snippets.sdkSnippet).toContain("DEROUTE_API_KEY");
+    expect(snippets.sdkSnippet).not.toContain("any value");
     expect(snippets.sdkSnippet).not.toContain("dRouter");
     expect(snippets.sdkSnippet).not.toContain("sim-echo-1");
     const parsedOpencode = JSON.parse(snippets.opencodeConfig);
     expect(
-      parsedOpencode.provider["drouter-confidential"].options.baseURL,
-    ).toBe(`${PRODUCTION_BASE_URL}/v1`);
+      parsedOpencode.providers.deroute.settings.baseURL,
+    ).toBe(`${PRODUCTION_BASE_URL}/api/v1`);
     expect(
-      parsedOpencode.provider["drouter-confidential"].options.apiKey,
-    ).toBe("drk_YOUR_ACCESS_KEY");
+      parsedOpencode.providers.deroute.env[0],
+    ).toBe("DEROUTE_API_KEY");
     expect(
-      parsedOpencode.provider["drouter-confidential"].models["voxtral-small-24b"],
+      parsedOpencode.providers.deroute.models["voxtral-small-24b"],
     ).toBeUndefined();
-    expect(parsedOpencode.provider["drouter-confidential"].name).toBe(
-      "deRoute Confidential TEE (Attested)",
+    expect(parsedOpencode.providers.deroute.name).toBe(
+      "deRoute (Hosted Gateway)",
     );
-    expect(parsedOpencode.model).toBe("drouter-confidential/kimi-k3-1-pro");
+    expect(parsedOpencode.model).toBe("deroute/kimi-k3-1-pro");
   });
 });
 
@@ -350,14 +350,14 @@ describe("Shared InkModal accessibility, layout, summary, and deRoute branding",
       }),
     );
 
-    expect(terminalHtml).toContain("Use deRoute from Terminal, OpenCode, or Cursor");
+    expect(terminalHtml).toContain("Use deRoute from Terminal or a coding agent");
     expect(terminalHtml).toContain(
       "What this shows: how developers can use deRoute from their own computer or code editor. You do not need any of this to use the chat.",
     );
     expect(terminalHtml).not.toContain(
       "What this shows: the sealed computer&#x27;s signed proof",
     );
-    expect(terminalHtml).toContain("https://drouter-demo.vercel.app/v1");
+    expect(terminalHtml).toContain("https://deroute.is-an.ai/api/v1");
     expect(terminalHtml).toContain("scripts/drouter-cli.mjs verify");
     expect(terminalHtml).not.toContain("sim-echo-1");
     expect(terminalHtml).not.toContain("dRouter");

@@ -6,6 +6,7 @@ import {
   getCurrentVaultSession,
   openVaultBundle,
   sealVaultBundle,
+  subscribeVaultSession,
 } from "@/lib/auth/vault";
 import {
   blindToken,
@@ -29,6 +30,12 @@ export interface PendingAccessKeyRecord {
 
 let memoryStore: BlindCreditToken[] = [];
 let pendingAccessKeyMemory: PendingAccessKeyRecord | null = null;
+let pendingVaultId: string | null = null;
+subscribeVaultSession(() => {
+  if ((getCurrentVaultSession()?.vaultId ?? null) !== pendingVaultId) {
+    pendingAccessKeyMemory = null;
+  }
+});
 let ephemeralWalletKey: Uint8Array | null = null;
 
 function getWalletStorageKey(): Uint8Array {
@@ -262,8 +269,8 @@ export function selectTokensForTargetCredits(
   };
 }
 
-function writePendingAccessKey(record: PendingAccessKeyRecord): void {
-  if (typeof window !== "undefined" && window.localStorage) {
+function writePendingAccessKey(record: PendingAccessKeyRecord, persist = false): void {
+  if (persist && typeof window !== "undefined" && window.localStorage) {
     const vault = getCurrentVaultSession();
     if (vault && vault.vaultKeyHex && /^[0-9a-fA-F]{64}$/.test(vault.vaultKeyHex)) {
       const sealed = sealVaultBundle(
@@ -298,6 +305,7 @@ function writePendingAccessKey(record: PendingAccessKeyRecord): void {
     }
   }
   pendingAccessKeyMemory = { ...record };
+  pendingVaultId = getCurrentVaultSession()?.vaultId ?? null;
 }
 
 function parsePendingRecord(raw: unknown): PendingAccessKeyRecord | null {
@@ -344,7 +352,6 @@ export function readPendingAccessKey(): PendingAccessKeyRecord | null {
             );
             const record = parsePendingRecord(JSON.parse(payload.notes ?? "{}"));
             if (record) {
-              pendingAccessKeyMemory = record;
               return { ...record };
             }
           }
@@ -362,14 +369,11 @@ export function readPendingAccessKey(): PendingAccessKeyRecord | null {
             JSON.parse(new TextDecoder().decode(pt)),
           );
           if (record) {
-            pendingAccessKeyMemory = record;
             return { ...record };
           }
         }
       }
-    } catch {
-      // Fall back to session-only memory if storage entry belongs to another session
-    }
+    } catch { /* A different vault cannot open the encrypted recovery copy. */ }
   }
   return pendingAccessKeyMemory ? { ...pendingAccessKeyMemory } : null;
 }
@@ -393,7 +397,7 @@ export function clearPendingAccessKey(): void {
  */
 export function moveTokensToAccessKey(
   tokenCount: number,
-  opts?: { onAfterKeyWritten?: (key: string) => void }
+  opts?: { onAfterKeyWritten?: (key: string) => void; persistPending?: boolean }
 ): MoveTokensToAccessKeyResult {
   if (!Number.isInteger(tokenCount) || tokenCount < 1 || tokenCount > 50) {
     throw new Error("tokenCount must be an integer between 1 and 50");
@@ -417,7 +421,7 @@ export function moveTokensToAccessKey(
     creditsMoved,
     tokenCount: selected.length,
     createdAt: Date.now(),
-  });
+  }, opts?.persistPending);
 
   if (opts?.onAfterKeyWritten) {
     opts.onAfterKeyWritten(key);
@@ -447,7 +451,7 @@ export function moveTokensToAccessKey(
  */
 export function moveCreditsToAccessKey(
   targetCredits: number,
-  opts?: { onAfterKeyWritten?: (key: string) => void }
+  opts?: { onAfterKeyWritten?: (key: string) => void; persistPending?: boolean }
 ): MoveTokensToAccessKeyResult {
   if (!Number.isInteger(targetCredits) || targetCredits < 1 || targetCredits > 1000) {
     throw new Error("targetCredits must be a positive integer");
@@ -472,7 +476,7 @@ export function moveCreditsToAccessKey(
     creditsMoved: selection.creditsMoved,
     tokenCount: selection.selected.length,
     createdAt: Date.now(),
-  });
+  }, opts?.persistPending);
 
   if (opts?.onAfterKeyWritten) {
     opts.onAfterKeyWritten(key);

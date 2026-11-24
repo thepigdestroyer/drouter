@@ -1,5 +1,5 @@
 import {
-  CHAT_GATEWAY_MODEL_IDS,
+  CHAT_GATEWAY_MODEL_IDS, buildCodingToolSnippets, GATEWAY_ORIGIN,
   filterChatCapableModelIds,
   isChatCapableGatewayModel,
 } from "@/lib/gateway/harness-config";
@@ -15,7 +15,7 @@ export interface TerminalSnippets {
   sdkSnippet: string;
 }
 
-export const PRODUCTION_BASE_URL = "https://drouter-demo.vercel.app";
+export const PRODUCTION_BASE_URL = GATEWAY_ORIGIN;
 export const REPO_CLONE_URL = "https://github.com/thepigdestroyer/drouter";
 
 export const DEFAULT_LIVE_MODEL_IDS = CHAT_GATEWAY_MODEL_IDS;
@@ -37,7 +37,7 @@ export function normalizeBaseUrl(baseUrl?: string): string {
  * Resolves the upstream HTTPS URL for `node scripts/drouter-cli.mjs`.
  * Because the Tinfoil SDK requires an HTTPS `attestationBundleURL`,
  * plain `http://localhost` origins automatically point the CLI upstream
- * at `https://drouter-demo.vercel.app`.
+ * at `https://deroute.is-an.ai`.
  */
 export function resolveCliUpstreamUrl(baseUrl?: string): string {
   const clean = normalizeBaseUrl(baseUrl);
@@ -55,116 +55,17 @@ export function buildTerminalSnippets(
   const cleanBase = normalizeBaseUrl(baseUrl);
   const resolvedModel = sanitizeLiveModelId(defaultModel);
   const modelList = filterChatCapableModelIds(liveModelIds);
-  const gatewayV1 = `${cleanBase}/v1`;
-  const prodV1 = `${PRODUCTION_BASE_URL}/v1`;
   const cliUpstream = resolveCliUpstreamUrl(cleanBase);
   const upstreamFlag =
     cliUpstream === PRODUCTION_BASE_URL ? "" : ` --upstream ${cliUpstream}`;
 
-  const opencodeConfig = `{
-  "$schema": "https://opencode.ai/config.json",
-  "provider": {
-    "drouter-confidential": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "deRoute Confidential TEE (Attested)",
-      "options": {
-        "baseURL": "${prodV1}",
-        "apiKey": "drk_YOUR_ACCESS_KEY"
-      },
-      "models": {
-        "kimi-k3-1-pro": {
-          "name": "Kimi K3.1 Pro (256K context)"
-        },
-        "glm-5-3": {
-          "name": "GLM-5.3 (AMD SEV-SNP + NVIDIA CC GPUs)"
-        },
-        "deepseek-v4-1-flash": {
-          "name": "DeepSeek V4.1 Flash (Intel TDX + NVIDIA CC GPUs)"
-        },
-        "gpt-oss-120b": {
-          "name": "GPT-OSS 120B (Intel TDX + NVIDIA CC GPU)"
-        },
-        "llama3-3-70b": {
-          "name": "Llama 3.3 70B Instruct (Intel TDX + NVIDIA CC GPU)"
-        },
-        "gemma4-31b": {
-          "name": "Gemma 4 31B (AMD SEV-SNP / Intel TDX + NVIDIA CC GPUs)"
-        }
-      }
-    }
-  },
-  "model": "drouter-confidential/${resolvedModel}"
-}`;
-
-  const opencodeRemoteComment = `// Recommended: create an access key (drk_...) on your Account page (${PRODUCTION_BASE_URL}/account)
-// and run the local proxy: node deroute-proxy.mjs --key drk_...
-// Then set "baseURL": "http://127.0.0.1:4141/v1" (or use "apiKey": "drk_YOUR_ACCESS_KEY" in hosted mode; any non-empty string falls back to the free tier).`;
-
-  const proxySnippet = `# Recommended: create an access key (drk_...) on your Account page (${PRODUCTION_BASE_URL}/account)
-# Download the single-file local proxy and verify its checksum:
-curl -fsSLO ${PRODUCTION_BASE_URL}/downloads/deroute-proxy.mjs
-curl -fsSLO ${PRODUCTION_BASE_URL}/downloads/deroute-proxy.mjs.sha256
-shasum -a 256 -c deroute-proxy.mjs.sha256
-
-# Start the local proxy on http://127.0.0.1:4141/v1 (or set DEROUTE_ACCESS_KEY=drk_...):
-node deroute-proxy.mjs --key drk_YOUR_ACCESS_KEY`;
-
-  const envSnippet = `# Private mode (recommended): run "node deroute-proxy.mjs --key drk_..." from /account
-export OPENAI_BASE_URL="http://127.0.0.1:4141/v1"
-export OPENAI_API_KEY="deroute-local"
-
-# Hosted mode (convenient, our server filters your words before forwarding):
-export OPENAI_BASE_URL="${prodV1}"
-export OPENAI_API_KEY="drk_YOUR_ACCESS_KEY" # or "any-value" for the per-network free tier
-
-# Live Models (/v1/models): ${modelList.join(" | ")}`;
-
-  const curlSnippet = `# 1. List attested enclave models:
-curl ${prodV1}/models
-
-# 2. Hosted mode with an access key from /account (Authorization: Bearer drk_...):
-curl -sS -X POST "${prodV1}/chat/completions" \\
-  -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer drk_YOUR_ACCESS_KEY" \\
-  -d '{
-    "model": "${resolvedModel}",
-    "messages": [
-      { "role": "user", "content": "Reply with one short sentence." }
-    ]
-  }'
-
-# 3. Verify all 7 checks and ask from the local zero-trust CLI:
-git clone ${REPO_CLONE_URL} && cd drouter && npm ci && node scripts/drouter-cli.mjs verify${upstreamFlag}
-node scripts/drouter-cli.mjs ask "Explain AMD SEV-SNP in one sentence." --model ${resolvedModel}${upstreamFlag}`;
-
-  const sdkSnippet = `// TypeScript / Node.js (OpenAI SDK)
-import OpenAI from "openai";
-
-const client = new OpenAI({
-  baseURL: "${prodV1}", // or "${gatewayV1}" or "http://127.0.0.1:4141/v1" with node deroute-proxy.mjs --key drk_...
-  apiKey: "drk_YOUR_ACCESS_KEY", // Create a drk_... key on /account; deRoute accepts any value for the free tier (x-drouter-credit header also supported)
-});
-
-const response = await client.chat.completions.create({
-  model: "${resolvedModel}",
-  messages: [{ role: "user", content: "Summarize how AMD SEV-SNP isolates guest memory." }],
-});
-console.log(response.choices[0]?.message?.content);
-
-# ---------------------------------------------------------
-# Python (openai >= 1.0)
-from openai import OpenAI
-
-client = OpenAI(
-    base_url="${prodV1}",  # or "http://127.0.0.1:4141/v1"
-    api_key="drk_YOUR_ACCESS_KEY",  # Create a drk_... key on /account; any non-empty string uses the free tier (x-drouter-credit header also supported)
-)
-
-res = client.chat.completions.create(
-    model="${resolvedModel}",
-    messages=[{"role": "user", "content": "Summarize how AMD SEV-SNP isolates guest memory."}],
-)
-print(res.choices[0].message.content)`;
+  const setup = buildCodingToolSnippets({mode:"hosted", defaultModel: resolvedModel, modelIds: modelList});
+  const opencodeConfig = setup.byTool.opencode;
+  const opencodeRemoteComment = `// Get a key at ${PRODUCTION_BASE_URL}/api-keys and set DEROUTE_API_KEY for the OpenCode server.`;
+  const proxySnippet = setup.proxyStartCommand;
+  const envSnippet = `export OPENAI_BASE_URL="${setup.baseUrl}"\nexport OPENAI_API_KEY="\${DEROUTE_API_KEY:?Set your deRoute API key first}"\n# Models: ${modelList.join(" | ")}`;
+  const curlSnippet = `${setup.byTool.curl}\n\n# Independent enclave verification:\ngit clone ${REPO_CLONE_URL} && cd drouter && npm ci && node scripts/drouter-cli.mjs verify${upstreamFlag}`;
+  const sdkSnippet = `${setup.byTool.typescript}\n\n# Python\n${setup.byTool.python}`;
 
   return {
     opencodeConfig,

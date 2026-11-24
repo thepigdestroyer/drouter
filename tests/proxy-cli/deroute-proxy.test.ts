@@ -77,7 +77,7 @@ afterEach(() => {
 });
 
 describe("K2: deroute-proxy unit & integration tests", () => {
-  it("decodes access keys strictly, creates spent.json with mode 0600, rotates tokens across restarts, and falls back to the free tier when exhausted", async () => {
+  it("decodes access keys strictly, creates spent.json with mode 0600, rotates tokens across restarts, and stops at the supplied budget", async () => {
     const tmpDir = makeTempDir("deroute-proxy-spent");
     const spentPath = path.join(tmpDir, ".config", "deroute", "spent.json");
     const tokens = makeSampleTokens(2);
@@ -213,12 +213,9 @@ describe("K2: deroute-proxy unit & integration tests", () => {
           }),
         },
       );
-      expect(res3.status).toBe(200);
+      expect(res3.status).toBe(402);
       expect(res3.headers.get("x-drouter-credits-remaining")).toBe("0");
-      expect(observedHeaders[2]["x-drouter-credit"]).toBeUndefined();
-      expect(stderrLines.some((l) => l.includes("falling back to free tier"))).toBe(
-        true,
-      );
+      expect(observedHeaders).toHaveLength(2);
 
       // Never logs keys, tokens, or request bodies
       const allLogs = [...stdoutLines, ...stderrLines].join("\n");

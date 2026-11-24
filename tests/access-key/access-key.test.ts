@@ -89,6 +89,7 @@ import { resetRateLimitStateForTests } from "@/lib/ratelimit";
 import { canonicalJson } from "@/lib/transparency/log";
 import type { BlindCreditToken } from "@/lib/types";
 import { POST as postChatCompletions } from "@/app/api/v1/chat/completions/route";
+import ApiKeysPage from "@/app/api-keys/page";
 import AccountPage from "@/app/account/page";
 import fs from "node:fs";
 import path from "node:path";
@@ -108,6 +109,11 @@ function encodeRawBase64Url(jsonText: string): string {
 }
 
 describe("K1: Access key format (encodeAccessKey & strict decodeAccessKey)", () => {
+  it("issues canonical keys and accepts existing keys from the original issuer host", () => {
+    expect(ACCESS_KEY_ORIGIN).toBe("https://deroute.is-an.ai");
+    const legacy = encodeRawBase64Url(JSON.stringify({v:1, origin:"https://drouter-demo.vercel.app", tokens:[{t:"aa",s:"bb",d:1}]}));
+    expect(decodeAccessKey(legacy).ok).toBe(true);
+  });
   it("completes round-trip for 1 to 50 tokens and matches canonicalJson format", () => {
     const tokens = [
       makeSampleToken(1, 1),
@@ -500,11 +506,11 @@ describe("Step 3 (K3): Hosted /api/v1/chat/completions Bearer drk_ support", () 
     expect(body.error.message).toContain(
       "All credits in this access key have been spent",
     );
-    expect(body.error.message).toContain("/account");
+    expect(body.error.message).toContain("/api-keys");
     expect(tinfoilMocks.createCompletion).not.toHaveBeenCalled();
   });
 
-  it("returns 400 on a malformed drk_ access key and falls back to free tier on any non-drk_ bearer value", async () => {
+  it("rejects malformed keys; only the documented anonymous sentinel selects the legacy free tier", async () => {
     const badReq = new Request("http://localhost/api/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -518,11 +524,15 @@ describe("Step 3 (K3): Hosted /api/v1/chat/completions Bearer drk_ support", () 
     });
 
     const badRes = await postChatCompletions(badReq);
-    expect(badRes.status).toBe(400);
+    expect(badRes.status).toBe(401);
     const badJson = await badRes.json();
     expect(badJson.error.message).toContain("Malformed deRoute access key");
 
-    // Non-drk_ bearer value uses the free tier without calling verifyAndSpendCreditHeader
+    for (const authorization of ["Bearer unknown", "Bearer", "Basic invalid", ""]) {
+      const req = new Request("http://localhost/api/v1/chat/completions", {method:"POST", headers:{authorization}, body:JSON.stringify({messages:[{role:"user",content:"Hello"}]})});
+      expect((await postChatCompletions(req)).status).toBe(401);
+    }
+    expect(tinfoilMocks.createCompletion).not.toHaveBeenCalled();
     tinfoilMocks.createCompletion.mockResolvedValueOnce({
       id: "chatcmpl-free-1",
       object: "chat.completion",
@@ -541,7 +551,7 @@ describe("Step 3 (K3): Hosted /api/v1/chat/completions Bearer drk_ support", () 
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: "Bearer any-value",
+        Authorization: "Bearer drouter-anonymous",
       },
       body: JSON.stringify({
         model: "kimi-k3-1-pro",
@@ -561,19 +571,19 @@ describe("Step 4 (K4): Coding tool snippets & Account page SSR render safety", (
 
     const priv = buildCodingToolSnippets({
       mode: "private",
-      accessKey: sampleKey,
+      ...{accessKey: sampleKey},
     });
     expect(priv.baseUrl).toBe(LOCAL_PROXY_BASE_URL);
-    expect(priv.proxyStartCommand).toContain(`node deroute-proxy.mjs --key ${sampleKey}`);
+    expect(JSON.stringify(priv).includes(sampleKey)).toBe(false);
     expect(priv.proxyStartCommand).toContain("deroute-proxy.mjs.sha256");
 
     const parsedPrivOpencode = JSON.parse(priv.byTool.opencode);
     expect(parsedPrivOpencode.$schema).toBe("https://opencode.ai/config.json");
-    expect(parsedPrivOpencode.provider.deroute.npm).toBe("@ai-sdk/openai-compatible");
-    expect(parsedPrivOpencode.provider.deroute.options.baseURL).toBe(
+    expect(parsedPrivOpencode.providers.deroute.package).toBe("@opencode/ai/providers/openai-compatible");
+    expect(parsedPrivOpencode.providers.deroute.settings.baseURL).toBe(
       "http://127.0.0.1:4141/v1",
     );
-    expect(parsedPrivOpencode.provider.deroute.models["kimi-k3-1-pro"]).toBeDefined();
+    expect(parsedPrivOpencode.providers.deroute.models["kimi-k3-1-pro"]).toBeDefined();
     expect(parsedPrivOpencode.model).toBe("deroute/kimi-k3-1-pro");
 
     expect(priv.byTool.cursor).toContain("http://127.0.0.1:4141/v1");
@@ -586,18 +596,22 @@ describe("Step 4 (K4): Coding tool snippets & Account page SSR render safety", (
 
     const hosted = buildCodingToolSnippets({
       mode: "hosted",
-      accessKey: sampleKey,
+      ...{accessKey: sampleKey},
     });
     expect(hosted.baseUrl).toBe(HOSTED_GATEWAY_BASE_URL);
     const parsedHostedOpencode = JSON.parse(hosted.byTool.opencode);
-    expect(parsedHostedOpencode.provider.deroute.options.baseURL).toBe(
-      "https://drouter-demo.vercel.app/api/v1",
+    expect(parsedHostedOpencode.providers.deroute.settings.baseURL).toBe(
+      "https://deroute.is-an.ai/api/v1",
     );
-    expect(parsedHostedOpencode.provider.deroute.options.apiKey).toBe(sampleKey);
-    expect(hosted.byTool.curl).toContain(`Authorization: Bearer ${sampleKey}`);
+    expect(parsedHostedOpencode.providers.deroute.env).toEqual(["DEROUTE_API_KEY"]);
+    expect(JSON.stringify(hosted).includes(sampleKey)).toBe(false);
+    expect(hosted.byTool.curl).toContain("Authorization: Bearer ${DEROUTE_API_KEY");
   });
 
   it("renders AccountPage via renderToStaticMarkup without reading localStorage or calling crypto.getRandomValues during render", () => {
+    const setup = renderToStaticMarkup(React.createElement(ApiKeysPage));
+    expect(setup).toContain("https://deroute.is-an.ai/api/v1");
+    expect(setup).not.toContain("access-key-value");
     const html = renderToStaticMarkup(React.createElement(AccountPage));
     expect(html).toContain("deRoute");
     expect(html).not.toContain("—");
@@ -757,13 +771,19 @@ describe("Review Fixes (I1-I4, M1-M4)", () => {
 
       // When storage write succeeds, pending key is encrypted with vault and readable via readPendingAccessKey
       failWalletWrite = false;
-      const okMove = moveCreditsToAccessKey(5);
+      const okMove = moveCreditsToAccessKey(5, {persistPending:true});
       expect(storedCreditBalance()).toBe(0);
       const vaultPending = readPendingAccessKey();
       expect(vaultPending?.key).toBe(okMove.key);
       const rawPendingJson = storageMap.get(PENDING_ACCESS_KEY_STORAGE_KEY) ?? "";
       expect(rawPendingJson).toContain("drouter-pending-access-key-v1-vault");
       expect(rawPendingJson).not.toContain(okMove.key);
+      clearPendingAccessKey();
+      storeCreditTokens([makeSampleToken(31,1)]);
+      moveCreditsToAccessKey(1);
+      expect(storageMap.has(PENDING_ACCESS_KEY_STORAGE_KEY)).toBe(false);
+      lockVault();
+      expect(readPendingAccessKey()).toBeNull();
     } finally {
       lockVault();
       if (origWindow === undefined) {
@@ -1014,11 +1034,8 @@ describe("Review Fixes (I1-I4, M1-M4)", () => {
     expect(res.headers.get("X-DRouter-Credits-Remaining")).toBe("1");
   });
 
-  it("M4: terminal snippet opencodeConfig uses drk_YOUR_ACCESS_KEY", () => {
-    const snippets = buildTerminalSnippets();
-    const parsed = JSON.parse(snippets.opencodeConfig);
-    expect(parsed.provider["drouter-confidential"].options.apiKey).toBe(
-      "drk_YOUR_ACCESS_KEY",
-    );
+  it("uses an environment credential for the terminal OpenCode config", () => {
+    const config = JSON.parse(buildTerminalSnippets().opencodeConfig);
+    expect(config.providers.deroute.env).toEqual(["DEROUTE_API_KEY"]);
   });
 });

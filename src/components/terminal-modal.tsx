@@ -87,7 +87,7 @@ export function TerminalModal({
   const tabs: Array<{ id: TerminalTabId; label: string }> = [
     { id: "opencode", label: "1. OpenCode (opencode.json)" },
     { id: "proxy", label: "2. Local CLI Proxy" },
-    { id: "env", label: "3. Claude Code / Cursor" },
+    { id: "env", label: "3. OpenAI SDK environment" },
     { id: "curl", label: "4. curl & CLI" },
     { id: "sdk", label: "5. Python / TS SDK" },
   ];
@@ -109,12 +109,12 @@ export function TerminalModal({
       onClose={onClose}
       titleId="terminal-modal-title"
       eyebrow="CLI & IDE Integration"
-      title="Use deRoute from Terminal, OpenCode, or Cursor"
+      title="Use deRoute from Terminal or a coding agent"
       subtitle={
         <>
           Route your coding agent or scripts through sealed computers at{" "}
           <code className="font-mono text-ink">
-            https://drouter-demo.vercel.app/v1
+            https://deroute.is-an.ai/api/v1
           </code>{" "}
           or via the local zero-trust HPKE CLI proxy.
         </>
@@ -131,18 +131,7 @@ export function TerminalModal({
           <strong className="font-medium text-ink">
             Access keys &amp; Account page setup:
           </strong>{" "}
-          Open your{" "}
-          <a href="/account" className="ep-link font-medium text-ink">
-            Account page (/account)
-          </a>{" "}
-          to create a portable <code className="font-mono text-ink">drk_...</code>{" "}
-          access key from your anonymous tokens and copy ready-made setup for
-          OpenCode, Cursor, Continue, Aider, TypeScript, Python, or curl.
-          OpenAI SDKs also accept any non-empty{" "}
-          <code className="font-mono text-ink">apiKey</code> string (such as{" "}
-          <code className="font-mono text-ink">&quot;any-value&quot;</code>) for
-          the per-network free tier, or an optional{" "}
-          <code className="font-mono text-ink">x-drouter-credit</code> header.
+          <a href="/api-keys" className="ep-link font-medium text-ink">Get an API key</a> and configure your OpenAI-compatible coding agent. Hosted requests are visible to the gateway. One signed token is spent per request.
         </div>
         <div>
           <strong className="font-medium text-ink">
@@ -150,7 +139,7 @@ export function TerminalModal({
           </strong>{" "}
           Run{" "}
           <code className="font-mono text-ink">
-            node deroute-proxy.mjs --key drk_...
+            node deroute-proxy.mjs (set DEROUTE_ACCESS_KEY first)
           </code>{" "}
           on your machine to listen on{" "}
           <code className="font-mono text-ink">http://127.0.0.1:4141/v1</code>{" "}

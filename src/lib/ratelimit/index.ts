@@ -214,13 +214,16 @@ export function createGlobalBucketLimiter(opts: {
   now?: () => number;
 }) {
   const nowFn = opts.now ?? Date.now;
-  let state: BucketState | null = null;
+  const stateKey = "global:" + opts.name;
 
   return {
     consume(cost = 1): { allowed: boolean; remaining: number; retryAfterSec: number } {
       const nowMs = nowFn();
+      const buckets = getBucketMap(stateKey);
+      let state = buckets.get("all");
       if (!state) {
         state = { tokens: opts.capacity, lastRefillMs: nowMs };
+        buckets.set("all", state);
       } else {
         const elapsedSec = Math.max(0, (nowMs - state.lastRefillMs) / 1000);
         if (elapsedSec > 0) {
@@ -240,8 +243,10 @@ export function createGlobalBucketLimiter(opts: {
       if (!Number.isFinite(bonusTokens) || bonusTokens <= 0) return;
       const nowMs = nowFn();
       const maxCap = opts.capacity * Math.max(1, maxCapMultiplier);
+      const buckets = getBucketMap(stateKey);
+      const state = buckets.get("all");
       if (!state) {
-        state = { tokens: Math.min(maxCap, opts.capacity + bonusTokens), lastRefillMs: nowMs };
+        buckets.set("all", { tokens: Math.min(maxCap, opts.capacity + bonusTokens), lastRefillMs: nowMs });
       } else {
         const elapsedSec = Math.max(0, (nowMs - state.lastRefillMs) / 1000);
         if (elapsedSec > 0) {
@@ -252,7 +257,7 @@ export function createGlobalBucketLimiter(opts: {
       }
     },
     reset() {
-      state = null;
+      getBucketMap(stateKey).clear();
     },
   };
 }

@@ -63,6 +63,11 @@ export const SEO_PAGES: ReadonlyArray<SeoPage> = [
     priority: 1.0,
   },
   {
+    path: "/api-keys", title: "Get an API Key for Your Coding Agent | deRoute",
+    description: "Create a credit-backed deRoute API key for your coding agent. Copy model settings for OpenCode, Continue or Cline, and choose hosted or locally encrypted chat.",
+    breadcrumb: "API keys", indexable: true, lastModified: "2026-11-24", changeFrequency: "weekly", priority: 0.8,
+  },
+  {
     path: "/explain",
     title: "How Private AI Routing Works, Step by Step | deRoute",
     description:

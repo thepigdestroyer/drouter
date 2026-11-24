@@ -124,18 +124,9 @@ export async function GET(req: Request): Promise<Response> {
   const limited = verifyLimiter.check(req, CORS_HEADERS);
   if (limited) return limited;
 
-  let baseUrl = "https://drouter-demo.vercel.app";
   let requestedModel = "kimi-k3-1-pro";
   try {
     const url = new URL(req.url);
-    if (
-      (url.protocol === "http:" || url.protocol === "https:") &&
-      url.origin &&
-      url.origin !== "null" &&
-      /^[a-zA-Z0-9.:-]+$/.test(url.host)
-    ) {
-      baseUrl = url.origin;
-    }
     const modelParam = url.searchParams.get("model")?.trim();
     if (modelParam && /^[a-zA-Z0-9._-]+$/.test(modelParam)) {
       requestedModel = modelParam;
@@ -160,7 +151,7 @@ export async function GET(req: Request): Promise<Response> {
       )
     : null;
 
-  const harnessConfigs = buildHarnessConfigs(baseUrl);
+  const harnessConfigs = buildHarnessConfigs();
   const allChecksOk = checks ? checks.every((c) => c.status !== "fail") : false;
   const ok = Boolean(doc?.securityVerified && allChecksOk);
 

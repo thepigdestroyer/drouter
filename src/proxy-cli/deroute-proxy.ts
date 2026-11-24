@@ -2,7 +2,7 @@
  * deRoute Downloadable Local Private Proxy (K2)
  *
  * Usage:
- *   node deroute-proxy.mjs [--key drk_...] [--port 4141] [--upstream https://drouter-demo.vercel.app]
+ *   node deroute-proxy.mjs [--key drk_...] [--port 4141] [--upstream https://deroute.is-an.ai]
  *   DEROUTE_ACCESS_KEY=drk_... node deroute-proxy.mjs
  */
 
@@ -41,7 +41,7 @@ import { padJsonPayloadToBucket } from "@/lib/relay";
 import type { BlindCreditToken, CheckResult } from "@/lib/types";
 
 export const DEFAULT_PORT = 4141;
-export const DEFAULT_UPSTREAM = "https://drouter-demo.vercel.app";
+export const DEFAULT_UPSTREAM = "https://deroute.is-an.ai";
 export const DEFAULT_MODEL = "kimi-k3-1-pro";
 export const CHAT_MODEL_ALLOWLIST = CHAT_GATEWAY_MODEL_IDS;
 export const MAX_REQUEST_BODY_BYTES = 262_144;
@@ -1738,10 +1738,9 @@ export function createDerouteProxyServer(
       const redactionsCount = messageRedactionsCount + schemaRedactionsCount;
 
       const tokenSpend = spentStore.spendNextToken();
-      if (tokenSpend.usedFreeTier) {
-        writeStderr(
-          "[deroute-proxy] Access key credits exhausted (0 remaining); falling back to free tier.",
-        );
+      if (tokenSpend.usedFreeTier && rawKey) {
+        sendJsonResponse(res, 402, { error: { type: "credit_error", message: "API key exhausted. Create a new key at /api-keys." } }, { "X-DRouter-Credits-Remaining": "0" });
+        return;
       }
 
       const upstreamHeaders: Record<string, string> = {
@@ -2299,7 +2298,7 @@ export function formatProxyHelpText(): string {
     "deroute-proxy - Local private OpenAI-compatible enclave proxy",
     "",
     "Usage:",
-    "  node deroute-proxy.mjs [--key drk_...] [--port 4141] [--upstream https://drouter-demo.vercel.app]",
+    "  node deroute-proxy.mjs [--key drk_...] [--port 4141] [--upstream https://deroute.is-an.ai]",
     "",
     "Options:",
     `  --key <drk_...>       Access key from /account (or set DEROUTE_ACCESS_KEY)`,

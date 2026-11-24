@@ -2,7 +2,7 @@ import { generatePrimeSync } from "node:crypto";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { HDKey, HARDENED_OFFSET } from "@scure/bip32";
 import { privateKeyToAccount } from "viem/accounts";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { POST as postClaimRoute } from "@/app/api/credits/claim/route";
 import { POST as postInvoiceRoute } from "@/app/api/credits/invoice/route";
 import { GET as getCreditsRoute, POST as postCreditsRoute } from "@/app/api/credits/route";
@@ -270,6 +270,20 @@ describe("Subsystem 1: Unlinkable Blind-Signed Credits & One-Time Deposit Invoic
     const rejections = raceResults.filter((r) => !r.ok && r.status === 409);
     expect(successes).toHaveLength(1);
     expect(rejections).toHaveLength(9);
+  });
+
+  it("declines a valid production token if its spend cannot be recorded durably", async () => {
+    vi.stubEnv("CREDITS_ISSUER_SEED", TEST_SEED);
+    vi.stubEnv("MONGODB_URI", "");
+    vi.stubEnv("VITEST", "");
+    try {
+      const pub = issuerPublicInfo();
+      const token = "21".repeat(32);
+      const b = blindToken(token, 1, pub);
+      const signature = unblindSignature(mintBlindedBatch([b.blindedHex], 1).signatures[0], b.rHex, pub);
+      expect(await spendToken({token, signature, denomination:1})).toMatchObject({ok:false, status:503});
+      expect(ledgerStats().spentCount).toBe(0);
+    } finally { vi.unstubAllEnvs(); }
   });
 
   it("implements interface I2 takeCreditHeader() by popping one token from storage or returning null when empty", async () => {

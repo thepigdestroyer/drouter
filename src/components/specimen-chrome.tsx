@@ -52,6 +52,7 @@ export const SIGNED_OUT_NAV_ITEMS: ReadonlyArray<{
   { label: "How it works", href: "/explain" },
   { label: "About", href: "/about" },
   { label: "Backend partners", href: "/partners" },
+  { label: "API keys", href: "/api-keys" },
 ];
 
 export const SIGNED_IN_NAV_ITEMS: ReadonlyArray<{
@@ -63,6 +64,7 @@ export const SIGNED_IN_NAV_ITEMS: ReadonlyArray<{
   { label: "Proof", href: "/audit" },
   { label: "How it works", href: "/explain" },
   { label: "Backend partners", href: "/partners" },
+  { label: "API keys", href: "/api-keys" },
 ];
 
 export function SpecimenGrainOverlay() {

@@ -4,7 +4,8 @@
 
 **deRoute** is a private AI router and split-knowledge verification system. It lets you chat with frontier AI models and run multi-step document or code reviews without the model host, Google, MongoDB, or deRoute reading your private words or personal details.
 
-- **Live deployment**: https://drouter-demo.vercel.app
+- **Live deployment**: https://deroute.is-an.ai
+- **[Get an API key](https://deroute.is-an.ai/api-keys)** for OpenAI-compatible Chat Completions clients. [Coding agent and SDK setup](docs/API.md). The hosted API sees request plaintext; use browser chat or the local proxy for client-side encryption.
 - **Source repository**: https://github.com/thepigdestroyer/drouter
 - **Deployment and operations runbook**: [docs/DEPLOY.md](docs/DEPLOY.md)
 - **Hackathon submission and demo script**: [docs/SUBMISSION.md](docs/SUBMISSION.md)
@@ -13,7 +14,7 @@
 - **Architecture in pictures**: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - **Security policy**: [SECURITY.md](SECURITY.md)
 
-*Naming note:* The product is called **deRoute**. Internal cryptographic domain labels (`drouter/v1/...`), HTTP headers (`X-DRouter-*`), environment variable names, the MongoDB `drouter` database, file and script names (`scripts/drouter-cli.mjs`, `DRouterRegistry.sol`), and the production URL (`https://drouter-demo.vercel.app`) stay unchanged for compatibility.
+*Naming note:* The product is called **deRoute**. Internal cryptographic domain labels (`drouter/v1/...`), HTTP headers (`X-DRouter-*`), environment variable names, the MongoDB `drouter` database, file and script names (`scripts/drouter-cli.mjs`, `DRouterRegistry.sol`), and the original passkey origin (`https://drouter-demo.vercel.app`) stay unchanged for compatibility.
 
 ---
 
@@ -345,19 +346,19 @@ The default workflow in the codebase (`DEMO_PERSONA` and `DEFAULT_TASK_PROMPT` i
 
 ```bash
 # 1. Verify live 2-hop Tinfoil enclave attestation and print the C1-C7 checklist
-node scripts/drouter-cli.mjs verify --upstream https://drouter-demo.vercel.app
+node scripts/drouter-cli.mjs verify --upstream https://deroute.is-an.ai
 
 # 2. Sign your C1-C7 verification claim with a local Ed25519 key and submit it to the RFC 6962 transparency log
-node scripts/drouter-cli.mjs verify --submit --upstream https://drouter-demo.vercel.app
+node scripts/drouter-cli.mjs verify --submit --upstream https://deroute.is-an.ai
 
 # 3. Ask a question from the terminal with local PII scrubbing and streaming placeholder restoration
-node scripts/drouter-cli.mjs ask "Audit cohort COHORT-2026-08-14 for dana.reyes@example.org" --model kimi-k3 --upstream https://drouter-demo.vercel.app
+node scripts/drouter-cli.mjs ask "Audit cohort COHORT-2026-08-14 for dana.reyes@example.org" --model kimi-k3-1-pro --upstream https://deroute.is-an.ai
 
 # 4. Start the local private OpenAI-compatible proxy on http://127.0.0.1:4141/v1 (verifies public/downloads/deroute-proxy.mjs.sha256 and launches public/downloads/deroute-proxy.mjs)
-node scripts/drouter-cli.mjs proxy --port 4141 --key drk_YOUR_ACCESS_KEY
+DEROUTE_ACCESS_KEY="${DEROUTE_API_KEY:?Set a key first}" node scripts/drouter-cli.mjs proxy --port 4141
 
 # 5. Print OpenCode / OpenAI client configuration snippets
-node scripts/drouter-cli.mjs config --upstream https://drouter-demo.vercel.app
+node scripts/drouter-cli.mjs config --upstream https://deroute.is-an.ai
 ```
 
 ### 6.3 Filter Fingerprint, Registry, and Confidential Space Scripts

@@ -147,7 +147,7 @@ describe("indexing hygiene", () => {
   // What each route serves to a crawler (live HTML, no JavaScript, 5 Nov 2026):
   // the public pages carry their full content; every other route serves a
   // heading and a sign-in card, because the real page needs a passkey session.
-  const PUBLIC_PATHS = ["/", "/explain", "/about", "/partners"];
+  const PUBLIC_PATHS = ["/", "/api-keys", "/explain", "/about", "/partners"];
   const NOINDEX_PATHS = [
     "/app",
     "/argon",
