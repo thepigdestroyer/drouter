@@ -19,16 +19,11 @@ const BASE_GRID_HEIGHT = 220;
 const MAX_TRANSIENT_DROPS = 32;
 const FRAME_INTERVAL_MS = 33; // ~30 fps, < 0.8 ms CPU per frame
 
-function computeCanvasGridSize(vw: number, vh: number): { width: number; height: number } {
-  const aspect = vw / Math.max(1, vh);
-  if (aspect >= 1) {
-    const width = clamp(Math.round(vw / 2.6), 280, 560);
-    const height = clamp(Math.round(width / aspect), 220, 540);
-    return { width, height };
-  }
-  const height = clamp(Math.round(vh / 2.6), 280, 620);
-  const width = clamp(Math.round(height * aspect), 200, 540);
-  return { width, height };
+function computeCanvasGridSize(vw: number, vh: number, dpr: number): { width: number; height: number } {
+  // Sharpen the same ink contours. Bound total pixel work on large displays
+  // and preserve aspect ratio instead of stretching the short dimension.
+  const scale = Math.min(clamp(dpr || 1, 1, 1.5), Math.sqrt(1_050_000 / (vw * vh)));
+  return { width: Math.max(1, Math.round(vw * scale)), height: Math.max(1, Math.round(vh * scale)) };
 }
 
 function isInteractiveTarget(target: EventTarget | null): boolean {
@@ -81,7 +76,7 @@ export function InkField(): React.JSX.Element {
         : 1.5;
 
     const syncCanvasResolution = (vw: number, vh: number) => {
-      const next = computeCanvasGridSize(vw, vh);
+      const next = computeCanvasGridSize(vw, vh, window.devicePixelRatio);
       if (next.width !== gridWidth || next.height !== gridHeight) {
         gridWidth = next.width;
         gridHeight = next.height;
