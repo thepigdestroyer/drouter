@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// deRoute Private Local Proxy (source commit: 819bca9fb443)
+// deRoute Private Local Proxy (source commit: 9ef891f45458)
 import { createRequire as __derouteCreateRequire } from "node:module";
 const require = __derouteCreateRequire(import.meta.url);
 var __create = Object.create;
@@ -45888,6 +45888,16 @@ function decodeAccessKey(rawKey, expectedOrigin) {
   };
 }
 
+// src/lib/gateway/tool-finish.ts
+function hasToolCalls(payload) {
+  if (!payload || typeof payload !== "object" || !("tool_calls" in payload)) return false;
+  return Array.isArray(payload.tool_calls) && payload.tool_calls.length > 0;
+}
+function trackToolFinish(choice, seen, index) {
+  if (hasToolCalls(choice.delta)) seen.add(index);
+  if (seen.has(index) && choice.finish_reason === "stop") choice.finish_reason = "tool_calls";
+}
+
 // src/lib/gateway/harness-config.ts
 var TINFOIL_PROXY_WELL_KNOWN_URL = "https://inference.tinfoil.sh/.well-known/tinfoil-proxy";
 var NON_INFERENCE_TINFOIL_SERVICES = /* @__PURE__ */ new Set([
@@ -49394,6 +49404,7 @@ function createDerouteProxyServer(opts) {
             }
             return r;
           };
+          const toolChoices = /* @__PURE__ */ new Set();
           for await (const chunk of stream) {
             lastChunkTemplate = chunk;
             const rawChoices2 = Array.isArray(chunk?.choices) ? chunk.choices : null;
@@ -49410,6 +49421,7 @@ function createDerouteProxyServer(opts) {
               const choice = outChunk.choices[i];
               if (!choice || typeof choice !== "object") continue;
               const choiceIdx = typeof choice.index === "number" ? choice.index : i;
+              trackToolFinish(choice, toolChoices, choiceIdx);
               const delta = choice.delta && typeof choice.delta === "object" ? choice.delta : null;
               const hasFinishReason = choice.finish_reason !== void 0 && choice.finish_reason !== null;
               let choiceShouldEmit = false;
@@ -49630,6 +49642,7 @@ function createDerouteProxyServer(opts) {
           }
           return {
             ...choice,
+            ...hasToolCalls(nextMessage) && choice.finish_reason === "stop" ? { finish_reason: "tool_calls" } : {},
             message: nextMessage
           };
         });
@@ -49754,7 +49767,7 @@ function formatProxyHelpText() {
     "  node deroute-proxy.mjs [--key drk_...] [--port 4141] [--upstream https://deroute.is-an.ai]",
     "",
     "Options:",
-    `  --key <drk_...>       Access key from /account (or set DEROUTE_ACCESS_KEY)`,
+    `  --key <drk_...>       API key from /api-keys (prefer DEROUTE_ACCESS_KEY)`,
     `  --port <number>       Local port on 127.0.0.1 (default: ${DEFAULT_PORT})`,
     `  --upstream <url>      deRoute relay origin (default: ${DEFAULT_UPSTREAM})`,
     "  --spent-path <path>   Path to spent nullifier file (default: ~/.config/deroute/spent.json)",
